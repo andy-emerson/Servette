@@ -147,6 +147,7 @@ class Config:
         self.csp                = data.get("csp",                "")
         self.permissions_policy = data.get("permissions_policy", "")
         self.log_format         = data.get("log_format",         "text")
+        self.trusted_proxy      = data.get("trusted_proxy",      "")
 
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
@@ -189,6 +190,7 @@ class Config:
             "csp":                self.csp,
             "permissions_policy": self.permissions_policy,
             "log_format":         self.log_format,
+            "trusted_proxy":      self.trusted_proxy,
         }
         with open(self.CONFIG_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -265,7 +267,8 @@ setup_logging()
 # manipulation — not I/O — so it doesn't meaningfully block the event loop.
 # ─────────────────────────────────────────────────────────────────────────────
 
-RATE_WINDOW = 60  # seconds
+RATE_WINDOW  = 60      # seconds
+_RATE_IP_CAP = 10_000  # max IPs tracked per dict; bounds memory under IP-flood attacks
 
 _request_times   = {}
 _auth_fail_times = {}
@@ -289,6 +292,11 @@ def _rate_limit_exceeded(tracker, ip, limit):
         stale = [k for k, v in tracker.items() if not v or v[-1] < cutoff]
         for k in stale:
             del tracker[k]
+
+        # Evict oldest IPs if still over cap (flood of distinct source IPs)
+        if len(tracker) > _RATE_IP_CAP:
+            for k in sorted(tracker, key=lambda k: tracker[k][-1])[:len(tracker) - _RATE_IP_CAP]:
+                del tracker[k]
 
         timestamps = tracker.get(ip, [])
         timestamps = [t for t in timestamps if t > cutoff]
@@ -415,13 +423,12 @@ async def https_app(scope, receive, send):
     method  = scope["method"]
     headers = dict(scope["headers"])
 
-    # Client IP — trust X-Forwarded-For when present (reverse proxy / Tailscale)
     client = scope.get("client")
-    ip     = client[0] if client else "unknown"
-    xff    = headers.get(b"x-forwarded-for", b"").decode()
-    if xff:
-        ip = xff.split(",")[0].strip()
-    ip = _normalize_ip(ip)
+    ip     = _normalize_ip(client[0] if client else "unknown")
+    if config.trusted_proxy:
+        xff = headers.get(b"x-forwarded-for", b"").decode()
+        if xff and ip == config.trusted_proxy:
+            ip = _normalize_ip(xff.split(",")[0].strip())
 
     send_body = (method != "HEAD")
 
@@ -826,6 +833,7 @@ CONFIG_HELP = """
     csp       — Content-Security-Policy header
     perms     — Permissions-Policy header
     logformat — log output format (text or json)
+    proxy     — trusted proxy IP for X-Forwarded-For
     show      — show current settings
     back      — return to main shell
 """
@@ -876,6 +884,7 @@ def _config_show():
     print(f"  {'CSP':<22}  {val(config.csp)}")
     print(f"  {'Permissions-Policy':<22}  {val(config.permissions_policy)}")
     print(f"  {'Log format':<22}  {config.log_format}")
+    print(f"  {'Trusted proxy':<22}  {val(config.trusted_proxy)}")
     print()
 
 
@@ -1084,6 +1093,20 @@ def _config_log_format():
     print("  → saved (takes effect on next server start)")
 
 
+def _config_trusted_proxy():
+    current = config.trusted_proxy
+    print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
+    print("  Set to the IP of your reverse proxy to trust its X-Forwarded-For header.")
+    print("  Leave blank to ignore XFF entirely (correct when Servette faces the internet directly).\n")
+    new_value = input("  trusted_proxy IP: ").strip()
+    if new_value == current:
+        print("  → unchanged")
+        return
+    config.trusted_proxy = new_value
+    config.save()
+    print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
+
+
 def cmd_config():
     _config_show()
     print(CONFIG_HELP)
@@ -1124,6 +1147,8 @@ def cmd_config():
             _config_permissions_policy()
         elif cmd in ("logformat", "log_format", "format"):
             _config_log_format()
+        elif cmd in ("proxy", "trusted_proxy"):
+            _config_trusted_proxy()
         elif cmd in ("back", "done", "exit", "quit"):
             break
         elif cmd in ("help", "?"):

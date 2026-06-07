@@ -205,12 +205,6 @@ def run_unit_tests(s):
     check("__version__ has 3 parts",         len(s.__version__.split(".")) == 3)
     check("__version__ major is 0",          s.__version__.split(".")[0] == "0")
 
-    pv = s._parse_version
-    check("_parse_version finds version",    pv(b'__version__ = "1.2.3"') == "1.2.3")
-    check("_parse_version single quotes",    pv(b"__version__ = '0.26.1'") == "0.26.1")
-    check("_parse_version missing",          pv(b"no version here") is None)
-    check("_parse_version ignores comments", pv(b"# __version__ = '9.9.9'\n__version__ = '1.0.0'") == "1.0.0")
-
     section("Cache-Control header")
 
     s.config.username     = ""

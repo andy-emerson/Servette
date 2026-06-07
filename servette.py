@@ -30,6 +30,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import shutil
 import ssl
 import subprocess
@@ -1563,6 +1564,12 @@ def _run_acme(domain):
 
 RELEASES_API_URL   = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
 _SIGNING_PUBLIC_KEY = "abb8854be0b82df813f3b052296a26573063fc6314ea2701d54354605e6f15db"
+_VERSION_RE        = re.compile(rb"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
+
+def _parse_version(source_bytes):
+    """Extract __version__ from servette.py source bytes. Returns the string or None."""
+    m = _VERSION_RE.search(source_bytes)
+    return m.group(1).decode() if m else None
 
 def cmd_update():
     servette_path = os.path.abspath(__file__)
@@ -1636,6 +1643,11 @@ def cmd_update():
         return
     except Exception as e:
         print(f"  Update failed: could not verify signature: {e}")
+        return
+
+    file_version = _parse_version(new_source)
+    if file_version != new_version:
+        print(f"  Update failed: release tag {new_version!r} doesn't match file version {file_version!r}.")
         return
 
     try:

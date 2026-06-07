@@ -1,0 +1,22 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python3 -m venv .servette-env
+          .servette-env/bin/pip install --quiet hypercorn cryptography acme josepy
+      - name: Run tests
+        run: .servette-env/bin/python3 test.py

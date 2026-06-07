@@ -135,6 +135,8 @@ Changes appear immediately, no restart required.
 
 To update Servette itself, run `update` from the Servette shell. Your settings are stored in `servette.toml` and are never affected by updates.
 
+If you have a password set, `servette.toml` contains its hash. Sharing the file — for troubleshooting, for example — gives anyone who receives it material they can use to attempt an offline cracking attack against your password.
+
 ---
 
 ## How it works

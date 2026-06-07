@@ -194,10 +194,6 @@ setup_logging()
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 #
-# Two independent sliding-window limits per IP address:
-#   config.rate_limit      — total requests per minute (default 30)
-#   config.auth_rate_limit — failed auth attempts per minute (default 6)
-#
 # Uses threading.Lock because the critical section is in-memory deque
 # manipulation — not I/O — so it doesn't meaningfully block the event loop.
 
@@ -252,9 +248,6 @@ def _rate_limit_exceeded(tracker, ip, limit):
 
 
 # ── File cache ────────────────────────────────────────────────────────────────
-#
-# Files are read once and held in memory with gzip-compressed and raw copies.
-# Modification time is checked on each request so edits take effect immediately.
 
 _file_cache       = collections.OrderedDict()
 _file_cache_lock  = threading.Lock()
@@ -274,7 +267,9 @@ def _get_cached_file(path):
         if entry and entry["mtime"] == mtime:
             return entry["raw"], entry["compressed"], entry["etag"]
 
-    # Read and compress outside the lock so one slow disk read doesn't block other requests.
+    # Two threads can race here: both miss the cache check and both read the file. The fix is
+    # either holding the lock during I/O (serializes all requests on misses) or double-checked
+    # locking (adds complexity for an idempotent result). Both are worse than the rare duplicate read.
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -1056,7 +1051,6 @@ def _run_acme(domain):
     _chown_servette(ACME_WEBROOT)
     _chown_servette(CERTS_DIR)
 
-    # Load or generate ACME account key
     if os.path.exists(ACCOUNT_KEY_FILE):
         with open(ACCOUNT_KEY_FILE, "rb") as f:
             account_key = _jose.JWKRSA.load(f.read())
@@ -1112,7 +1106,6 @@ def _run_acme(domain):
             except _acme_errors.ConflictError:
                 pass
 
-            # Generate domain key and CSR (covers domain and www.domain)
             www_domain  = f"www.{domain}"
             domain_key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
             domain_key_pem = domain_key.private_bytes(

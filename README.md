@@ -35,7 +35,7 @@ The closest alternative is Caddy, which handles HTTPS and Let's Encrypt with a f
 | Rate limiting | Stops bots from hammering the server; makes password guessing impractical |
 | Live reload | Edit any file and changes appear immediately, no restart required |
 | Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |
-| Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, and Content-Security-Policy sent on every response |
+| Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 
 ---
@@ -209,7 +209,7 @@ graph LR
 
 **File Cache:** files are read once, gzip-compressed, and held in memory keyed by path. Modification time is checked on each request so edits take effect immediately. ETags (SHA-256 of file contents) enable 304 Not Modified responses.
 
-**HTTPS App:** an ASGI coroutine called for every HTTPS request. Handles rate limiting, auth, path resolution, and file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy).
+**HTTPS App:** an ASGI coroutine called for every HTTPS request. Handles rate limiting, auth, path resolution, and file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, Permissions-Policy).
 
 **Redirect App:** an ASGI coroutine on port 80. Serves Let's Encrypt ACME challenge tokens during certificate issuance; redirects everything else to HTTPS with 301.
 
@@ -241,6 +241,6 @@ The interactive REPL. Dispatches user commands to Server and System functions. C
 
 **CSP default: block what static sites never need.** A `Content-Security-Policy` header is sent on every response. The default blocks plugins (`object-src 'none'`), `eval()`, and plain HTTP external resources, while allowing own-origin resources, HTTPS externals, inline styles and scripts, and data URIs — things static sites might need. Use `config > csp` to tighten or replace it for your specific site. Set it to blank to disable the header entirely.
 
-**Permissions-Policy not sent.** The correct values depend on which browser APIs your site uses. Hardcoding defaults that restrict APIs your site relies on is worse than sending nothing.
+**Permissions-Policy default: deny hardware APIs static sites never need.** A `Permissions-Policy` header is sent on every response denying camera, microphone, USB, MIDI, and serial port access — browser APIs that require either a backend or specialized hardware, and that no static site would use by accident. APIs a static site might legitimately use (geolocation, fullscreen, payment) are left at their browser defaults. Use `config > perms` to adjust. Set it to blank to disable the header entirely.
 
 **No SPA deep-link rewriting.** Servette serves files as-is. A request for `/about` looks for a file at that path and returns 404 if it doesn't exist. Single-page applications that rely on client-side routing (React Router, Vue Router, etc.) need a server that rewrites all paths to `index.html` — Servette doesn't do this. If your site is a SPA, either use hash-based routing (`/#/about`) or serve it from a platform that supports rewrite rules.

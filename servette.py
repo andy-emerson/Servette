@@ -116,6 +116,7 @@ class Config:
         self.tls_min_version    = data.get("tls_min_version",    "1.2")
         self.ciphers            = data.get("ciphers",            "")
         self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
+        self.permissions_policy = data.get("permissions_policy", "camera=(), microphone=(), usb=(), midi=(), serial=()")
 
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
@@ -158,6 +159,7 @@ class Config:
             "tls_min_version":    self.tls_min_version,
             "ciphers":            self.ciphers,
             "csp":                self.csp,
+            "permissions_policy": self.permissions_policy,
         }
         fd = os.open(self.CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
@@ -516,6 +518,8 @@ async def https_app(scope, receive, send):
     ]
     if config.csp:
         response_headers.append((b"content-security-policy", config.csp.encode()))
+    if config.permissions_policy:
+        response_headers.append((b"permissions-policy", config.permissions_policy.encode()))
     if accepts_gzip:
         response_headers.append((b"content-encoding", b"gzip"))
     if _cert_domain:
@@ -1295,6 +1299,7 @@ CONFIG_HELP = """
     proxy     — trusted proxy IP for X-Forwarded-For
     tls       — minimum TLS version and cipher suites
     csp       — Content-Security-Policy header
+    perms     — Permissions-Policy header
     show      — show current settings
     back      — return to main shell
 """
@@ -1331,6 +1336,7 @@ def _config_show():
     print(f"  {'TLS min version':<22}  {config.tls_min_version}")
     print(f"  {'Cipher suites':<22}  {config.ciphers or '(system default)'}")
     print(f"  {'CSP':<22}  {config.csp or '(disabled)'}")
+    print(f"  {'Permissions-Policy':<22}  {config.permissions_policy or '(disabled)'}")
     print()
 
 
@@ -1546,6 +1552,8 @@ def cmd_config():
             _config_tls()
         elif cmd == "csp":
             _config_set("csp", "csp", hint="  Block what static sites never need; allow what they might. Leave blank to disable.")
+        elif cmd in ("perms", "permissions_policy"):
+            _config_set("permissions_policy", "permissions_policy", hint="  Deny hardware APIs static sites never need. Leave blank to disable.")
         elif cmd in ("back", "done", "exit", "quit"):
             break
         elif cmd in ("help", "?"):

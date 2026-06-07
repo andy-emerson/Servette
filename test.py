@@ -352,6 +352,14 @@ def run_server_tests(s, serve_dir):
           "object-src 'none'" in resp.headers.get("Content-Security-Policy", ""))
     check("CSP blocks eval (no unsafe-eval)",
           "'unsafe-eval'" not in resp.headers.get("Content-Security-Policy", ""))
+    check("Permissions-Policy sent",
+          resp.headers.get("Permissions-Policy") is not None)
+    check("Permissions-Policy denies camera",
+          "camera=()" in resp.headers.get("Permissions-Policy", ""))
+    check("Permissions-Policy denies microphone",
+          "microphone=()" in resp.headers.get("Permissions-Policy", ""))
+    check("Permissions-Policy does not deny payment",
+          "payment" not in resp.headers.get("Permissions-Policy", ""))
 
     section("Method handling")
 

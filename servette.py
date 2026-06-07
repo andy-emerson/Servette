@@ -133,7 +133,7 @@ class Config:
                 print(f"Fix or delete {self.CONFIG_FILE} and try again.")
                 sys.exit(1)
 
-        self.serve_dir       = data.get("serve_dir",       data.get("html_file", ""))
+        self.serve_dir       = data.get("serve_dir",       data.get("html_file", "site"))
         self.port            = data.get("port",            443)
         self.cert_file       = data.get("cert_file",       "cert.pem")
         self.key_file        = data.get("key_file",        "key.pem")
@@ -1171,6 +1171,7 @@ WantedBy=multi-user.target
             _chown_servette(_resolve(config.cert_file))
         if config.key_file:
             _chown_servette(_resolve(config.key_file))
+        _chown_servette(_resolve(config.serve_dir))
         _chown_servette(os.path.join(BASE_DIR, "certs"))
         _chown_servette(os.path.join(BASE_DIR, ".acme-account.pem"))
         _chown_servette(ACME_WEBROOT)
@@ -1765,19 +1766,14 @@ def cmd_setup():
     print("───────────────────────────────────────────────────")
 
     print()
-    print("  Step 1 — Choose your directory")
-    print("  Copy your directory to the same location as servette.py.")
-    _config_dir()
-
-    print()
-    print("  Step 2 — Password protection (optional)")
+    print("  Step 1 — Password protection (optional)")
     print("  Leave username blank to disable. Press Enter to keep current value.")
     _config_username()
     if config.username:
         _config_password()
 
     print()
-    print("  Step 3 — SSL certificate")
+    print("  Step 2 — SSL certificate")
     print(f"  Your server's IP address is {public_ip}.")
     print("  Enter a domain to get a trusted certificate, or press Enter for self-signed.\n")
     _config_cert()

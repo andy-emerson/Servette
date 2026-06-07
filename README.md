@@ -1,9 +1,9 @@
 # Ser*vette*
-### The Simple Secure Static Site Server
+### The Simple, Secure Static-Site Server
 
 ---
 
-Servette is a single Python file that puts a folder of static files on the internet with HTTPS, optional password protection, and auto-renewing certificates. Copy it to a server, including a Raspberry Pi. Run it. Follow the wizard. Done.
+Servette is a single Python file that puts anything that runs in a browser on the internet with HTTPS, optional password protection, and auto-renewing certificates. Copy it to a server, including a Raspberry Pi. Run it. Follow the wizard. Done.
 
 Most ways to host a static site ask you to choose between simplicity and control:
 
@@ -60,10 +60,12 @@ From your local machine:
 
 ```
 scp servette.py user@your.server.ip:~
-scp -r mysite/ user@your.server.ip:~
+scp -r mysite/ user@your.server.ip:~/site
 ```
 
 Replace `user` with your server's login name (`ubuntu` on Ubuntu, `pi` on Raspberry Pi) and `your.server.ip` with its IP address. If your server uses a key file, add `-i your-key.pem` before the filenames.
+
+Servette serves the `site/` folder next to `servette.py`. Copy your files there and it will find them.
 
 ### 2. SSH into your server
 
@@ -89,10 +91,9 @@ setup
 
 The wizard walks you through everything:
 
-1. Choose your site directory
-2. Set a password (optional)
-3. Set up an SSL certificate
-4. Confirm you're ready. Servette enables itself as a service and starts.
+1. Set a password (optional)
+2. Set up an SSL certificate
+3. Confirm you're ready. Servette enables itself as a service and starts.
 
 That's it. Your site is live. Close your terminal. Servette keeps running and restarts automatically if the server reboots. If you used a domain name, SSL certificates renew automatically.
 

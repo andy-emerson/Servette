@@ -27,9 +27,11 @@ Servette does one thing well: it takes your static site folder and puts it on th
 |---|---|
 | HTTPS | Your site is encrypted end-to-end; browsers show the padlock |
 | HTTP/2 | Faster page loads with multiplexed requests |
+| HTTP/3 | Even faster loads over QUIC where supported |
 | Basic Auth | Optional username and password to restrict access |
 | Rate limiting | Stops bots from hammering the server and makes password guessing impractical |
 | Live reload | Edit any file and changes appear immediately — no restart required |
+| Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |
 | HSTS | Tells browsers to always use HTTPS for your domain, even if someone types http:// |
 | X-Frame-Options | Prevents your page from being embedded in iframes on other sites |
 | X-Content-Type-Options | Stops browsers from misinterpreting your files |
@@ -110,7 +112,7 @@ The wizard walks you through everything:
 4. Enable Servette as a system service
 5. Start the server
 
-That's it. Your site is live. Close your terminal and walk away — Servette keeps running and restarts automatically if the server reboots. SSL certificates renew automatically.
+That's it. Your site is live. Close your terminal and walk away — Servette keeps running and restarts automatically if the server reboots. If you used a domain name, SSL certificates renew automatically.
 
 ---
 
@@ -213,7 +215,7 @@ graph LR
 
 **Redirect App** — an ASGI coroutine (`redirect_app`) on port 80. Serves Let's Encrypt ACME challenge tokens during certificate issuance; redirects everything else to HTTPS with 301.
 
-**Server** — starts Hypercorn in a background daemon thread with its own asyncio event loop. A `threading.Event` signals graceful shutdown. Checks certificate expiry on startup and warns if it expires within 30 days.
+**Server** — starts Hypercorn in a background daemon thread with its own asyncio event loop. A `threading.Event` signals graceful shutdown. Checks certificate expiry on startup and warns if it expires within 30 days. A cert watchdog thread polls every 60 seconds: for Let's Encrypt certs it triggers automatic renewal when fewer than 30 days remain (retrying at most once per hour on failure); for any cert it detects external file changes and restarts to pick up the new cert.
 
 **Shell** — the interactive REPL. Dispatches to setup, config, service management, and status commands. The only module that writes to Config.
 

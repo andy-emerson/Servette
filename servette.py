@@ -616,10 +616,11 @@ async def redirect_app(scope, receive, send):
 # A threading.Event signals graceful shutdown from the shell thread.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_server_thread     = None
-_server_start_time = None
-_shutdown_event    = threading.Event()
-_watchdog_thread   = None
+_server_thread        = None
+_server_start_time    = None
+_shutdown_event       = threading.Event()
+_watchdog_thread      = None
+_last_renewal_attempt = 0.0
 
 
 async def _serve_http_redirect(stop_event):
@@ -693,13 +694,35 @@ def _server_running():
 
 
 def _cert_watchdog():
-    """Detect cert/key changes on disk and restart the server automatically."""
+    """Auto-renew Let's Encrypt certs before expiry; detect externally-rotated certs."""
+    global _last_renewal_attempt
     while _server_running():
         time.sleep(60)
         if not _server_running():
             break
+
+        cert_path = _resolve(config.cert_file)
+
+        # Auto-renew: only for Let's Encrypt certs (domain known, not self-signed)
+        domain = _domain_from_cert(cert_path)
+        if domain:
+            days = _cert_days_remaining(cert_path)
+            if days is not None and days < 30:
+                now = time.monotonic()
+                if now - _last_renewal_attempt >= 3600:
+                    _last_renewal_attempt = now
+                    log.info("Certificate for %s expires in %d days — renewing", domain, days)
+                    _run_acme(domain)
+                    # Update _cert_mtime so the mtime check below doesn't fire again
+                    try:
+                        config._cert_mtime = os.path.getmtime(_resolve(config.cert_file))
+                    except OSError:
+                        pass
+                continue
+
+        # Externally-rotated cert: detect mtime change and restart
         try:
-            mtime = os.path.getmtime(_resolve(config.cert_file))
+            mtime = os.path.getmtime(cert_path)
             if config._cert_mtime is not None and mtime != config._cert_mtime:
                 log.info("Certificate changed on disk — reloading server")
                 config._cert_mtime = mtime
@@ -1372,8 +1395,11 @@ def _run_acme(domain):
         http_started_here = True
 
     stop = threading.Event()
-    t    = threading.Thread(target=_spin, args=(f"Requesting certificate for {domain}...", stop), daemon=True)
-    t.start()
+    if sys.stdout.isatty():
+        t = threading.Thread(target=_spin, args=(f"Requesting certificate for {domain}...", stop), daemon=True)
+        t.start()
+    else:
+        t = None
 
     token_path = None
     try:
@@ -1430,7 +1456,8 @@ def _run_acme(domain):
         os.chmod(key_path, 0o600)
 
         stop.set()
-        t.join()
+        if t:
+            t.join()
 
         config.cert_file = cert_path
         config.key_file  = key_path
@@ -1445,7 +1472,8 @@ def _run_acme(domain):
 
     except Exception as e:
         stop.set()
-        t.join()
+        if t:
+            t.join()
         print(f"  Error getting certificate: {e}")
         log.error("ACME failed for %s: %s", domain, e)
     finally:

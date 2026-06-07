@@ -20,7 +20,7 @@ Servette is the middle option: your own server, with the simplicity of a platfor
 
 **Raspberry Pi users.** Servette was designed with the Pi in mind. If you can SSH in and run a Python script, you can have a real HTTPS site running on your Pi in under ten minutes, with a trusted certificate, automatic renewal, and a server that survives reboots.
 
-**Developers who want to understand what they're running.** Servette is under 2,000 lines of Python, organized into components with clear boundaries. The full feature set, including HTTP/2, TLS, ACME certificate issuance, rate limiting, and file caching, is readable in an afternoon. It is a working server, not a toy example.
+**Developers who want to understand what they're running.** Servette is under 2,000 lines of Python, organized into components with clear boundaries. The actual server — HTTP/2, TLS, ACME certificate issuance, rate limiting, and file caching — is under 700 lines of code. The rest is the interactive shell and setup wizard. It is a working server, not a toy example, and it is readable in an afternoon.
 
 ---
 

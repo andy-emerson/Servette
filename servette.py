@@ -1166,7 +1166,9 @@ def _run_acme(domain):
                     terms_of_service_agreed=True
                 ))
             except _acme_errors.ConflictError as e:
-                ac.query_registration(_messages.RegistrationResource(uri=e.location))
+                ac.query_registration(_messages.RegistrationResource(
+                    body=_messages.Registration(), uri=e.location
+                ))
 
             www_domain  = f"www.{domain}"
             domain_key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)

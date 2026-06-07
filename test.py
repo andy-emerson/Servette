@@ -103,6 +103,13 @@ def req(method="GET", path="/", headers=None, auth=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def setup():
+    # Creates an isolated temp directory containing:
+    #   - A throwaway RSA cert/key via openssl. servette isn't imported yet at this
+    #     point, so _generate_self_signed_cert can't be used here.
+    #   - A minimal serve_dir file tree covering the cases integration tests need.
+    #   - A test servette.toml. Any existing config is backed up and restored by teardown.
+    # Then imports servette, reloads config into that test state, clears all runtime
+    # caches and rate-limit trackers, and starts the live server on TEST_PORT.
     tmpdir = tempfile.mkdtemp()
 
     cert_path = os.path.join(tmpdir, "cert.pem")
@@ -173,6 +180,8 @@ email = ""
 
 
 def teardown(tmpdir, saved_config, config_path, servette):
+    # Stops the server, restores the original servette.toml (or removes the test
+    # one if none existed), and deletes the temp directory.
     servette.stop_server()
     if saved_config is not None:
         with open(config_path, "wb") as f:
@@ -188,6 +197,8 @@ def teardown(tmpdir, saved_config, config_path, servette):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_unit_tests(s):
+    # Pure-function tests — no network I/O, no server required.
+    # Calls internal helpers directly and verifies return values.
 
     section("Password hashing")
 
@@ -271,6 +282,8 @@ def run_unit_tests(s):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_server_tests(s, serve_dir):
+    # Live integration tests against the real Hypercorn server on TEST_PORT.
+    # Each section mutates config or server state as needed and restores it afterward.
 
     section("Protocol negotiation")
 
@@ -515,8 +528,11 @@ def run_server_tests(s, serve_dir):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_cert_tests(s, tmpdir):
+    # Tests certificate generation and inspection helpers.
+    # ACME issuance is intentionally not covered — it requires a real domain and
+    # outbound Let's Encrypt connectivity.
 
-    section("Self-signed certificate generation (M3)")
+    section("Self-signed certificate generation")
 
     cert_path = os.path.join(tmpdir, "self-signed-cert.pem")
     key_path  = os.path.join(tmpdir, "self-signed-key.pem")
@@ -541,6 +557,11 @@ def run_cert_tests(s, tmpdir):
 
 
 def run_install_tests(s, tmpdir):
+    # Tests installation helpers and the systemd service file template.
+    # cmd_install itself is not called — it writes to /etc/systemd/system/ and
+    # creates a system user, both of which require root and would affect the real
+    # system. The service file template is reconstructed inline instead.
+
     section("System user helpers")
 
     # _servette_user_exists: just check it returns a bool without crashing
@@ -567,8 +588,6 @@ def run_install_tests(s, tmpdir):
 
     section("Service file content")
 
-    # Verify the service file template has the right fields — build it via cmd_install's
-    # string template by inspecting what cmd_install would write.
     servette_path = os.path.abspath(s.__file__)
     python_path   = s._VENV_PY if os.path.exists(s._VENV_PY) else "python3"
     service = f"""[Unit]

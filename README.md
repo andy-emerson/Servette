@@ -154,6 +154,81 @@ Your settings are stored in `servette.json` and are never affected by updates to
 
 ---
 
-For implementation details and design decisions, see [ARCHITECTURE.md](ARCHITECTURE.md).
+## How it works
+
+Servette is a single file, but it is not a monolith. It is organized into discrete modules with well-defined responsibilities.
+
+```mermaid
+graph LR
+    CFG[Config]
+
+    EP[Entry Point]
+    BS[Bootstrap]
+    SH[Shell]
+    SV[Server]
+    SD[systemd]
+    HYP[Hypercorn]
+    HTTPS[HTTPS App]
+    HTTP[Redirect App]
+    RL[Rate Limiter]
+    FC[File Cache]
+
+    LOG[Logging]
+
+    CFG -.-> SH
+    CFG -.-> SV
+    CFG -.-> HTTPS
+    CFG -.-> HTTP
+
+    EP -->|first run| BS
+    EP -->|--serve| SV
+    EP -->|interactive| SH
+    SH --> SV
+    SH --> SD
+
+    SV --> HYP
+    HYP --> HTTPS
+    HYP --> HTTP
+
+    HTTPS --> RL
+    HTTPS --> FC
+
+    HTTPS -.-> LOG
+    HTTP -.-> LOG
+    SV -.-> LOG
+    SH -.-> LOG
+```
+
+**Bootstrap** — on first run, installs dependencies (`hypercorn`, `cryptography`, `acme`, `josepy`, `aioquic`) into a private virtualenv and re-execs the process inside it. Subsequent runs skip straight to re-exec. The operator never touches pip.
+
+**Config** — reads and writes `servette.json`. Settings take effect without a restart — the file's modification time is checked on every incoming request. Passwords are hashed with PBKDF2-HMAC-SHA256 at 260,000 iterations and never stored in plaintext. `servette.json` is written mode `0o600`.
+
+**Logging** — rotating log file (5 MB cap, 3 backups). In interactive mode, warnings and errors go to the terminal; info goes to the log file only. In service mode, systemd captures stdout directly so only one process writes to the log.
+
+**Rate Limiter** — two independent sliding-window limits per IP: total requests (default 30/min) and failed auth attempts (default 6/min). IPv6-mapped IPv4 addresses are normalized. `X-Forwarded-For` is trusted when present.
+
+**File Cache** — files are read once, gzip-compressed, and held in memory keyed by path. Modification time is checked on each request so edits take effect immediately. ETags (SHA-256 of file contents) enable 304 Not Modified responses.
+
+**HTTPS App** — an ASGI coroutine (`https_app`) called by Hypercorn for every HTTPS request. Handles rate limiting → auth → path resolution → file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy).
+
+**Redirect App** — an ASGI coroutine (`redirect_app`) on port 80. Serves Let's Encrypt ACME challenge tokens during certificate issuance; redirects everything else to HTTPS with 301.
+
+**Server** — starts Hypercorn in a background daemon thread with its own asyncio event loop. A `threading.Event` signals graceful shutdown. Checks certificate expiry on startup and warns if it expires within 30 days.
+
+**Shell** — the interactive REPL. Dispatches to setup, config, service management, and status commands. The only module that writes to Config.
+
+### Design decisions
+
+**Running as root.** Binding to ports 80 and 443 requires root on Linux. The alternative — a dedicated system user with `CAP_NET_BIND_SERVICE` — requires creating an account, configuring file permissions, and managing certificate access. For a server with no database, no exec paths, and files served from memory, running as root is a deliberate and reasonable tradeoff.
+
+**Hypercorn over a hand-rolled server.** The original Servette used Python's `BaseHTTPRequestHandler`. Hypercorn replaces it with HTTP/2, modern TLS defaults, and async concurrency — capabilities that would take significant code to implement correctly. The tradeoff is a dependency, which bootstrap manages invisibly.
+
+**Managed virtualenv over system packages.** A private virtualenv in `.servette-env/` is isolated, reproducible, and invisible to the rest of the system. The operator never interacts with it directly.
+
+**POST returns 405.** POST implies data going somewhere — a database, an email, a file on disk. Servette has no destination for POST data. If your site submits a form, the backend it posts to is outside Servette's scope.
+
+**CSP and Permissions-Policy not sent by default.** The correct values depend entirely on what your site loads. Hardcoding defaults that would break most sites is worse than sending nothing. Both headers are configurable via `config` → `csp` / `perms`.
+
+---
 
 Built with assistance from [Claude](https://claude.ai) (Anthropic).

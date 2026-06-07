@@ -142,11 +142,17 @@ class Config:
         self.email              = data.get("email",              "")
         self.csp                = data.get("csp",                "")
         self.permissions_policy = data.get("permissions_policy", "")
+        self.log_format         = data.get("log_format",         "text")
 
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
             pass
+
+        try:
+            self._cert_mtime = os.path.getmtime(_resolve(self.cert_file))
+        except OSError:
+            self._cert_mtime = None
 
         if data.get("password") and not self.password_hash:
             self.password_hash, self.password_salt = _hash_password(data["password"])
@@ -178,6 +184,7 @@ class Config:
             "email":              self.email,
             "csp":                self.csp,
             "permissions_policy": self.permissions_policy,
+            "log_format":         self.log_format,
         }
         with open(self.CONFIG_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -196,14 +203,31 @@ config = Config()
 #
 # RotatingFileHandler caps log size at 5 MB and keeps 3 backups — important
 # on Pi SD cards where unbounded log growth is a real concern.
+# log_format = "json" emits one JSON object per line for log shippers / jq.
 # ─────────────────────────────────────────────────────────────────────────────
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record):
+        entry = {
+            "time":    self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S"),
+            "level":   record.levelname,
+            "message": record.getMessage(),
+        }
+        for field in ("status", "path", "ip"):
+            if hasattr(record, field):
+                entry[field] = getattr(record, field)
+        if record.exc_info:
+            entry["exc"] = self.formatException(record.exc_info)
+        return json.dumps(entry)
+
 
 def setup_logging():
     root = logging.getLogger()
     root.handlers.clear()
     root.setLevel(logging.INFO)
 
-    fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s")
+    use_json = getattr(config, "log_format", "text") == "json"
+    fmt = _JsonFormatter() if use_json else logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s")
 
     stream = logging.StreamHandler()
     stream.setLevel(logging.INFO if "--serve" in sys.argv else logging.WARNING)
@@ -632,8 +656,24 @@ async def _run_servers(stop_event):
     https_cfg.certfile = cert_file
     https_cfg.keyfile  = key_file
     https_cfg.loglevel = "warning"
-    if config.log_file:
+    if config.log_file and config.log_format != "json":
+        # Skip Hypercorn's Apache-format accesslog when JSON is enabled —
+        # https_app logs requests itself in JSON via the standard logger.
         https_cfg.accesslog = config.log_file
+
+    try:
+        import aioquic as _aioquic
+        https_cfg.quic_bind = [f"0.0.0.0:{config.port}"]
+        log.info("HTTP/3 enabled on port %d", config.port)
+    except ImportError:
+        log.warning("aioquic not installed; HTTP/3 disabled")
+
+    async def run_https():
+        try:
+            await hypercorn_serve(https_app, https_cfg, shutdown_trigger=trigger)
+        except Exception as e:
+            log.error("HTTPS server error: %s", e)
+            raise
 
     async def run_http_redirect():
         try:
@@ -647,7 +687,7 @@ async def _run_servers(stop_event):
             print("Note: could not bind to port 80 (requires root). HTTP redirects unavailable.")
 
     await asyncio.gather(
-        hypercorn_serve(https_app, https_cfg, shutdown_trigger=trigger),
+        run_https(),
         run_http_redirect(),
         return_exceptions=True,
     )
@@ -655,6 +695,22 @@ async def _run_servers(stop_event):
 
 def _server_running():
     return _server_thread is not None and _server_thread.is_alive()
+
+
+def _cert_watchdog():
+    """Detect cert/key changes on disk and restart the server automatically."""
+    while _server_running():
+        time.sleep(60)
+        if not _server_running():
+            break
+        try:
+            mtime = os.path.getmtime(_resolve(config.cert_file))
+            if config._cert_mtime is not None and mtime != config._cert_mtime:
+                log.info("Certificate changed on disk — reloading server")
+                config._cert_mtime = mtime
+                _reload_server()
+        except OSError:
+            pass
 
 
 def start_server():
@@ -686,6 +742,7 @@ def start_server():
     _server_thread.start()
     time.sleep(0.5)
 
+    threading.Thread(target=_cert_watchdog, daemon=True).start()
     _server_start_time = time.monotonic()
     log.info("Server started on port %d", config.port)
     print(f"\nServing {config.serve_dir}/ at https://localhost:{config.port}\n")
@@ -751,6 +808,7 @@ CONFIG_HELP = """
     cache     — browser cache policy
     csp       — Content-Security-Policy header
     perms     — Permissions-Policy header
+    logformat — log output format (text or json)
     show      — show current settings
     back      — return to main shell
 """
@@ -800,6 +858,7 @@ def _config_show():
     print(f"  {'Cache policy':<22}  {cache_display}")
     print(f"  {'CSP':<22}  {val(config.csp)}")
     print(f"  {'Permissions-Policy':<22}  {val(config.permissions_policy)}")
+    print(f"  {'Log format':<22}  {config.log_format}")
     print()
 
 
@@ -991,6 +1050,23 @@ def _config_permissions_policy():
     print("  → saved" if new_value else "  → cleared, header will not be sent")
 
 
+def _config_log_format():
+    current = config.log_format
+    print(f"\n  Current: {current}\n")
+    print("    text — human-readable timestamped lines (default)")
+    print("    json — structured JSON, one object per line\n")
+    choice = input("  log_format [text / json]: ").strip().lower()
+    if not choice:
+        print("  → unchanged")
+        return
+    if choice not in ("text", "json"):
+        print("  → invalid option, unchanged")
+        return
+    config.log_format = choice
+    config.save()
+    print("  → saved (takes effect on next server start)")
+
+
 def cmd_config():
     _config_show()
     print(CONFIG_HELP)
@@ -1029,6 +1105,8 @@ def cmd_config():
             _config_csp()
         elif cmd in ("perms", "permissions"):
             _config_permissions_policy()
+        elif cmd in ("logformat", "log_format", "format"):
+            _config_log_format()
         elif cmd in ("back", "done", "exit", "quit"):
             break
         elif cmd in ("help", "?"):
@@ -1223,6 +1301,21 @@ def _generate_self_signed_cert(cert_path, key_path):
     log.info("Generated self-signed certificate at %s", cert_path)
 
 
+def _wait_for_port_free(port, timeout=15):
+    import socket as _socket
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                s.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            time.sleep(0.5)
+    log.warning("Port %d did not free up within %ds", port, timeout)
+    return False
+
+
 def _reload_server():
     """Reload the server to pick up a new certificate."""
     if _service_is_active():
@@ -1233,7 +1326,7 @@ def _reload_server():
             print(f"  Could not restart service: {e}")
     elif _server_running():
         stop_server()
-        time.sleep(0.5)
+        _wait_for_port_free(config.port)
         start_server()
 
 

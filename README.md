@@ -108,8 +108,7 @@ The wizard walks you through everything:
 1. Choose your site directory
 2. Set a password (optional)
 3. Set up an SSL certificate
-4. Enable Servette as a system service
-5. Start the server
+4. Confirm you're ready — Servette enables itself as a service and starts
 
 That's it. Your site is live. Close your terminal and walk away — Servette keeps running and restarts automatically if the server reboots. If you used a domain name, SSL certificates renew automatically.
 

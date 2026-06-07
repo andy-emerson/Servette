@@ -1630,59 +1630,28 @@ def cmd_setup():
 
     print()
     print("  Step 1 — Choose your directory")
-    dir_path = _resolve(config.serve_dir) if config.serve_dir else None
-    if dir_path and os.path.isdir(dir_path):
-        print(f"  ✓ {config.serve_dir}")
-    else:
-        print("  Copy your directory to the same location as servette.py.")
-        if _prompt("Configure now?"):
-            _config_dir()
+    print("  Copy your directory to the same location as servette.py.")
+    _config_dir()
 
     print()
     print("  Step 2 — Password protection (optional)")
+    print("  Leave username blank to disable. Press Enter to keep current value.")
+    _config_username()
     if config.username:
-        print(f"  ✓ Enabled (username: {config.username})")
-    else:
-        print("  Restrict access to visitors who know the password.")
-        if _prompt("Enable password protection?"):
-            _config_username()
-            if config.username:
-                _config_password()
+        _config_password()
 
     print()
     print("  Step 3 — SSL certificate")
-    cert_path = _resolve(config.cert_file)
-    if os.path.exists(cert_path):
-        days = _cert_days_remaining(cert_path)
-        if days is None or days > 30:
-            print(f"  ✓ Certificate found{f', expires in {days} days.' if days else '.'}")
-        else:
-            print(f"  {'✗ Certificate has expired.' if days <= 0 else f'⚠ Certificate expires in {days} days.'}")
-            _config_cert()
-    else:
-        print(f"  Your server's IP address is {public_ip}.")
-        print("  If you have a domain pointed at this IP, enter it to get a trusted certificate.")
-        print("  Otherwise press Enter to use a self-signed certificate (browser warning until domain is added).\n")
-        _config_cert()
+    print(f"  Your server's IP address is {public_ip}.")
+    print("  Enter a domain to get a trusted certificate, or press Enter for self-signed.\n")
+    _config_cert()
 
     print()
-    print("  Step 4 — Enable as a system service")
-    if _service_file_exists():
-        print("  ✓ Already enabled.")
+    if _prompt("Ready to start?"):
+        cmd_install()
+        cmd_start()
     else:
-        print("  Keeps Servette running after you close this session")
-        print("  and starts it automatically on reboot.")
-        if _prompt("Enable now?"):
-            cmd_install()
-
-    print()
-    print("  Step 5 — Start the server")
-    if _service_is_active() or _server_running():
-        print("  ✓ Server is running.")
-        cmd_status()
-    else:
-        if _prompt("Start now?"):
-            cmd_start()
+        print("  Run 'start' when you're ready.")
 
 
 # ── Main shell loop ───────────────────────────────────────────────────────────

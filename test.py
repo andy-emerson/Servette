@@ -12,7 +12,6 @@ Or, after first-run bootstrap:
 
 import base64
 import gzip
-import json
 import os
 import shutil
 import socket
@@ -133,27 +132,28 @@ def setup():
     with open(os.path.join(serve_dir, "sub", "page.html"), "w") as f:
         f.write(TEST_SUB_HTML)
 
-    config_path  = os.path.join(SERVETTE_DIR, "servette.json")
+    config_path  = os.path.join(SERVETTE_DIR, "servette.toml")
     saved_config = None
     if os.path.exists(config_path):
         with open(config_path, "rb") as f:
             saved_config = f.read()
 
     with open(config_path, "w") as f:
-        json.dump({
-            "serve_dir":          serve_dir,
-            "port":               TEST_PORT,
-            "cert_file":          cert_path,
-            "key_file":           key_path,
-            "username":           "",
-            "password_hash":      "",
-            "password_salt":      "",
-            "rate_limit":         200,
-            "auth_rate_limit":    6,
-            "cache_policy":       "no-cache",
-            "cache_max_age":      3600,
-            "email":              "",
-        }, f, indent=2)
+        f.write(f"""\
+serve_dir = "{serve_dir}"
+port = {TEST_PORT}
+cert_file = "{cert_path}"
+key_file = "{key_path}"
+username = ""
+password_hash = ""
+password_salt = ""
+rate_limit = 200
+auth_rate_limit = 6
+cache_policy = "no-cache"
+cache_max_age = 3600
+cache_size_mb = 128
+email = ""
+""")
 
     import servette
     servette.config._load()

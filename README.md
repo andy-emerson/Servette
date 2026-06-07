@@ -44,7 +44,7 @@ The closest alternative is Caddy, which handles HTTPS and Let's Encrypt with a f
 
 **A Linux server.** A Raspberry Pi works. So does any VPS. Common choices include [DigitalOcean](https://digitalocean.com), [Linode](https://linode.com), [Vultr](https://vultr.com), and [AWS Lightsail](https://aws.amazon.com/lightsail/). Ubuntu 22.04 is a reliable starting point. You'll need the server's IP address and SSH access.
 
-**Python 3.8 or higher.** Pre-installed on most Linux servers and Raspberry Pi OS.
+**Python 3.11 or higher.** Pre-installed on most current Linux servers. Raspberry Pi OS Bookworm (the current release) satisfies both the OS and Python requirements on a Raspberry Pi 4.
 
 **A folder with your site files.** Servette looks for `index.html` at the root and in any subdirectory. If you don't have a site yet, use the `demo/` folder from this repository to verify everything is working first.
 
@@ -131,7 +131,7 @@ scp -r mysite/ user@your.server.ip:~
 
 Changes appear immediately, no restart required.
 
-To update Servette itself, run `update` from the Servette shell. Your settings are stored in `servette.json` and are never affected by updates.
+To update Servette itself, run `update` from the Servette shell. Your settings are stored in `servette.toml` and are never affected by updates.
 
 ---
 

@@ -23,8 +23,8 @@ import gzip
 import hashlib
 import hmac
 import ipaddress
-import json
 import logging
+import tomllib
 import os
 import re
 import shutil
@@ -83,7 +83,7 @@ def _check_password(submitted, stored_hash, stored_salt):
 class Config:
     """Holds all Servette settings and handles reading/writing servette.json."""
 
-    CONFIG_FILE = os.path.join(BASE_DIR, "servette.json")
+    CONFIG_FILE = os.path.join(BASE_DIR, "servette.toml")
 
     def __init__(self):
         self._mtime = None
@@ -93,10 +93,10 @@ class Config:
         data = {}
         if os.path.exists(self.CONFIG_FILE):
             try:
-                with open(self.CONFIG_FILE, "r") as f:
-                    data = json.load(f)
-            except json.JSONDecodeError as e:
-                print(f"Error: servette.json is not valid JSON ({e}).")
+                with open(self.CONFIG_FILE, "rb") as f:
+                    data = tomllib.load(f)
+            except tomllib.TOMLDecodeError as e:
+                print(f"Error: servette.toml is not valid TOML ({e}).")
                 print(f"Fix or delete {self.CONFIG_FILE} and try again.")
                 sys.exit(1)
 
@@ -111,6 +111,7 @@ class Config:
         self.auth_rate_limit = data.get("auth_rate_limit", 6)
         self.cache_policy       = data.get("cache_policy",       "no-cache")
         self.cache_max_age      = data.get("cache_max_age",      3600)
+        self.cache_size_mb      = data.get("cache_size_mb",      128)
         self.email              = data.get("email",              "")
         self.trusted_proxy      = data.get("trusted_proxy",      "")
         self.tls_min_version    = data.get("tls_min_version",    "1.2")
@@ -142,29 +143,50 @@ class Config:
             pass
 
     def save(self):
-        data = {
-            "serve_dir":       self.serve_dir,
-            "port":            self.port,
-            "cert_file":       self.cert_file,
-            "key_file":        self.key_file,
-            "username":        self.username,
-            "password_hash":   self.password_hash,
-            "password_salt":   self.password_salt,
-            "rate_limit":      self.rate_limit,
-            "auth_rate_limit": self.auth_rate_limit,
-            "cache_policy":       self.cache_policy,
-            "cache_max_age":      self.cache_max_age,
-            "email":              self.email,
-            "trusted_proxy":      self.trusted_proxy,
-            "tls_min_version":    self.tls_min_version,
-            "ciphers":            self.ciphers,
-            "csp":                self.csp,
-            "permissions_policy": self.permissions_policy,
-        }
+        def s(v):
+            return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+        content = f"""\
+# Servette configuration — https://github.com/andy-emerson/servette
+
+serve_dir = {s(self.serve_dir)}
+port = {self.port}
+cert_file = {s(self.cert_file)}
+key_file = {s(self.key_file)}
+
+# Leave username blank to disable password protection
+username = {s(self.username)}
+
+# Rate limiting (requests per minute per IP)
+rate_limit = {self.rate_limit}
+auth_rate_limit = {self.auth_rate_limit}
+
+# Browser cache policy: no-store, no-cache, or max-age
+cache_policy = {s(self.cache_policy)}
+cache_max_age = {self.cache_max_age}
+# In-memory file cache limit in MB — reduce on constrained hardware
+cache_size_mb = {self.cache_size_mb}
+
+# Let's Encrypt registration email and optional reverse proxy IP
+email = {s(self.email)}
+trusted_proxy = {s(self.trusted_proxy)}
+
+# TLS settings
+tls_min_version = {s(self.tls_min_version)}
+ciphers = {s(self.ciphers)}
+
+# Security headers — use config shell to adjust
+csp = {s(self.csp)}
+permissions_policy = {s(self.permissions_policy)}
+
+# Machine-generated — do not edit by hand
+password_hash = {s(self.password_hash)}
+password_salt = {s(self.password_salt)}
+"""
         fd = os.open(self.CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        os.chmod(self.CONFIG_FILE, 0o600)  # fix perms if file pre-existed with wrong mode
+            f.write(content)
+        os.chmod(self.CONFIG_FILE, 0o600)
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
@@ -256,7 +278,6 @@ def _rate_limit_exceeded(tracker, ip, limit):
 _file_cache       = collections.OrderedDict()
 _file_cache_lock  = threading.Lock()
 _file_cache_bytes = 0
-_FILE_CACHE_MAX   = 128 * 1024 * 1024  # 128 MB
 
 
 def _get_cached_file(path):
@@ -289,9 +310,10 @@ def _get_cached_file(path):
             _file_cache_bytes -= len(old["raw"]) + len(old["compressed"])
         _file_cache[path] = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
         _file_cache_bytes += len(raw) + len(compressed)
-        if _file_cache_bytes > _FILE_CACHE_MAX:
-            log.warning("File cache full (%d MB) — evicting oldest entries", _FILE_CACHE_MAX // (1024 * 1024))
-        while _file_cache_bytes > _FILE_CACHE_MAX and _file_cache:
+        cache_max = config.cache_size_mb * 1024 * 1024
+        if _file_cache_bytes > cache_max:
+            log.warning("File cache full (%d MB) — evicting oldest entries", config.cache_size_mb)
+        while _file_cache_bytes > cache_max and _file_cache:
             _, evicted = _file_cache.popitem(last=False)
             _file_cache_bytes -= len(evicted["raw"]) + len(evicted["compressed"])
 
@@ -1332,6 +1354,7 @@ def _config_show():
     print(f"  {'Rate limit':<22}  {config.rate_limit} req/min")
     print(f"  {'Auth rate limit':<22}  {config.auth_rate_limit} fails/min")
     print(f"  {'Cache policy':<22}  {cache_display}")
+    print(f"  {'Cache size':<22}  {config.cache_size_mb} MB")
     print(f"  {'Trusted proxy':<22}  {val(config.trusted_proxy)}")
     print(f"  {'TLS min version':<22}  {config.tls_min_version}")
     print(f"  {'Cipher suites':<22}  {config.ciphers or '(system default)'}")
@@ -1470,6 +1493,8 @@ def _config_cache():
                 print("  → invalid number, keeping current max-age")
     config.save()
     print("  → saved")
+    _config_set("cache_size_mb", "cache_size_mb", int, lambda v: v > 0,
+                "invalid number", hint="In-memory file cache limit in MB (e.g. 32 on a Raspberry Pi)")
 
 
 def _config_trusted_proxy():

@@ -250,21 +250,29 @@ def _normalize_ip(ip):
     return ip
 
 
+def _rate_sweep():
+    """Background thread: evict stale IPs and enforce the IP cap every 30 seconds."""
+    while True:
+        time.sleep(30)
+        with _rate_lock:
+            now    = time.monotonic()
+            cutoff = now - RATE_WINDOW
+            for tracker in (_request_times, _auth_fail_times):
+                stale = [k for k, v in tracker.items() if not v or v[-1] < cutoff]
+                for k in stale:
+                    del tracker[k]
+                if len(tracker) > _RATE_IP_CAP:
+                    for k in sorted(tracker, key=lambda k: tracker[k][-1])[:len(tracker) - _RATE_IP_CAP]:
+                        del tracker[k]
+
+threading.Thread(target=_rate_sweep, daemon=True).start()
+
+
 def _rate_limit_exceeded(tracker, ip, limit):
     """Record this request for ip and return True if the limit has been exceeded."""
     with _rate_lock:
         now    = time.monotonic()
         cutoff = now - RATE_WINDOW
-
-        # Evict IPs with no recent activity
-        stale = [k for k, v in tracker.items() if not v or v[-1] < cutoff]
-        for k in stale:
-            del tracker[k]
-
-        # Evict oldest IPs if still over cap (flood of distinct source IPs)
-        if len(tracker) > _RATE_IP_CAP:
-            for k in sorted(tracker, key=lambda k: tracker[k][-1])[:len(tracker) - _RATE_IP_CAP]:
-                del tracker[k]
 
         timestamps = tracker.get(ip, [])
         timestamps = [t for t in timestamps if t > cutoff]

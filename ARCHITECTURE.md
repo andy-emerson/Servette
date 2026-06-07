@@ -2,15 +2,15 @@
 
 ## Design Philosophy
 
-**One file. No dependencies. No build step.**
+**One file. Managed dependencies. No build step.**
 
-Servette is built around a single constraint: the entire server must live in one Python file with no dependencies beyond the standard library. A server you can audit in one sitting, copy with `scp`, and run with `python3` is a fundamentally different kind of tool than one that requires a package manager, a build step, or a configuration directory.
+Servette is built around a single constraint: the entire server must live in one Python file. Dependencies are installed automatically into a private virtualenv on first run — the operator never touches pip. A server you can audit in one sitting, copy with `scp`, and run with `python3` is a fundamentally different kind of tool than one that requires a package manager, a build step, or a configuration directory.
 
 Three priorities follow from this:
 
-**Scope discipline.** Servette serves one HTML file over HTTPS. It does not route requests, render templates, handle form submissions, or manage sessions. Sharp boundaries keep the codebase small and the remaining features trustworthy.
+**Scope discipline.** Servette serves a directory of static files over HTTPS. It does not route dynamic requests, render templates, handle form submissions, or manage sessions. Sharp boundaries keep the codebase small and the remaining features trustworthy.
 
-**Handled, not delegated.** TLS configuration, security headers, certificate renewal, rate limiting, service management — these are real concerns that every public-facing server has to get right. Servette handles them automatically so the operator can focus on the HTML file, not the infrastructure around it.
+**Handled, not delegated.** TLS configuration, security headers, certificate renewal, rate limiting, service management — these are real concerns that every public-facing server has to get right. Servette handles them automatically so the operator can focus on their site, not the infrastructure around it.
 
 **Transparent by design.** Everything Servette does is visible in one readable file. There are no layers of abstraction hiding how requests are handled or how security decisions are made.
 
@@ -27,11 +27,13 @@ graph LR
     CFG[Config]
 
     EP[Entry Point]
+    BS[Bootstrap]
     SH[Shell]
     SV[Server]
     SD[systemd]
-    HTTPS[HTTPS Handler]
-    HTTP[HTTP Redirect]
+    HYP[Hypercorn]
+    HTTPS[HTTPS App]
+    HTTP[Redirect App]
     RL[Rate Limiter]
     FC[File Cache]
 
@@ -42,13 +44,15 @@ graph LR
     CFG -.-> HTTPS
     CFG -.-> HTTP
 
+    EP -->|first run| BS
     EP -->|--serve| SV
     EP -->|interactive| SH
     SH --> SV
     SH --> SD
 
-    SV --> HTTPS
-    SV --> HTTP
+    SV --> HYP
+    HYP --> HTTPS
+    HYP --> HTTP
 
     HTTPS --> RL
     HTTPS --> FC
@@ -63,9 +67,19 @@ graph LR
 
 ## Modules
 
+### Bootstrap
+
+On first run, `_bootstrap()` checks whether the process is already running inside the managed virtualenv (`.servette-env/`). If not, it installs the required system package for venv support via `apt-get`, creates the virtualenv, installs dependencies via pip, and re-execs the process inside it using `os.execv`. Subsequent runs skip straight to the re-exec.
+
+Dependencies installed into the virtualenv: `hypercorn`, `cryptography`, `acme`, `josepy`, `aioquic`.
+
+The bootstrap runs before any other code, so the rest of `servette.py` can import from the virtualenv unconditionally.
+
+---
+
 ### Config
 
-Config holds all settings in a single object and reads from and writes to `servette.json`. Accessing any setting is `config.html_file`, `config.port`, and so on. The config file is kept separate from `servette.py` deliberately — updating the server never overwrites your configuration.
+Config holds all settings in a single object and reads from and writes to `servette.json`. Accessing any setting is `config.serve_dir`, `config.port`, and so on. The config file is kept separate from `servette.py` deliberately — updating the server never overwrites your configuration.
 
 On each incoming request, `reload_if_changed()` checks the file's modification time and reloads if it has changed. This means you can edit `servette.json` directly and have changes take effect without restarting the server.
 
@@ -77,7 +91,7 @@ On each incoming request, `reload_if_changed()` checks the file's modification t
 
 ### Logging
 
-Python's standard `logging` module writes timestamped entries to both a log file and the terminal. The behavior differs between the two runtime modes:
+Python's standard `logging` module writes timestamped entries to a rotating log file and the terminal. The log file is capped at 5 MB with 3 backups — important on Pi SD cards where unbounded log growth is a real concern. The behavior differs between the two runtime modes:
 
 - **Interactive shell:** only warnings and errors appear in the terminal. Informational entries go to the log file only, so they don't clutter the shell output.
 - **Systemd service (`--serve`):** there is no file handler. Systemd captures stdout and appends it to the configured log file via `StandardOutput=append:`. This avoids two processes writing to the same file simultaneously.
@@ -93,7 +107,9 @@ Two independent sliding-window rate limits, both over a 60-second window:
 - **Request limit** (`rate_limit`, default 30/min): caps total requests per IP. Stops bots from hammering the server.
 - **Auth limit** (`auth_rate_limit`, default 6/min): caps failed authentication attempts per IP. Makes brute-force password guessing impractical.
 
-Both trackers are in-memory dicts of `{ip: [timestamp, ...]}`. A threading lock protects concurrent access. Stale entries — IPs not seen in over 60 seconds — are pruned on each check to keep memory bounded.
+Both trackers are in-memory dicts of `{ip: [timestamp, ...]}` using `time.monotonic()`. A threading lock protects concurrent access. Stale entries — IPs not seen in over 60 seconds — are pruned on each check to keep memory bounded.
+
+IPv6-mapped IPv4 addresses (`::ffff:x.x.x.x`) are normalized to plain IPv4 so both forms bucket to the same counter. `X-Forwarded-For` is trusted when present, for deployments behind a reverse proxy or Tailscale.
 
 The auth limit only triggers when credentials are actually submitted, not on unauthenticated requests. This prevents locking out a visitor who simply hasn't logged in yet.
 
@@ -101,28 +117,33 @@ The auth limit only triggers when credentials are actually submitted, not on una
 
 ### File Cache
 
-The HTML file is read once, gzip-compressed, and held in memory. On each request the file's modification time is checked; if it has changed the cache is refreshed. Edits take effect immediately without restarting the server.
+Files are read once, gzip-compressed, and held in memory in a dict keyed by absolute path. On each request the file's modification time is checked; if it has changed the cache entry is refreshed. Edits to any file in the serve directory take effect immediately without restarting the server.
 
 An ETag is computed as the first 16 hex characters of the SHA-256 hash of the raw file contents. If a browser sends back the same ETag in `If-None-Match`, the server returns 304 Not Modified with no body — the browser uses its cached copy.
 
 Both compressed and raw bytes are stored. If the client sends `Accept-Encoding: gzip` (all modern browsers do), the compressed version is sent. A `Vary: Accept-Encoding` header tells caching proxies to store separate copies for clients that do and don't support gzip.
 
-The cache is protected by a threading lock since multiple request handler threads may read and update it simultaneously.
+The cache is protected by a threading lock since Hypercorn may dispatch concurrent requests across threads.
 
 ---
 
-### HTTPS Handler
+### HTTPS App
 
-`HTTPSHandler` subclasses Python's `BaseHTTPRequestHandler` and implements `do_GET` and `do_HEAD` — the only HTTP methods Servette accepts. All other methods return 405 Method Not Allowed.
+`https_app` is an ASGI coroutine called by Hypercorn for every incoming HTTPS connection. It handles `GET` and `HEAD` — the only HTTP methods Servette accepts. All other methods return 405 Method Not Allowed.
 
 On each request, in order:
 
 1. Reload config if `servette.json` has changed on disk
 2. Check the request rate limit for this IP
 3. If auth is configured, check credentials — then check the auth rate limit if credentials were submitted and wrong
-4. Read the HTML file from cache (refreshing from disk if the file has changed)
-5. Return 304 if the client's ETag matches
-6. Send the response with security headers
+4. Resolve the URL path to a file within `serve_dir`, enforcing path traversal protection
+5. Return 403 (traversal), 404 (missing file, with optional `404.html` fallback), or 500 (unreadable file) as appropriate
+6. Return 304 if the client's ETag matches
+7. Send the response with security headers
+
+**Path resolution.** `_resolve_request_path()` decodes percent-encoding, normalizes the path, and verifies the result stays within `serve_dir`. Directories resolve to their `index.html`. Paths that escape `serve_dir` return 403.
+
+**MIME types.** Content-Type is inferred from the file extension. Common web types are supported: HTML, CSS, JS, JSON, images, fonts, PDF, and more. Unknown extensions get `application/octet-stream`.
 
 **Security headers sent on every response:**
 
@@ -133,17 +154,13 @@ On each request, in order:
 | `X-Content-Type-Options: nosniff` | Stops browsers from misinterpreting the content type |
 | `Referrer-Policy: no-referrer` | Prevents your URL from leaking to sites your page links to |
 
-`Content-Security-Policy` and `Permissions-Policy` are supported but not sent by default. The correct values depend on what your HTML file loads — inline scripts, CDN sources, required browser APIs — so they are left to the operator via `config` → `csp` / `perms`.
-
-**Connection timeout.** Connections that don't send a complete request within 10 seconds are closed. This defends against slow loris attacks, where a client opens a connection and trickles headers slowly to tie up server threads.
-
-**Threading model.** `HTTPSHandler` runs inside a `ThreadingMixIn` server, which spawns a new OS thread per connection. Since the file is served from memory and most repeat requests return a 304 with no body, individual thread lifetimes are extremely short. The rate limiter bounds the realistic request volume per IP. A thread pool executor would cap total simultaneous threads, but adds queue management complexity for no practical benefit at Servette's expected scale.
+`Content-Security-Policy` and `Permissions-Policy` are supported but not sent by default. The correct values depend on what your site loads — inline scripts, CDN sources, required browser APIs — so they are left to the operator via `config` → `csp` / `perms`.
 
 ---
 
-### HTTP Redirect Handler
+### Redirect App
 
-`HTTPRedirectHandler` listens on port 80 and handles two cases:
+`redirect_app` is an ASGI coroutine that listens on port 80 and handles two cases:
 
 **ACME challenge requests.** Let's Encrypt verifies domain ownership by fetching a token file over plain HTTP at `/.well-known/acme-challenge/<token>`. The handler serves these files from `ACME_WEBROOT` on disk. This allows certificate renewal without stopping the server — certbot drops the token file, the running handler serves it, and renewal completes without any downtime.
 
@@ -155,13 +172,13 @@ Token paths are validated: empty tokens and paths containing `/` or `..` are rej
 
 ### Server
 
-`start_server()` creates two `ThreadedHTTPServer` instances — one for HTTPS on the configured port, one for the HTTP redirect on port 80 — and starts each in a daemon thread. Daemon threads shut down automatically when the main process exits.
+`start_server()` creates a Hypercorn configuration for the HTTPS app and starts it in a background daemon thread with its own asyncio event loop. A second Hypercorn instance for the HTTP redirect runs concurrently via `asyncio.gather`. A `threading.Event` is passed to Hypercorn's `shutdown_trigger` so the shell thread can signal graceful shutdown.
 
 Binding to port 80 requires root. If it fails, the HTTPS server still starts — visitors just need to type `https://` manually. The failure is reported but is not fatal.
 
 On startup, the SSL certificate's expiry date is checked. If it expires within 30 days, a warning is printed with instructions to renew.
 
-`stop_server()` calls `shutdown()` on both servers, which blocks until `serve_forever()` returns. Because `stop_server()` runs in the shell thread (separate from the `serve_forever()` threads), there is no deadlock risk.
+`stop_server()` sets the shutdown event and joins the server thread, blocking until Hypercorn exits cleanly.
 
 ---
 
@@ -179,7 +196,7 @@ The shell is the interactive terminal interface — a command loop that reads in
 
 ### Entry Point
 
-`__main__` checks for the `--serve` flag:
+`__main__` runs bootstrap first (no-op if already in the virtualenv), then checks for the `--serve` flag:
 
 - **`--serve`**: calls `start_server()` directly and enters a sleep loop. Used exclusively by the systemd service.
 - **Interactive**: calls `shell()`. The server starts only when the user runs `start`.
@@ -188,7 +205,7 @@ The shell is the interactive terminal interface — a command loop that reads in
 
 ## Testing
 
-The test suite (`test.py`) starts a temporary HTTPS server on port 8443, runs checks against it, and tears everything down. `openssl` must be available on the system. No configuration required.
+The test suite (`test.py`) starts a temporary Hypercorn HTTPS server on port 8443, runs checks against it, and tears everything down. `openssl` must be available on the system for test setup. No other configuration required.
 
 Three areas are intentionally not covered by the automated suite:
 
@@ -204,18 +221,18 @@ Three areas are intentionally not covered by the automated suite:
 
 Things an experienced server operator might question — with the reasoning behind each.
 
-**Running as root.** Servette requires `sudo` because binding to ports 80 and 443 is reserved for root on Linux. The standard alternative — a dedicated system user with `CAP_NET_BIND_SERVICE` — requires creating a system account, configuring file permissions, and managing certificate access across multiple paths. That is several steps that work against Servette's core purpose. For a server with no database, no exec paths, and a single cached file to serve, running as root is a deliberate and reasonable tradeoff.
+**Running as root.** Servette requires `sudo` because binding to ports 80 and 443 is reserved for root on Linux. The standard alternative — a dedicated system user with `CAP_NET_BIND_SERVICE` — requires creating a system account, configuring file permissions, and managing certificate access across multiple paths. That is several steps that work against Servette's core purpose. For a server with no database, no exec paths, and files served from memory, running as root is a deliberate and reasonable tradeoff.
 
-**`ThreadingMixIn` over a thread pool executor.** A bounded thread pool would cap total simultaneous connections and prevent thread exhaustion under extreme load. For Servette's workload — one cached file, extremely short thread lifetimes, per-IP rate limiting already bounding realistic request volume — the benefit is theoretical. `ThreadingMixIn` is simpler, more readable, and sufficient.
+**Hypercorn over a hand-rolled server.** The original Servette used Python's `BaseHTTPRequestHandler` and `ThreadingMixIn`. Hypercorn replaces this with HTTP/2, modern TLS defaults, and async concurrency — capabilities that would take significant code to implement correctly from scratch. The tradeoff is a dependency, which bootstrap manages invisibly.
 
-**IPv6 not supported.** Servette currently binds to IPv4 only. For the typical deployment — a domain pointed at a VPS — IPv4 is the common case. IPv6 dual-stack support is a future improvement.
+**Managed virtualenv over system packages.** Installing Hypercorn and its dependencies system-wide risks conflicts with other Python software on the server. A private virtualenv in `.servette-env/` is isolated, reproducible, and invisible to the rest of the system. The operator never interacts with it directly.
 
-**Multiple files or static directories.** Serving a directory requires path routing, MIME type detection, and path traversal protection across every file. That is a different tool. If you need more, use nginx or caddy.
+**`threading.Lock` in the rate limiter.** The rate limiter uses a threading lock rather than async primitives because the critical section is microseconds of dict manipulation — not I/O — and doesn't meaningfully block the event loop.
 
-**POST handling and form processing.** POST implies data going somewhere — a database, an email, a file on disk. Servette has no destination for POST data, so it returns 405. If your HTML file submits a form, the backend it posts to is outside Servette's scope.
+**POST handling and form processing.** POST implies data going somewhere — a database, an email, a file on disk. Servette has no destination for POST data, so it returns 405. If your site submits a form, the backend it posts to is outside Servette's scope.
 
 **WebSockets.** WebSockets require protocol upgrade handling and persistent connection management — out of scope for a static file server.
 
 **Windows and macOS service management.** The `enable` and `disable` commands use systemd, which is Linux-only. Supporting launchd (macOS) and the Windows Service Control Manager would add significant branching complexity for a tool that is, by definition, deployed to a Linux server.
 
-**CSP and Permissions-Policy defaults.** These headers are supported but not sent by default. The correct values depend entirely on what your HTML file loads — inline scripts, external resources, required browser APIs. Hardcoding defaults that would break most pages is worse than sending nothing.
+**CSP and Permissions-Policy defaults.** These headers are supported but not sent by default. The correct values depend entirely on what your site loads — inline scripts, external resources, required browser APIs. Hardcoding defaults that would break most sites is worse than sending nothing.

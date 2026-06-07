@@ -1,0 +1,22 @@
+CLAUDE.md
+test.py
+TODO.md
+
+# Runtime config — contains password hashes and cert paths
+servette.json
+
+# SSL certificate and key files
+*.pem
+
+# Log files
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Managed virtualenv created by bootstrap
+.servette-env/
+
+# macOS
+.DS_Store

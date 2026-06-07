@@ -199,7 +199,7 @@ graph LR
 
 ### Server
 
-**Config:** reads and writes `servette.json`. Settings take effect without a restart; the file's modification time is checked on every incoming request. Passwords are hashed with PBKDF2-HMAC-SHA256 at 260,000 iterations and never stored in plaintext. `servette.json` is written mode `0o600`.
+**Config:** reads and writes `servette.toml`. Settings take effect without a restart; the file's modification time is checked on every incoming request. Passwords are hashed with PBKDF2-HMAC-SHA256 at 260,000 iterations and never stored in plaintext. `servette.toml` is written mode `0o600`.
 
 **Logging:** in interactive mode, warnings and errors go to the terminal. In service mode, output goes to the systemd journal (`journalctl -u servette`), which handles rotation and retention automatically.
 

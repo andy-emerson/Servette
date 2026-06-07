@@ -186,6 +186,8 @@ graph LR
 
 **Rate Limiter:** two independent sliding-window limits per IP: total requests (default 30/min) and failed auth attempts (default 6/min). IPv6-mapped IPv4 addresses are normalized. `X-Forwarded-For` is trusted only when a `trusted_proxy` IP is configured. A background sweep thread evicts stale entries every 30 seconds.
 
+> **Proxy note:** Servette expects the proxy to overwrite the `X-Forwarded-For` header with the real client IP. Cloudflare and some other CDNs *append* to `X-Forwarded-For` instead of overwriting it. If your proxy appends, set `trusted_proxy` to the proxy's IP but be aware that Servette will read the leftmost value in the header, which is client-controlled — rate limiting will not work correctly in that configuration.
+
 **File Cache:** files are read once, gzip-compressed, and held in memory keyed by path. Modification time is checked on each request so edits take effect immediately. ETags (SHA-256 of file contents) enable 304 Not Modified responses.
 
 **HTTPS App:** an ASGI coroutine called by Hypercorn for every HTTPS request. Handles rate limiting, auth, path resolution, and file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy).

@@ -1515,9 +1515,12 @@ def _run_acme(domain):
             if t:
                 t.join()
 
-            config.cert_file = cert_path
-            config.key_file  = key_path
-            config.save()
+            managed_cert = os.path.normpath(cert_path)
+            current_cert = os.path.normpath(_resolve(config.cert_file)) if config.cert_file else None
+            if current_cert is None or current_cert == managed_cert:
+                config.cert_file = cert_path
+                config.key_file  = key_path
+                config.save()
             global _cert_domain
             _cert_domain = domain
 
@@ -1641,13 +1644,16 @@ def cmd_update():
         print(f"  Update failed: downloaded file has a syntax error: {e}")
         return
 
+    bak_path = servette_path + ".bak"
     tmp_path = servette_path + ".new"
     with open(tmp_path, "wb") as f:
         f.write(new_source)
     os.chmod(tmp_path, os.stat(servette_path).st_mode)
+    shutil.copy2(servette_path, bak_path)
     os.replace(tmp_path, servette_path)
 
     print(f"  Updated {__version__} → {new_version}.")
+    print(f"  Previous version saved to {bak_path}.")
     print("  Restart to run the new version ('stop' then 'start', or 'sudo systemctl restart servette').")
 
 
@@ -1686,12 +1692,6 @@ def _is_real_domain(s):
 def _domain_from_cert(cert_path):
     if not cert_path:
         return None
-    # Fast path: our LE certs live at BASE_DIR/certs/<domain>/fullchain.pem
-    if "/certs/" in cert_path:
-        after_certs    = cert_path.split("/certs/")[1]
-        domain_segment = after_certs.split("/")[0]
-        if domain_segment:
-            return domain_segment
     cert = _load_cert(cert_path)
     if cert is None:
         return None

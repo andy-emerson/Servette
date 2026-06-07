@@ -1157,14 +1157,16 @@ def _run_acme(domain):
             directory = _messages.Directory.from_json(net.get(ACME_URL).json())
             ac        = _acme_client.ClientV2(directory, net)
 
-            # Register account (no-op if already registered)
+            # Register account; if key is already registered, fetch the account
+            # to load its URL (kid) into the ClientNetwork — without this,
+            # all subsequent signed requests fail with "No Key ID in JWS header".
             try:
                 ac.new_account(_messages.NewRegistration.from_data(
                     email=config.email if config.email else None,
                     terms_of_service_agreed=True
                 ))
-            except _acme_errors.ConflictError:
-                pass
+            except _acme_errors.ConflictError as e:
+                ac.query_registration(_messages.RegistrationResource(uri=e.location))
 
             www_domain  = f"www.{domain}"
             domain_key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)

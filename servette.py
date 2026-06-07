@@ -916,21 +916,23 @@ def _config_dir():
     print("  → saved")
 
 
-def _config_port():
-    current   = config.port
-    new_value = input(f"  port [{current}]: ").strip()
-    if new_value and new_value != str(current):
-        try:
-            port = int(new_value)
-            if not (1 <= port <= 65535):
-                raise ValueError
-            config.port = port
-            config.save()
-            print("  → saved")
-        except ValueError:
-            print("  → invalid port number, unchanged")
-    else:
+def _config_set(attr, label, cast=str, validate=None, error="invalid value", hint=None):
+    current = getattr(config, attr)
+    if hint:
+        print(f"  {hint}")
+    new_value = input(f"  {label} [{current}]: ").strip()
+    if not new_value or new_value == str(current):
         print("  → unchanged")
+        return
+    try:
+        value = cast(new_value)
+        if validate and not validate(value):
+            raise ValueError
+        setattr(config, attr, value)
+        config.save()
+        print("  → saved")
+    except ValueError:
+        print(f"  → {error}, unchanged")
 
 
 def _config_cert():
@@ -998,40 +1000,8 @@ def _config_password():
 
 
 def _config_limits():
-    current   = config.rate_limit
-    new_value = input(f"  Requests per minute per IP\n  rate_limit [{current}]: ").strip()
-    if new_value and new_value != str(current):
-        try:
-            config.rate_limit = int(new_value)
-            config.save()
-            print("  → saved")
-        except ValueError:
-            print("  → invalid number, unchanged")
-    else:
-        print("  → unchanged")
-
-    current   = config.auth_rate_limit
-    new_value = input(f"  Failed login attempts per minute per IP\n  auth_rate_limit [{current}]: ").strip()
-    if new_value and new_value != str(current):
-        try:
-            config.auth_rate_limit = int(new_value)
-            config.save()
-            print("  → saved")
-        except ValueError:
-            print("  → invalid number, unchanged")
-    else:
-        print("  → unchanged")
-
-
-def _config_email():
-    current   = config.email
-    new_value = input(f"  email [{current}]: ").strip()
-    if new_value == current or not new_value:
-        print("  → unchanged")
-        return
-    config.email = new_value
-    config.save()
-    print("  → saved")
+    _config_set("rate_limit",      "rate_limit",      int, error="invalid number", hint="Requests per minute per IP")
+    _config_set("auth_rate_limit", "auth_rate_limit", int, error="invalid number", hint="Failed login attempts per minute per IP")
 
 
 def _config_cache():
@@ -1120,7 +1090,7 @@ def cmd_config():
         elif cmd in ("dir", "directory"):
             _config_dir()
         elif cmd == "port":
-            _config_port()
+            _config_set("port", "port", int, lambda v: 1 <= v <= 65535, "invalid port number")
         elif cmd == "cert":
             _config_cert()
         elif cmd == "username":
@@ -1128,7 +1098,7 @@ def cmd_config():
         elif cmd == "password":
             _config_password()
         elif cmd == "email":
-            _config_email()
+            _config_set("email", "email")
         elif cmd == "limits":
             _config_limits()
         elif cmd == "cache":

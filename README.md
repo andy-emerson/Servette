@@ -145,9 +145,9 @@ Servette is a single file (~2,000 lines) divided into three sections with clear 
 
 | Section | Lines | Responsibility |
 |---|---|---|
-| **Server** | ~550 | Handles every incoming request: config, rate limiting, file cache, and the two ASGI apps |
-| **System** | ~700 | Manages the environment: bootstrap, server lifecycle, certificates, and systemd integration |
-| **Shell** | ~650 | The interactive terminal interface |
+| **Server** | ~600 | Handles every incoming request: config, rate limiting, file cache, and the two ASGI apps |
+| **System** | ~750 | Manages the environment: bootstrap, server lifecycle, certificates, and systemd integration |
+| **Shell** | ~700 | The interactive terminal interface |
 
 ```mermaid
 graph LR

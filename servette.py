@@ -790,6 +790,7 @@ Commands:
   stop              — stop the server
   status            — show whether the server is running
   log [n]           — show the last n log entries
+  update            — download the latest version of servette.py
   help              — show this message
   quit              — exit
 """
@@ -1370,100 +1371,144 @@ def _run_acme(domain):
         time.sleep(0.5)
         http_started_here = True
 
-    stop = threading.Event()
-    if sys.stdout.isatty():
-        t = threading.Thread(target=_spin, args=(f"Requesting certificate for {domain}...", stop), daemon=True)
-        t.start()
-    else:
-        t = None
+    ACME_RETRIES = 3
+    last_error   = None
 
-    token_path = None
-    try:
-        net       = _acme_client.ClientNetwork(account_key, user_agent="servette/1.0")
-        directory = _messages.Directory.from_json(net.get(ACME_URL).json())
-        ac        = _acme_client.ClientV2(directory, net)
+    for attempt in range(1, ACME_RETRIES + 1):
+        stop = threading.Event()
+        if sys.stdout.isatty():
+            label = f"Requesting certificate for {domain}..." if attempt == 1 else f"Retry {attempt - 1}/{ACME_RETRIES - 1}..."
+            t = threading.Thread(target=_spin, args=(label, stop), daemon=True)
+            t.start()
+        else:
+            t = None
 
-        # Register account (no-op if already registered)
+        token_path = None
         try:
-            ac.new_account(_messages.NewRegistration.from_data(
-                email=config.email if config.email else None,
-                terms_of_service_agreed=True
-            ))
-        except Exception:
-            pass
+            net       = _acme_client.ClientNetwork(account_key, user_agent="servette/1.0")
+            directory = _messages.Directory.from_json(net.get(ACME_URL).json())
+            ac        = _acme_client.ClientV2(directory, net)
 
-        # Generate domain key and CSR
-        domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        domain_key_pem = domain_key.private_bytes(
-            _serialization.Encoding.PEM,
-            _serialization.PrivateFormat.TraditionalOpenSSL,
-            _serialization.NoEncryption()
-        )
-        csr_pem = (
-            _x509.CertificateSigningRequestBuilder()
-            .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
-            .add_extension(_x509.SubjectAlternativeName([_x509.DNSName(domain)]), critical=False)
-            .sign(domain_key, _hashes.SHA256())
-            .public_bytes(_serialization.Encoding.PEM)
-        )
+            # Register account (no-op if already registered)
+            try:
+                ac.new_account(_messages.NewRegistration.from_data(
+                    email=config.email if config.email else None,
+                    terms_of_service_agreed=True
+                ))
+            except Exception:
+                pass
 
-        # Order certificate and answer HTTP-01 challenge
-        order = ac.new_order(csr_pem)
-        for authz in order.authorizations:
-            for challenge in authz.body.challenges:
-                if isinstance(challenge.chall, _challenges.HTTP01):
-                    token      = challenge.chall.encode("token")
-                    key_auth   = challenge.chall.key_authorization(account_key)
-                    token_path = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
-                    with open(token_path, "w") as f:
-                        f.write(key_auth)
-                    ac.answer_challenge(challenge, challenge.chall.response(account_key))
-                    break
+            # Generate domain key and CSR
+            domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            domain_key_pem = domain_key.private_bytes(
+                _serialization.Encoding.PEM,
+                _serialization.PrivateFormat.TraditionalOpenSSL,
+                _serialization.NoEncryption()
+            )
+            csr_pem = (
+                _x509.CertificateSigningRequestBuilder()
+                .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
+                .add_extension(_x509.SubjectAlternativeName([_x509.DNSName(domain)]), critical=False)
+                .sign(domain_key, _hashes.SHA256())
+                .public_bytes(_serialization.Encoding.PEM)
+            )
 
-        finalized = ac.poll_and_finalize(order)
+            # Order certificate and answer HTTP-01 challenge
+            order = ac.new_order(csr_pem)
+            for authz in order.authorizations:
+                for challenge in authz.body.challenges:
+                    if isinstance(challenge.chall, _challenges.HTTP01):
+                        token      = challenge.chall.encode("token")
+                        key_auth   = challenge.chall.key_authorization(account_key)
+                        token_path = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
+                        with open(token_path, "w") as f:
+                            f.write(key_auth)
+                        ac.answer_challenge(challenge, challenge.chall.response(account_key))
+                        break
 
-        cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
-        key_path  = os.path.join(CERTS_DIR, "privkey.pem")
+            finalized = ac.poll_and_finalize(order)
 
-        with open(cert_path, "w") as f:
-            f.write(finalized.fullchain_pem)
-        with open(key_path, "wb") as f:
-            f.write(domain_key_pem)
-        os.chmod(key_path, 0o600)
+            cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
+            key_path  = os.path.join(CERTS_DIR, "privkey.pem")
 
-        stop.set()
-        if t:
-            t.join()
+            with open(cert_path, "w") as f:
+                f.write(finalized.fullchain_pem)
+            with open(key_path, "wb") as f:
+                f.write(domain_key_pem)
+            os.chmod(key_path, 0o600)
 
-        config.cert_file = cert_path
-        config.key_file  = key_path
-        config.save()
-        global _cert_domain
-        _cert_domain = domain
+            stop.set()
+            if t:
+                t.join()
 
-        print(f"  Certificate issued for {domain}.")
-        log.info("ACME certificate issued for %s", domain)
+            config.cert_file = cert_path
+            config.key_file  = key_path
+            config.save()
+            global _cert_domain
+            _cert_domain = domain
 
-        if _server_running() or _service_is_active():
-            print("  Reloading server...")
-            _reload_server()
+            print(f"  Certificate issued for {domain}.")
+            log.info("ACME certificate issued for %s", domain)
 
+            if _server_running() or _service_is_active():
+                print("  Reloading server...")
+                _reload_server()
+            last_error = None
+            break
+
+        except Exception as e:
+            last_error = e
+            stop.set()
+            if t:
+                t.join()
+            if token_path and os.path.exists(token_path):
+                os.remove(token_path)
+            token_path = None
+            if attempt < ACME_RETRIES:
+                delay = 5 * attempt
+                log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
+                time.sleep(delay)
+        finally:
+            if token_path and os.path.exists(token_path):
+                os.remove(token_path)
+
+    if last_error:
+        print(f"  Error getting certificate: {last_error}")
+        log.error("ACME failed for %s after %d attempts: %s", domain, ACME_RETRIES, last_error)
+
+    if http_started_here and tmp_stop:
+        tmp_stop.set()
+        if tmp_thread:
+            tmp_thread.join(timeout=5)
+
+
+# ── Log, status, update, helpers ─────────────────────────────────────────────
+
+UPDATE_URL = "https://raw.githubusercontent.com/andy-emerson/servette/main/servette.py"
+
+def cmd_update():
+    servette_path = os.path.abspath(__file__)
+    stop = threading.Event()
+    t    = threading.Thread(target=_spin, args=("Checking for update...", stop), daemon=True)
+    t.start()
+    try:
+        new_source = urllib.request.urlopen(UPDATE_URL, timeout=15).read()
     except Exception as e:
-        stop.set()
-        if t:
-            t.join()
-        print(f"  Error getting certificate: {e}")
-        log.error("ACME failed for %s: %s", domain, e)
-    finally:
-        if token_path and os.path.exists(token_path):
-            os.remove(token_path)
-        if http_started_here and tmp_stop:
-            tmp_stop.set()
-            if tmp_thread:
-                tmp_thread.join(timeout=5)
+        stop.set(); t.join()
+        print(f"  Update failed: {e}")
+        return
+    stop.set(); t.join()
 
+    compile(new_source, "servette.py", "exec")  # raises SyntaxError if invalid
 
-# ── Log, status, helpers ──────────────────────────────────────────────────────
+    tmp_path = servette_path + ".new"
+    with open(tmp_path, "wb") as f:
+        f.write(new_source)
+    os.chmod(tmp_path, os.stat(servette_path).st_mode)
+    os.replace(tmp_path, servette_path)
+
+    print("  Updated. Restart to run the new version ('stop' then 'start', or 'sudo systemctl restart servette').")
+
 
 def cmd_log(n=20):
     try:
@@ -1703,6 +1748,8 @@ def shell():
                 cmd_log(int(args[0]) if args else 20)
             except ValueError:
                 print("Usage: log [number]")
+        elif cmd == "update":
+            cmd_update()
         elif cmd in ("help", "?"):
             print(HELP)
         elif cmd in ("quit", "exit"):

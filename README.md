@@ -128,6 +128,7 @@ Any time you want to check on Servette or change a setting, SSH into your server
 | `stop` | Stop the server |
 | `status` | Show whether the server is running |
 | `log` | Show recent activity |
+| `update` | Download the latest version of Servette |
 | `help` | Show the command list |
 | `quit` | Exit the shell |
 

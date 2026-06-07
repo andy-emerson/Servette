@@ -12,6 +12,8 @@ Most ways to host a static site ask you to choose between simplicity and control
 
 Servette is the middle option: your own server, with the simplicity of a platform. It serves anything that runs in a browser, from a simple portfolio to a serious client-side application. The decrease in complexity is not a decrease in capability — within its domain, nothing is missing.
 
+The closest alternative is Caddy, which handles HTTPS and Let's Encrypt with a famously simple config syntax. But Caddy's core is ~73,000 lines of Go; Servette is under 2,000 lines of Python. For serving a static site, they cover the same ground. Caddy's additional bulk comes from features like reverse proxying, load balancing, and a live config API that a Pi-hosted static site doesn't need. That size difference matters: if something goes wrong, Servette is readily debuggable where Caddy is effectively a black box, and on more constrained hardware like a Raspberry Pi, a smaller footprint has real advantages.
+
 ---
 
 ## Who is Servette for?
@@ -33,7 +35,7 @@ Servette is the middle option: your own server, with the simplicity of a platfor
 | Rate limiting | Stops bots from hammering the server; makes password guessing impractical |
 | Live reload | Edit any file and changes appear immediately, no restart required |
 | Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |
-| Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy sent on every response |
+| Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, and Content-Security-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 
 ---
@@ -207,7 +209,7 @@ graph LR
 
 **File Cache:** files are read once, gzip-compressed, and held in memory keyed by path. Modification time is checked on each request so edits take effect immediately. ETags (SHA-256 of file contents) enable 304 Not Modified responses.
 
-**HTTPS App:** an ASGI coroutine called for every HTTPS request. Handles rate limiting, auth, path resolution, and file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy).
+**HTTPS App:** an ASGI coroutine called for every HTTPS request. Handles rate limiting, auth, path resolution, and file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy).
 
 **Redirect App:** an ASGI coroutine on port 80. Serves Let's Encrypt ACME challenge tokens during certificate issuance; redirects everything else to HTTPS with 301.
 
@@ -237,6 +239,8 @@ The interactive REPL. Dispatches user commands to Server and System functions. C
 
 **POST returns 405.** POST implies data going somewhere: a database, an email, a file on disk. Servette has no destination for POST data. If your site submits a form, the backend it posts to is outside Servette's scope.
 
-**CSP and Permissions-Policy not sent.** The correct values depend entirely on what your site loads. Hardcoding defaults that would break most sites is worse than sending nothing.
+**CSP default: block what static sites never need.** A `Content-Security-Policy` header is sent on every response. The default blocks plugins (`object-src 'none'`), `eval()`, and plain HTTP external resources, while allowing own-origin resources, HTTPS externals, inline styles and scripts, and data URIs — things static sites might need. Use `config > csp` to tighten or replace it for your specific site. Set it to blank to disable the header entirely.
+
+**Permissions-Policy not sent.** The correct values depend on which browser APIs your site uses. Hardcoding defaults that restrict APIs your site relies on is worse than sending nothing.
 
 **No SPA deep-link rewriting.** Servette serves files as-is. A request for `/about` looks for a file at that path and returns 404 if it doesn't exist. Single-page applications that rely on client-side routing (React Router, Vue Router, etc.) need a server that rewrites all paths to `index.html` — Servette doesn't do this. If your site is a SPA, either use hash-based routing (`/#/about`) or serve it from a platform that supports rewrite rules.

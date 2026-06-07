@@ -115,6 +115,7 @@ class Config:
         self.trusted_proxy      = data.get("trusted_proxy",      "")
         self.tls_min_version    = data.get("tls_min_version",    "1.2")
         self.ciphers            = data.get("ciphers",            "")
+        self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
 
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
@@ -156,6 +157,7 @@ class Config:
             "trusted_proxy":      self.trusted_proxy,
             "tls_min_version":    self.tls_min_version,
             "ciphers":            self.ciphers,
+            "csp":                self.csp,
         }
         fd = os.open(self.CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
@@ -512,6 +514,8 @@ async def https_app(scope, receive, send):
         (b"x-content-type-options",      b"nosniff"),
         (b"referrer-policy",             b"no-referrer"),
     ]
+    if config.csp:
+        response_headers.append((b"content-security-policy", config.csp.encode()))
     if accepts_gzip:
         response_headers.append((b"content-encoding", b"gzip"))
     if _cert_domain:
@@ -1290,6 +1294,7 @@ CONFIG_HELP = """
     cache     — browser cache policy
     proxy     — trusted proxy IP for X-Forwarded-For
     tls       — minimum TLS version and cipher suites
+    csp       — Content-Security-Policy header
     show      — show current settings
     back      — return to main shell
 """
@@ -1325,6 +1330,7 @@ def _config_show():
     print(f"  {'Trusted proxy':<22}  {val(config.trusted_proxy)}")
     print(f"  {'TLS min version':<22}  {config.tls_min_version}")
     print(f"  {'Cipher suites':<22}  {config.ciphers or '(system default)'}")
+    print(f"  {'CSP':<22}  {config.csp or '(disabled)'}")
     print()
 
 
@@ -1538,6 +1544,8 @@ def cmd_config():
             _config_trusted_proxy()
         elif cmd == "tls":
             _config_tls()
+        elif cmd == "csp":
+            _config_set("csp", "csp", hint="  Block what static sites never need; allow what they might. Leave blank to disable.")
         elif cmd in ("back", "done", "exit", "quit"):
             break
         elif cmd in ("help", "?"):

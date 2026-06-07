@@ -346,6 +346,12 @@ def run_server_tests(s, serve_dir):
           resp.headers.get("Vary") == "Accept-Encoding")
     check("Cache-Control present",
           resp.headers.get("Cache-Control") is not None)
+    check("Content-Security-Policy sent",
+          resp.headers.get("Content-Security-Policy") is not None)
+    check("CSP blocks plugins (object-src 'none')",
+          "object-src 'none'" in resp.headers.get("Content-Security-Policy", ""))
+    check("CSP blocks eval (no unsafe-eval)",
+          "'unsafe-eval'" not in resp.headers.get("Content-Security-Policy", ""))
 
     section("Method handling")
 

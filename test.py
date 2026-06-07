@@ -471,6 +471,25 @@ def run_server_tests(s, serve_dir):
     s.config.rate_limit = 200
     s._request_times.clear()
 
+    section("X-Forwarded-For ignored from untrusted source")
+
+    # trusted_proxy is set to an IP that is NOT our test client (127.0.0.1).
+    # If the server wrongly trusted XFF here, each request below would count
+    # against a different IP and never hit the per-IP rate limit.
+    # Correct behaviour: XFF is ignored, all three count against 127.0.0.1 → 429.
+    s._request_times.clear()
+    s.config.rate_limit    = 2
+    s.config.trusted_proxy = "10.0.0.1"
+
+    req("GET", headers={"X-Forwarded-For": "1.2.3.4"})
+    req("GET", headers={"X-Forwarded-For": "5.6.7.8"})
+    check("XFF from untrusted source ignored — third request hits rate limit",
+          req("GET", headers={"X-Forwarded-For": "9.10.11.12"}).status == 429)
+
+    s.config.rate_limit    = 200
+    s.config.trusted_proxy = ""
+    s._request_times.clear()
+
     section("Auth rate limit — credential-absent requests don't count")
 
     s.config.username = "testuser"

@@ -81,7 +81,7 @@ def _check_password(submitted, stored_hash, stored_salt):
 
 
 class Config:
-    """Holds all Servette settings and handles reading/writing servette.json."""
+    """Holds all Servette settings and handles reading/writing servette.toml."""
 
     CONFIG_FILE = os.path.join(BASE_DIR, "servette.toml")
 
@@ -144,7 +144,7 @@ class Config:
 
     def save(self):
         def s(v):
-            return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+            return '"' + str(v).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace('"', '\\"') + '"'
 
         content = f"""\
 # Servette configuration — https://github.com/andy-emerson/servette
@@ -193,6 +193,10 @@ password_salt = {s(self.password_salt)}
             pass
 
 
+# Config is a module-level singleton. Dependency injection (passing config into
+# every function) is the textbook alternative, but ASGI handlers have fixed
+# signatures imposed by Hypercorn and cannot accept extra arguments. In a
+# single-file server that is always run as a process, the global is the right call.
 config = Config()
 
 
@@ -238,10 +242,9 @@ def _normalize_ip(ip):
     return ip
 
 
-def _rate_sweep():
+def _rate_sweep(stop_event):
     """Background thread: evict stale IPs and enforce the IP cap every 30 seconds."""
-    while True:
-        time.sleep(30)
+    while not stop_event.wait(timeout=30):
         with _rate_lock:
             now    = time.monotonic()
             cutoff = now - RATE_WINDOW
@@ -252,8 +255,6 @@ def _rate_sweep():
                 if len(tracker) > _RATE_IP_CAP:
                     for k in sorted(tracker, key=lambda ip: tracker[ip][-1])[:len(tracker) - _RATE_IP_CAP]:
                         del tracker[k]
-
-threading.Thread(target=_rate_sweep, daemon=True).start()
 
 
 def _rate_limit_exceeded(tracker, ip, limit):
@@ -665,6 +666,8 @@ _server_thread        = None
 _server_start_time    = None
 _shutdown_event       = threading.Event()
 _watchdog_thread      = None
+_sweep_thread         = None
+_sweep_stop           = threading.Event()
 _last_renewal_attempt = 0.0
 _cert_domain          = None  # cached domain from active cert; None means self-signed
 
@@ -774,7 +777,7 @@ def _cert_watchdog():
 
 
 def start_server():
-    global _server_thread, _server_start_time, _watchdog_thread, _cert_domain
+    global _server_thread, _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread
 
     if _server_running():
         print("Server is already running.")
@@ -805,6 +808,11 @@ def start_server():
     if _watchdog_thread is None or not _watchdog_thread.is_alive():
         _watchdog_thread = threading.Thread(target=_cert_watchdog, daemon=True)
         _watchdog_thread.start()
+
+    if _sweep_thread is None or not _sweep_thread.is_alive():
+        _sweep_stop.clear()
+        _sweep_thread = threading.Thread(target=_rate_sweep, args=(_sweep_stop,), daemon=True)
+        _sweep_thread.start()
     _server_start_time = time.monotonic()
     _cert_domain = _domain_from_cert(_resolve(config.cert_file))
     log.info("Server started on port %d", config.port)
@@ -822,9 +830,12 @@ def start_server():
             print("Run 'config' then 'cert' to renew it.\n")
             log.warning("SSL certificate expires in %d days", days)
 
+    for issue in _production_issues():
+        print(f"  ⚠ {issue}")
+
 
 def stop_server():
-    global _server_thread, _server_start_time
+    global _server_thread, _server_start_time, _sweep_thread
 
     if not _server_running():
         return
@@ -833,6 +844,11 @@ def stop_server():
     _server_thread.join(timeout=10)
     _server_thread     = None
     _server_start_time = None
+
+    _sweep_stop.set()
+    if _sweep_thread is not None:
+        _sweep_thread.join(timeout=5)
+        _sweep_thread = None
     log.info("Server stopped")
     print("Session server stopped.")
 
@@ -1413,7 +1429,7 @@ def _config_cert():
             print(f"  Current: {config.cert_file}")
     print()
 
-    domain = input("  Domain name (press Enter to skip and use a self-signed certificate): ").strip()
+    domain = input("  Domain name (leave blank for self-signed): ").strip()
 
     if domain:
         _run_acme(domain)
@@ -1766,6 +1782,20 @@ def _format_uptime(seconds):
         return f"{s // 86400}d {(s % 86400) // 3600}h"
 
 
+def _production_issues():
+    """Return a list of strings describing conditions that prevent production readiness."""
+    issues = []
+    if not config.serve_dir or not os.path.exists(_resolve(config.serve_dir)):
+        issues.append("serve directory not configured — run 'config'")
+    if not config.cert_file or not os.path.exists(_resolve(config.cert_file)):
+        issues.append("certificate not configured — run 'config cert'")
+    elif _domain_from_cert(_resolve(config.cert_file)) is None:
+        issues.append("self-signed certificate — run 'config cert' to add a domain")
+    if not config.username:
+        issues.append("no password protection — run 'config' to set credentials")
+    return issues
+
+
 def cmd_status():
     service_active = _service_is_active()
     running        = service_active or _server_running()
@@ -1789,6 +1819,12 @@ def cmd_status():
     if days is not None:
         cert_str = "expired" if days <= 0 else f"{days} days remaining"
         print(f"  {'Cert':<{W}} {cert_str}")
+
+    issues = _production_issues()
+    if issues:
+        print()
+        for issue in issues:
+            print(f"  ⚠ {issue}")
 
     if running:
         if service_active:
@@ -1862,8 +1898,8 @@ def cmd_setup():
 
     print()
     print("  Step 2 — SSL certificate")
-    print(f"  Your server's IP address is {public_ip}.")
-    print("  Enter a domain to get a trusted certificate, or press Enter for self-signed.\n")
+    print(f"  Your public IP is {public_ip}. Point a domain here for a trusted certificate.")
+    print("  Leave blank to use a self-signed certificate (browsers will warn visitors).\n")
     _config_cert()
 
     print()

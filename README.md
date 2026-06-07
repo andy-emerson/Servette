@@ -3,7 +3,7 @@
 
 ---
 
-Servette is a single Python file that puts anything that runs in a browser on the internet with HTTPS, optional password protection, and auto-renewing certificates. Copy it to a server, including a Raspberry Pi. Run it. Follow the wizard. Done.
+Servette is a production nanoserver. A nanoserver focuses on doing one thing well, which makes them very popular as dev tools. Servette, however, is not a dev tool. It serves a real site on the public internet and, therefore, inherits features that a dev tool may not have: a trusted certificate, automatic renewal, HTTPS enforced at the redirect level, a password if you want one. No configuration language to learn. No certificates to manage. No dependencies to install. Simply copy Servette to a server, run it, follow the wizard, done.
 
 Most ways to host a static site ask you to choose between simplicity and control:
 
@@ -48,7 +48,7 @@ Servette is the middle option: your own server, with the simplicity of a platfor
 
 **A domain name (optional).** Only required if you want a free SSL certificate from [Let's Encrypt](https://letsencrypt.org). Without one, Servette generates a self-signed certificate. Your browser will warn you, but the connection is still encrypted.
 
-On first run, Servette installs its own dependencies automatically. No manual pip installs required.
+Servette depends on a handful of Python packages — Hypercorn, cryptography, and two ACME libraries — but manages them itself. On first run it creates a private virtualenv and installs everything. You will not need to run pip.
 
 ---
 

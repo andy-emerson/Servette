@@ -50,7 +50,7 @@ The closest alternative is Caddy, which handles HTTPS and Let's Encrypt with a f
 
 **A folder with your site files.** Servette looks for `index.html` at the root and in any subdirectory. If you don't have a site yet, use the `demo/` folder from this repository to verify everything is working first.
 
-**A domain name (optional).** Only required if you want a free SSL certificate from [Let's Encrypt](https://letsencrypt.org). Without one, Servette generates a self-signed certificate. Your browser will warn you, but the connection is still encrypted.
+**A domain name.** Required for a trusted certificate and recommended for any public-facing site. Without one, Servette can use a self-signed certificate, but visitors' browsers will warn them before they can access your site. Self-signed is fine for a private home network or local testing.
 
 Servette depends on a handful of Python packages — Hypercorn, cryptography, and two ACME libraries — but manages them itself. On first run it creates a private virtualenv and installs everything. You will not need to run pip.
 
@@ -143,7 +143,7 @@ Servette is a single file (~2,000 lines) divided into three sections with clear 
 
 | Section | Lines | Responsibility |
 |---|---|---|
-| **Server** | ~600 | Handles every incoming request: config, rate limiting, file cache, and the two ASGI apps |
+| **Server** | ~550 | Handles every incoming request: config, rate limiting, file cache, and the two ASGI apps |
 | **System** | ~700 | Manages the environment: bootstrap, server lifecycle, certificates, and systemd integration |
 | **Shell** | ~650 | The interactive terminal interface |
 

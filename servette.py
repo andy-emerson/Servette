@@ -1,5 +1,5 @@
 """
-servette.py — The Simple Secure Server
+servette.py — The Simple Secure Static Site Server
 
 Servette serves a directory of static files over HTTPS with optional Basic Auth
 and essential security headers. Run it:
@@ -32,6 +32,7 @@ import threading
 import time
 import urllib.request
 from logging.handlers import RotatingFileHandler
+from urllib.parse import unquote
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -45,6 +46,9 @@ from logging.handlers import RotatingFileHandler
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 _VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
 _VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
+
+SERVICE_PATH = "/etc/systemd/system/servette.service"
+ACME_WEBROOT = "/var/lib/letsencrypt/webroot"
 
 
 def _bootstrap():
@@ -67,7 +71,7 @@ def _bootstrap():
             print(f"  Error: failed to create virtual environment: {e}")
             sys.exit(1)
 
-        deps = ["hypercorn", "cryptography", "acme", "josepy"]
+        deps = ["hypercorn", "cryptography", "acme", "josepy", "aioquic"]
         result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
         if result.returncode != 0:
             print(f"  Error: failed to install dependencies")
@@ -358,8 +362,6 @@ def _mime_type(path):
 def _resolve_request_path(url_path):
     """Resolve a URL path to an absolute file path within serve_dir. Returns None on traversal."""
     serve_dir = _resolve(config.serve_dir)
-    # Decode percent-encoding, strip query string
-    from urllib.parse import unquote
     clean = unquote(url_path.split("?")[0])
     # Normalize and join
     rel   = os.path.normpath(clean.lstrip("/"))
@@ -388,11 +390,6 @@ def _cache_control_header():
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ASGI APPS
-#
-# Hypercorn calls these coroutines for every incoming connection. The ASGI
-# interface replaces the old BaseHTTPRequestHandler subclasses — all the same
-# auth, rate limiting, caching, and security header logic is preserved, just
-# expressed as async functions instead of class methods.
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _send_response(send, status, headers_list, body=b""):
@@ -411,7 +408,6 @@ async def https_app(scope, receive, send):
             elif event["type"] == "lifespan.shutdown":
                 await send({"type": "lifespan.shutdown.complete"})
                 return
-        return
 
     if scope["type"] != "http":
         return
@@ -427,7 +423,7 @@ async def https_app(scope, receive, send):
         ip = xff.split(",")[0].strip()
     ip = _normalize_ip(ip)
 
-    send_body = (method != b"HEAD" and method != "HEAD")
+    send_body = (method != "HEAD")
 
     if method not in ("GET", "HEAD"):
         await _send_response(send, 405,
@@ -574,14 +570,13 @@ async def redirect_app(scope, receive, send):
             elif event["type"] == "lifespan.shutdown":
                 await send({"type": "lifespan.shutdown.complete"})
                 return
-        return
 
     if scope["type"] != "http":
         return
 
     path      = scope["path"]
     headers   = dict(scope["headers"])
-    send_body = (scope["method"] not in ("HEAD", b"HEAD"))
+    send_body = (scope["method"] != "HEAD")
 
     # ACME HTTP-01 challenges arrive on port 80 during Let's Encrypt verification
     prefix = "/.well-known/acme-challenge/"
@@ -624,6 +619,7 @@ async def redirect_app(scope, receive, send):
 _server_thread     = None
 _server_start_time = None
 _shutdown_event    = threading.Event()
+_watchdog_thread   = None
 
 
 async def _serve_http_redirect(stop_event):
@@ -681,7 +677,6 @@ async def _run_servers(stop_event):
             http_cfg.bind     = ["0.0.0.0:80"]
             http_cfg.loglevel = "warning"
             await hypercorn_serve(redirect_app, http_cfg, shutdown_trigger=trigger)
-            log.info("HTTP redirect listener started on port 80")
         except OSError as e:
             log.warning("Could not bind to port 80: %s", e)
             print("Note: could not bind to port 80 (requires root). HTTP redirects unavailable.")
@@ -714,7 +709,7 @@ def _cert_watchdog():
 
 
 def start_server():
-    global _server_thread, _server_start_time
+    global _server_thread, _server_start_time, _watchdog_thread
 
     if _server_running():
         print("Server is already running.")
@@ -742,7 +737,9 @@ def start_server():
     _server_thread.start()
     time.sleep(0.5)
 
-    threading.Thread(target=_cert_watchdog, daemon=True).start()
+    if _watchdog_thread is None or not _watchdog_thread.is_alive():
+        _watchdog_thread = threading.Thread(target=_cert_watchdog, daemon=True)
+        _watchdog_thread.start()
     _server_start_time = time.monotonic()
     log.info("Server started on port %d", config.port)
     print(f"\nServing {config.serve_dir}/ at https://localhost:{config.port}\n")
@@ -778,9 +775,6 @@ def stop_server():
 # SHELL
 # ─────────────────────────────────────────────────────────────────────────────
 
-SERVICE_PATH = "/etc/systemd/system/servette.service"
-ACME_WEBROOT = "/var/lib/letsencrypt/webroot"
-
 HELP = """
 Commands:
   setup             — guided walkthrough for getting started
@@ -798,7 +792,7 @@ Commands:
 CONFIG_HELP = """
   Commands
   ──────────────────────────────────────
-    html      — HTML file to serve
+    dir       — directory to serve
     port      — HTTPS port
     cert      — SSL certificate and key
     username  — login username

@@ -1,0 +1,1662 @@
+"""
+servette.py — The Simple Secure Server
+
+Servette serves a directory of static files over HTTPS with optional Basic Auth
+and essential security headers. Run it:
+
+    sudo python3 servette.py
+
+Architecture:
+    Bootstrap           — creates a virtualenv and installs Hypercorn on first run
+    Config              — a Config object holds all settings and reads/writes servette.json
+    Logging             — rotating log file; unified with Hypercorn's access log
+    Rate Limiter        — in-memory per-IP request and auth-fail rate limiting
+    ASGI Apps           — https_app and redirect_app handle all HTTP traffic via Hypercorn
+    Server              — starts/stops Hypercorn in a background thread
+    Shell               — the interactive terminal interface
+"""
+
+import asyncio
+import base64
+import datetime
+import getpass
+import gzip
+import hashlib
+import hmac
+import json
+import logging
+import os
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from logging.handlers import RotatingFileHandler
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BOOTSTRAP
+#
+# On first run, servette.py creates a virtualenv and installs Hypercorn into
+# it, then re-execs itself inside that environment. The user just runs
+# `sudo python3 servette.py` — the environment is managed invisibly.
+# ─────────────────────────────────────────────────────────────────────────────
+
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+_VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
+_VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
+
+
+def _bootstrap():
+    if sys.prefix == _VENV_DIR:
+        return  # Already running inside the managed virtualenv
+
+    if not os.path.exists(_VENV_PY):
+        print("Setting up Servette...")
+
+        ver = f"python3.{sys.version_info.minor}-venv"
+        result = subprocess.run(["apt-get", "install", "-y", ver])
+        if result.returncode != 0:
+            print(f"  Error: failed to install {ver}")
+            sys.exit(1)
+
+        try:
+            import venv as _venv_mod
+            _venv_mod.create(_VENV_DIR, with_pip=True, clear=True)
+        except Exception as e:
+            print(f"  Error: failed to create virtual environment: {e}")
+            sys.exit(1)
+
+        deps = ["hypercorn", "cryptography", "acme", "josepy"]
+        result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
+        if result.returncode != 0:
+            print(f"  Error: failed to install dependencies")
+            sys.exit(1)
+        print()
+
+    os.execv(_VENV_PY, [_VENV_PY] + sys.argv)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _resolve(path):
+    """Return path as-is if absolute, otherwise anchor it to BASE_DIR."""
+    return path if os.path.isabs(path) else os.path.join(BASE_DIR, path)
+
+
+def _hash_password(password):
+    """Hash a password with a random salt using PBKDF2-HMAC-SHA256."""
+    salt = os.urandom(16)
+    key  = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 260000)
+    return key.hex(), salt.hex()
+
+
+def _check_password(submitted, stored_hash, stored_salt):
+    """Return True if submitted matches the stored hash."""
+    if not stored_hash or not stored_salt:
+        return False
+    try:
+        salt = bytes.fromhex(stored_salt)
+        key  = hashlib.pbkdf2_hmac("sha256", submitted.encode("utf-8"), salt, 260000)
+        return hmac.compare_digest(key.hex(), stored_hash)
+    except Exception:
+        return False
+
+
+class Config:
+    """Holds all Servette settings and handles reading/writing servette.json."""
+
+    CONFIG_FILE = os.path.join(BASE_DIR, "servette.json")
+
+    def __init__(self):
+        self._mtime = None
+        self._load()
+
+    def _load(self):
+        data = {}
+        if os.path.exists(self.CONFIG_FILE):
+            try:
+                with open(self.CONFIG_FILE, "r") as f:
+                    data = json.load(f)
+            except json.JSONDecodeError as e:
+                print(f"Error: servette.json is not valid JSON ({e}).")
+                print(f"Fix or delete {self.CONFIG_FILE} and try again.")
+                sys.exit(1)
+
+        self.html_file       = data.get("html_file",       "")  # legacy, migrated on load
+        self.serve_dir       = data.get("serve_dir",       data.get("html_file", ""))
+        self.port            = data.get("port",            443)
+        self.cert_file       = data.get("cert_file",       "cert.pem")
+        self.key_file        = data.get("key_file",        "key.pem")
+        self.username        = data.get("username",        "")
+        self.password_hash   = data.get("password_hash",   "")
+        self.password_salt   = data.get("password_salt",   "")
+        self.log_file        = data.get("log_file",        "/var/log/servette.log")
+        self.rate_limit      = data.get("rate_limit",      30)
+        self.auth_rate_limit = data.get("auth_rate_limit", 6)
+        self.cache_policy       = data.get("cache_policy",       "no-cache")
+        self.cache_max_age      = data.get("cache_max_age",      3600)
+        self.email              = data.get("email",              "")
+        self.csp                = data.get("csp",                "")
+        self.permissions_policy = data.get("permissions_policy", "")
+
+        try:
+            self._mtime = os.path.getmtime(self.CONFIG_FILE)
+        except OSError:
+            pass
+
+        if data.get("password") and not self.password_hash:
+            self.password_hash, self.password_salt = _hash_password(data["password"])
+            self.save()
+
+    def reload_if_changed(self):
+        try:
+            mtime = os.path.getmtime(self.CONFIG_FILE)
+            if mtime != self._mtime:
+                self._load()
+                log.info("Config reloaded from disk")
+        except OSError:
+            pass
+
+    def save(self):
+        data = {
+            "serve_dir":       self.serve_dir,
+            "port":            self.port,
+            "cert_file":       self.cert_file,
+            "key_file":        self.key_file,
+            "username":        self.username,
+            "password_hash":   self.password_hash,
+            "password_salt":   self.password_salt,
+            "log_file":        self.log_file,
+            "rate_limit":      self.rate_limit,
+            "auth_rate_limit": self.auth_rate_limit,
+            "cache_policy":       self.cache_policy,
+            "cache_max_age":      self.cache_max_age,
+            "email":              self.email,
+            "csp":                self.csp,
+            "permissions_policy": self.permissions_policy,
+        }
+        with open(self.CONFIG_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+        os.chmod(self.CONFIG_FILE, 0o600)
+        try:
+            self._mtime = os.path.getmtime(self.CONFIG_FILE)
+        except OSError:
+            pass
+
+
+config = Config()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGGING
+#
+# RotatingFileHandler caps log size at 5 MB and keeps 3 backups — important
+# on Pi SD cards where unbounded log growth is a real concern.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def setup_logging():
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+
+    fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s")
+
+    stream = logging.StreamHandler()
+    stream.setLevel(logging.INFO if "--serve" in sys.argv else logging.WARNING)
+    stream.setFormatter(fmt)
+    root.addHandler(stream)
+
+    if config.log_file and "--serve" not in sys.argv:
+        try:
+            fh = RotatingFileHandler(
+                config.log_file, maxBytes=5 * 1024 * 1024, backupCount=3
+            )
+            fh.setLevel(logging.INFO)
+            fh.setFormatter(fmt)
+            root.addHandler(fh)
+        except OSError:
+            pass
+
+
+log = logging.getLogger(__name__)
+setup_logging()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RATE LIMITER
+#
+# Two independent sliding-window limits per IP address:
+#   config.rate_limit      — total requests per minute (default 30)
+#   config.auth_rate_limit — failed auth attempts per minute (default 6)
+#
+# Uses threading.Lock because the critical section is microseconds of dict
+# manipulation — not I/O — so it doesn't meaningfully block the event loop.
+# ─────────────────────────────────────────────────────────────────────────────
+
+RATE_WINDOW = 60  # seconds
+
+_request_times   = {}
+_auth_fail_times = {}
+_rate_lock       = threading.Lock()
+
+
+def _normalize_ip(ip):
+    """Normalize IPv6-mapped IPv4 addresses so both forms bucket together."""
+    if ip.startswith("::ffff:"):
+        return ip[7:]
+    return ip
+
+
+def _rate_limit_exceeded(tracker, ip, limit):
+    """Record this request for ip and return True if the limit has been exceeded."""
+    with _rate_lock:
+        now    = time.monotonic()
+        cutoff = now - RATE_WINDOW
+
+        # Evict IPs with no recent activity
+        stale = [k for k, v in tracker.items() if not v or v[-1] < cutoff]
+        for k in stale:
+            del tracker[k]
+
+        timestamps = tracker.get(ip, [])
+        timestamps = [t for t in timestamps if t > cutoff]
+        timestamps.append(now)
+        tracker[ip] = timestamps
+
+        return len(timestamps) > limit
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FILE CACHE
+#
+# Files are read once and held in memory with gzip-compressed and raw copies.
+# Modification time is checked on each request so edits take effect immediately.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_file_cache      = {}
+_file_cache_lock = threading.Lock()
+
+
+def _get_cached_file(path):
+    """Return (raw_bytes, compressed_bytes, etag), reloading only if the file changed."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None, None, None
+
+    with _file_cache_lock:
+        entry = _file_cache.get(path)
+        if entry and entry["mtime"] == mtime:
+            return entry["raw"], entry["compressed"], entry["etag"]
+
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return None, None, None
+
+        compressed = gzip.compress(raw, compresslevel=6)
+        etag       = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
+        _file_cache[path] = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
+
+        return raw, compressed, etag
+
+
+MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css":  "text/css; charset=utf-8",
+    ".js":   "application/javascript; charset=utf-8",
+    ".json": "application/json",
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif":  "image/gif",
+    ".svg":  "image/svg+xml",
+    ".ico":  "image/x-icon",
+    ".webp": "image/webp",
+    ".woff": "font/woff",
+    ".woff2":"font/woff2",
+    ".ttf":  "font/ttf",
+    ".pdf":  "application/pdf",
+    ".txt":  "text/plain; charset=utf-8",
+    ".xml":  "application/xml",
+    ".webmanifest": "application/manifest+json",
+}
+
+def _mime_type(path):
+    ext = os.path.splitext(path)[1].lower()
+    return MIME_TYPES.get(ext, "application/octet-stream")
+
+def _resolve_request_path(url_path):
+    """Resolve a URL path to an absolute file path within serve_dir. Returns None on traversal."""
+    serve_dir = _resolve(config.serve_dir)
+    # Decode percent-encoding, strip query string
+    from urllib.parse import unquote
+    clean = unquote(url_path.split("?")[0])
+    # Normalize and join
+    rel   = os.path.normpath(clean.lstrip("/"))
+    if rel == ".":
+        rel = ""
+    abs_path = os.path.normpath(os.path.join(serve_dir, rel)) if rel else serve_dir
+    # Path traversal check
+    if not abs_path.startswith(serve_dir + os.sep) and abs_path != serve_dir:
+        return None, 403
+    # Directory → index.html
+    if os.path.isdir(abs_path):
+        abs_path = os.path.join(abs_path, "index.html")
+    if not os.path.isfile(abs_path):
+        return None, 404
+    return abs_path, 200
+
+
+def _cache_control_header():
+    scope = "private" if config.username else "public"
+    if config.cache_policy == "no-store":
+        return "no-store"
+    if config.cache_policy == "no-cache":
+        return f"{scope}, no-cache"
+    return f"{scope}, max-age={config.cache_max_age}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ASGI APPS
+#
+# Hypercorn calls these coroutines for every incoming connection. The ASGI
+# interface replaces the old BaseHTTPRequestHandler subclasses — all the same
+# auth, rate limiting, caching, and security header logic is preserved, just
+# expressed as async functions instead of class methods.
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _send_response(send, status, headers_list, body=b""):
+    await send({"type": "http.response.start", "status": status, "headers": headers_list})
+    await send({"type": "http.response.body",  "body": body})
+
+
+async def https_app(scope, receive, send):
+    """ASGI app — HTTPS server."""
+
+    if scope["type"] == "lifespan":
+        while True:
+            event = await receive()
+            if event["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif event["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+        return
+
+    if scope["type"] != "http":
+        return
+
+    method  = scope["method"]
+    headers = dict(scope["headers"])
+
+    # Client IP — trust X-Forwarded-For when present (reverse proxy / Tailscale)
+    client = scope.get("client")
+    ip     = client[0] if client else "unknown"
+    xff    = headers.get(b"x-forwarded-for", b"").decode()
+    if xff:
+        ip = xff.split(",")[0].strip()
+    ip = _normalize_ip(ip)
+
+    send_body = (method != b"HEAD" and method != "HEAD")
+
+    if method not in ("GET", "HEAD"):
+        await _send_response(send, 405,
+            [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
+        return
+
+    config.reload_if_changed()
+
+    # Rate limiting
+    if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
+        await _send_response(send, 429, [
+            (b"retry-after", str(RATE_WINDOW).encode()),
+            (b"content-length", b"0"),
+        ])
+        log.warning("Rate limited %s", ip)
+        return
+
+    # Authentication
+    if config.username:
+        auth                  = headers.get(b"authorization", b"").decode()
+        authed                = False
+        credentials_submitted = False
+
+        if auth.startswith("Basic "):
+            credentials_submitted = True
+            try:
+                decoded        = base64.b64decode(auth[6:]).decode("utf-8", errors="strict")
+                parts          = decoded.split(":", 1)
+                submitted_user = parts[0]
+                pw             = parts[1] if len(parts) == 2 else ""
+                authed = (submitted_user == config.username and
+                          _check_password(pw, config.password_hash, config.password_salt))
+            except (ValueError, UnicodeDecodeError):
+                pass
+
+        if not authed:
+            if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit):
+                await _send_response(send, 429, [
+                    (b"retry-after", str(RATE_WINDOW).encode()),
+                    (b"content-length", b"0"),
+                ])
+                log.warning("Auth rate limited %s", ip)
+                return
+            await _send_response(send, 401, [
+                (b"www-authenticate", b'Basic realm="Access Required"'),
+                (b"content-type",     b"text/plain"),
+                (b"content-length",   b"12"),
+            ], body=b"Unauthorized" if send_body else b"")
+            if credentials_submitted:
+                log.warning("Failed auth attempt from %s", ip)
+            return
+
+    # Resolve request path to a file
+    url_path = scope.get("path", "/")
+    try:
+        file_path, status = _resolve_request_path(url_path)
+    except Exception as e:
+        log.error("500 resolving %s: %s", url_path, e)
+        body_500 = b"Internal server error."
+        await _send_response(send, 500,
+            [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())],
+            body=body_500 if send_body else b"")
+        return
+
+    if status == 403:
+        body_403 = b"Forbidden."
+        await _send_response(send, 403,
+            [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())],
+            body=body_403 if send_body else b"")
+        log.warning("403 Forbidden %s from %s", url_path, ip)
+        return
+
+    if status == 404 or file_path is None:
+        # Try custom 404.html in serve_dir root
+        custom_404 = os.path.join(_resolve(config.serve_dir), "404.html")
+        if os.path.isfile(custom_404):
+            raw_404, _, _ = _get_cached_file(custom_404)
+            body_404 = raw_404 or b"Not found."
+            content_type_404 = b"text/html; charset=utf-8"
+        else:
+            body_404 = b"Not found."
+            content_type_404 = b"text/plain"
+        await _send_response(send, 404,
+            [(b"content-type", content_type_404), (b"content-length", str(len(body_404)).encode())],
+            body=body_404 if send_body else b"")
+        log.warning("404 Not Found %s from %s", url_path, ip)
+        return
+
+    raw, compressed, etag = _get_cached_file(file_path)
+    if raw is None:
+        body_500 = b"Internal server error."
+        await _send_response(send, 500,
+            [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())],
+            body=body_500 if send_body else b"")
+        log.error("500 could not read %s", file_path)
+        return
+
+    # 304 Not Modified
+    if_none_match = headers.get(b"if-none-match", b"").decode()
+    if if_none_match == etag:
+        await _send_response(send, 304, [
+            (b"etag",          etag.encode()),
+            (b"cache-control", _cache_control_header().encode()),
+        ])
+        log.info("304 Not Modified %s to %s", url_path, ip)
+        return
+
+    # Serve
+    accept_encoding = headers.get(b"accept-encoding", b"").decode()
+    accepts_gzip    = "gzip" in accept_encoding
+    mime            = _mime_type(file_path)
+    body            = compressed if accepts_gzip else raw
+
+    response_headers = [
+        (b"content-type",                mime.encode()),
+        (b"content-length",              str(len(body)).encode()),
+        (b"etag",                        etag.encode()),
+        (b"cache-control",               _cache_control_header().encode()),
+        (b"vary",                        b"Accept-Encoding"),
+        (b"strict-transport-security",   b"max-age=31536000; includeSubDomains"),
+        (b"x-frame-options",             b"DENY"),
+        (b"x-content-type-options",      b"nosniff"),
+        (b"referrer-policy",             b"no-referrer"),
+    ]
+    if accepts_gzip:
+        response_headers.append((b"content-encoding", b"gzip"))
+    if config.csp:
+        response_headers.append((b"content-security-policy", config.csp.encode()))
+    if config.permissions_policy:
+        response_headers.append((b"permissions-policy", config.permissions_policy.encode()))
+
+    await _send_response(send, 200, response_headers, body=body if send_body else b"")
+    log.info("200 %s to %s", url_path, ip)
+
+
+async def redirect_app(scope, receive, send):
+    """ASGI app — HTTP redirect to HTTPS and ACME challenge serving."""
+
+    if scope["type"] == "lifespan":
+        while True:
+            event = await receive()
+            if event["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif event["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+        return
+
+    if scope["type"] != "http":
+        return
+
+    path      = scope["path"]
+    headers   = dict(scope["headers"])
+    send_body = (scope["method"] not in ("HEAD", b"HEAD"))
+
+    # ACME HTTP-01 challenges arrive on port 80 during Let's Encrypt verification
+    prefix = "/.well-known/acme-challenge/"
+    if path.startswith(prefix):
+        token = path[len(prefix):]
+        if not token or "/" in token or ".." in token:
+            await _send_response(send, 404, [(b"content-length", b"0")])
+            return
+        file_path = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
+        try:
+            with open(file_path, "rb") as f:
+                data = f.read()
+            await _send_response(send, 200, [
+                (b"content-type",   b"text/plain"),
+                (b"content-length", str(len(data)).encode()),
+            ], body=data if send_body else b"")
+        except OSError:
+            await _send_response(send, 404, [(b"content-length", b"0")])
+        return
+
+    # Redirect everything else to HTTPS
+    host      = headers.get(b"host", b"localhost").decode().split(":")[0]
+    https_url = (f"https://{host}{path}" if config.port == 443
+                 else f"https://{host}:{config.port}{path}")
+
+    await _send_response(send, 301, [
+        (b"location",       https_url.encode()),
+        (b"content-length", b"0"),
+    ])
+    log.info("Redirected to %s", https_url)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERVER
+#
+# Hypercorn runs in a background thread with its own asyncio event loop.
+# A threading.Event signals graceful shutdown from the shell thread.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_server_thread     = None
+_server_start_time = None
+_shutdown_event    = threading.Event()
+
+
+async def _serve_http_redirect(stop_event):
+    """Run only the HTTP redirect server — used as a temporary listener during cert issuance."""
+    from hypercorn.config import Config as HypercornConfig
+    from hypercorn.asyncio import serve as hypercorn_serve
+
+    cfg      = HypercornConfig()
+    cfg.bind = ["0.0.0.0:80"]
+    cfg.loglevel = "warning"
+
+    async def trigger():
+        await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)
+
+    await hypercorn_serve(redirect_app, cfg, shutdown_trigger=trigger)
+
+
+async def _run_servers(stop_event):
+    from hypercorn.config import Config as HypercornConfig
+    from hypercorn.asyncio import serve as hypercorn_serve
+
+    async def trigger():
+        await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)
+
+    cert_file = _resolve(config.cert_file)
+    key_file  = _resolve(config.key_file)
+
+    https_cfg          = HypercornConfig()
+    https_cfg.bind     = [f"0.0.0.0:{config.port}"]
+    https_cfg.certfile = cert_file
+    https_cfg.keyfile  = key_file
+    https_cfg.loglevel = "warning"
+    if config.log_file:
+        https_cfg.accesslog = config.log_file
+
+    async def run_http_redirect():
+        try:
+            http_cfg          = HypercornConfig()
+            http_cfg.bind     = ["0.0.0.0:80"]
+            http_cfg.loglevel = "warning"
+            await hypercorn_serve(redirect_app, http_cfg, shutdown_trigger=trigger)
+            log.info("HTTP redirect listener started on port 80")
+        except OSError as e:
+            log.warning("Could not bind to port 80: %s", e)
+            print("Note: could not bind to port 80 (requires root). HTTP redirects unavailable.")
+
+    await asyncio.gather(
+        hypercorn_serve(https_app, https_cfg, shutdown_trigger=trigger),
+        run_http_redirect(),
+        return_exceptions=True,
+    )
+
+
+def _server_running():
+    return _server_thread is not None and _server_thread.is_alive()
+
+
+def start_server():
+    global _server_thread, _server_start_time
+
+    if _server_running():
+        print("Server is already running.")
+        return
+
+    for fname in [config.serve_dir, config.cert_file, config.key_file]:
+        if not fname:
+            print("Not fully configured. Run 'config' to set up the server.")
+            if "--serve" in sys.argv:
+                sys.exit(1)
+            return
+        full_path = _resolve(fname)
+        if not os.path.exists(full_path):
+            print(f"File not found: {full_path}")
+            if "--serve" in sys.argv:
+                sys.exit(1)
+            return
+
+    _shutdown_event.clear()
+
+    def run():
+        asyncio.run(_run_servers(_shutdown_event))
+
+    _server_thread = threading.Thread(target=run, daemon=True)
+    _server_thread.start()
+    time.sleep(0.5)
+
+    _server_start_time = time.monotonic()
+    log.info("Server started on port %d", config.port)
+    print(f"\nServing {config.serve_dir}/ at https://localhost:{config.port}\n")
+
+    cert_path = _resolve(config.cert_file)
+    days      = _cert_days_remaining(cert_path)
+    if days is not None and days < 30:
+        if days <= 0:
+            print("Warning: SSL certificate has expired. Browsers will block visitors.")
+            print("Run 'config' then 'cert' to renew it.\n")
+            log.warning("SSL certificate has expired")
+        else:
+            print(f"Warning: SSL certificate expires in {days} days.")
+            print("Run 'config' then 'cert' to renew it.\n")
+            log.warning("SSL certificate expires in %d days", days)
+
+
+def stop_server():
+    global _server_thread, _server_start_time
+
+    if not _server_running():
+        return
+
+    _shutdown_event.set()
+    _server_thread.join(timeout=10)
+    _server_thread     = None
+    _server_start_time = None
+    log.info("Server stopped")
+    print("Session server stopped.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SHELL
+# ─────────────────────────────────────────────────────────────────────────────
+
+SERVICE_PATH = "/etc/systemd/system/servette.service"
+ACME_WEBROOT = "/var/lib/letsencrypt/webroot"
+
+HELP = """
+Commands:
+  setup             — guided walkthrough for getting started
+  config            — view and edit settings
+  enable            — enable Servette as a system service
+  disable           — remove the system service
+  start             — start the server
+  stop              — stop the server
+  status            — show whether the server is running
+  log [n]           — show the last n log entries
+  help              — show this message
+  quit              — exit
+"""
+
+CONFIG_HELP = """
+  Commands
+  ──────────────────────────────────────
+    html      — HTML file to serve
+    port      — HTTPS port
+    cert      — SSL certificate and key
+    username  — login username
+    password  — login password
+    email     — email address
+    limits    — rate limits
+    cache     — browser cache policy
+    csp       — Content-Security-Policy header
+    perms     — Permissions-Policy header
+    show      — show current settings
+    back      — return to main shell
+"""
+
+
+def _service_file_exists():
+    return os.path.exists(SERVICE_PATH)
+
+
+def _service_is_active():
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "servette"],
+            capture_output=True, text=True
+        )
+        return result.stdout.strip() == "active"
+    except FileNotFoundError:
+        return False
+
+
+def _prompt(question):
+    return input(f"  {question} [y/n]: ").strip().lower() == "y"
+
+
+# ── Config sub-shell ──────────────────────────────────────────────────────────
+
+def _config_show():
+    def val(v):
+        return v if v else "(not set)"
+
+    cache_display = config.cache_policy
+    if config.cache_policy == "max-age":
+        cache_display += f" ({config.cache_max_age}s)"
+
+    print()
+    print("  Current Settings")
+    print("  " + "─" * 38)
+    print(f"  {'Directory':<22}  {val(config.serve_dir)}")
+    print(f"  {'HTTPS port':<22}  {config.port}")
+    print(f"  {'Certificate':<22}  {val(config.cert_file)}")
+    print(f"  {'Key':<22}  {val(config.key_file)}")
+    print(f"  {'Username':<22}  {val(config.username)}")
+    print(f"  {'Password':<22}  {'(set)' if config.password_hash else '(not set)'}")
+    print(f"  {'Email':<22}  {val(config.email)}")
+    print(f"  {'Rate limit':<22}  {config.rate_limit} req/min")
+    print(f"  {'Auth rate limit':<22}  {config.auth_rate_limit} fails/min")
+    print(f"  {'Cache policy':<22}  {cache_display}")
+    print(f"  {'CSP':<22}  {val(config.csp)}")
+    print(f"  {'Permissions-Policy':<22}  {val(config.permissions_policy)}")
+    print()
+
+
+def _config_dir():
+    dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
+    if dirs:
+        print()
+        for d in dirs:
+            print(f"    {d}{' ←' if d == config.serve_dir else ''}")
+    new_value = input(f"\n  serve_dir [{config.serve_dir}]: ").strip()
+    if not new_value:
+        print("  → unchanged")
+        return
+    path = _resolve(new_value)
+    if not os.path.isdir(path):
+        print(f"  → directory not found: {path}")
+        return
+    config.serve_dir = new_value
+    config.save()
+    print("  → saved")
+
+
+def _config_port():
+    current   = config.port
+    new_value = input(f"  port [{current}]: ").strip()
+    if new_value and new_value != str(current):
+        try:
+            port = int(new_value)
+            if not (1 <= port <= 65535):
+                raise ValueError
+            config.port = port
+            config.save()
+            print("  → saved")
+        except ValueError:
+            print("  → invalid port number, unchanged")
+    else:
+        print("  → unchanged")
+
+
+def _config_cert():
+    cert_path = _resolve(config.cert_file)
+    if os.path.exists(cert_path):
+        days = _cert_days_remaining(cert_path)
+        if days is not None and days <= 0:
+            print("  Current certificate has expired.")
+        elif days is not None:
+            print(f"  Current certificate expires in {days} days.")
+        else:
+            print(f"  Current: {config.cert_file}")
+    print()
+
+    domain = input("  Domain name (press Enter to skip and use a self-signed certificate): ").strip()
+
+    if domain:
+        _run_acme(domain)
+    else:
+        cert_path = _resolve("cert.pem")
+        key_path  = _resolve("key.pem")
+        print("  Generating self-signed certificate...")
+        _generate_self_signed_cert(cert_path, key_path)
+        config.cert_file = "cert.pem"
+        config.key_file  = "key.pem"
+        config.save()
+        print("  → self-signed certificate generated.")
+        print("  Note: your browser will show a security warning until you add a domain.\n")
+        if _server_running() or _service_is_active():
+            _reload_server()
+
+
+def _config_username():
+    current   = config.username
+    new_value = input(f"  username [{current}]: ").strip()
+    if new_value == "" and current != "":
+        config.username      = ""
+        config.password_hash = ""
+        config.password_salt = ""
+        config.save()
+        print("  → auth disabled, password cleared")
+    elif new_value and new_value != current:
+        config.username = new_value
+        config.save()
+        print("  → saved")
+    else:
+        print("  → unchanged")
+
+
+def _config_password():
+    if not config.username:
+        print("  Set a username first.")
+        return
+    pwd = getpass.getpass("  password: ")
+    if not pwd:
+        print("  → unchanged")
+        return
+    confirm = getpass.getpass("  confirm: ")
+    if pwd != confirm:
+        print("  → passwords do not match, unchanged")
+        return
+    config.password_hash, config.password_salt = _hash_password(pwd)
+    config.save()
+    print("  → saved")
+
+
+def _config_limits():
+    current   = config.rate_limit
+    new_value = input(f"  Requests per minute per IP\n  rate_limit [{current}]: ").strip()
+    if new_value and new_value != str(current):
+        try:
+            config.rate_limit = int(new_value)
+            config.save()
+            print("  → saved")
+        except ValueError:
+            print("  → invalid number, unchanged")
+    else:
+        print("  → unchanged")
+
+    current   = config.auth_rate_limit
+    new_value = input(f"  Failed login attempts per minute per IP\n  auth_rate_limit [{current}]: ").strip()
+    if new_value and new_value != str(current):
+        try:
+            config.auth_rate_limit = int(new_value)
+            config.save()
+            print("  → saved")
+        except ValueError:
+            print("  → invalid number, unchanged")
+    else:
+        print("  → unchanged")
+
+
+def _config_email():
+    current   = config.email
+    new_value = input(f"  email [{current}]: ").strip()
+    if new_value == current or not new_value:
+        print("  → unchanged")
+        return
+    config.email = new_value
+    config.save()
+    print("  → saved")
+
+
+def _config_cache():
+    print(f"\n  Current: {config.cache_policy}" +
+          (f" ({config.cache_max_age}s)" if config.cache_policy == "max-age" else "") + "\n")
+    print("    no-store  — never cache, always download fresh")
+    print("    no-cache  — cache but always revalidate (ETag makes this a quick check)")
+    print("    max-age   — trust cached copy for N seconds without checking\n")
+    choice = input("  cache_policy [no-store / no-cache / max-age]: ").strip().lower()
+    if not choice:
+        print("  → unchanged")
+        return
+    if choice not in ("no-store", "no-cache", "max-age"):
+        print("  → invalid option, unchanged")
+        return
+    config.cache_policy = choice
+    if choice == "max-age":
+        age_str = input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
+        if age_str:
+            try:
+                config.cache_max_age = int(age_str)
+            except ValueError:
+                print("  → invalid number, keeping current max-age")
+    config.save()
+    print("  → saved")
+
+
+def _config_csp():
+    print(f"\n  Current: {config.csp or '(not set — header not sent)'}")
+    print("  Example: default-src 'self'; object-src 'none'")
+    print("  Leave blank to clear.\n")
+    new_value = input("  csp: ").strip()
+    if new_value == config.csp:
+        print("  → unchanged")
+        return
+    config.csp = new_value
+    config.save()
+    print("  → saved" if new_value else "  → cleared, header will not be sent")
+
+
+def _config_permissions_policy():
+    print(f"\n  Current: {config.permissions_policy or '(not set — header not sent)'}")
+    print("  Example: camera=(), microphone=(), geolocation=()")
+    print("  Leave blank to clear.\n")
+    new_value = input("  permissions_policy: ").strip()
+    if new_value == config.permissions_policy:
+        print("  → unchanged")
+        return
+    config.permissions_policy = new_value
+    config.save()
+    print("  → saved" if new_value else "  → cleared, header will not be sent")
+
+
+def cmd_config():
+    _config_show()
+    print(CONFIG_HELP)
+
+    while True:
+        try:
+            raw = input("  config> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not raw:
+            continue
+
+        cmd = raw.split()[0].lower()
+
+        if cmd == "show":
+            _config_show()
+        elif cmd in ("html", "dir", "directory"):
+            _config_dir()
+        elif cmd == "port":
+            _config_port()
+        elif cmd == "cert":
+            _config_cert()
+        elif cmd == "username":
+            _config_username()
+        elif cmd == "password":
+            _config_password()
+        elif cmd == "email":
+            _config_email()
+        elif cmd == "limits":
+            _config_limits()
+        elif cmd == "cache":
+            _config_cache()
+        elif cmd == "csp":
+            _config_csp()
+        elif cmd in ("perms", "permissions"):
+            _config_permissions_policy()
+        elif cmd in ("back", "done", "exit", "quit"):
+            break
+        elif cmd in ("help", "?"):
+            print(CONFIG_HELP)
+        else:
+            print(f"  Unknown setting: {cmd}")
+            print(CONFIG_HELP)
+
+
+# ── Service management ────────────────────────────────────────────────────────
+
+def cmd_install():
+    updating      = _service_file_exists()
+    servette_path = os.path.abspath(__file__)
+    python_path   = _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(
+        ["which", "python3"], capture_output=True, text=True
+    ).stdout.strip()
+
+    service = f"""[Unit]
+Description=Servette — The Simple Secure Server
+After=network.target
+
+[Service]
+ExecStart={python_path} {servette_path} --serve
+Restart=always
+RestartSec=3
+StandardInput=null
+StandardOutput=append:{config.log_file}
+StandardError=append:{config.log_file}
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    try:
+        with open(SERVICE_PATH, "w") as f:
+            f.write(service)
+
+        subprocess.run(["systemctl", "daemon-reload"],      check=True)
+        subprocess.run(["systemctl", "enable", "servette"], check=True, capture_output=True)
+
+        if updating:
+            print("Service file updated.")
+            if _service_is_active():
+                print("Run 'stop' then 'start' to apply the changes.")
+        else:
+            print("Servette enabled as a system service.")
+            print("It will start automatically on boot and survive SSH disconnects.")
+        log.info("Enabled as systemd service")
+
+        if _server_running():
+            if _prompt("Server is running in session only. Restart as a service now?"):
+                stop_server()
+                subprocess.run(["systemctl", "start", "servette"], check=True, capture_output=True)
+                print("Server started as a service.")
+                log.info("Service started after enable")
+                cmd_status()
+
+    except PermissionError:
+        print("Error: enable requires sudo. Run: sudo python3 servette.py")
+    except FileNotFoundError:
+        print("Error: enable requires a Linux server with systemd.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error during enable: {e}")
+
+
+def cmd_uninstall():
+    if not _service_file_exists():
+        cmd_status()
+        return
+
+    try:
+        if _service_is_active():
+            subprocess.run(["systemctl", "stop",    "servette"], check=True, capture_output=True)
+        subprocess.run(["systemctl", "disable", "servette"], check=True, capture_output=True)
+        os.remove(SERVICE_PATH)
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        print("Servette service disabled.")
+        log.info("Systemd service disabled")
+    except PermissionError:
+        print("Error: disable requires sudo. Run: sudo python3 servette.py")
+    except FileNotFoundError:
+        print("Error: disable requires a Linux server with systemd.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error during disable: {e}")
+
+
+def cmd_start():
+    if _service_file_exists():
+        if _service_is_active():
+            cmd_status()
+        else:
+            try:
+                subprocess.run(["systemctl", "start", "servette"], check=True, capture_output=True)
+                log.info("Service started")
+                cmd_status()
+            except PermissionError:
+                print("Error: start requires sudo. Run: sudo python3 servette.py")
+            except FileNotFoundError:
+                print("Error: start requires a Linux server with systemd.")
+            except subprocess.CalledProcessError as e:
+                print(f"Error starting service: {e}")
+    else:
+        start_server()
+        if _server_running():
+            print("Running in session only — server will stop when you quit.")
+            if _prompt("Install as a permanent service?"):
+                cmd_install()
+
+
+def cmd_stop():
+    stopped = False
+
+    if _service_is_active():
+        try:
+            subprocess.run(["systemctl", "stop", "servette"], check=True, capture_output=True)
+            print("Service stopped.")
+            log.info("Service stopped")
+            stopped = True
+        except PermissionError:
+            print("Error: stop requires sudo. Run: sudo python3 servette.py")
+        except FileNotFoundError:
+            print("Error: stop requires a Linux server with systemd.")
+        except subprocess.CalledProcessError as e:
+            print(f"Error stopping service: {e}")
+
+    if _server_running():
+        stop_server()
+        stopped = True
+
+    if not stopped:
+        cmd_status()
+
+
+# ── Certificate management ────────────────────────────────────────────────────
+
+def _spin(message, stop_event):
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    i = 0
+    while not stop_event.is_set():
+        sys.stdout.write(f"\r  {frames[i % len(frames)]}  {message}")
+        sys.stdout.flush()
+        time.sleep(0.1)
+        i += 1
+    sys.stdout.write(f"\r  {' ' * (len(message) + 5)}\r")
+    sys.stdout.flush()
+
+
+def _generate_self_signed_cert(cert_path, key_path):
+    """Generate a self-signed certificate and write it to cert_path/key_path."""
+    import ipaddress as _ipaddress
+    from cryptography import x509 as _x509
+    from cryptography.x509.oid import NameOID as _NameOID
+    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+
+    key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = _x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, "servette")])
+
+    san = [_x509.DNSName("localhost"), _x509.IPAddress(_ipaddress.IPv4Address("127.0.0.1"))]
+    try:
+        import socket as _socket
+        ip = _socket.gethostbyname(_socket.gethostname())
+        san.append(_x509.IPAddress(_ipaddress.IPv4Address(ip)))
+    except Exception:
+        pass
+
+    cert = (
+        _x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(_x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650))
+        .add_extension(_x509.SubjectAlternativeName(san), critical=False)
+        .sign(key, _hashes.SHA256())
+    )
+
+    with open(key_path, "wb") as f:
+        f.write(key.private_bytes(
+            _serialization.Encoding.PEM,
+            _serialization.PrivateFormat.TraditionalOpenSSL,
+            _serialization.NoEncryption()
+        ))
+    os.chmod(key_path, 0o600)
+
+    with open(cert_path, "wb") as f:
+        f.write(cert.public_bytes(_serialization.Encoding.PEM))
+
+    log.info("Generated self-signed certificate at %s", cert_path)
+
+
+def _reload_server():
+    """Reload the server to pick up a new certificate."""
+    if _service_is_active():
+        try:
+            subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
+            print("  Server restarted.")
+        except Exception as e:
+            print(f"  Could not restart service: {e}")
+    elif _server_running():
+        stop_server()
+        time.sleep(0.5)
+        start_server()
+
+
+def _run_acme(domain):
+    """Get a trusted SSL certificate from Let's Encrypt using the acme library."""
+    from acme import client as _acme_client, challenges as _challenges, messages as _messages
+    import josepy as _jose
+    from cryptography import x509 as _x509
+    from cryptography.x509.oid import NameOID as _NameOID
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _serialization
+
+    ACME_URL        = "https://acme-v02.api.letsencrypt.org/directory"
+    ACCOUNT_KEY_FILE = os.path.join(BASE_DIR, ".acme-account.pem")
+    CERTS_DIR       = os.path.join(BASE_DIR, "certs", domain)
+
+    print(f"\nGetting a trusted SSL certificate for {domain}...")
+    print("Make sure your domain points to this server's IP first.\n")
+
+    os.makedirs(os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge"), exist_ok=True)
+    os.makedirs(CERTS_DIR, exist_ok=True)
+
+    # Load or generate ACME account key
+    if os.path.exists(ACCOUNT_KEY_FILE):
+        with open(ACCOUNT_KEY_FILE, "rb") as f:
+            account_key = _jose.JWKRSA.load(f.read())
+    else:
+        rsa_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        account_key = _jose.JWKRSA(key=rsa_key)
+        with open(ACCOUNT_KEY_FILE, "wb") as f:
+            f.write(rsa_key.private_bytes(
+                _serialization.Encoding.PEM,
+                _serialization.PrivateFormat.TraditionalOpenSSL,
+                _serialization.NoEncryption()
+            ))
+        os.chmod(ACCOUNT_KEY_FILE, 0o600)
+
+    # Start a temporary HTTP listener on port 80 if the main server isn't running
+    http_started_here = False
+    tmp_stop          = None
+    tmp_thread        = None
+    if not _server_running():
+        tmp_stop   = threading.Event()
+        tmp_thread = threading.Thread(
+            target=lambda: asyncio.run(_serve_http_redirect(tmp_stop)), daemon=True
+        )
+        tmp_thread.start()
+        time.sleep(0.5)
+        http_started_here = True
+
+    stop = threading.Event()
+    t    = threading.Thread(target=_spin, args=(f"Requesting certificate for {domain}...", stop), daemon=True)
+    t.start()
+
+    token_path = None
+    try:
+        net       = _acme_client.ClientNetwork(account_key, user_agent="servette/1.0")
+        directory = _messages.Directory.from_json(net.get(ACME_URL).json())
+        ac        = _acme_client.ClientV2(directory, net)
+
+        # Register account (no-op if already registered)
+        try:
+            ac.new_account(_messages.NewRegistration.from_data(
+                email=config.email if config.email else None,
+                terms_of_service_agreed=True
+            ))
+        except Exception:
+            pass
+
+        # Generate domain key and CSR
+        domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        domain_key_pem = domain_key.private_bytes(
+            _serialization.Encoding.PEM,
+            _serialization.PrivateFormat.TraditionalOpenSSL,
+            _serialization.NoEncryption()
+        )
+        csr_pem = (
+            _x509.CertificateSigningRequestBuilder()
+            .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
+            .add_extension(_x509.SubjectAlternativeName([_x509.DNSName(domain)]), critical=False)
+            .sign(domain_key, _hashes.SHA256())
+            .public_bytes(_serialization.Encoding.PEM)
+        )
+
+        # Order certificate and answer HTTP-01 challenge
+        order = ac.new_order(csr_pem)
+        for authz in order.authorizations:
+            for challenge in authz.body.challenges:
+                if isinstance(challenge.chall, _challenges.HTTP01):
+                    token      = challenge.chall.encode("token")
+                    key_auth   = challenge.chall.key_authorization(account_key)
+                    token_path = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
+                    with open(token_path, "w") as f:
+                        f.write(key_auth)
+                    ac.answer_challenge(challenge, challenge.chall.response(account_key))
+                    break
+
+        finalized = ac.poll_and_finalize(order)
+
+        cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
+        key_path  = os.path.join(CERTS_DIR, "privkey.pem")
+
+        with open(cert_path, "w") as f:
+            f.write(finalized.fullchain_pem)
+        with open(key_path, "wb") as f:
+            f.write(domain_key_pem)
+        os.chmod(key_path, 0o600)
+
+        stop.set()
+        t.join()
+
+        config.cert_file = cert_path
+        config.key_file  = key_path
+        config.save()
+
+        print(f"  Certificate issued for {domain}.")
+        log.info("ACME certificate issued for %s", domain)
+
+        if _server_running() or _service_is_active():
+            print("  Reloading server...")
+            _reload_server()
+
+    except Exception as e:
+        stop.set()
+        t.join()
+        print(f"  Error getting certificate: {e}")
+        log.error("ACME failed for %s: %s", domain, e)
+    finally:
+        if token_path and os.path.exists(token_path):
+            os.remove(token_path)
+        if http_started_here and tmp_stop:
+            tmp_stop.set()
+            if tmp_thread:
+                tmp_thread.join(timeout=5)
+
+
+# ── Log, status, helpers ──────────────────────────────────────────────────────
+
+def cmd_log(n=20):
+    """Print the last n lines of the log file."""
+    if not config.log_file or not os.path.exists(config.log_file):
+        print("No log file found.")
+        return
+    try:
+        with open(config.log_file, "r") as f:
+            lines = f.readlines()
+        print("".join(lines[-n:]), end="")
+    except OSError as e:
+        print(f"Could not read log: {e}")
+
+
+def _load_cert(cert_path):
+    """Return a cryptography X.509 certificate object, or None on failure."""
+    try:
+        from cryptography import x509 as _x509
+        with open(cert_path, "rb") as f:
+            return _x509.load_pem_x509_certificate(f.read())
+    except Exception:
+        return None
+
+
+def _domain_from_cert(cert_path):
+    if not cert_path:
+        return None
+    # Fast path: parse domain from our certs directory structure
+    marker = "/certs/"
+    if marker in cert_path:
+        part = cert_path.split(marker)[1].split("/")[0]
+        if part:
+            return part
+    cert = _load_cert(cert_path)
+    if cert is None:
+        return None
+    try:
+        from cryptography import x509 as _x509
+        san = cert.extensions.get_extension_for_class(_x509.SubjectAlternativeName)
+        for name in san.value.get_values_for_type(_x509.DNSName):
+            if name not in ("localhost", "servette"):
+                return name
+    except Exception:
+        pass
+    try:
+        from cryptography.x509.oid import NameOID as _NameOID
+        cn = cert.subject.get_attributes_for_oid(_NameOID.COMMON_NAME)
+        if cn and cn[0].value not in ("localhost", "servette"):
+            return cn[0].value
+    except Exception:
+        pass
+    return None
+
+
+def _cert_days_remaining(cert_path):
+    cert = _load_cert(cert_path)
+    if cert is None:
+        return None
+    try:
+        expiry = cert.not_valid_after_utc
+    except AttributeError:
+        expiry = cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+    return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
+
+
+def _format_uptime(seconds):
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    elif s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    elif s < 86400:
+        return f"{s // 3600}h {(s % 3600) // 60}m"
+    else:
+        return f"{s // 86400}d {(s % 86400) // 3600}h"
+
+
+def cmd_status():
+    service_active = _service_is_active()
+    running        = service_active or _server_running()
+    domain         = _domain_from_cert(config.cert_file)
+    url            = f"https://{domain}" if domain else f"https://localhost:{config.port}"
+    cert_path      = _resolve(config.cert_file)
+    W              = 8
+
+    print()
+    print("● Running" if running else "○ Stopped")
+
+    if running:
+        mode = "System service" if service_active else "Session only"
+        print(f"  {'Mode':<{W}} {mode}")
+
+    print(f"  {'URL':<{W}} {url}")
+    print(f"  {'Directory':<{W}} {config.serve_dir or '(not configured)'}")
+    print(f"  {'Auth':<{W}} {'enabled' if config.username else 'disabled'}")
+
+    days = _cert_days_remaining(cert_path)
+    if days is not None:
+        cert_str = "expired" if days <= 0 else f"{days} days remaining"
+        print(f"  {'Cert':<{W}} {cert_str}")
+
+    if running:
+        if service_active:
+            try:
+                result = subprocess.run(
+                    ["systemctl", "show", "servette",
+                     "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,MainPID"],
+                    capture_output=True, text=True
+                )
+                props = dict(
+                    line.split("=", 1) for line in result.stdout.strip().splitlines() if "=" in line
+                )
+                mono = props.get("ActiveEnterTimestampMonotonic", "")
+                if mono and mono != "0":
+                    try:
+                        with open("/proc/uptime") as f:
+                            boot_elapsed = float(f.read().split()[0])
+                        elapsed = boot_elapsed - int(mono) / 1_000_000
+                        if elapsed >= 0:
+                            print(f"  {'Uptime':<{W}} {_format_uptime(elapsed)}")
+                    except Exception:
+                        pass
+                mem = props.get("MemoryCurrent", "")
+                if mem and mem.isdigit() and int(mem) > 0:
+                    print(f"  {'Memory':<{W}} {int(mem) / (1024 * 1024):.1f} MB")
+                pid = props.get("MainPID", "")
+                if pid and pid != "0":
+                    print(f"  {'PID':<{W}} {pid}")
+            except Exception:
+                pass
+        else:
+            if _server_start_time is not None:
+                print(f"  {'Uptime':<{W}} {_format_uptime(time.monotonic() - _server_start_time)}")
+            try:
+                with open("/proc/self/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            print(f"  {'Memory':<{W}} {int(line.split()[1]) / 1024:.1f} MB")
+                            break
+            except Exception:
+                pass
+            print(f"  {'PID':<{W}} {os.getpid()}")
+
+    print(f"  {'Log':<{W}} {config.log_file}")
+    print()
+
+
+# ── Setup wizard ──────────────────────────────────────────────────────────────
+
+def cmd_setup():
+    stop = threading.Event()
+    t    = threading.Thread(target=_spin, args=("Detecting public IP...", stop), daemon=True)
+    t.start()
+    try:
+        public_ip = urllib.request.urlopen("https://api.ipify.org", timeout=5).read().decode()
+    except Exception:
+        public_ip = "your.server.ip"
+    finally:
+        stop.set()
+        t.join()
+
+    print("\n───────────────────────────────────────────────────")
+    print("  Getting Started")
+    print("───────────────────────────────────────────────────")
+
+    print()
+    print("  Step 1 — Choose your directory")
+    dir_path = _resolve(config.serve_dir) if config.serve_dir else None
+    if dir_path and os.path.isdir(dir_path):
+        print(f"  ✓ {config.serve_dir}")
+    else:
+        print("  Copy your directory to the same location as servette.py.")
+        if _prompt("Configure now?"):
+            _config_dir()
+
+    print()
+    print("  Step 2 — Password protection (optional)")
+    if config.username:
+        print(f"  ✓ Enabled (username: {config.username})")
+    else:
+        print("  Restrict access to visitors who know the password.")
+        if _prompt("Enable password protection?"):
+            _config_username()
+            if config.username:
+                _config_password()
+
+    print()
+    print("  Step 3 — SSL certificate")
+    cert_path = _resolve(config.cert_file)
+    if os.path.exists(cert_path):
+        days = _cert_days_remaining(cert_path)
+        if days is None or days > 30:
+            print(f"  ✓ Certificate found{f', expires in {days} days.' if days else '.'}")
+        else:
+            print(f"  {'✗ Certificate has expired.' if days <= 0 else f'⚠ Certificate expires in {days} days.'}")
+            _config_cert()
+    else:
+        print(f"  Your server's IP address is {public_ip}.")
+        print("  If you have a domain pointed at this IP, enter it to get a trusted certificate.")
+        print("  Otherwise press Enter to use a self-signed certificate (browser warning until domain is added).\n")
+        _config_cert()
+
+    print()
+    print("  Step 4 — Enable as a system service")
+    if _service_file_exists():
+        print("  ✓ Already enabled.")
+    else:
+        print("  Keeps Servette running after you close this session")
+        print("  and starts it automatically on reboot.")
+        if _prompt("Enable now?"):
+            cmd_install()
+
+    print()
+    print("  Step 5 — Start the server")
+    if _service_is_active() or _server_running():
+        print("  ✓ Server is running.")
+        cmd_status()
+    else:
+        if _prompt("Start now?"):
+            cmd_start()
+
+
+# ── Main shell loop ───────────────────────────────────────────────────────────
+
+def shell():
+    print("\n───────────────────────────────────────────────────")
+    print("  Servette — The Simple Secure Server")
+    print("───────────────────────────────────────────────────")
+    print(HELP)
+
+    while True:
+        try:
+            raw = input("servette> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nType 'quit' to exit.")
+            continue
+
+        if not raw:
+            continue
+
+        parts = raw.split()
+        cmd   = parts[0].lower()
+        args  = parts[1:]
+
+        if cmd == "setup":
+            cmd_setup()
+        elif cmd == "config":
+            cmd_config()
+        elif cmd == "enable":
+            cmd_install()
+        elif cmd == "disable":
+            cmd_uninstall()
+        elif cmd == "start":
+            cmd_start()
+        elif cmd == "stop":
+            cmd_stop()
+        elif cmd == "status":
+            cmd_status()
+        elif cmd == "log":
+            try:
+                cmd_log(int(args[0]) if args else 20)
+            except ValueError:
+                print("Usage: log [number]")
+        elif cmd in ("help", "?"):
+            print(HELP)
+        elif cmd in ("quit", "exit"):
+            stop_server()
+            print("Goodbye.")
+            break
+        else:
+            print(f"Unknown command: {cmd}. Type 'help' for a list of commands.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    _bootstrap()  # no-op if already in venv; otherwise re-execs into venv
+
+    if "--serve" in sys.argv:
+        start_server()
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            stop_server()
+    else:
+        shell()

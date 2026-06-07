@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Servette — It's working.</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;1,300&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:      #0e0e0e;
+      --surface: #161616;
+      --border:  #2a2a2a;
+      --text:    #e8e8e8;
+      --muted:   #555;
+      --green:   #4ade80;
+      --red:     #f87171;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'DM Mono', monospace;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      opacity: 0.4;
+      z-index: 0;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 480px;
+      width: 100%;
+    }
+
+    .header {
+      margin-bottom: 3rem;
+      opacity: 0;
+      animation: rise 0.6s ease forwards;
+    }
+
+    .wordmark {
+      font-family: 'Fraunces', serif;
+      font-weight: 300;
+      font-size: 3rem;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .wordmark em {
+      font-style: italic;
+      color: #C41230;
+    }
+
+    .tagline {
+      margin-top: 0.5rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      margin-right: 0.5rem;
+      animation: pulse 2s ease infinite;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+    }
+
+    .dot.red { background: var(--red); animation: none; }
+
+    /* ── Verified card ── */
+    .verified {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 2rem;
+      opacity: 0;
+      animation: rise 0.5s ease 0.2s forwards;
+    }
+
+    .verified-header {
+      background: var(--surface);
+      padding: 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .verified-label {
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.25rem;
+    }
+
+    .verified-value {
+      font-size: 0.9rem;
+      color: var(--text);
+    }
+
+    .badge {
+      font-size: 0.7rem;
+      font-weight: 500;
+      padding: 0.3rem 0.7rem;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
+    .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
+
+    /* ── What Servette provides ── */
+    .provides {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 2rem;
+      opacity: 0;
+      animation: rise 0.5s ease 0.35s forwards;
+    }
+
+    .provides-title {
+      background: var(--surface);
+      padding: 0.75rem 1.25rem;
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .provides-table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--surface);
+    }
+
+    .provides-table td {
+      padding: 0.9rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    .provides-table tr:last-child td { border-bottom: none; }
+
+    .ptd-name {
+      width: 1px;
+      white-space: nowrap;
+      padding-right: 1.5rem;
+      font-size: 0.8rem;
+      color: var(--text);
+    }
+
+    .ptd-desc {
+      font-size: 0.72rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    /* ── Footer ── */
+    .note {
+      font-size: 0.7rem;
+      color: var(--muted);
+      line-height: 1.7;
+      opacity: 0;
+      animation: rise 0.5s ease 0.5s forwards;
+    }
+
+    .note a { color: #60a5fa; text-decoration: none; }
+    .note a:hover { text-decoration: underline; }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="header">
+    <div class="wordmark">Ser<em>vette</em></div>
+    <div class="tagline" id="tagline">
+      <span class="dot" id="dot"></span><span id="tagline-text">checking...</span>
+    </div>
+  </div>
+
+  <div class="verified">
+    <div class="verified-header">
+      <div>
+        <div class="verified-label">Connection</div>
+        <div class="verified-value" id="url">—</div>
+      </div>
+      <div class="badge" id="badge">—</div>
+    </div>
+  </div>
+
+  <div class="provides">
+    <div class="provides-title">This server also provides</div>
+    <table class="provides-table">
+      <tr>
+        <td class="ptd-name">Password protection</td>
+        <td class="ptd-desc">Restricts access to authenticated visitors. Prevents unauthorized access.</td>
+      </tr>
+      <tr>
+        <td class="ptd-name">Rate limiting</td>
+        <td class="ptd-desc">Caps requests per IP per minute. Defeats brute-force, credential stuffing, and basic DoS.</td>
+      </tr>
+      <tr>
+        <td class="ptd-name">HTTPS redirect</td>
+        <td class="ptd-desc">Forces all connections to HTTPS. Prevents interception of plaintext HTTP traffic.</td>
+      </tr>
+      <tr>
+        <td class="ptd-name">Browser HTTPS lock</td>
+        <td class="ptd-desc">Instructs browsers to refuse HTTP for one year. Defeats SSL stripping attacks.</td>
+      </tr>
+      <tr>
+        <td class="ptd-name">Iframe protection</td>
+        <td class="ptd-desc">Blocks your page from loading in a frame. Prevents clickjacking attacks.</td>
+      </tr>
+      <tr>
+        <td class="ptd-name">Content type safety</td>
+        <td class="ptd-desc">Forces browsers to respect the declared content type. Prevents MIME sniffing attacks.</td>
+      </tr>
+      <tr>
+        <td class="ptd-name">Link privacy</td>
+        <td class="ptd-desc">Suppresses the Referer header. Prevents your URL from leaking to third-party sites.</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="note">
+    This page was served by <a href="https://github.com/andy-emerson/servette">Servette</a> — a simple, secure, single-file server.
+  </div>
+
+</div>
+
+<script>
+  const isHttps = window.location.protocol === 'https:';
+
+  // Update the live verified connection card
+  document.getElementById('url').textContent = window.location.protocol + '//' + window.location.host;
+
+  const badge  = document.getElementById('badge');
+  const dot    = document.getElementById('dot');
+  const tagline = document.getElementById('tagline-text');
+
+  if (isHttps) {
+    badge.textContent = '✓ Verified encrypted';
+    badge.className   = 'badge badge-green';
+    tagline.textContent = 'YOUR NANOSERVER IS RUNNING';
+  } else {
+    badge.textContent = '⚠ Not encrypted';
+    badge.className   = 'badge badge-red';
+    dot.className     = 'dot red';
+    tagline.textContent = 'Connection is not secure';
+  }
+</script>
+
+</body>
+</html>

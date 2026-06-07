@@ -447,8 +447,9 @@ async def https_app(scope, receive, send):
     ip     = _normalize_ip(client[0] if client else "unknown")
     if config.trusted_proxy:
         xff = headers.get(b"x-forwarded-for", b"").decode()
-        # Read the rightmost value — what the trusted proxy appended — so both
-        # overwrite-style and append-style proxies (e.g. Cloudflare) work correctly.
+        # Rightmost XFF value is what the single trusted proxy appended.
+        # Correct for one-hop topologies (overwrite-style or append-style).
+        # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
         if xff and ip == config.trusted_proxy:
             ip = _normalize_ip(xff.split(",")[-1].strip())
 

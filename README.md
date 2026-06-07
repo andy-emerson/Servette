@@ -1,4 +1,4 @@
-# Ser*vette*
+# Servette
 ### The Simple, Secure Static-Site Server
 
 ---
@@ -186,7 +186,7 @@ graph LR
 
 **Rate Limiter:** two independent sliding-window limits per IP: total requests (default 30/min) and failed auth attempts (default 6/min). IPv6-mapped IPv4 addresses are normalized. `X-Forwarded-For` is trusted only when a `trusted_proxy` IP is configured. A background sweep thread evicts stale entries every 30 seconds.
 
-> **Proxy note:** Servette reads the rightmost value in `X-Forwarded-For`, which is what the trusted proxy appended. This works correctly with both overwrite-style and append-style proxies, including Cloudflare.
+> **Proxy note:** Servette supports a single trusted proxy hop. It reads the rightmost value in `X-Forwarded-For`, which is what that proxy appended — correctly handling both overwrite-style proxies (single value) and append-style proxies like Cloudflare (client IP is the rightmost entry). Multi-hop proxy chains are not supported: if more than one proxy appends to `X-Forwarded-For`, the rightmost value will be an intermediate proxy IP, not the client.
 
 **File Cache:** files are read once, gzip-compressed, and held in memory keyed by path. Modification time is checked on each request so edits take effect immediately. ETags (SHA-256 of file contents) enable 304 Not Modified responses.
 
@@ -209,3 +209,5 @@ graph LR
 **POST returns 405.** POST implies data going somewhere: a database, an email, a file on disk. Servette has no destination for POST data. If your site submits a form, the backend it posts to is outside Servette's scope.
 
 **CSP and Permissions-Policy not sent.** The correct values depend entirely on what your site loads. Hardcoding defaults that would break most sites is worse than sending nothing.
+
+**No SPA deep-link rewriting.** Servette serves files as-is. A request for `/about` looks for a file at that path and returns 404 if it doesn't exist. Single-page applications that rely on client-side routing (React Router, Vue Router, etc.) need a server that rewrites all paths to `index.html` — Servette doesn't do this. If your site is a SPA, either use hash-based routing (`/#/about`) or serve it from a platform that supports rewrite rules.

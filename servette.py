@@ -148,6 +148,8 @@ class Config:
         self.permissions_policy = data.get("permissions_policy", "")
         self.log_format         = data.get("log_format",         "text")
         self.trusted_proxy      = data.get("trusted_proxy",      "")
+        self.tls_min_version    = data.get("tls_min_version",    "1.2")
+        self.ciphers            = data.get("ciphers",            "")
 
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
@@ -191,6 +193,8 @@ class Config:
             "permissions_policy": self.permissions_policy,
             "log_format":         self.log_format,
             "trusted_proxy":      self.trusted_proxy,
+            "tls_min_version":    self.tls_min_version,
+            "ciphers":            self.ciphers,
         }
         with open(self.CONFIG_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -646,16 +650,29 @@ async def _serve_http_redirect(stop_event):
 
 
 async def _run_servers(stop_event):
+    import ssl as _ssl
     from hypercorn.config import Config as HypercornConfig
     from hypercorn.asyncio import serve as hypercorn_serve
 
     async def trigger():
         await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)
 
+    _tls_versions = {"1.2": _ssl.TLSVersion.TLSv1_2, "1.3": _ssl.TLSVersion.TLSv1_3}
+
+    class _TLSConfig(HypercornConfig):
+        def create_ssl_context(self):
+            ctx = super().create_ssl_context()
+            if ctx is None:
+                return ctx
+            ctx.minimum_version = _tls_versions.get(config.tls_min_version, _ssl.TLSVersion.TLSv1_2)
+            if config.ciphers:
+                ctx.set_ciphers(config.ciphers)
+            return ctx
+
     cert_file = _resolve(config.cert_file)
     key_file  = _resolve(config.key_file)
 
-    https_cfg          = HypercornConfig()
+    https_cfg          = _TLSConfig()
     https_cfg.bind     = [f"0.0.0.0:{config.port}"]
     https_cfg.certfile = cert_file
     https_cfg.keyfile  = key_file
@@ -834,6 +851,7 @@ CONFIG_HELP = """
     perms     — Permissions-Policy header
     logformat — log output format (text or json)
     proxy     — trusted proxy IP for X-Forwarded-For
+    tls       — minimum TLS version and cipher suites
     show      — show current settings
     back      — return to main shell
 """
@@ -885,6 +903,8 @@ def _config_show():
     print(f"  {'Permissions-Policy':<22}  {val(config.permissions_policy)}")
     print(f"  {'Log format':<22}  {config.log_format}")
     print(f"  {'Trusted proxy':<22}  {val(config.trusted_proxy)}")
+    print(f"  {'TLS min version':<22}  {config.tls_min_version}")
+    print(f"  {'Cipher suites':<22}  {config.ciphers or '(system default)'}")
     print()
 
 
@@ -1107,6 +1127,32 @@ def _config_trusted_proxy():
     print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
 
 
+def _config_tls():
+    print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
+    print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
+    print("    1.3 — TLS 1.3 only; drops support for older clients\n")
+    ver = input("  tls_min_version [1.2 / 1.3]: ").strip()
+    if ver and ver not in ("1.2", "1.3"):
+        print("  → invalid, unchanged")
+    elif ver and ver != config.tls_min_version:
+        config.tls_min_version = ver
+        config.save()
+        print("  → saved (takes effect on next server start)")
+    else:
+        print("  → unchanged")
+
+    print(f"\n  Current cipher suites: {config.ciphers or '(system default)'}")
+    print("  OpenSSL cipher string, e.g.: ECDHE+AESGCM:DHE+AESGCM")
+    print("  Leave blank to use the system default (recommended unless you have specific requirements).\n")
+    ciphers = input("  ciphers: ").strip()
+    if ciphers == config.ciphers:
+        print("  → unchanged")
+        return
+    config.ciphers = ciphers
+    config.save()
+    print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
+
+
 def cmd_config():
     _config_show()
     print(CONFIG_HELP)
@@ -1149,6 +1195,8 @@ def cmd_config():
             _config_log_format()
         elif cmd in ("proxy", "trusted_proxy"):
             _config_trusted_proxy()
+        elif cmd == "tls":
+            _config_tls()
         elif cmd in ("back", "done", "exit", "quit"):
             break
         elif cmd in ("help", "?"):

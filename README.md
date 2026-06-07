@@ -135,13 +135,13 @@ To update Servette itself, run `update` from the Servette shell. Your settings a
 
 ## How it works
 
-Servette is a single file (~1,910 lines) divided into three sections with clear boundaries — Server, System, and Shell — each of which is readable on its own.
+Servette is a single file (~2,000 lines) divided into three sections with clear boundaries — Server, System, and Shell — each of which is readable on its own.
 
 | Section | Lines | Responsibility |
 |---|---|---|
-| **Server** | 572 | Handles every incoming request: config, rate limiting, file cache, and the two ASGI apps |
-| **System** | 691 | Manages the environment: bootstrap, server lifecycle, certificates, and systemd integration |
-| **Shell** | 631 | The interactive terminal interface |
+| **Server** | ~600 | Handles every incoming request: config, rate limiting, file cache, and the two ASGI apps |
+| **System** | ~700 | Manages the environment: bootstrap, server lifecycle, certificates, and systemd integration |
+| **Shell** | ~650 | The interactive terminal interface |
 
 ```mermaid
 graph LR
@@ -213,7 +213,7 @@ graph LR
 
 ### System
 
-**Bootstrap:** on first run, installs dependencies (`hypercorn`, `cryptography`, `acme`, `josepy`) into a private virtualenv and re-execs the process inside it. Subsequent runs skip straight to re-exec. The operator never touches pip.
+**Bootstrap:** every invocation from the system Python re-execs the process into the managed virtualenv. On first run (or if the venv is missing), it creates the venv and installs dependencies (`hypercorn`, `cryptography`, `acme`, `josepy`) first. When running as a systemd service, the venv Python is invoked directly and bootstrap is bypassed entirely. The operator never touches pip.
 
 **Server Lifecycle:** starts the ASGI runner (Hypercorn) in a background daemon thread with its own asyncio event loop. A `threading.Event` signals graceful shutdown. Exposes `start_server` and `stop_server` to the shell and the entry point.
 

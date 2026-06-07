@@ -580,9 +580,10 @@ async def redirect_app(scope, receive, send):
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 #
-# On first run, servette.py creates a virtualenv and installs dependencies into
-# it, then re-execs itself inside that environment. The user just runs
-# `sudo python3 servette.py` — the environment is managed invisibly.
+# Every invocation from the system Python re-execs into the managed virtualenv.
+# On first run (or if the venv is missing), the venv is created and deps are
+# installed first. The user just runs `sudo python3 servette.py` — the
+# environment is managed invisibly.
 
 def _bootstrap():
     if sys.prefix == _VENV_DIR:

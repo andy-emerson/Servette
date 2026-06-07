@@ -5,8 +5,9 @@ TODO.md
 # Runtime config — contains password hashes and cert paths
 servette.json
 
-# SSL certificate and key files
+# SSL certificate, key, and release signature files
 *.pem
+*.sig
 
 # Log files
 *.log

@@ -345,6 +345,8 @@ def _get_cached_file(path):
             _file_cache_bytes -= len(old["raw"]) + len(old["compressed"])
         _file_cache[path] = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
         _file_cache_bytes += len(raw) + len(compressed)
+        if _file_cache_bytes > _FILE_CACHE_MAX:
+            log.warning("File cache full (%d MB) — evicting oldest entries", _FILE_CACHE_MAX // (1024 * 1024))
         while _file_cache_bytes > _FILE_CACHE_MAX and _file_cache:
             _, evicted = _file_cache.popitem(last=False)
             _file_cache_bytes -= len(evicted["raw"]) + len(evicted["compressed"])
@@ -442,9 +444,10 @@ async def https_app(scope, receive, send):
     ip     = _normalize_ip(client[0] if client else "unknown")
     if config.trusted_proxy:
         xff = headers.get(b"x-forwarded-for", b"").decode()
-        # Proxy must overwrite (not append) inbound XFF — otherwise the leftmost value is client-controlled
+        # Read the rightmost value — what the trusted proxy appended — so both
+        # overwrite-style and append-style proxies (e.g. Cloudflare) work correctly.
         if xff and ip == config.trusted_proxy:
-            ip = _normalize_ip(xff.split(",")[0].strip())
+            ip = _normalize_ip(xff.split(",")[-1].strip())
 
     send_body = (method != "HEAD")
 
@@ -1397,7 +1400,7 @@ def _reload_server():
 
 def _run_acme(domain):
     """Get a trusted SSL certificate from Let's Encrypt using the acme library."""
-    from acme import client as _acme_client, challenges as _challenges, messages as _messages
+    from acme import client as _acme_client, challenges as _challenges, messages as _messages, errors as _acme_errors
     import josepy as _jose
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
@@ -1469,7 +1472,7 @@ def _run_acme(domain):
                     email=config.email if config.email else None,
                     terms_of_service_agreed=True
                 ))
-            except Exception:
+            except _acme_errors.ConflictError:
                 pass
 
             # Generate domain key and CSR

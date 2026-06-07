@@ -1237,6 +1237,7 @@ def _run_acme(domain):
             break
 
         except Exception as e:
+            import traceback as _tb
             last_error = e
             stop.set()
             if t:
@@ -1247,7 +1248,7 @@ def _run_acme(domain):
             token_paths = []
             if attempt < ACME_RETRIES:
                 delay = 5 * attempt
-                log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
+                log.warning("ACME attempt %d/%d failed for %s: %s\n%s — retrying in %ds", attempt, ACME_RETRIES, domain, e, _tb.format_exc(), delay)
                 time.sleep(delay)
         finally:
             for path in token_paths:

@@ -20,6 +20,7 @@ __version__ = "0.26.157"
 
 import asyncio
 import base64
+import collections
 import datetime
 import getpass
 import gzip
@@ -29,6 +30,7 @@ import ipaddress
 import json
 import logging
 import os
+import shutil
 import ssl
 import subprocess
 import sys
@@ -61,14 +63,30 @@ def _bootstrap():
     if not os.path.exists(_VENV_PY):
         print("Setting up Servette...")
 
-        ver = f"python3.{sys.version_info.minor}-venv"
-        result = subprocess.run(["apt-get", "install", "-y", ver])
-        if result.returncode != 0:
-            print(f"  Error: failed to install {ver}")
-            sys.exit(1)
-
         try:
             import venv as _venv_mod
+        except ImportError:
+            _venv_mod = None
+
+        if _venv_mod is None:
+            pkg_managers = [
+                ("apt-get", f"python3.{sys.version_info.minor}-venv"),
+                ("dnf",     "python3-venv"),
+                ("apk",     "py3-venv"),
+            ]
+            for mgr, pkg in pkg_managers:
+                if shutil.which(mgr):
+                    result = subprocess.run([mgr, "install", "-y", pkg])
+                    if result.returncode != 0:
+                        print(f"  Error: failed to install {pkg} via {mgr}")
+                        sys.exit(1)
+                    break
+            else:
+                print("  Error: no supported package manager found (tried apt-get, dnf, apk)")
+                sys.exit(1)
+            import venv as _venv_mod
+
+        try:
             _venv_mod.create(_VENV_DIR, with_pip=True, clear=True)
         except Exception as e:
             print(f"  Error: failed to create virtual environment: {e}")
@@ -190,9 +208,10 @@ class Config:
             "tls_min_version":    self.tls_min_version,
             "ciphers":            self.ciphers,
         }
-        with open(self.CONFIG_FILE, "w") as f:
+        fd = os.open(self.CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
-        os.chmod(self.CONFIG_FILE, 0o600)
+        os.chmod(self.CONFIG_FILE, 0o600)  # fix perms if file pre-existed with wrong mode
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
@@ -291,8 +310,10 @@ def _rate_limit_exceeded(tracker, ip, limit):
 # Modification time is checked on each request so edits take effect immediately.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_file_cache      = {}
-_file_cache_lock = threading.Lock()
+_file_cache       = collections.OrderedDict()
+_file_cache_lock  = threading.Lock()
+_file_cache_bytes = 0
+_FILE_CACHE_MAX   = 128 * 1024 * 1024  # 128 MB
 
 
 def _get_cached_file(path):
@@ -317,7 +338,15 @@ def _get_cached_file(path):
     compressed = gzip.compress(raw, compresslevel=6)
     etag       = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
     with _file_cache_lock:
+        global _file_cache_bytes
+        old = _file_cache.pop(path, None)
+        if old:
+            _file_cache_bytes -= len(old["raw"]) + len(old["compressed"])
         _file_cache[path] = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
+        _file_cache_bytes += len(raw) + len(compressed)
+        while _file_cache_bytes > _FILE_CACHE_MAX and _file_cache:
+            _, evicted = _file_cache.popitem(last=False)
+            _file_cache_bytes -= len(evicted["raw"]) + len(evicted["compressed"])
 
     return raw, compressed, etag
 

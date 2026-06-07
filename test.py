@@ -169,7 +169,6 @@ email = ""
     servette._file_cache.clear()
 
     servette.start_server()
-    time.sleep(1.0)
 
     if not servette._server_running():
         print(f"ERROR: Server failed to start on port {TEST_PORT}.")

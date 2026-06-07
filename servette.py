@@ -803,7 +803,7 @@ def start_server():
 
     _server_thread = threading.Thread(target=run, daemon=True)
     _server_thread.start()
-    time.sleep(0.5)
+    _wait_for_server(config.port)
 
     if _watchdog_thread is None or not _watchdog_thread.is_alive():
         _watchdog_thread = threading.Thread(target=_cert_watchdog, daemon=True)
@@ -1059,6 +1059,19 @@ def _wait_for_port_free(port, timeout=15):
         except OSError:
             time.sleep(0.5)
     log.warning("Port %d did not free up within %ds", port, timeout)
+    return False
+
+
+def _wait_for_server(port, timeout=5.0):
+    """Poll until the server is accepting TCP connections or timeout elapses."""
+    import socket as _socket
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with _socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                return True
+        except OSError:
+            time.sleep(0.05)
     return False
 
 

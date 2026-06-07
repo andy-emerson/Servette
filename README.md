@@ -8,7 +8,7 @@ Servette is a single Python file that puts a folder of static files on the inter
 Most ways to host a static site ask you to choose between simplicity and control:
 
 - **Platforms** (GitHub Pages, Netlify, Vercel) are easy but live on someone else's infrastructure, don't support password protection, and disappear if the free tier changes.
-- **Real servers** (nginx, Caddy, Apache) give you full control but require learning configuration languages, managing certificates manually, and wiring everything together yourself.
+- **General-purpose servers** (nginx, Caddy, Apache) give you full control but require learning configuration languages, managing certificates manually, and wiring everything together yourself.
 
 Servette is the middle option: your own server, with the simplicity of a platform.
 

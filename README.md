@@ -174,9 +174,9 @@ graph LR
     CFG -.-> SRV
     CFG -.-> SH
 
-    EP -->|first run| BS
-    EP -->|--serve| SRV
-    EP -->|interactive| SH
+    EP --> BS
+    BS -->|--serve| SRV
+    BS -->|interactive| SH
 
     SH --> SRV
     SH --> SD

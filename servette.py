@@ -253,7 +253,7 @@ setup_logging()
 #   config.rate_limit      — total requests per minute (default 30)
 #   config.auth_rate_limit — failed auth attempts per minute (default 6)
 #
-# Uses threading.Lock because the critical section is microseconds of dict
+# Uses threading.Lock because the critical section is in-memory deque
 # manipulation — not I/O — so it doesn't meaningfully block the event loop.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -296,10 +296,13 @@ def _rate_limit_exceeded(tracker, ip, limit):
         now    = time.monotonic()
         cutoff = now - RATE_WINDOW
 
-        timestamps = tracker.get(ip, [])
-        timestamps = [t for t in timestamps if t > cutoff]
+        timestamps = tracker.get(ip)
+        if timestamps is None:
+            timestamps = collections.deque()
+            tracker[ip] = timestamps
+        while timestamps and timestamps[0] <= cutoff:
+            timestamps.popleft()
         timestamps.append(now)
-        tracker[ip] = timestamps
 
         return len(timestamps) > limit
 
@@ -1460,7 +1463,7 @@ def _run_acme(domain):
         else:
             t = None
 
-        token_path = None
+        token_paths = []
         try:
             net       = _acme_client.ClientNetwork(account_key, user_agent="servette/1.0")
             directory = _messages.Directory.from_json(net.get(ACME_URL).json())
@@ -1475,8 +1478,9 @@ def _run_acme(domain):
             except _acme_errors.ConflictError:
                 pass
 
-            # Generate domain key and CSR
-            domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            # Generate domain key and CSR (covers domain and www.domain)
+            www_domain  = f"www.{domain}"
+            domain_key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
             domain_key_pem = domain_key.private_bytes(
                 _serialization.Encoding.PEM,
                 _serialization.PrivateFormat.TraditionalOpenSSL,
@@ -1485,21 +1489,25 @@ def _run_acme(domain):
             csr_pem = (
                 _x509.CertificateSigningRequestBuilder()
                 .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
-                .add_extension(_x509.SubjectAlternativeName([_x509.DNSName(domain)]), critical=False)
+                .add_extension(_x509.SubjectAlternativeName([
+                    _x509.DNSName(domain),
+                    _x509.DNSName(www_domain),
+                ]), critical=False)
                 .sign(domain_key, _hashes.SHA256())
                 .public_bytes(_serialization.Encoding.PEM)
             )
 
-            # Order certificate and answer HTTP-01 challenge
+            # Order certificate and answer HTTP-01 challenges (one per name)
             order = ac.new_order(csr_pem)
             for authz in order.authorizations:
                 for challenge in authz.body.challenges:
                     if isinstance(challenge.chall, _challenges.HTTP01):
-                        token      = challenge.chall.encode("token")
-                        key_auth   = challenge.chall.key_authorization(account_key)
-                        token_path = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
-                        with open(token_path, "w") as f:
+                        token    = challenge.chall.encode("token")
+                        key_auth = challenge.chall.key_authorization(account_key)
+                        path     = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
+                        with open(path, "w") as f:
                             f.write(key_auth)
+                        token_paths.append(path)
                         ac.answer_challenge(challenge, challenge.chall.response(account_key))
                         break
 
@@ -1528,8 +1536,8 @@ def _run_acme(domain):
             global _cert_domain
             _cert_domain = domain
 
-            print(f"  Certificate issued for {domain}.")
-            log.info("ACME certificate issued for %s", domain)
+            print(f"  Certificate issued for {domain} and {www_domain}.")
+            log.info("ACME certificate issued for %s and %s", domain, www_domain)
 
             if _server_running() or _service_is_active():
                 print("  Reloading server...")
@@ -1542,16 +1550,18 @@ def _run_acme(domain):
             stop.set()
             if t:
                 t.join()
-            if token_path and os.path.exists(token_path):
-                os.remove(token_path)
-            token_path = None
+            for path in token_paths:
+                if os.path.exists(path):
+                    os.remove(path)
+            token_paths = []
             if attempt < ACME_RETRIES:
                 delay = 5 * attempt
                 log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
                 time.sleep(delay)
         finally:
-            if token_path and os.path.exists(token_path):
-                os.remove(token_path)
+            for path in token_paths:
+                if os.path.exists(path):
+                    os.remove(path)
 
     if last_error:
         print(f"  Error getting certificate: {last_error}")

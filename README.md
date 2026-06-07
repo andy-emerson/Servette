@@ -20,7 +20,7 @@ Servette is the middle option: your own server, with the simplicity of a platfor
 
 **Raspberry Pi users.** Servette was designed with the Pi in mind. If you can SSH in and run a Python script, you can have a real HTTPS site running on your Pi in under ten minutes, with a trusted certificate, automatic renewal, and a server that survives reboots.
 
-**Developers who want to understand what they're running.** Servette is under 2,000 lines of Python, organized into components with clear boundaries. The actual server — HTTP/2, TLS, ACME certificate issuance, rate limiting, and file caching — is under 700 lines of code. The rest is the interactive shell and setup wizard. It is a working server, not a toy example, and it is readable in an afternoon.
+**Developers who want to understand what they're running.** Servette is under 2,000 lines of Python with no hidden magic. It is a working server, not a toy example, and it is readable in an afternoon.
 
 ---
 
@@ -135,50 +135,67 @@ To update Servette itself, run `update` from the Servette shell. Your settings a
 
 ## How it works
 
-Servette is a single file, organized into discrete components with clear responsibilities. The sections below map directly to sections of the source code.
+Servette is a single file (~1,910 lines) divided into three sections with clear boundaries — Server, System, and Shell — each of which is readable on its own.
+
+| Section | Lines | Responsibility |
+|---|---|---|
+| **Server** | 572 | Handles every incoming request: config, rate limiting, file cache, and the two ASGI apps |
+| **System** | 691 | Manages the environment: bootstrap, server lifecycle, certificates, and systemd integration |
+| **Shell** | 631 | The interactive terminal interface |
 
 ```mermaid
 graph LR
-    CFG[Config]
-
     EP[Entry Point]
-    BS[Bootstrap]
+
+    subgraph SERVER
+        CFG[Config]
+        LOG[Logging]
+        RL[Rate Limiter]
+        FC[File Cache]
+        HTTPS[HTTPS App]
+        HTTP[Redirect App]
+    end
+
+    subgraph SYSTEM
+        BS[Bootstrap]
+        SRV[Server Lifecycle]
+        ASG[ASGI Runner]
+        CW[Cert Watchdog]
+        ACME[ACME]
+        SD[systemd]
+    end
+
     SH[Shell]
-    SV[Server]
-    SD[systemd]
-    HYP[Hypercorn]
-    HTTPS[HTTPS App]
-    HTTP[Redirect App]
-    RL[Rate Limiter]
-    FC[File Cache]
 
-    LOG[Logging]
-
-    CFG -.-> SH
-    CFG -.-> SV
     CFG -.-> HTTPS
     CFG -.-> HTTP
+    CFG -.-> SRV
+    CFG -.-> SH
 
     EP -->|first run| BS
-    EP -->|--serve| SV
+    EP -->|--serve| SRV
     EP -->|interactive| SH
-    SH --> SV
+
+    SH --> SRV
     SH --> SD
 
-    SV --> HYP
-    HYP --> HTTPS
-    HYP --> HTTP
+    SRV --> ASG
+    SRV --> CW
+    ASG --> HTTPS
+    ASG --> HTTP
+
+    CW --> ACME
 
     HTTPS --> RL
     HTTPS --> FC
 
     HTTPS -.-> LOG
     HTTP -.-> LOG
-    SV -.-> LOG
+    SRV -.-> LOG
     SH -.-> LOG
 ```
 
-**Bootstrap:** on first run, installs dependencies (`hypercorn`, `cryptography`, `acme`, `josepy`) into a private virtualenv and re-execs the process inside it. Subsequent runs skip straight to re-exec. The operator never touches pip.
+### Server
 
 **Config:** reads and writes `servette.json`. Settings take effect without a restart; the file's modification time is checked on every incoming request. Passwords are hashed with PBKDF2-HMAC-SHA256 at 260,000 iterations and never stored in plaintext. `servette.json` is written mode `0o600`.
 
@@ -190,13 +207,25 @@ graph LR
 
 **File Cache:** files are read once, gzip-compressed, and held in memory keyed by path. Modification time is checked on each request so edits take effect immediately. ETags (SHA-256 of file contents) enable 304 Not Modified responses.
 
-**HTTPS App:** an ASGI coroutine called by Hypercorn for every HTTPS request. Handles rate limiting, auth, path resolution, and file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy).
+**HTTPS App:** an ASGI coroutine called for every HTTPS request. Handles rate limiting, auth, path resolution, and file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy).
 
 **Redirect App:** an ASGI coroutine on port 80. Serves Let's Encrypt ACME challenge tokens during certificate issuance; redirects everything else to HTTPS with 301.
 
-**Server:** starts Hypercorn in a background daemon thread with its own asyncio event loop. A `threading.Event` signals graceful shutdown. A cert watchdog thread polls every 60 seconds: for Let's Encrypt certs it triggers automatic renewal when fewer than 30 days remain (retrying up to 3 times with backoff); for externally managed certs it detects file changes and restarts to pick up the new cert.
+### System
 
-**Shell:** the interactive REPL. Dispatches to setup, config, service management, and status commands. The only component that writes to Config.
+**Bootstrap:** on first run, installs dependencies (`hypercorn`, `cryptography`, `acme`, `josepy`) into a private virtualenv and re-execs the process inside it. Subsequent runs skip straight to re-exec. The operator never touches pip.
+
+**Server Lifecycle:** starts the ASGI runner (Hypercorn) in a background daemon thread with its own asyncio event loop. A `threading.Event` signals graceful shutdown. Exposes `start_server` and `stop_server` to the shell and the entry point.
+
+**Cert Watchdog:** a daemon thread that polls every 60 seconds. For Let's Encrypt certs, triggers ACME renewal when fewer than 30 days remain (retrying up to 3 times with backoff). For externally managed certs, detects file changes by mtime and restarts to pick up the new cert.
+
+**ACME:** issues and renews Let's Encrypt certificates via the HTTP-01 challenge. Temporarily starts the redirect app on port 80 if the main server isn't running, then tears it down when issuance completes.
+
+**Service Management:** creates a `servette` system user, writes a systemd unit file, and delegates start/stop to `systemctl` when a service is installed.
+
+### Shell
+
+The interactive REPL. Dispatches user commands to Server and System functions. Contains only UI logic — prompts, progress spinners, and formatted output. The only layer that can write to Config interactively.
 
 ### Design decisions
 

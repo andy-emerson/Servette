@@ -247,16 +247,12 @@
         <td class="ptd-desc">Instructs browsers to refuse HTTP for one year. Defeats SSL stripping attacks.</td>
       </tr>
       <tr>
-        <td class="ptd-name">Iframe protection</td>
-        <td class="ptd-desc">Blocks your page from loading in a frame. Prevents clickjacking attacks.</td>
+        <td class="ptd-name">Security headers</td>
+        <td class="ptd-desc">Blocks framing (clickjacking), prevents MIME type sniffing, and suppresses the Referer header so your URL doesn't leak to third-party sites.</td>
       </tr>
       <tr>
-        <td class="ptd-name">Content type safety</td>
-        <td class="ptd-desc">Forces browsers to respect the declared content type. Prevents MIME sniffing attacks.</td>
-      </tr>
-      <tr>
-        <td class="ptd-name">Link privacy</td>
-        <td class="ptd-desc">Suppresses the Referer header. Prevents your URL from leaking to third-party sites.</td>
+        <td class="ptd-name">Gzip &amp; ETag</td>
+        <td class="ptd-desc">Serves compressed files and fingerprints each response. Repeat visitors receive a 304 Not Modified instead of a full download.</td>
       </tr>
     </table>
   </div>

@@ -7,12 +7,8 @@ and essential security headers. Run it:
     sudo python3 servette.py
 
 Architecture:
-    Bootstrap           — creates a virtualenv and installs Hypercorn on first run
-    Config              — a Config object holds all settings and reads/writes servette.json
-    Logging             — terminal in interactive mode; systemd journal in service mode
-    Rate Limiter        — in-memory per-IP request and auth-fail rate limiting
-    ASGI Apps           — https_app and redirect_app handle all HTTP traffic via Hypercorn
-    Server              — starts/stops Hypercorn in a background thread
+    Server              — config, rate limiting, file cache, and the two ASGI apps
+    System              — bootstrap, server lifecycle, certificate management, and service management
     Shell               — the interactive terminal interface
 """
 
@@ -41,14 +37,6 @@ import urllib.request
 from urllib.parse import unquote
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BOOTSTRAP
-#
-# On first run, servette.py creates a virtualenv and installs dependencies into
-# it, then re-execs itself inside that environment. The user just runs
-# `sudo python3 servette.py` — the environment is managed invisibly.
-# ─────────────────────────────────────────────────────────────────────────────
-
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 _VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
 _VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
@@ -57,55 +45,15 @@ SERVICE_PATH = "/etc/systemd/system/servette.service"
 ACME_WEBROOT = "/var/lib/letsencrypt/webroot"
 
 
-def _bootstrap():
-    if sys.prefix == _VENV_DIR:
-        return  # Already running inside the managed virtualenv
-
-    if not os.path.exists(_VENV_PY):
-        print("Setting up Servette...")
-
-        try:
-            import venv as _venv_mod
-        except ImportError:
-            _venv_mod = None
-
-        if _venv_mod is None:
-            pkg_managers = [
-                ("apt-get", f"python3.{sys.version_info.minor}-venv"),
-                ("dnf",     "python3-venv"),
-                ("apk",     "py3-venv"),
-            ]
-            for mgr, pkg in pkg_managers:
-                if shutil.which(mgr):
-                    result = subprocess.run([mgr, "install", "-y", pkg])
-                    if result.returncode != 0:
-                        print(f"  Error: failed to install {pkg} via {mgr}")
-                        sys.exit(1)
-                    break
-            else:
-                print("  Error: no supported package manager found (tried apt-get, dnf, apk)")
-                sys.exit(1)
-            import venv as _venv_mod
-
-        try:
-            _venv_mod.create(_VENV_DIR, with_pip=True, clear=True)
-        except Exception as e:
-            print(f"  Error: failed to create virtual environment: {e}")
-            sys.exit(1)
-
-        deps = ["hypercorn", "cryptography", "acme", "josepy"]
-        result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
-        if result.returncode != 0:
-            print(f"  Error: failed to install dependencies")
-            sys.exit(1)
-        print()
-
-    os.execv(_VENV_PY, [_VENV_PY] + sys.argv)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIG
+# SERVER
+#
+# Handles all incoming HTTP(S) requests. Contains config, rate limiting, the
+# file cache, and the two ASGI apps (HTTPS + HTTP redirect) that Hypercorn runs.
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Config ────────────────────────────────────────────────────────────────────
 
 
 def _resolve(path):
@@ -222,12 +170,10 @@ class Config:
 config = Config()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOGGING
+# ── Logging ───────────────────────────────────────────────────────────────────
 #
 # In service mode, logs go to systemd journal (StandardOutput=journal).
 # In interactive mode, warnings and errors go to the terminal.
-# ─────────────────────────────────────────────────────────────────────────────
 
 def setup_logging():
     root = logging.getLogger()
@@ -246,8 +192,7 @@ log = logging.getLogger(__name__)
 setup_logging()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RATE LIMITER
+# ── Rate limiter ──────────────────────────────────────────────────────────────
 #
 # Two independent sliding-window limits per IP address:
 #   config.rate_limit      — total requests per minute (default 30)
@@ -255,7 +200,6 @@ setup_logging()
 #
 # Uses threading.Lock because the critical section is in-memory deque
 # manipulation — not I/O — so it doesn't meaningfully block the event loop.
-# ─────────────────────────────────────────────────────────────────────────────
 
 RATE_WINDOW  = 60      # seconds
 _RATE_IP_CAP = 10_000  # max IPs tracked per dict; bounds memory under IP-flood attacks
@@ -307,12 +251,10 @@ def _rate_limit_exceeded(tracker, ip, limit):
         return len(timestamps) > limit
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FILE CACHE
+# ── File cache ────────────────────────────────────────────────────────────────
 #
 # Files are read once and held in memory with gzip-compressed and raw copies.
 # Modification time is checked on each request so edits take effect immediately.
-# ─────────────────────────────────────────────────────────────────────────────
 
 _file_cache       = collections.OrderedDict()
 _file_cache_lock  = threading.Lock()
@@ -410,9 +352,7 @@ def _cache_control_header():
     return f"{scope}, max-age={config.cache_max_age}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ASGI APPS
-# ─────────────────────────────────────────────────────────────────────────────
+# ── ASGI apps ─────────────────────────────────────────────────────────────────
 
 async def _send_response(send, status, headers_list, body=b""):
     await send({"type": "http.response.start", "status": status, "headers": headers_list})
@@ -631,11 +571,69 @@ async def redirect_app(scope, receive, send):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SERVER
+# SYSTEM
+#
+# Manages the server's environment: bootstrapping the Python runtime, server
+# lifecycle, certificate management, and systemd service integration.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Bootstrap ─────────────────────────────────────────────────────────────────
+#
+# On first run, servette.py creates a virtualenv and installs dependencies into
+# it, then re-execs itself inside that environment. The user just runs
+# `sudo python3 servette.py` — the environment is managed invisibly.
+
+def _bootstrap():
+    if sys.prefix == _VENV_DIR:
+        return  # Already running inside the managed virtualenv
+
+    if not os.path.exists(_VENV_PY):
+        print("Setting up Servette...")
+
+        try:
+            import venv as _venv_mod
+        except ImportError:
+            _venv_mod = None
+
+        if _venv_mod is None:
+            pkg_managers = [
+                ("apt-get", f"python3.{sys.version_info.minor}-venv"),
+                ("dnf",     "python3-venv"),
+                ("apk",     "py3-venv"),
+            ]
+            for mgr, pkg in pkg_managers:
+                if shutil.which(mgr):
+                    result = subprocess.run([mgr, "install", "-y", pkg])
+                    if result.returncode != 0:
+                        print(f"  Error: failed to install {pkg} via {mgr}")
+                        sys.exit(1)
+                    break
+            else:
+                print("  Error: no supported package manager found (tried apt-get, dnf, apk)")
+                sys.exit(1)
+            import venv as _venv_mod
+
+        try:
+            _venv_mod.create(_VENV_DIR, with_pip=True, clear=True)
+        except Exception as e:
+            print(f"  Error: failed to create virtual environment: {e}")
+            sys.exit(1)
+
+        deps = ["hypercorn", "cryptography", "acme", "josepy"]
+        result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
+        if result.returncode != 0:
+            print(f"  Error: failed to install dependencies")
+            sys.exit(1)
+        print()
+
+    os.execv(_VENV_PY, [_VENV_PY] + sys.argv)
+
+
+# ── Server lifecycle ──────────────────────────────────────────────────────────
 #
 # Hypercorn runs in a background thread with its own asyncio event loop.
 # A threading.Event signals graceful shutdown from the shell thread.
-# ─────────────────────────────────────────────────────────────────────────────
 
 _server_thread        = None
 _server_start_time    = None
@@ -813,42 +811,7 @@ def stop_server():
     print("Session server stopped.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SHELL
-# ─────────────────────────────────────────────────────────────────────────────
-
-HELP = """
-Commands:
-  setup             — guided walkthrough for getting started
-  config            — view and edit settings
-  enable            — enable Servette as a system service
-  disable           — remove the system service
-  start             — start the server
-  stop              — stop the server
-  status            — show whether the server is running
-  log [n]           — show the last n log entries
-  update            — download the latest version of servette.py
-  help              — show this message
-  quit              — exit
-"""
-
-CONFIG_HELP = """
-  Commands
-  ──────────────────────────────────────
-    dir       — directory to serve
-    port      — HTTPS port
-    cert      — SSL certificate and key
-    username  — login username
-    password  — login password
-    email     — email address
-    limits    — rate limits
-    cache     — browser cache policy
-    proxy     — trusted proxy IP for X-Forwarded-For
-    tls       — minimum TLS version and cipher suites
-    show      — show current settings
-    back      — return to main shell
-"""
-
+# ── Service management ────────────────────────────────────────────────────────
 
 def _service_file_exists():
     return os.path.exists(SERVICE_PATH)
@@ -864,260 +827,6 @@ def _service_is_active():
     except FileNotFoundError:
         return False
 
-
-def _prompt(question):
-    return input(f"  {question} [y/n]: ").strip().lower() == "y"
-
-
-# ── Config sub-shell ──────────────────────────────────────────────────────────
-
-def _config_show():
-    def val(v):
-        return v if v else "(not set)"
-
-    cache_display = config.cache_policy
-    if config.cache_policy == "max-age":
-        cache_display += f" ({config.cache_max_age}s)"
-
-    print()
-    print("  Current Settings")
-    print("  " + "─" * 38)
-    print(f"  {'Directory':<22}  {val(config.serve_dir)}")
-    print(f"  {'HTTPS port':<22}  {config.port}")
-    print(f"  {'Certificate':<22}  {val(config.cert_file)}")
-    print(f"  {'Key':<22}  {val(config.key_file)}")
-    print(f"  {'Username':<22}  {val(config.username)}")
-    print(f"  {'Password':<22}  {'(set)' if config.password_hash else '(not set)'}")
-    print(f"  {'Email':<22}  {val(config.email)}")
-    print(f"  {'Rate limit':<22}  {config.rate_limit} req/min")
-    print(f"  {'Auth rate limit':<22}  {config.auth_rate_limit} fails/min")
-    print(f"  {'Cache policy':<22}  {cache_display}")
-    print(f"  {'Trusted proxy':<22}  {val(config.trusted_proxy)}")
-    print(f"  {'TLS min version':<22}  {config.tls_min_version}")
-    print(f"  {'Cipher suites':<22}  {config.ciphers or '(system default)'}")
-    print()
-
-
-def _config_dir():
-    dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
-    if dirs:
-        print()
-        for d in dirs:
-            print(f"    {d}{' ←' if d == config.serve_dir else ''}")
-    new_value = input(f"\n  serve_dir [{config.serve_dir}]: ").strip()
-    if not new_value:
-        print("  → unchanged")
-        return
-    path = _resolve(new_value)
-    if not os.path.isdir(path):
-        print(f"  → directory not found: {path}")
-        return
-    config.serve_dir = new_value
-    config.save()
-    print("  → saved")
-
-
-def _config_set(attr, label, cast=str, validate=None, error="invalid value", hint=None):
-    current = getattr(config, attr)
-    if hint:
-        print(f"  {hint}")
-    new_value = input(f"  {label} [{current}]: ").strip()
-    if not new_value or new_value == str(current):
-        print("  → unchanged")
-        return
-    try:
-        value = cast(new_value)
-        if validate and not validate(value):
-            raise ValueError
-        setattr(config, attr, value)
-        config.save()
-        print("  → saved")
-    except ValueError:
-        print(f"  → {error}, unchanged")
-
-
-def _config_cert():
-    cert_path = _resolve(config.cert_file)
-    if os.path.exists(cert_path):
-        days = _cert_days_remaining(cert_path)
-        if days is not None and days <= 0:
-            print("  Current certificate has expired.")
-        elif days is not None:
-            print(f"  Current certificate expires in {days} days.")
-        else:
-            print(f"  Current: {config.cert_file}")
-    print()
-
-    domain = input("  Domain name (press Enter to skip and use a self-signed certificate): ").strip()
-
-    if domain:
-        _run_acme(domain)
-    else:
-        cert_path = _resolve(config.cert_file or "cert.pem")
-        key_path  = _resolve(config.key_file or "key.pem")
-        print("  Generating self-signed certificate...")
-        _generate_self_signed_cert(cert_path, key_path)
-        config.cert_file = config.cert_file or "cert.pem"
-        config.key_file  = config.key_file or "key.pem"
-        config.save()
-        print("  → self-signed certificate generated.")
-        print("  Note: your browser will show a security warning until you add a domain.\n")
-        if _server_running() or _service_is_active():
-            _reload_server()
-
-
-def _config_username():
-    current   = config.username
-    new_value = input(f"  username [{current}]: ").strip()
-    if new_value == "" and current != "":
-        config.username      = ""
-        config.password_hash = ""
-        config.password_salt = ""
-        config.save()
-        print("  → auth disabled, password cleared")
-    elif new_value and new_value != current:
-        config.username = new_value
-        config.save()
-        print("  → saved")
-    else:
-        print("  → unchanged")
-
-
-def _config_password():
-    if not config.username:
-        print("  Set a username first.")
-        return
-    pwd = getpass.getpass("  password: ")
-    if not pwd:
-        print("  → unchanged")
-        return
-    confirm = getpass.getpass("  confirm: ")
-    if pwd != confirm:
-        print("  → passwords do not match, unchanged")
-        return
-    config.password_hash, config.password_salt = _hash_password(pwd)
-    config.save()
-    print("  → saved")
-
-
-def _config_limits():
-    _config_set("rate_limit",      "rate_limit",      int, error="invalid number", hint="Requests per minute per IP")
-    _config_set("auth_rate_limit", "auth_rate_limit", int, error="invalid number", hint="Failed login attempts per minute per IP")
-
-
-def _config_cache():
-    print(f"\n  Current: {config.cache_policy}" +
-          (f" ({config.cache_max_age}s)" if config.cache_policy == "max-age" else "") + "\n")
-    print("    no-store  — never cache, always download fresh")
-    print("    no-cache  — cache but always revalidate (ETag makes this a quick check)")
-    print("    max-age   — trust cached copy for N seconds without checking\n")
-    choice = input("  cache_policy [no-store / no-cache / max-age]: ").strip().lower()
-    if not choice:
-        print("  → unchanged")
-        return
-    if choice not in ("no-store", "no-cache", "max-age"):
-        print("  → invalid option, unchanged")
-        return
-    config.cache_policy = choice
-    if choice == "max-age":
-        age_str = input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
-        if age_str:
-            try:
-                config.cache_max_age = int(age_str)
-            except ValueError:
-                print("  → invalid number, keeping current max-age")
-    config.save()
-    print("  → saved")
-
-
-def _config_trusted_proxy():
-    current = config.trusted_proxy
-    print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
-    print("  Set to the IP of your reverse proxy to trust its X-Forwarded-For header.")
-    print("  Leave blank to ignore XFF entirely (correct when Servette faces the internet directly).\n")
-    new_value = input("  trusted_proxy IP: ").strip()
-    if new_value == current:
-        print("  → unchanged")
-        return
-    config.trusted_proxy = new_value
-    config.save()
-    print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
-
-
-def _config_tls():
-    print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
-    print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
-    print("    1.3 — TLS 1.3 only; drops support for older clients\n")
-    ver = input("  tls_min_version [1.2 / 1.3]: ").strip()
-    if ver and ver not in ("1.2", "1.3"):
-        print("  → invalid, unchanged")
-    elif ver and ver != config.tls_min_version:
-        config.tls_min_version = ver
-        config.save()
-        print("  → saved (takes effect on next server start)")
-    else:
-        print("  → unchanged")
-
-    print(f"\n  Current cipher suites: {config.ciphers or '(system default)'}")
-    print("  OpenSSL cipher string, e.g.: ECDHE+AESGCM:DHE+AESGCM")
-    print("  Leave blank to use the system default (recommended unless you have specific requirements).\n")
-    ciphers = input("  ciphers: ").strip()
-    if ciphers == config.ciphers:
-        print("  → unchanged")
-        return
-    config.ciphers = ciphers
-    config.save()
-    print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
-
-
-def cmd_config():
-    _config_show()
-    print(CONFIG_HELP)
-
-    while True:
-        try:
-            raw = input("  config> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-
-        if not raw:
-            continue
-
-        cmd = raw.split()[0].lower()
-
-        if cmd == "show":
-            _config_show()
-        elif cmd in ("dir", "directory"):
-            _config_dir()
-        elif cmd == "port":
-            _config_set("port", "port", int, lambda v: 1 <= v <= 65535, "invalid port number")
-        elif cmd == "cert":
-            _config_cert()
-        elif cmd == "username":
-            _config_username()
-        elif cmd == "password":
-            _config_password()
-        elif cmd == "email":
-            _config_set("email", "email")
-        elif cmd == "limits":
-            _config_limits()
-        elif cmd == "cache":
-            _config_cache()
-        elif cmd in ("proxy", "trusted_proxy"):
-            _config_trusted_proxy()
-        elif cmd == "tls":
-            _config_tls()
-        elif cmd in ("back", "done", "exit", "quit"):
-            break
-        elif cmd in ("help", "?"):
-            print(CONFIG_HELP)
-        else:
-            print(f"  Unknown setting: {cmd}")
-            print(CONFIG_HELP)
-
-
-# ── Service management ────────────────────────────────────────────────────────
 
 def _servette_user_exists():
     result = subprocess.run(["id", "servette"], capture_output=True)
@@ -1236,53 +945,6 @@ def cmd_uninstall():
         print("Error: disable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
         print(f"Error during disable: {e}")
-
-
-def cmd_start():
-    if _service_file_exists():
-        if _service_is_active():
-            cmd_status()
-        else:
-            try:
-                subprocess.run(["systemctl", "start", "servette"], check=True, capture_output=True)
-                log.info("Service started")
-                cmd_status()
-            except PermissionError:
-                print("Error: start requires sudo. Run: sudo python3 servette.py")
-            except FileNotFoundError:
-                print("Error: start requires a Linux server with systemd.")
-            except subprocess.CalledProcessError as e:
-                print(f"Error starting service: {e}")
-    else:
-        start_server()
-        if _server_running():
-            print("Running in session only — server will stop when you quit.")
-            if _prompt("Install as a permanent service?"):
-                cmd_install()
-
-
-def cmd_stop():
-    stopped = False
-
-    if _service_is_active():
-        try:
-            subprocess.run(["systemctl", "stop", "servette"], check=True, capture_output=True)
-            print("Service stopped.")
-            log.info("Service stopped")
-            stopped = True
-        except PermissionError:
-            print("Error: stop requires sudo. Run: sudo python3 servette.py")
-        except FileNotFoundError:
-            print("Error: stop requires a Linux server with systemd.")
-        except subprocess.CalledProcessError as e:
-            print(f"Error stopping service: {e}")
-
-    if _server_running():
-        stop_server()
-        stopped = True
-
-    if not stopped:
-        cmd_status()
 
 
 # ── Certificate management ────────────────────────────────────────────────────
@@ -1544,11 +1206,415 @@ def _run_acme(domain):
             tmp_thread.join(timeout=5)
 
 
-# ── Log, status, update, helpers ─────────────────────────────────────────────
+def _load_cert(cert_path):
+    """Return a cryptography X.509 certificate object, or None on failure."""
+    try:
+        from cryptography import x509 as _x509
+        with open(cert_path, "rb") as f:
+            return _x509.load_pem_x509_certificate(f.read())
+    except Exception:
+        return None
 
-RELEASES_API_URL   = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
+
+def _is_real_domain(s):
+    if s in ("localhost", "servette"):
+        return False
+    try:
+        ipaddress.ip_address(s)
+        return False  # it's an IP, not a domain
+    except ValueError:
+        return bool(s)
+
+
+def _domain_from_cert(cert_path):
+    if not cert_path:
+        return None
+    cert = _load_cert(cert_path)
+    if cert is None:
+        return None
+    try:
+        from cryptography import x509 as _x509
+        san = cert.extensions.get_extension_for_class(_x509.SubjectAlternativeName)
+        for name in san.value.get_values_for_type(_x509.DNSName):
+            if _is_real_domain(name):
+                return name
+    except Exception:
+        pass
+    try:
+        from cryptography.x509.oid import NameOID as _NameOID
+        cn = cert.subject.get_attributes_for_oid(_NameOID.COMMON_NAME)
+        if cn and _is_real_domain(cn[0].value):
+            return cn[0].value
+    except Exception:
+        pass
+    return None
+
+
+def _cert_days_remaining(cert_path):
+    cert = _load_cert(cert_path)
+    if cert is None:
+        return None
+    try:
+        expiry = cert.not_valid_after_utc
+    except AttributeError:
+        expiry = cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+    return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SHELL
+#
+# The interactive terminal interface. Contains only UI logic — all system work
+# is delegated to functions in the SYSTEM section.
+# ─────────────────────────────────────────────────────────────────────────────
+
+HELP = """
+Commands:
+  setup             — guided walkthrough for getting started
+  config            — view and edit settings
+  enable            — enable Servette as a system service
+  disable           — remove the system service
+  start             — start the server
+  stop              — stop the server
+  status            — show whether the server is running
+  log [n]           — show the last n log entries
+  update            — download the latest version of servette.py
+  help              — show this message
+  quit              — exit
+"""
+
+CONFIG_HELP = """
+  Commands
+  ──────────────────────────────────────
+    dir       — directory to serve
+    port      — HTTPS port
+    cert      — SSL certificate and key
+    username  — login username
+    password  — login password
+    email     — email address
+    limits    — rate limits
+    cache     — browser cache policy
+    proxy     — trusted proxy IP for X-Forwarded-For
+    tls       — minimum TLS version and cipher suites
+    show      — show current settings
+    back      — return to main shell
+"""
+
+
+def _prompt(question):
+    return input(f"  {question} [y/n]: ").strip().lower() == "y"
+
+
+# ── Config sub-shell ──────────────────────────────────────────────────────────
+
+def _config_show():
+    def val(v):
+        return v if v else "(not set)"
+
+    cache_display = config.cache_policy
+    if config.cache_policy == "max-age":
+        cache_display += f" ({config.cache_max_age}s)"
+
+    print()
+    print("  Current Settings")
+    print("  " + "─" * 38)
+    print(f"  {'Directory':<22}  {val(config.serve_dir)}")
+    print(f"  {'HTTPS port':<22}  {config.port}")
+    print(f"  {'Certificate':<22}  {val(config.cert_file)}")
+    print(f"  {'Key':<22}  {val(config.key_file)}")
+    print(f"  {'Username':<22}  {val(config.username)}")
+    print(f"  {'Password':<22}  {'(set)' if config.password_hash else '(not set)'}")
+    print(f"  {'Email':<22}  {val(config.email)}")
+    print(f"  {'Rate limit':<22}  {config.rate_limit} req/min")
+    print(f"  {'Auth rate limit':<22}  {config.auth_rate_limit} fails/min")
+    print(f"  {'Cache policy':<22}  {cache_display}")
+    print(f"  {'Trusted proxy':<22}  {val(config.trusted_proxy)}")
+    print(f"  {'TLS min version':<22}  {config.tls_min_version}")
+    print(f"  {'Cipher suites':<22}  {config.ciphers or '(system default)'}")
+    print()
+
+
+def _config_dir():
+    dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
+    if dirs:
+        print()
+        for d in dirs:
+            print(f"    {d}{' ←' if d == config.serve_dir else ''}")
+    new_value = input(f"\n  serve_dir [{config.serve_dir}]: ").strip()
+    if not new_value:
+        print("  → unchanged")
+        return
+    path = _resolve(new_value)
+    if not os.path.isdir(path):
+        print(f"  → directory not found: {path}")
+        return
+    config.serve_dir = new_value
+    config.save()
+    print("  → saved")
+
+
+def _config_set(attr, label, cast=str, validate=None, error="invalid value", hint=None):
+    current = getattr(config, attr)
+    if hint:
+        print(f"  {hint}")
+    new_value = input(f"  {label} [{current}]: ").strip()
+    if not new_value or new_value == str(current):
+        print("  → unchanged")
+        return
+    try:
+        value = cast(new_value)
+        if validate and not validate(value):
+            raise ValueError
+        setattr(config, attr, value)
+        config.save()
+        print("  → saved")
+    except ValueError:
+        print(f"  → {error}, unchanged")
+
+
+def _config_cert():
+    cert_path = _resolve(config.cert_file)
+    if os.path.exists(cert_path):
+        days = _cert_days_remaining(cert_path)
+        if days is not None and days <= 0:
+            print("  Current certificate has expired.")
+        elif days is not None:
+            print(f"  Current certificate expires in {days} days.")
+        else:
+            print(f"  Current: {config.cert_file}")
+    print()
+
+    domain = input("  Domain name (press Enter to skip and use a self-signed certificate): ").strip()
+
+    if domain:
+        _run_acme(domain)
+    else:
+        cert_path = _resolve(config.cert_file or "cert.pem")
+        key_path  = _resolve(config.key_file or "key.pem")
+        print("  Generating self-signed certificate...")
+        _generate_self_signed_cert(cert_path, key_path)
+        config.cert_file = config.cert_file or "cert.pem"
+        config.key_file  = config.key_file or "key.pem"
+        config.save()
+        print("  → self-signed certificate generated.")
+        print("  Note: your browser will show a security warning until you add a domain.\n")
+        if _server_running() or _service_is_active():
+            _reload_server()
+
+
+def _config_username():
+    current   = config.username
+    new_value = input(f"  username [{current}]: ").strip()
+    if new_value == "" and current != "":
+        config.username      = ""
+        config.password_hash = ""
+        config.password_salt = ""
+        config.save()
+        print("  → auth disabled, password cleared")
+    elif new_value and new_value != current:
+        config.username = new_value
+        config.save()
+        print("  → saved")
+    else:
+        print("  → unchanged")
+
+
+def _config_password():
+    if not config.username:
+        print("  Set a username first.")
+        return
+    pwd = getpass.getpass("  password: ")
+    if not pwd:
+        print("  → unchanged")
+        return
+    confirm = getpass.getpass("  confirm: ")
+    if pwd != confirm:
+        print("  → passwords do not match, unchanged")
+        return
+    config.password_hash, config.password_salt = _hash_password(pwd)
+    config.save()
+    print("  → saved")
+
+
+def _config_limits():
+    _config_set("rate_limit",      "rate_limit",      int, error="invalid number", hint="Requests per minute per IP")
+    _config_set("auth_rate_limit", "auth_rate_limit", int, error="invalid number", hint="Failed login attempts per minute per IP")
+
+
+def _config_cache():
+    print(f"\n  Current: {config.cache_policy}" +
+          (f" ({config.cache_max_age}s)" if config.cache_policy == "max-age" else "") + "\n")
+    print("    no-store  — never cache, always download fresh")
+    print("    no-cache  — cache but always revalidate (ETag makes this a quick check)")
+    print("    max-age   — trust cached copy for N seconds without checking\n")
+    choice = input("  cache_policy [no-store / no-cache / max-age]: ").strip().lower()
+    if not choice:
+        print("  → unchanged")
+        return
+    if choice not in ("no-store", "no-cache", "max-age"):
+        print("  → invalid option, unchanged")
+        return
+    config.cache_policy = choice
+    if choice == "max-age":
+        age_str = input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
+        if age_str:
+            try:
+                config.cache_max_age = int(age_str)
+            except ValueError:
+                print("  → invalid number, keeping current max-age")
+    config.save()
+    print("  → saved")
+
+
+def _config_trusted_proxy():
+    current = config.trusted_proxy
+    print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
+    print("  Set to the IP of your reverse proxy to trust its X-Forwarded-For header.")
+    print("  Leave blank to ignore XFF entirely (correct when Servette faces the internet directly).\n")
+    new_value = input("  trusted_proxy IP: ").strip()
+    if new_value == current:
+        print("  → unchanged")
+        return
+    config.trusted_proxy = new_value
+    config.save()
+    print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
+
+
+def _config_tls():
+    print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
+    print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
+    print("    1.3 — TLS 1.3 only; drops support for older clients\n")
+    ver = input("  tls_min_version [1.2 / 1.3]: ").strip()
+    if ver and ver not in ("1.2", "1.3"):
+        print("  → invalid, unchanged")
+    elif ver and ver != config.tls_min_version:
+        config.tls_min_version = ver
+        config.save()
+        print("  → saved (takes effect on next server start)")
+    else:
+        print("  → unchanged")
+
+    print(f"\n  Current cipher suites: {config.ciphers or '(system default)'}")
+    print("  OpenSSL cipher string, e.g.: ECDHE+AESGCM:DHE+AESGCM")
+    print("  Leave blank to use the system default (recommended unless you have specific requirements).\n")
+    ciphers = input("  ciphers: ").strip()
+    if ciphers == config.ciphers:
+        print("  → unchanged")
+        return
+    config.ciphers = ciphers
+    config.save()
+    print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
+
+
+def cmd_config():
+    _config_show()
+    print(CONFIG_HELP)
+
+    while True:
+        try:
+            raw = input("  config> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not raw:
+            continue
+
+        cmd = raw.split()[0].lower()
+
+        if cmd == "show":
+            _config_show()
+        elif cmd in ("dir", "directory"):
+            _config_dir()
+        elif cmd == "port":
+            _config_set("port", "port", int, lambda v: 1 <= v <= 65535, "invalid port number")
+        elif cmd == "cert":
+            _config_cert()
+        elif cmd == "username":
+            _config_username()
+        elif cmd == "password":
+            _config_password()
+        elif cmd == "email":
+            _config_set("email", "email")
+        elif cmd == "limits":
+            _config_limits()
+        elif cmd == "cache":
+            _config_cache()
+        elif cmd in ("proxy", "trusted_proxy"):
+            _config_trusted_proxy()
+        elif cmd == "tls":
+            _config_tls()
+        elif cmd in ("back", "done", "exit", "quit"):
+            break
+        elif cmd in ("help", "?"):
+            print(CONFIG_HELP)
+        else:
+            print(f"  Unknown setting: {cmd}")
+            print(CONFIG_HELP)
+
+
+def cmd_start():
+    if _service_file_exists():
+        if _service_is_active():
+            cmd_status()
+        else:
+            try:
+                subprocess.run(["systemctl", "start", "servette"], check=True, capture_output=True)
+                log.info("Service started")
+                cmd_status()
+            except PermissionError:
+                print("Error: start requires sudo. Run: sudo python3 servette.py")
+            except FileNotFoundError:
+                print("Error: start requires a Linux server with systemd.")
+            except subprocess.CalledProcessError as e:
+                print(f"Error starting service: {e}")
+    else:
+        start_server()
+        if _server_running():
+            print("Running in session only — server will stop when you quit.")
+            if _prompt("Install as a permanent service?"):
+                cmd_install()
+
+
+def cmd_stop():
+    stopped = False
+
+    if _service_is_active():
+        try:
+            subprocess.run(["systemctl", "stop", "servette"], check=True, capture_output=True)
+            print("Service stopped.")
+            log.info("Service stopped")
+            stopped = True
+        except PermissionError:
+            print("Error: stop requires sudo. Run: sudo python3 servette.py")
+        except FileNotFoundError:
+            print("Error: stop requires a Linux server with systemd.")
+        except subprocess.CalledProcessError as e:
+            print(f"Error stopping service: {e}")
+
+    if _server_running():
+        stop_server()
+        stopped = True
+
+    if not stopped:
+        cmd_status()
+
+
+def cmd_log(n=20):
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "servette", "-o", "cat", "-n", str(n), "--no-pager"],
+            capture_output=True, text=True
+        )
+        output = result.stdout or result.stderr
+        print(output, end="")
+    except FileNotFoundError:
+        print("journalctl not found. Is this a systemd system?")
+
+
+RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
 _SIGNING_PUBLIC_KEY = "abb8854be0b82df813f3b052296a26573063fc6314ea2701d54354605e6f15db"
-_VERSION_RE        = re.compile(rb"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
+_VERSION_RE         = re.compile(rb"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
 
 def _parse_version(source_bytes):
     """Extract __version__ from servette.py source bytes. Returns the string or None."""
@@ -1651,73 +1717,6 @@ def cmd_update():
     print(f"  Updated {__version__} → {new_version}.")
     print(f"  Previous version saved to {bak_path}.")
     print("  Restart to run the new version ('stop' then 'start', or 'sudo systemctl restart servette').")
-
-
-def cmd_log(n=20):
-    try:
-        result = subprocess.run(
-            ["journalctl", "-u", "servette", "-o", "cat", "-n", str(n), "--no-pager"],
-            capture_output=True, text=True
-        )
-        output = result.stdout or result.stderr
-        print(output, end="")
-    except FileNotFoundError:
-        print("journalctl not found. Is this a systemd system?")
-
-
-def _load_cert(cert_path):
-    """Return a cryptography X.509 certificate object, or None on failure."""
-    try:
-        from cryptography import x509 as _x509
-        with open(cert_path, "rb") as f:
-            return _x509.load_pem_x509_certificate(f.read())
-    except Exception:
-        return None
-
-
-def _is_real_domain(s):
-    if s in ("localhost", "servette"):
-        return False
-    try:
-        ipaddress.ip_address(s)
-        return False  # it's an IP, not a domain
-    except ValueError:
-        return bool(s)
-
-
-def _domain_from_cert(cert_path):
-    if not cert_path:
-        return None
-    cert = _load_cert(cert_path)
-    if cert is None:
-        return None
-    try:
-        from cryptography import x509 as _x509
-        san = cert.extensions.get_extension_for_class(_x509.SubjectAlternativeName)
-        for name in san.value.get_values_for_type(_x509.DNSName):
-            if _is_real_domain(name):
-                return name
-    except Exception:
-        pass
-    try:
-        from cryptography.x509.oid import NameOID as _NameOID
-        cn = cert.subject.get_attributes_for_oid(_NameOID.COMMON_NAME)
-        if cn and _is_real_domain(cn[0].value):
-            return cn[0].value
-    except Exception:
-        pass
-    return None
-
-
-def _cert_days_remaining(cert_path):
-    cert = _load_cert(cert_path)
-    if cert is None:
-        return None
-    try:
-        expiry = cert.not_valid_after_utc
-    except AttributeError:
-        expiry = cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
-    return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
 
 
 def _format_uptime(seconds):

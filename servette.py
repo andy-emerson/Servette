@@ -264,7 +264,7 @@ def _rate_sweep():
                 for k in stale:
                     del tracker[k]
                 if len(tracker) > _RATE_IP_CAP:
-                    for k in sorted(tracker, key=lambda k: tracker[k][-1])[:len(tracker) - _RATE_IP_CAP]:
+                    for k in sorted(tracker, key=lambda ip: tracker[ip][-1])[:len(tracker) - _RATE_IP_CAP]:
                         del tracker[k]
 
 threading.Thread(target=_rate_sweep, daemon=True).start()
@@ -307,17 +307,19 @@ def _get_cached_file(path):
         if entry and entry["mtime"] == mtime:
             return entry["raw"], entry["compressed"], entry["etag"]
 
-        try:
-            with open(path, "rb") as f:
-                raw = f.read()
-        except OSError:
-            return None, None, None
+    # Read and compress outside the lock so one slow disk read doesn't block other requests.
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None, None, None
 
-        compressed = gzip.compress(raw, compresslevel=6)
-        etag       = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
+    compressed = gzip.compress(raw, compresslevel=6)
+    etag       = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
+    with _file_cache_lock:
         _file_cache[path] = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
 
-        return raw, compressed, etag
+    return raw, compressed, etag
 
 
 MIME_TYPES = {
@@ -346,12 +348,12 @@ def _mime_type(path):
     return MIME_TYPES.get(ext, "application/octet-stream")
 
 def _resolve_request_path(url_path):
-    """Resolve a URL path to an absolute file path within serve_dir. Returns (None, 403) on traversal."""
+    """Resolve a URL path to an absolute file path within serve_dir. Returns (None, 403) on traversal, (None, 404) if not found."""
     serve_dir = os.path.realpath(_resolve(config.serve_dir))
     clean = unquote(url_path.split("?")[0])
     rel   = os.path.normpath(clean.lstrip("/"))
     if rel == ".":
-        rel = ""
+        rel = ""  # normpath("") returns "." — treat root request as empty relative path
     abs_path = os.path.realpath(os.path.join(serve_dir, rel) if rel else serve_dir)
     if not abs_path.startswith(serve_dir + os.sep) and abs_path != serve_dir:
         return None, 403
@@ -382,17 +384,23 @@ async def _send_response(send, status, headers_list, body=b""):
     await send({"type": "http.response.body",  "body": body})
 
 
+async def _handle_lifespan(receive, send):
+    """Handle ASGI lifespan events (server startup/shutdown signals from Hypercorn)."""
+    while True:
+        event = await receive()
+        if event["type"] == "lifespan.startup":
+            await send({"type": "lifespan.startup.complete"})
+        elif event["type"] == "lifespan.shutdown":
+            await send({"type": "lifespan.shutdown.complete"})
+            return
+
+
 async def https_app(scope, receive, send):
     """ASGI app — HTTPS server."""
 
     if scope["type"] == "lifespan":
-        while True:
-            event = await receive()
-            if event["type"] == "lifespan.startup":
-                await send({"type": "lifespan.startup.complete"})
-            elif event["type"] == "lifespan.shutdown":
-                await send({"type": "lifespan.shutdown.complete"})
-                return
+        await _handle_lifespan(receive, send)
+        return
 
     if scope["type"] != "http":
         return
@@ -544,13 +552,8 @@ async def redirect_app(scope, receive, send):
     """ASGI app — HTTP redirect to HTTPS and ACME challenge serving."""
 
     if scope["type"] == "lifespan":
-        while True:
-            event = await receive()
-            if event["type"] == "lifespan.startup":
-                await send({"type": "lifespan.startup.complete"})
-            elif event["type"] == "lifespan.shutdown":
-                await send({"type": "lifespan.shutdown.complete"})
-                return
+        await _handle_lifespan(receive, send)
+        return
 
     if scope["type"] != "http":
         return
@@ -605,6 +608,7 @@ _last_renewal_attempt = 0.0
 _cert_domain          = None  # cached domain from active cert; None means self-signed
 
 _TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
+ACME_RETRIES  = 3
 
 
 async def _serve_http_redirect(stop_event):
@@ -685,9 +689,9 @@ def _cert_watchdog():
 
         cert_path = _resolve(config.cert_file)
 
-        # Auto-renew: only for Let's Encrypt certs (domain known, not self-signed)
         domain = _domain_from_cert(cert_path)
         if domain:
+            # Let's Encrypt cert: auto-renew when fewer than 30 days remain
             days = _cert_days_remaining(cert_path)
             if days is not None and days < 30:
                 now = time.monotonic()
@@ -696,22 +700,16 @@ def _cert_watchdog():
                     log.info("Certificate for %s expires in %d days — renewing", domain, days)
                     _run_acme(domain)
                     _cert_domain = domain
-                    # Update _cert_mtime so the mtime check below doesn't fire again
-                    try:
-                        config._cert_mtime = os.path.getmtime(_resolve(config.cert_file))
-                    except OSError:
-                        pass
-                continue
-
-        # Externally-rotated cert: detect mtime change and restart
-        try:
-            mtime = os.path.getmtime(cert_path)
-            if config._cert_mtime is not None and mtime != config._cert_mtime:
-                log.info("Certificate changed on disk — reloading server")
-                config._cert_mtime = mtime
-                _reload_server()
-        except OSError:
-            pass
+        else:
+            # Self-signed or externally managed cert: reload if the file changed on disk
+            try:
+                mtime = os.path.getmtime(cert_path)
+                if config._cert_mtime is not None and mtime != config._cert_mtime:
+                    log.info("Certificate changed on disk — reloading server")
+                    config._cert_mtime = mtime
+                    _reload_server()
+            except OSError:
+                pass
 
 
 def start_server():
@@ -1121,7 +1119,7 @@ def _servette_user_exists():
 
 def _chown_servette(path):
     """Chown path to servette:servette if the user exists and the path exists."""
-    if os.path.exists(path) and _servette_user_exists():
+    if _servette_user_exists() and os.path.exists(path):
         subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
@@ -1173,12 +1171,9 @@ WantedBy=multi-user.target
             _chown_servette(_resolve(config.cert_file))
         if config.key_file:
             _chown_servette(_resolve(config.key_file))
-        certs_dir = os.path.join(BASE_DIR, "certs")
-        _chown_servette(certs_dir)
-        account_key = os.path.join(BASE_DIR, ".acme-account.pem")
-        _chown_servette(account_key)
-        if os.path.exists(ACME_WEBROOT):
-            _chown_servette(ACME_WEBROOT)
+        _chown_servette(os.path.join(BASE_DIR, "certs"))
+        _chown_servette(os.path.join(BASE_DIR, ".acme-account.pem"))
+        _chown_servette(ACME_WEBROOT)
 
         # Warn if serve_dir isn't world-readable
         if config.serve_dir:
@@ -1298,7 +1293,6 @@ def _spin(message, stop_event):
 
 def _generate_self_signed_cert(cert_path, key_path):
     """Generate a self-signed certificate and write it to cert_path/key_path."""
-    import ipaddress as _ipaddress
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives import hashes as _hashes, serialization as _serialization
@@ -1307,11 +1301,11 @@ def _generate_self_signed_cert(cert_path, key_path):
     key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = _x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, "servette")])
 
-    san = [_x509.DNSName("localhost"), _x509.IPAddress(_ipaddress.IPv4Address("127.0.0.1"))]
+    san = [_x509.DNSName("localhost"), _x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))]
     try:
         import socket as _socket
         ip = _socket.gethostbyname(_socket.gethostname())
-        san.append(_x509.IPAddress(_ipaddress.IPv4Address(ip)))
+        san.append(_x509.IPAddress(ipaddress.IPv4Address(ip)))
     except Exception:
         pass
 
@@ -1408,9 +1402,8 @@ def _run_acme(domain):
         _chown_servette(ACCOUNT_KEY_FILE)
 
     # Start a temporary HTTP listener on port 80 if the main server isn't running
-    http_started_here = False
-    tmp_stop          = None
-    tmp_thread        = None
+    tmp_stop   = None
+    tmp_thread = None
     if not _server_running():
         tmp_stop   = threading.Event()
         tmp_thread = threading.Thread(
@@ -1418,15 +1411,16 @@ def _run_acme(domain):
         )
         tmp_thread.start()
         time.sleep(0.5)
-        http_started_here = True
 
-    ACME_RETRIES = 3
-    last_error   = None
+    last_error = None
 
     for attempt in range(1, ACME_RETRIES + 1):
         stop = threading.Event()
         if sys.stdout.isatty():
-            label = f"Requesting certificate for {domain}..." if attempt == 1 else f"Retry {attempt - 1}/{ACME_RETRIES - 1}..."
+            if attempt == 1:
+                label = f"Requesting certificate for {domain}..."
+            else:
+                label = f"Retry {attempt - 1} of {ACME_RETRIES - 1}..."
             t = threading.Thread(target=_spin, args=(label, stop), daemon=True)
             t.start()
         else:
@@ -1526,7 +1520,7 @@ def _run_acme(domain):
         print(f"  Error getting certificate: {last_error}")
         log.error("ACME failed for %s after %d attempts: %s", domain, ACME_RETRIES, last_error)
 
-    if http_started_here and tmp_stop:
+    if tmp_stop:
         tmp_stop.set()
         if tmp_thread:
             tmp_thread.join(timeout=5)
@@ -1542,7 +1536,8 @@ def _parse_version(source):
         if line.startswith("__version__"):
             parts = line.split("=", 1)
             if len(parts) == 2:
-                return parts[1].strip().strip('"\'')
+                value = parts[1].strip()       # remove whitespace
+                return value.strip("\"'")      # remove surrounding quotes
     return None
 
 def cmd_update():
@@ -1619,27 +1614,28 @@ def _load_cert(cert_path):
         return None
 
 
+def _is_real_domain(s):
+    if s in ("localhost", "servette"):
+        return False
+    try:
+        ipaddress.ip_address(s)
+        return False  # it's an IP, not a domain
+    except ValueError:
+        return bool(s)
+
+
 def _domain_from_cert(cert_path):
     if not cert_path:
         return None
-    # Fast path: parse domain from our certs directory structure
-    marker = "/certs/"
-    if marker in cert_path:
-        part = cert_path.split(marker)[1].split("/")[0]
-        if part:
-            return part
+    # Fast path: our LE certs live at BASE_DIR/certs/<domain>/fullchain.pem
+    if "/certs/" in cert_path:
+        after_certs    = cert_path.split("/certs/")[1]
+        domain_segment = after_certs.split("/")[0]
+        if domain_segment:
+            return domain_segment
     cert = _load_cert(cert_path)
     if cert is None:
         return None
-    def _is_real_domain(s):
-        if s in ("localhost", "servette"):
-            return False
-        try:
-            ipaddress.ip_address(s)
-            return False  # it's an IP, not a domain
-        except ValueError:
-            return bool(s)
-
     try:
         from cryptography import x509 as _x509
         san = cert.extensions.get_extension_for_class(_x509.SubjectAlternativeName)

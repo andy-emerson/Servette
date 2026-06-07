@@ -3,21 +3,22 @@
 
 ---
 
-Servette is a nanoserver — a single Python file that takes a folder of static files and puts them on the internet, encrypted and protected. Dependencies are installed automatically on first run.
+Servette is a single Python file that puts a folder of static files on the internet with HTTPS, optional password protection, and auto-renewing certificates. Copy it to a server. Run it. Follow the wizard. Done.
 
-Most servers are built for large, complex applications. They come with databases, routing systems, templating engines, and dozens of configuration files. If all you have is a static site and you just want people to be able to visit it, that is a lot of machinery you do not need.
+Most ways to host a static site ask you to choose between simplicity and control:
 
-Servette does one thing well: it takes your static site folder and puts it on the internet, encrypted and protected.
+- **Platforms** (GitHub Pages, Netlify, Vercel) are easy but live on someone else's infrastructure, don't support password protection, and disappear if the free tier changes.
+- **Real servers** (nginx, Caddy, Apache) give you full control but require learning configuration languages, managing certificates manually, and wiring everything together yourself.
+
+Servette is the middle option: your own server, with the simplicity of a platform.
 
 ---
 
 ## Who is Servette for?
 
-**Static site developers.** If your site is a folder of HTML, CSS, JavaScript, and images — a portfolio, a dashboard, a tool, a game — Servette is built for exactly that use case. Copy your folder, run a few commands, and your site is live with HTTPS and optional password protection.
+**People who just want their site live.** You built something — a portfolio, a dashboard, a tool, a game — and you want it on the internet. You don't want to learn nginx. You don't want your site to depend on someone else's platform. You want to copy a file to a server, answer a few questions, and walk away.
 
-**Developers who need a quick private deployment.** Built something for your team or a client? Servette puts it on a domain with password protection in minutes, with no infrastructure to maintain.
-
-**People putting their first website online.** You built something. Now you want it live. Existing options are either overwhelming, expensive, or designed for problems much bigger than yours. Servette gets you from a folder on your computer to a real website with a padlock with as little friction as possible.
+**Developers learning how web servers work.** Servette is under 2,000 lines of Python, organized into components with clear boundaries. The full feature set — HTTP/2, TLS, ACME certificate issuance, rate limiting, file caching — is readable in an afternoon. It's a working server, not a toy example.
 
 ---
 
@@ -25,16 +26,12 @@ Servette does one thing well: it takes your static site folder and puts it on th
 
 | Feature | What it does |
 |---|---|
-| HTTPS | Your site is encrypted end-to-end; browsers show the padlock |
-| HTTP/2 | Faster page loads with multiplexed requests |
+| HTTPS with HTTP/2 | Your site is encrypted; browsers show the padlock; pages load faster with multiplexed requests |
 | Basic Auth | Optional username and password to restrict access |
-| Rate limiting | Stops bots from hammering the server and makes password guessing impractical |
+| Rate limiting | Stops bots from hammering the server; makes password guessing impractical |
 | Live reload | Edit any file and changes appear immediately — no restart required |
 | Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |
-| HSTS | Tells browsers to always use HTTPS for your domain, even if someone types http:// |
-| X-Frame-Options | Prevents your page from being embedded in iframes on other sites |
-| X-Content-Type-Options | Stops browsers from misinterpreting your files |
-| Referrer-Policy | Your URL is not leaked to third-party sites your page links to |
+| Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 
 ---
@@ -45,11 +42,11 @@ Servette does one thing well: it takes your static site folder and puts it on th
 
 **Python 3.8 or higher.** Pre-installed on most Linux servers.
 
-**A folder with your site files.** The directory you want to serve. Servette looks for `index.html` at the root and in any subdirectory. If you don't have a site yet, use the `demo/` folder from this repository to verify everything is working first.
+**A folder with your site files.** Servette looks for `index.html` at the root and in any subdirectory. If you don't have a site yet, use the `demo/` folder from this repository to verify everything is working first.
 
-**A domain name (optional).** Only required if you want a free SSL certificate from [Let's Encrypt](https://letsencrypt.org). If you don't have a domain, Servette works with a self-signed certificate — you'll just need to tell your browser to trust it.
+**A domain name (optional).** Only required if you want a free SSL certificate from [Let's Encrypt](https://letsencrypt.org). Without one, Servette generates a self-signed certificate — your browser will warn you, but the connection is still encrypted.
 
-On first run, Servette automatically installs its dependencies into a private virtualenv. No manual pip installs required.
+On first run, Servette installs its own dependencies automatically. No manual pip installs required.
 
 ---
 
@@ -57,32 +54,19 @@ On first run, Servette automatically installs its dependencies into a private vi
 
 ### 1. Copy your files to the server
 
-From your local machine, copy `servette.py` and your site folder to the server. If your server uses a password to log in:
+From your local machine:
 
 ```
 scp servette.py user@your.server.ip:~
 scp -r mysite/ user@your.server.ip:~
 ```
 
-If your server uses a key file:
-
-```
-scp -i your-key.pem servette.py user@your.server.ip:~
-scp -i your-key.pem -r mysite/ user@your.server.ip:~
-```
-
-Replace `user` with your server's username (`pi` on Raspberry Pi, `ubuntu` on Ubuntu, or whatever you set during setup) and `your.server.ip` with its IP address.
+Replace `user` with your server's login name (`ubuntu` on Ubuntu, `pi` on Raspberry Pi) and `your.server.ip` with its IP address. If your server uses a key file, add `-i your-key.pem` before the filenames.
 
 ### 2. SSH into your server
 
 ```
 ssh user@your.server.ip
-```
-
-Or with a key file:
-
-```
-ssh -i your-key.pem user@your.server.ip
 ```
 
 ### 3. Run Servette
@@ -91,11 +75,9 @@ ssh -i your-key.pem user@your.server.ip
 sudo python3 servette.py
 ```
 
-`sudo` is required because Servette listens on ports 80 and 443 — the standard ports for HTTP and HTTPS — and Linux reserves those ports for processes running as root. This is a one-time step; once Servette is installed as a service, it starts automatically on reboot without any manual intervention.
+`sudo` is required because setup writes a service file to `/etc/systemd/system/` and creates a system user. The server itself runs as a restricted system user afterward — not as root.
 
-On first run, Servette will install its dependencies before dropping you into the shell. This takes a minute.
-
-You will land in the Servette shell.
+On first run, Servette installs its dependencies before dropping you into the shell. This takes about a minute.
 
 ### 4. Run setup
 
@@ -110,7 +92,7 @@ The wizard walks you through everything:
 3. Set up an SSL certificate
 4. Confirm you're ready — Servette enables itself as a service and starts
 
-That's it. Your site is live. Close your terminal and walk away — Servette keeps running and restarts automatically if the server reboots. If you used a domain name, SSL certificates renew automatically.
+That's it. Your site is live. Close your terminal — Servette keeps running and restarts automatically if the server reboots. If you used a domain name, SSL certificates renew automatically.
 
 ---
 
@@ -144,20 +126,13 @@ scp -r mysite/ user@your.server.ip:~
 
 Changes appear immediately — no restart required.
 
-To update Servette itself, copy the new `servette.py` and restart the service:
-
-```
-scp servette.py user@your.server.ip:~
-sudo systemctl restart servette
-```
-
-Your settings are stored in `servette.json` and are never affected by updates to `servette.py`.
+To update Servette itself, run `update` from the Servette shell. Your settings are stored in `servette.json` and are never affected by updates.
 
 ---
 
 ## How it works
 
-Servette is a single file, but it is not a monolith. It is organized into discrete modules with well-defined responsibilities.
+Servette is a single file, organized into discrete components with clear responsibilities. The sections below map directly to sections of the source code.
 
 ```mermaid
 graph LR
@@ -210,21 +185,21 @@ graph LR
 
 **File Cache** — files are read once, gzip-compressed, and held in memory keyed by path. Modification time is checked on each request so edits take effect immediately. ETags (SHA-256 of file contents) enable 304 Not Modified responses.
 
-**HTTPS App** — an ASGI coroutine (`https_app`) called by Hypercorn for every HTTPS request. Handles rate limiting → auth → path resolution → file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy).
+**HTTPS App** — an ASGI coroutine called by Hypercorn for every HTTPS request. Handles rate limiting → auth → path resolution → file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy).
 
-**Redirect App** — an ASGI coroutine (`redirect_app`) on port 80. Serves Let's Encrypt ACME challenge tokens during certificate issuance; redirects everything else to HTTPS with 301.
+**Redirect App** — an ASGI coroutine on port 80. Serves Let's Encrypt ACME challenge tokens during certificate issuance; redirects everything else to HTTPS with 301.
 
-**Server** — starts Hypercorn in a background daemon thread with its own asyncio event loop. A `threading.Event` signals graceful shutdown. Checks certificate expiry on startup and warns if it expires within 30 days. A cert watchdog thread polls every 60 seconds: for Let's Encrypt certs it triggers automatic renewal when fewer than 30 days remain (retrying at most once per hour on failure); for any cert it detects external file changes and restarts to pick up the new cert.
+**Server** — starts Hypercorn in a background daemon thread with its own asyncio event loop. A `threading.Event` signals graceful shutdown. A cert watchdog thread polls every 60 seconds: for Let's Encrypt certs it triggers automatic renewal when fewer than 30 days remain (retrying at most once per hour on failure); for externally managed certs it detects file changes and restarts to pick up the new cert.
 
-**Shell** — the interactive REPL. Dispatches to setup, config, service management, and status commands. The only module that writes to Config.
+**Shell** — the interactive REPL. Dispatches to setup, config, service management, and status commands. The only component that writes to Config.
 
 ### Design decisions
 
-**Dedicated system user.** `enable` creates a `servette` system user with no login shell and no home directory. The service runs as that user with `AmbientCapabilities=CAP_NET_BIND_SERVICE`, which allows binding to ports 80 and 443 without root. Certificate files, the config file, and the ACME webroot are all chowned to `servette` at install time. `sudo` is still required to run the interactive shell, which writes the service file and calls `useradd`.
+**Dedicated system user.** `enable` creates a `servette` system user with no login shell and no home directory. The service runs as that user with `AmbientCapabilities=CAP_NET_BIND_SERVICE`, which allows binding to ports 80 and 443 without running as root. `sudo` is required to run the interactive shell, which writes the service file and calls `useradd`.
 
-**Hypercorn over a hand-rolled server.** The original Servette used Python's `BaseHTTPRequestHandler`. Hypercorn replaces it with HTTP/2, modern TLS defaults, and async concurrency — capabilities that would take significant code to implement correctly. The tradeoff is a dependency, which bootstrap manages invisibly.
+**Hypercorn over a hand-rolled server.** Hypercorn provides HTTP/2, modern TLS defaults, and async concurrency — capabilities that would take significant code to implement correctly. The tradeoff is a dependency, which bootstrap manages invisibly.
 
-**Managed virtualenv over system packages.** A private virtualenv in `.servette-env/` is isolated, reproducible, and invisible to the rest of the system. The operator never interacts with it directly.
+**Managed virtualenv over system packages.** A private virtualenv in `.servette-env/` is isolated, reproducible, and invisible to the rest of the system. The operator never interacts with it.
 
 **POST returns 405.** POST implies data going somewhere — a database, an email, a file on disk. Servette has no destination for POST data. If your site submits a form, the backend it posts to is outside Servette's scope.
 

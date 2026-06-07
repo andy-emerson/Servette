@@ -1558,38 +1558,41 @@ def _run_acme(domain):
 
 # ── Log, status, update, helpers ─────────────────────────────────────────────
 
-UPDATE_URL = "https://raw.githubusercontent.com/andy-emerson/servette/main/servette.py"
-
-def _parse_version(source):
-    """Extract __version__ string from source bytes. Returns None if not found."""
-    for line in source.decode(errors="replace").splitlines():
-        if line.startswith("__version__"):
-            parts = line.split("=", 1)
-            if len(parts) == 2:
-                value = parts[1].strip()       # remove whitespace
-                return value.strip("\"'")      # remove surrounding quotes
-    return None
+RELEASES_API_URL   = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
+_SIGNING_PUBLIC_KEY = "abb8854be0b82df813f3b052296a26573063fc6314ea2701d54354605e6f15db"
 
 def cmd_update():
     servette_path = os.path.abspath(__file__)
+
+    # Check latest release via GitHub API
     stop = threading.Event()
     t    = threading.Thread(target=_spin, args=("Checking for update...", stop), daemon=True)
     t.start()
     try:
-        new_source = urllib.request.urlopen(UPDATE_URL, timeout=15).read()
+        req = urllib.request.Request(
+            RELEASES_API_URL,
+            headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            release = json.loads(resp.read())
     except Exception as e:
         stop.set(); t.join()
         print(f"  Update failed: {e}")
         return
     stop.set(); t.join()
 
-    new_version = _parse_version(new_source)
-    if new_version is None:
-        print("  Update failed: could not read version from downloaded file.")
+    new_version = release.get("tag_name", "").lstrip("v")
+    if not new_version:
+        print("  Update failed: could not read version from release.")
         return
 
     if new_version == __version__:
         print(f"  Already up to date ({__version__}).")
+        return
+
+    assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
+    if "servette.py" not in assets or "servette.py.sig" not in assets:
+        print("  Update failed: release is missing servette.py or servette.py.sig assets.")
         return
 
     # Gate on major version bump
@@ -1605,6 +1608,32 @@ def cmd_update():
         if not _prompt("Continue?"):
             print("  Update cancelled.")
             return
+
+    # Download source and signature
+    stop = threading.Event()
+    t    = threading.Thread(target=_spin, args=(f"Downloading {new_version}...", stop), daemon=True)
+    t.start()
+    try:
+        new_source = urllib.request.urlopen(assets["servette.py"],     timeout=30).read()
+        signature  = urllib.request.urlopen(assets["servette.py.sig"], timeout=15).read()
+    except Exception as e:
+        stop.set(); t.join()
+        print(f"  Update failed: {e}")
+        return
+    stop.set(); t.join()
+
+    # Verify Ed25519 signature against pinned public key
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from cryptography.exceptions import InvalidSignature
+        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(_SIGNING_PUBLIC_KEY))
+        pub_key.verify(signature, new_source)
+    except InvalidSignature:
+        print("  Update failed: signature verification failed.")
+        return
+    except Exception as e:
+        print(f"  Update failed: could not verify signature: {e}")
+        return
 
     try:
         compile(new_source, "servette.py", "exec")

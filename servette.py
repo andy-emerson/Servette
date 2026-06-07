@@ -16,6 +16,8 @@ Architecture:
     Shell               — the interactive terminal interface
 """
 
+__version__ = "0.26.157"
+
 import asyncio
 import base64
 import datetime
@@ -1112,6 +1114,17 @@ def cmd_config():
 
 # ── Service management ────────────────────────────────────────────────────────
 
+def _servette_user_exists():
+    result = subprocess.run(["id", "servette"], capture_output=True)
+    return result.returncode == 0
+
+
+def _chown_servette(path):
+    """Chown path to servette:servette if the user exists and the path exists."""
+    if os.path.exists(path) and _servette_user_exists():
+        subprocess.run(["chown", "-R", "servette:servette", path], check=True)
+
+
 def cmd_install():
     updating      = _service_file_exists()
     servette_path = os.path.abspath(__file__)
@@ -1124,6 +1137,9 @@ Description=Servette — The Simple Secure Server
 After=network.target
 
 [Service]
+User=servette
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ExecStart={python_path} {servette_path} --serve
 Restart=always
 RestartSec=3
@@ -1137,11 +1153,41 @@ WantedBy=multi-user.target
 """
 
     try:
+        # Create system user if needed
+        if not _servette_user_exists():
+            subprocess.run(
+                ["useradd", "--system", "--no-create-home", "--shell", "/sbin/nologin", "servette"],
+                check=True
+            )
+            print("Created system user 'servette'.")
+
         with open(SERVICE_PATH, "w") as f:
             f.write(service)
 
         subprocess.run(["systemctl", "daemon-reload"],      check=True)
         subprocess.run(["systemctl", "enable", "servette"], check=True, capture_output=True)
+
+        # Chown files the service process needs to read
+        _chown_servette(config.CONFIG_FILE)
+        if config.cert_file:
+            _chown_servette(_resolve(config.cert_file))
+        if config.key_file:
+            _chown_servette(_resolve(config.key_file))
+        certs_dir = os.path.join(BASE_DIR, "certs")
+        _chown_servette(certs_dir)
+        account_key = os.path.join(BASE_DIR, ".acme-account.pem")
+        _chown_servette(account_key)
+        if os.path.exists(ACME_WEBROOT):
+            _chown_servette(ACME_WEBROOT)
+
+        # Warn if serve_dir isn't world-readable
+        if config.serve_dir:
+            serve_path = _resolve(config.serve_dir)
+            if os.path.isdir(serve_path):
+                mode = os.stat(serve_path).st_mode
+                if not (mode & 0o005 == 0o005):  # world read+execute on directory
+                    print(f"  Warning: '{serve_path}' may not be readable by the servette user.")
+                    print(f"  Fix with: chmod -R a+rX {serve_path}")
 
         if updating:
             print("Service file updated.")
@@ -1342,6 +1388,8 @@ def _run_acme(domain):
 
     os.makedirs(os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge"), exist_ok=True)
     os.makedirs(CERTS_DIR, exist_ok=True)
+    _chown_servette(ACME_WEBROOT)
+    _chown_servette(CERTS_DIR)
 
     # Load or generate ACME account key
     if os.path.exists(ACCOUNT_KEY_FILE):
@@ -1357,6 +1405,7 @@ def _run_acme(domain):
                 _serialization.NoEncryption()
             ))
         os.chmod(ACCOUNT_KEY_FILE, 0o600)
+        _chown_servette(ACCOUNT_KEY_FILE)
 
     # Start a temporary HTTP listener on port 80 if the main server isn't running
     http_started_here = False
@@ -1436,6 +1485,7 @@ def _run_acme(domain):
             with open(key_path, "wb") as f:
                 f.write(domain_key_pem)
             os.chmod(key_path, 0o600)
+            _chown_servette(CERTS_DIR)
 
             stop.set()
             if t:
@@ -1486,6 +1536,15 @@ def _run_acme(domain):
 
 UPDATE_URL = "https://raw.githubusercontent.com/andy-emerson/servette/main/servette.py"
 
+def _parse_version(source):
+    """Extract __version__ string from source bytes. Returns None if not found."""
+    for line in source.decode(errors="replace").splitlines():
+        if line.startswith("__version__"):
+            parts = line.split("=", 1)
+            if len(parts) == 2:
+                return parts[1].strip().strip('"\'')
+    return None
+
 def cmd_update():
     servette_path = os.path.abspath(__file__)
     stop = threading.Event()
@@ -1499,7 +1558,34 @@ def cmd_update():
         return
     stop.set(); t.join()
 
-    compile(new_source, "servette.py", "exec")  # raises SyntaxError if invalid
+    new_version = _parse_version(new_source)
+    if new_version is None:
+        print("  Update failed: could not read version from downloaded file.")
+        return
+
+    if new_version == __version__:
+        print(f"  Already up to date ({__version__}).")
+        return
+
+    # Gate on major version bump
+    try:
+        cur_major = int(__version__.split(".")[0])
+        new_major = int(new_version.split(".")[0])
+    except (ValueError, IndexError):
+        cur_major = new_major = 0
+
+    if new_major != cur_major:
+        print(f"  Major version change: {__version__} → {new_version}")
+        print("  This may include breaking changes. Review before upgrading.")
+        if not _prompt("Continue?"):
+            print("  Update cancelled.")
+            return
+
+    try:
+        compile(new_source, "servette.py", "exec")
+    except SyntaxError as e:
+        print(f"  Update failed: downloaded file has a syntax error: {e}")
+        return
 
     tmp_path = servette_path + ".new"
     with open(tmp_path, "wb") as f:
@@ -1507,7 +1593,8 @@ def cmd_update():
     os.chmod(tmp_path, os.stat(servette_path).st_mode)
     os.replace(tmp_path, servette_path)
 
-    print("  Updated. Restart to run the new version ('stop' then 'start', or 'sudo systemctl restart servette').")
+    print(f"  Updated {__version__} → {new_version}.")
+    print("  Restart to run the new version ('stop' then 'start', or 'sudo systemctl restart servette').")
 
 
 def cmd_log(n=20):
@@ -1603,7 +1690,7 @@ def cmd_status():
     W              = 8
 
     print()
-    print("● Running" if running else "○ Stopped")
+    print(f"● Running  (v{__version__})" if running else f"○ Stopped  (v{__version__})")
 
     if running:
         mode = "System service" if service_active else "Session only"

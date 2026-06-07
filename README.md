@@ -220,7 +220,7 @@ graph LR
 
 ### Design decisions
 
-**Running as root.** Binding to ports 80 and 443 requires root on Linux. The alternative — a dedicated system user with `CAP_NET_BIND_SERVICE` — requires creating an account, configuring file permissions, and managing certificate access. For a server with no database, no exec paths, and files served from memory, running as root is a deliberate and reasonable tradeoff.
+**Dedicated system user.** `enable` creates a `servette` system user with no login shell and no home directory. The service runs as that user with `AmbientCapabilities=CAP_NET_BIND_SERVICE`, which allows binding to ports 80 and 443 without root. Certificate files, the config file, and the ACME webroot are all chowned to `servette` at install time. `sudo` is still required to run the interactive shell, which writes the service file and calls `useradd`.
 
 **Hypercorn over a hand-rolled server.** The original Servette used Python's `BaseHTTPRequestHandler`. Hypercorn replaces it with HTTP/2, modern TLS defaults, and async concurrency — capabilities that would take significant code to implement correctly. The tradeoff is a dependency, which bootstrap manages invisibly.
 

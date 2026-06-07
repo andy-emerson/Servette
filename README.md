@@ -27,7 +27,6 @@ Servette does one thing well: it takes your static site folder and puts it on th
 |---|---|
 | HTTPS | Your site is encrypted end-to-end; browsers show the padlock |
 | HTTP/2 | Faster page loads with multiplexed requests |
-| HTTP/3 | Even faster loads over QUIC where supported |
 | Basic Auth | Optional username and password to restrict access |
 | Rate limiting | Stops bots from hammering the server and makes password guessing impractical |
 | Live reload | Edit any file and changes appear immediately — no restart required |
@@ -61,29 +60,29 @@ On first run, Servette automatically installs its dependencies into a private vi
 From your local machine, copy `servette.py` and your site folder to the server. If your server uses a password to log in:
 
 ```
-scp servette.py ubuntu@your.server.ip:~
-scp -r mysite/ ubuntu@your.server.ip:~
+scp servette.py user@your.server.ip:~
+scp -r mysite/ user@your.server.ip:~
 ```
 
 If your server uses a key file:
 
 ```
-scp -i your-key.pem servette.py ubuntu@your.server.ip:~
-scp -i your-key.pem -r mysite/ ubuntu@your.server.ip:~
+scp -i your-key.pem servette.py user@your.server.ip:~
+scp -i your-key.pem -r mysite/ user@your.server.ip:~
 ```
 
-Replace `ubuntu` with your server's username and `your.server.ip` with its IP address.
+Replace `user` with your server's username (`pi` on Raspberry Pi, `ubuntu` on Ubuntu, or whatever you set during setup) and `your.server.ip` with its IP address.
 
 ### 2. SSH into your server
 
 ```
-ssh ubuntu@your.server.ip
+ssh user@your.server.ip
 ```
 
 Or with a key file:
 
 ```
-ssh -i your-key.pem ubuntu@your.server.ip
+ssh -i your-key.pem user@your.server.ip
 ```
 
 ### 3. Run Servette
@@ -140,7 +139,7 @@ Any time you want to check on Servette or change a setting, SSH into your server
 To update your site files, copy the new version to your server:
 
 ```
-scp -r mysite/ ubuntu@your.server.ip:~
+scp -r mysite/ user@your.server.ip:~
 ```
 
 Changes appear immediately — no restart required.
@@ -148,7 +147,7 @@ Changes appear immediately — no restart required.
 To update Servette itself, copy the new `servette.py` and restart the service:
 
 ```
-scp servette.py ubuntu@your.server.ip:~
+scp servette.py user@your.server.ip:~
 sudo systemctl restart servette
 ```
 
@@ -201,17 +200,17 @@ graph LR
     SH -.-> LOG
 ```
 
-**Bootstrap** — on first run, installs dependencies (`hypercorn`, `cryptography`, `acme`, `josepy`, `aioquic`) into a private virtualenv and re-execs the process inside it. Subsequent runs skip straight to re-exec. The operator never touches pip.
+**Bootstrap** — on first run, installs dependencies (`hypercorn`, `cryptography`, `acme`, `josepy`) into a private virtualenv and re-execs the process inside it. Subsequent runs skip straight to re-exec. The operator never touches pip.
 
 **Config** — reads and writes `servette.json`. Settings take effect without a restart — the file's modification time is checked on every incoming request. Passwords are hashed with PBKDF2-HMAC-SHA256 at 260,000 iterations and never stored in plaintext. `servette.json` is written mode `0o600`.
 
-**Logging** — rotating log file (5 MB cap, 3 backups). In interactive mode, warnings and errors go to the terminal; info goes to the log file only. In service mode, systemd captures stdout directly so only one process writes to the log.
+**Logging** — in interactive mode, warnings and errors go to the terminal. In service mode, output goes to the systemd journal (`journalctl -u servette`), which handles rotation and retention automatically.
 
-**Rate Limiter** — two independent sliding-window limits per IP: total requests (default 30/min) and failed auth attempts (default 6/min). IPv6-mapped IPv4 addresses are normalized. `X-Forwarded-For` is trusted when present.
+**Rate Limiter** — two independent sliding-window limits per IP: total requests (default 30/min) and failed auth attempts (default 6/min). IPv6-mapped IPv4 addresses are normalized. `X-Forwarded-For` is trusted only when a `trusted_proxy` IP is configured.
 
 **File Cache** — files are read once, gzip-compressed, and held in memory keyed by path. Modification time is checked on each request so edits take effect immediately. ETags (SHA-256 of file contents) enable 304 Not Modified responses.
 
-**HTTPS App** — an ASGI coroutine (`https_app`) called by Hypercorn for every HTTPS request. Handles rate limiting → auth → path resolution → file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy).
+**HTTPS App** — an ASGI coroutine (`https_app`) called by Hypercorn for every HTTPS request. Handles rate limiting → auth → path resolution → file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy).
 
 **Redirect App** — an ASGI coroutine (`redirect_app`) on port 80. Serves Let's Encrypt ACME challenge tokens during certificate issuance; redirects everything else to HTTPS with 301.
 
@@ -229,7 +228,7 @@ graph LR
 
 **POST returns 405.** POST implies data going somewhere — a database, an email, a file on disk. Servette has no destination for POST data. If your site submits a form, the backend it posts to is outside Servette's scope.
 
-**CSP and Permissions-Policy not sent by default.** The correct values depend entirely on what your site loads. Hardcoding defaults that would break most sites is worse than sending nothing. Both headers are configurable via `config` → `csp` / `perms`.
+**CSP and Permissions-Policy not sent.** The correct values depend entirely on what your site loads. Hardcoding defaults that would break most sites is worse than sending nothing.
 
 ---
 

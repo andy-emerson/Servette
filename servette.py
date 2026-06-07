@@ -9,7 +9,7 @@ and essential security headers. Run it:
 Architecture:
     Bootstrap           — creates a virtualenv and installs Hypercorn on first run
     Config              — a Config object holds all settings and reads/writes servette.json
-    Logging             — rotating log file; unified with Hypercorn's access log
+    Logging             — terminal in interactive mode; systemd journal in service mode
     Rate Limiter        — in-memory per-IP request and auth-fail rate limiting
     ASGI Apps           — https_app and redirect_app handle all HTTP traffic via Hypercorn
     Server              — starts/stops Hypercorn in a background thread
@@ -23,22 +23,23 @@ import getpass
 import gzip
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
+import ssl
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
-from logging.handlers import RotatingFileHandler
 from urllib.parse import unquote
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BOOTSTRAP
 #
-# On first run, servette.py creates a virtualenv and installs Hypercorn into
+# On first run, servette.py creates a virtualenv and installs dependencies into
 # it, then re-execs itself inside that environment. The user just runs
 # `sudo python3 servette.py` — the environment is managed invisibly.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,7 +72,7 @@ def _bootstrap():
             print(f"  Error: failed to create virtual environment: {e}")
             sys.exit(1)
 
-        deps = ["hypercorn", "cryptography", "acme", "josepy", "aioquic"]
+        deps = ["hypercorn", "cryptography", "acme", "josepy"]
         result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
         if result.returncode != 0:
             print(f"  Error: failed to install dependencies")
@@ -130,7 +131,6 @@ class Config:
                 print(f"Fix or delete {self.CONFIG_FILE} and try again.")
                 sys.exit(1)
 
-        self.html_file       = data.get("html_file",       "")  # legacy, migrated on load
         self.serve_dir       = data.get("serve_dir",       data.get("html_file", ""))
         self.port            = data.get("port",            443)
         self.cert_file       = data.get("cert_file",       "cert.pem")
@@ -138,15 +138,11 @@ class Config:
         self.username        = data.get("username",        "")
         self.password_hash   = data.get("password_hash",   "")
         self.password_salt   = data.get("password_salt",   "")
-        self.log_file        = data.get("log_file",        "/var/log/servette.log")
         self.rate_limit      = data.get("rate_limit",      30)
         self.auth_rate_limit = data.get("auth_rate_limit", 6)
         self.cache_policy       = data.get("cache_policy",       "no-cache")
         self.cache_max_age      = data.get("cache_max_age",      3600)
         self.email              = data.get("email",              "")
-        self.csp                = data.get("csp",                "")
-        self.permissions_policy = data.get("permissions_policy", "")
-        self.log_format         = data.get("log_format",         "text")
         self.trusted_proxy      = data.get("trusted_proxy",      "")
         self.tls_min_version    = data.get("tls_min_version",    "1.2")
         self.ciphers            = data.get("ciphers",            "")
@@ -183,15 +179,11 @@ class Config:
             "username":        self.username,
             "password_hash":   self.password_hash,
             "password_salt":   self.password_salt,
-            "log_file":        self.log_file,
             "rate_limit":      self.rate_limit,
             "auth_rate_limit": self.auth_rate_limit,
             "cache_policy":       self.cache_policy,
             "cache_max_age":      self.cache_max_age,
             "email":              self.email,
-            "csp":                self.csp,
-            "permissions_policy": self.permissions_policy,
-            "log_format":         self.log_format,
             "trusted_proxy":      self.trusted_proxy,
             "tls_min_version":    self.tls_min_version,
             "ciphers":            self.ciphers,
@@ -211,49 +203,21 @@ config = Config()
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
 #
-# RotatingFileHandler caps log size at 5 MB and keeps 3 backups — important
-# on Pi SD cards where unbounded log growth is a real concern.
-# log_format = "json" emits one JSON object per line for log shippers / jq.
+# In service mode, logs go to systemd journal (StandardOutput=journal).
+# In interactive mode, warnings and errors go to the terminal.
 # ─────────────────────────────────────────────────────────────────────────────
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record):
-        entry = {
-            "time":    self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S"),
-            "level":   record.levelname,
-            "message": record.getMessage(),
-        }
-        for field in ("status", "path", "ip"):
-            if hasattr(record, field):
-                entry[field] = getattr(record, field)
-        if record.exc_info:
-            entry["exc"] = self.formatException(record.exc_info)
-        return json.dumps(entry)
-
 
 def setup_logging():
     root = logging.getLogger()
     root.handlers.clear()
     root.setLevel(logging.INFO)
 
-    use_json = getattr(config, "log_format", "text") == "json"
-    fmt = _JsonFormatter() if use_json else logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s")
+    fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s")
 
     stream = logging.StreamHandler()
     stream.setLevel(logging.INFO if "--serve" in sys.argv else logging.WARNING)
     stream.setFormatter(fmt)
     root.addHandler(stream)
-
-    if config.log_file and "--serve" not in sys.argv:
-        try:
-            fh = RotatingFileHandler(
-                config.log_file, maxBytes=5 * 1024 * 1024, backupCount=3
-            )
-            fh.setLevel(logging.INFO)
-            fh.setFormatter(fmt)
-            root.addHandler(fh)
-        except OSError:
-            pass
 
 
 log = logging.getLogger(__name__)
@@ -372,20 +336,19 @@ def _mime_type(path):
     return MIME_TYPES.get(ext, "application/octet-stream")
 
 def _resolve_request_path(url_path):
-    """Resolve a URL path to an absolute file path within serve_dir. Returns None on traversal."""
-    serve_dir = _resolve(config.serve_dir)
+    """Resolve a URL path to an absolute file path within serve_dir. Returns (None, 403) on traversal."""
+    serve_dir = os.path.realpath(_resolve(config.serve_dir))
     clean = unquote(url_path.split("?")[0])
-    # Normalize and join
     rel   = os.path.normpath(clean.lstrip("/"))
     if rel == ".":
         rel = ""
-    abs_path = os.path.normpath(os.path.join(serve_dir, rel)) if rel else serve_dir
-    # Path traversal check
+    abs_path = os.path.realpath(os.path.join(serve_dir, rel) if rel else serve_dir)
     if not abs_path.startswith(serve_dir + os.sep) and abs_path != serve_dir:
         return None, 403
-    # Directory → index.html
     if os.path.isdir(abs_path):
-        abs_path = os.path.join(abs_path, "index.html")
+        abs_path = os.path.realpath(os.path.join(abs_path, "index.html"))
+        if not abs_path.startswith(serve_dir + os.sep):
+            return None, 403
     if not os.path.isfile(abs_path):
         return None, 404
     return abs_path, 200
@@ -431,6 +394,7 @@ async def https_app(scope, receive, send):
     ip     = _normalize_ip(client[0] if client else "unknown")
     if config.trusted_proxy:
         xff = headers.get(b"x-forwarded-for", b"").decode()
+        # Proxy must overwrite (not append) inbound XFF — otherwise the leftmost value is client-controlled
         if xff and ip == config.trusted_proxy:
             ip = _normalize_ip(xff.split(",")[0].strip())
 
@@ -465,7 +429,7 @@ async def https_app(scope, receive, send):
                 parts          = decoded.split(":", 1)
                 submitted_user = parts[0]
                 pw             = parts[1] if len(parts) == 2 else ""
-                authed = (submitted_user == config.username and
+                authed = (hmac.compare_digest(submitted_user, config.username) and
                           _check_password(pw, config.password_hash, config.password_salt))
             except (ValueError, UnicodeDecodeError):
                 pass
@@ -554,18 +518,14 @@ async def https_app(scope, receive, send):
         (b"etag",                        etag.encode()),
         (b"cache-control",               _cache_control_header().encode()),
         (b"vary",                        b"Accept-Encoding"),
-        (b"strict-transport-security",   b"max-age=31536000; includeSubDomains"),
         (b"x-frame-options",             b"DENY"),
         (b"x-content-type-options",      b"nosniff"),
         (b"referrer-policy",             b"no-referrer"),
     ]
     if accepts_gzip:
         response_headers.append((b"content-encoding", b"gzip"))
-    if config.csp:
-        response_headers.append((b"content-security-policy", config.csp.encode()))
-    if config.permissions_policy:
-        response_headers.append((b"permissions-policy", config.permissions_policy.encode()))
-
+    if _cert_domain:
+        response_headers.append((b"strict-transport-security", b"max-age=31536000; includeSubDomains"))
     await _send_response(send, 200, response_headers, body=body if send_body else b"")
     log.info("200 %s to %s", url_path, ip)
 
@@ -632,6 +592,9 @@ _server_start_time    = None
 _shutdown_event       = threading.Event()
 _watchdog_thread      = None
 _last_renewal_attempt = 0.0
+_cert_domain          = None  # cached domain from active cert; None means self-signed
+
+_TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
 
 
 async def _serve_http_redirect(stop_event):
@@ -650,21 +613,18 @@ async def _serve_http_redirect(stop_event):
 
 
 async def _run_servers(stop_event):
-    import ssl as _ssl
     from hypercorn.config import Config as HypercornConfig
     from hypercorn.asyncio import serve as hypercorn_serve
 
     async def trigger():
         await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)
 
-    _tls_versions = {"1.2": _ssl.TLSVersion.TLSv1_2, "1.3": _ssl.TLSVersion.TLSv1_3}
-
     class _TLSConfig(HypercornConfig):
         def create_ssl_context(self):
             ctx = super().create_ssl_context()
             if ctx is None:
                 return ctx
-            ctx.minimum_version = _tls_versions.get(config.tls_min_version, _ssl.TLSVersion.TLSv1_2)
+            ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
             if config.ciphers:
                 ctx.set_ciphers(config.ciphers)
             return ctx
@@ -677,18 +637,6 @@ async def _run_servers(stop_event):
     https_cfg.certfile = cert_file
     https_cfg.keyfile  = key_file
     https_cfg.loglevel = "warning"
-    if config.log_file and config.log_format != "json":
-        # Skip Hypercorn's Apache-format accesslog when JSON is enabled —
-        # https_app logs requests itself in JSON via the standard logger.
-        https_cfg.accesslog = config.log_file
-
-    try:
-        import aioquic as _aioquic
-        https_cfg.quic_bind = [f"0.0.0.0:{config.port}"]
-        log.info("HTTP/3 enabled on port %d", config.port)
-    except ImportError:
-        log.warning("aioquic not installed; HTTP/3 disabled")
-
     async def run_https():
         try:
             await hypercorn_serve(https_app, https_cfg, shutdown_trigger=trigger)
@@ -719,7 +667,7 @@ def _server_running():
 
 def _cert_watchdog():
     """Auto-renew Let's Encrypt certs before expiry; detect externally-rotated certs."""
-    global _last_renewal_attempt
+    global _last_renewal_attempt, _cert_domain
     while _server_running():
         time.sleep(60)
         if not _server_running():
@@ -737,6 +685,7 @@ def _cert_watchdog():
                     _last_renewal_attempt = now
                     log.info("Certificate for %s expires in %d days — renewing", domain, days)
                     _run_acme(domain)
+                    _cert_domain = domain
                     # Update _cert_mtime so the mtime check below doesn't fire again
                     try:
                         config._cert_mtime = os.path.getmtime(_resolve(config.cert_file))
@@ -756,7 +705,7 @@ def _cert_watchdog():
 
 
 def start_server():
-    global _server_thread, _server_start_time, _watchdog_thread
+    global _server_thread, _server_start_time, _watchdog_thread, _cert_domain
 
     if _server_running():
         print("Server is already running.")
@@ -788,6 +737,7 @@ def start_server():
         _watchdog_thread = threading.Thread(target=_cert_watchdog, daemon=True)
         _watchdog_thread.start()
     _server_start_time = time.monotonic()
+    _cert_domain = _domain_from_cert(_resolve(config.cert_file))
     log.info("Server started on port %d", config.port)
     print(f"\nServing {config.serve_dir}/ at https://localhost:{config.port}\n")
 
@@ -847,9 +797,6 @@ CONFIG_HELP = """
     email     — email address
     limits    — rate limits
     cache     — browser cache policy
-    csp       — Content-Security-Policy header
-    perms     — Permissions-Policy header
-    logformat — log output format (text or json)
     proxy     — trusted proxy IP for X-Forwarded-For
     tls       — minimum TLS version and cipher suites
     show      — show current settings
@@ -899,9 +846,6 @@ def _config_show():
     print(f"  {'Rate limit':<22}  {config.rate_limit} req/min")
     print(f"  {'Auth rate limit':<22}  {config.auth_rate_limit} fails/min")
     print(f"  {'Cache policy':<22}  {cache_display}")
-    print(f"  {'CSP':<22}  {val(config.csp)}")
-    print(f"  {'Permissions-Policy':<22}  {val(config.permissions_policy)}")
-    print(f"  {'Log format':<22}  {config.log_format}")
     print(f"  {'Trusted proxy':<22}  {val(config.trusted_proxy)}")
     print(f"  {'TLS min version':<22}  {config.tls_min_version}")
     print(f"  {'Cipher suites':<22}  {config.ciphers or '(system default)'}")
@@ -961,12 +905,12 @@ def _config_cert():
     if domain:
         _run_acme(domain)
     else:
-        cert_path = _resolve("cert.pem")
-        key_path  = _resolve("key.pem")
+        cert_path = _resolve(config.cert_file or "cert.pem")
+        key_path  = _resolve(config.key_file or "key.pem")
         print("  Generating self-signed certificate...")
         _generate_self_signed_cert(cert_path, key_path)
-        config.cert_file = "cert.pem"
-        config.key_file  = "key.pem"
+        config.cert_file = config.cert_file or "cert.pem"
+        config.key_file  = config.key_file or "key.pem"
         config.save()
         print("  → self-signed certificate generated.")
         print("  Note: your browser will show a security warning until you add a domain.\n")
@@ -1070,49 +1014,6 @@ def _config_cache():
     print("  → saved")
 
 
-def _config_csp():
-    print(f"\n  Current: {config.csp or '(not set — header not sent)'}")
-    print("  Example: default-src 'self'; object-src 'none'")
-    print("  Leave blank to clear.\n")
-    new_value = input("  csp: ").strip()
-    if new_value == config.csp:
-        print("  → unchanged")
-        return
-    config.csp = new_value
-    config.save()
-    print("  → saved" if new_value else "  → cleared, header will not be sent")
-
-
-def _config_permissions_policy():
-    print(f"\n  Current: {config.permissions_policy or '(not set — header not sent)'}")
-    print("  Example: camera=(), microphone=(), geolocation=()")
-    print("  Leave blank to clear.\n")
-    new_value = input("  permissions_policy: ").strip()
-    if new_value == config.permissions_policy:
-        print("  → unchanged")
-        return
-    config.permissions_policy = new_value
-    config.save()
-    print("  → saved" if new_value else "  → cleared, header will not be sent")
-
-
-def _config_log_format():
-    current = config.log_format
-    print(f"\n  Current: {current}\n")
-    print("    text — human-readable timestamped lines (default)")
-    print("    json — structured JSON, one object per line\n")
-    choice = input("  log_format [text / json]: ").strip().lower()
-    if not choice:
-        print("  → unchanged")
-        return
-    if choice not in ("text", "json"):
-        print("  → invalid option, unchanged")
-        return
-    config.log_format = choice
-    config.save()
-    print("  → saved (takes effect on next server start)")
-
-
 def _config_trusted_proxy():
     current = config.trusted_proxy
     print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
@@ -1171,7 +1072,7 @@ def cmd_config():
 
         if cmd == "show":
             _config_show()
-        elif cmd in ("html", "dir", "directory"):
+        elif cmd in ("dir", "directory"):
             _config_dir()
         elif cmd == "port":
             _config_port()
@@ -1187,12 +1088,6 @@ def cmd_config():
             _config_limits()
         elif cmd == "cache":
             _config_cache()
-        elif cmd == "csp":
-            _config_csp()
-        elif cmd in ("perms", "permissions"):
-            _config_permissions_policy()
-        elif cmd in ("logformat", "log_format", "format"):
-            _config_log_format()
         elif cmd in ("proxy", "trusted_proxy"):
             _config_trusted_proxy()
         elif cmd == "tls":
@@ -1224,8 +1119,8 @@ ExecStart={python_path} {servette_path} --serve
 Restart=always
 RestartSec=3
 StandardInput=null
-StandardOutput=append:{config.log_file}
-StandardError=append:{config.log_file}
+StandardOutput=journal
+StandardError=journal
 LimitNOFILE=65536
 
 [Install]
@@ -1535,6 +1430,8 @@ def _run_acme(domain):
         config.cert_file = cert_path
         config.key_file  = key_path
         config.save()
+        global _cert_domain
+        _cert_domain = domain
 
         print(f"  Certificate issued for {domain}.")
         log.info("ACME certificate issued for %s", domain)
@@ -1561,16 +1458,15 @@ def _run_acme(domain):
 # ── Log, status, helpers ──────────────────────────────────────────────────────
 
 def cmd_log(n=20):
-    """Print the last n lines of the log file."""
-    if not config.log_file or not os.path.exists(config.log_file):
-        print("No log file found.")
-        return
     try:
-        with open(config.log_file, "r") as f:
-            lines = f.readlines()
-        print("".join(lines[-n:]), end="")
-    except OSError as e:
-        print(f"Could not read log: {e}")
+        result = subprocess.run(
+            ["journalctl", "-u", "servette", "-o", "cat", "-n", str(n), "--no-pager"],
+            capture_output=True, text=True
+        )
+        output = result.stdout or result.stderr
+        print(output, end="")
+    except FileNotFoundError:
+        print("journalctl not found. Is this a systemd system?")
 
 
 def _load_cert(cert_path):
@@ -1595,18 +1491,27 @@ def _domain_from_cert(cert_path):
     cert = _load_cert(cert_path)
     if cert is None:
         return None
+    def _is_real_domain(s):
+        if s in ("localhost", "servette"):
+            return False
+        try:
+            ipaddress.ip_address(s)
+            return False  # it's an IP, not a domain
+        except ValueError:
+            return bool(s)
+
     try:
         from cryptography import x509 as _x509
         san = cert.extensions.get_extension_for_class(_x509.SubjectAlternativeName)
         for name in san.value.get_values_for_type(_x509.DNSName):
-            if name not in ("localhost", "servette"):
+            if _is_real_domain(name):
                 return name
     except Exception:
         pass
     try:
         from cryptography.x509.oid import NameOID as _NameOID
         cn = cert.subject.get_attributes_for_oid(_NameOID.COMMON_NAME)
-        if cn and cn[0].value not in ("localhost", "servette"):
+        if cn and _is_real_domain(cn[0].value):
             return cn[0].value
     except Exception:
         pass
@@ -1702,7 +1607,6 @@ def cmd_status():
                 pass
             print(f"  {'PID':<{W}} {os.getpid()}")
 
-    print(f"  {'Log':<{W}} {config.log_file}")
     print()
 
 

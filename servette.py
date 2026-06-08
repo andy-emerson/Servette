@@ -1222,12 +1222,9 @@ def _run_acme(domain):
                 if t:
                     t.join()
 
-                managed_cert = os.path.normpath(cert_path)
-                current_cert = os.path.normpath(_resolve(config.cert_file)) if config.cert_file else None
-                if current_cert is None or current_cert == managed_cert:
-                    config.cert_file = cert_path
-                    config.key_file  = key_path
-                    config.save()
+                config.cert_file = cert_path
+                config.key_file  = key_path
+                config.save()
                 global _cert_domain
                 _cert_domain = domain
 

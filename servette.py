@@ -1137,123 +1137,157 @@ def _run_acme(domain):
         tmp_thread.start()
         time.sleep(0.5)
 
-    last_error = None
+    www_domain  = f"www.{domain}"
+    last_error  = None
+    include_www = True
 
-    for attempt in range(1, ACME_RETRIES + 1):
-        stop = threading.Event()
-        if sys.stdout.isatty():
-            if attempt == 1:
-                label = f"Requesting certificate for {domain}..."
+    while True:
+        names               = [domain, www_domain] if include_www else [domain]
+        www_dns_only_failure = False
+
+        for attempt in range(1, ACME_RETRIES + 1):
+            stop = threading.Event()
+            if sys.stdout.isatty():
+                if attempt == 1:
+                    label = f"Requesting certificate for {domain}..."
+                else:
+                    label = f"Retry {attempt - 1} of {ACME_RETRIES - 1}..."
+                t = threading.Thread(target=_spin, args=(label, stop), daemon=True)
+                t.start()
             else:
-                label = f"Retry {attempt - 1} of {ACME_RETRIES - 1}..."
-            t = threading.Thread(target=_spin, args=(label, stop), daemon=True)
-            t.start()
-        else:
-            t = None
+                t = None
 
-        token_paths = []
-        try:
-            net       = _acme_client.ClientNetwork(account_key, user_agent="servette/1.0")
-            directory = _messages.Directory.from_json(net.get(ACME_URL).json())
-            ac        = _acme_client.ClientV2(directory, net)
-
-            # Register account; if key is already registered, fetch the account
-            # to load its URL (kid) into the ClientNetwork — without this,
-            # all subsequent signed requests fail with "No Key ID in JWS header".
-            try:
-                ac.new_account(_messages.NewRegistration.from_data(
-                    email=config.email if config.email else None,
-                    terms_of_service_agreed=True
-                ))
-            except _acme_errors.ConflictError as e:
-                ac.query_registration(_messages.RegistrationResource(
-                    body=_messages.Registration(), uri=e.location
-                ))
-
-            www_domain  = f"www.{domain}"
-            domain_key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            domain_key_pem = domain_key.private_bytes(
-                _serialization.Encoding.PEM,
-                _serialization.PrivateFormat.TraditionalOpenSSL,
-                _serialization.NoEncryption()
-            )
-            csr_pem = (
-                _x509.CertificateSigningRequestBuilder()
-                .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
-                .add_extension(_x509.SubjectAlternativeName([
-                    _x509.DNSName(domain),
-                    _x509.DNSName(www_domain),
-                ]), critical=False)
-                .sign(domain_key, _hashes.SHA256())
-                .public_bytes(_serialization.Encoding.PEM)
-            )
-
-            # Order certificate and answer HTTP-01 challenges (one per name)
-            order = ac.new_order(csr_pem)
-            for authz in order.authorizations:
-                for challenge in authz.body.challenges:
-                    if isinstance(challenge.chall, _challenges.HTTP01):
-                        token    = challenge.chall.encode("token")
-                        key_auth = challenge.chall.key_authorization(account_key)
-                        path     = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
-                        with open(path, "w") as f:
-                            f.write(key_auth)
-                        token_paths.append(path)
-                        ac.answer_challenge(challenge, challenge.chall.response(account_key))
-                        break
-
-            finalized = ac.poll_and_finalize(order)
-
-            cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
-            key_path  = os.path.join(CERTS_DIR, "privkey.pem")
-
-            with open(cert_path, "w") as f:
-                f.write(finalized.fullchain_pem)
-            with open(key_path, "wb") as f:
-                f.write(domain_key_pem)
-            os.chmod(key_path, 0o600)
-            _chown_servette(CERTS_DIR)
-
-            stop.set()
-            if t:
-                t.join()
-
-            managed_cert = os.path.normpath(cert_path)
-            current_cert = os.path.normpath(_resolve(config.cert_file)) if config.cert_file else None
-            if current_cert is None or current_cert == managed_cert:
-                config.cert_file = cert_path
-                config.key_file  = key_path
-                config.save()
-            global _cert_domain
-            _cert_domain = domain
-
-            print(f"  Certificate issued for {domain} and {www_domain}.")
-            log.info("ACME certificate issued for %s and %s", domain, www_domain)
-
-            if _server_running() or _service_is_active():
-                print("  Reloading server...")
-                _reload_server()
-            last_error = None
-            break
-
-        except Exception as e:
-            import traceback as _tb
-            last_error = e
-            stop.set()
-            if t:
-                t.join()
-            for path in token_paths:
-                if os.path.exists(path):
-                    os.remove(path)
             token_paths = []
-            if attempt < ACME_RETRIES:
-                delay = 5 * attempt
-                log.warning("ACME attempt %d/%d failed for %s: %s\n%s — retrying in %ds", attempt, ACME_RETRIES, domain, e, _tb.format_exc(), delay)
-                time.sleep(delay)
-        finally:
-            for path in token_paths:
-                if os.path.exists(path):
-                    os.remove(path)
+            try:
+                net       = _acme_client.ClientNetwork(account_key, user_agent="servette/1.0")
+                directory = _messages.Directory.from_json(net.get(ACME_URL).json())
+                ac        = _acme_client.ClientV2(directory, net)
+
+                # Register account; if key is already registered, fetch the account
+                # to load its URL (kid) into the ClientNetwork — without this,
+                # all subsequent signed requests fail with "No Key ID in JWS header".
+                try:
+                    ac.new_account(_messages.NewRegistration.from_data(
+                        email=config.email if config.email else None,
+                        terms_of_service_agreed=True
+                    ))
+                except _acme_errors.ConflictError as e:
+                    ac.query_registration(_messages.RegistrationResource(
+                        body=_messages.Registration(), uri=e.location
+                    ))
+
+                domain_key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                domain_key_pem = domain_key.private_bytes(
+                    _serialization.Encoding.PEM,
+                    _serialization.PrivateFormat.TraditionalOpenSSL,
+                    _serialization.NoEncryption()
+                )
+                csr_pem = (
+                    _x509.CertificateSigningRequestBuilder()
+                    .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
+                    .add_extension(_x509.SubjectAlternativeName([
+                        _x509.DNSName(n) for n in names
+                    ]), critical=False)
+                    .sign(domain_key, _hashes.SHA256())
+                    .public_bytes(_serialization.Encoding.PEM)
+                )
+
+                # Order certificate and answer HTTP-01 challenges (one per name)
+                order = ac.new_order(csr_pem)
+                for authz in order.authorizations:
+                    for challenge in authz.body.challenges:
+                        if isinstance(challenge.chall, _challenges.HTTP01):
+                            token    = challenge.chall.encode("token")
+                            key_auth = challenge.chall.key_authorization(account_key)
+                            path     = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
+                            with open(path, "w") as f:
+                                f.write(key_auth)
+                            token_paths.append(path)
+                            ac.answer_challenge(challenge, challenge.chall.response(account_key))
+                            break
+
+                finalized = ac.poll_and_finalize(order)
+
+                cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
+                key_path  = os.path.join(CERTS_DIR, "privkey.pem")
+
+                with open(cert_path, "w") as f:
+                    f.write(finalized.fullchain_pem)
+                with open(key_path, "wb") as f:
+                    f.write(domain_key_pem)
+                os.chmod(key_path, 0o600)
+                _chown_servette(CERTS_DIR)
+
+                stop.set()
+                if t:
+                    t.join()
+
+                managed_cert = os.path.normpath(cert_path)
+                current_cert = os.path.normpath(_resolve(config.cert_file)) if config.cert_file else None
+                if current_cert is None or current_cert == managed_cert:
+                    config.cert_file = cert_path
+                    config.key_file  = key_path
+                    config.save()
+                global _cert_domain
+                _cert_domain = domain
+
+                issued_names = f"{domain} and {www_domain}" if include_www else domain
+                print(f"  Certificate issued for {issued_names}.")
+                log.info("ACME certificate issued for %s", issued_names)
+
+                if _server_running() or _service_is_active():
+                    print("  Reloading server...")
+                    _reload_server()
+                last_error = None
+                break
+
+            except _acme_errors.ValidationError as e:
+                last_error = e
+                stop.set()
+                if t:
+                    t.join()
+                for path in token_paths:
+                    if os.path.exists(path):
+                        os.remove(path)
+                token_paths = []
+                if include_www:
+                    failed_domains = {a.body.identifier.value for a in e.failed_authzrs}
+                    if failed_domains == {www_domain}:
+                        www_dns_only_failure = True
+                        break  # don't retry; fall back to bare domain
+                if attempt < ACME_RETRIES:
+                    delay = 5 * attempt
+                    log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
+                    time.sleep(delay)
+
+            except Exception as e:
+                last_error = e
+                stop.set()
+                if t:
+                    t.join()
+                for path in token_paths:
+                    if os.path.exists(path):
+                        os.remove(path)
+                token_paths = []
+                if attempt < ACME_RETRIES:
+                    delay = 5 * attempt
+                    log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
+                    time.sleep(delay)
+            finally:
+                for path in token_paths:
+                    if os.path.exists(path):
+                        os.remove(path)
+
+        if last_error is None:
+            break  # success
+
+        if www_dns_only_failure:
+            include_www = False
+            print(f"\n  Note: {www_domain} has no DNS record — certificate issued for {domain} only.")
+            print(f"  To add www support later, point {www_domain} to this server and run 'config cert'.\n")
+            continue
+
+        break  # real failure
 
     if last_error:
         print(f"  Error getting certificate: {last_error}")

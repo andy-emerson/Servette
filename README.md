@@ -14,7 +14,7 @@ Most ways to host a static site ask you to choose between simplicity and control
 
 Servette is the middle option: your own server, with the simplicity of a platform. It serves anything that runs in a browser, from a simple portfolio to a serious client-side application. The decrease in complexity is not a decrease in capability — within its domain, nothing is missing.
 
-The closest alternative is Caddy, which handles HTTPS and Let's Encrypt with a famously simple config syntax. But Caddy's core is ~73,000 lines of Go; Servette is under 2,000 lines of Python. For serving a static site, they cover the same ground. Caddy's additional bulk comes from features like reverse proxying, load balancing, and a live config API that a Pi-hosted static site doesn't need. That size difference matters: if something goes wrong, Servette is readily debuggable where Caddy is effectively a black box, and on more constrained hardware like a Raspberry Pi, a smaller footprint has real advantages.
+The closest alternative is Caddy, which handles HTTPS and Let's Encrypt with a famously simple config syntax. But Caddy's core is ~73,000 lines of Go; Servette is around 2,000 lines of Python. For serving a static site, they cover the same ground. Caddy's additional bulk comes from features like reverse proxying, load balancing, and a live config API that a Pi-hosted static site doesn't need. That size difference matters: if something goes wrong, Servette is readily debuggable where Caddy is effectively a black box, and on more constrained hardware like a Raspberry Pi, a smaller footprint has real advantages.
 
 ---
 
@@ -24,7 +24,7 @@ The closest alternative is Caddy, which handles HTTPS and Let's Encrypt with a f
 
 **Raspberry Pi users.** Servette was designed with the Pi in mind. If you can SSH in and run a Python script, you can have a real HTTPS site running on your Pi in under ten minutes, with a trusted certificate, automatic renewal, and a server that survives reboots.
 
-**Developers who want to understand what they're running.** Servette is under 2,000 lines of Python with no hidden magic. It is a working server, not a toy example, and it is readable in an afternoon.
+**Developers who want to understand what they're running.** Servette is around 2,000 lines of Python with no hidden magic. It is a working server, not a toy example, and it is readable in an afternoon.
 
 ---
 
@@ -146,8 +146,8 @@ Servette is a single file (~2,000 lines) divided into three sections with clear 
 | Section | Lines | Responsibility |
 |---|---|---|
 | **Server** | ~600 | Handles every incoming request: config, rate limiting, file cache, and the two ASGI apps |
-| **System** | ~750 | Manages the environment: bootstrap, server lifecycle, certificates, and systemd integration |
-| **Shell** | ~700 | The interactive terminal interface |
+| **System** | ~800 | Manages the environment: bootstrap, server lifecycle, certificates, and systemd integration |
+| **Shell** | ~650 | The interactive terminal interface |
 
 ```mermaid
 graph LR

@@ -12,7 +12,7 @@ Architecture:
     Shell               — the interactive terminal interface
 """
 
-__version__ = "0.26.157"
+__version__ = "0.26.159"
 
 import asyncio
 import base64

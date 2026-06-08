@@ -648,7 +648,7 @@ def _bootstrap():
             print(f"  Error: failed to create virtual environment: {e}")
             sys.exit(1)
 
-        deps = ["hypercorn", "cryptography", "acme", "josepy"]
+        deps = ["hypercorn>=0.17", "cryptography>=41.0", "acme>=2.0", "josepy>=1.10"]
         result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
         if result.returncode != 0:
             print(f"  Error: failed to install dependencies")

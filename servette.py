@@ -108,7 +108,7 @@ class Config:
         self.username        = data.get("username",        "")
         self.password_hash   = data.get("password_hash",   "")
         self.password_salt   = data.get("password_salt",   "")
-        self.rate_limit      = data.get("rate_limit",      30)
+        self.rate_limit      = data.get("rate_limit",      120)
         self.auth_rate_limit = data.get("auth_rate_limit", 6)
         self.cache_policy       = data.get("cache_policy",       "no-cache")
         self.cache_max_age      = data.get("cache_max_age",      3600)

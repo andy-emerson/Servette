@@ -207,7 +207,7 @@ graph LR
 
 **Logging:** in interactive mode, warnings and errors go to the terminal. In service mode, output goes to the systemd journal (`journalctl -u servette`), which handles rotation and retention automatically.
 
-**Rate Limiter:** two independent sliding-window limits per IP: total requests (default 30/min) and failed auth attempts (default 6/min). IPv6-mapped IPv4 addresses are normalized. `X-Forwarded-For` is trusted only when a `trusted_proxy` IP is configured. A background sweep thread evicts stale entries every 30 seconds.
+**Rate Limiter:** two independent sliding-window limits per IP: total requests (default 120/min) and failed auth attempts (default 6/min). IPv6-mapped IPv4 addresses are normalized. `X-Forwarded-For` is trusted only when a `trusted_proxy` IP is configured. A background sweep thread evicts stale entries every 30 seconds.
 
 > **Proxy note:** Servette supports a single trusted proxy hop. It reads the rightmost value in `X-Forwarded-For`, which is what that proxy appended — correctly handling both overwrite-style proxies (single value) and append-style proxies like Cloudflare (client IP is the rightmost entry). Multi-hop proxy chains are not supported: if more than one proxy appends to `X-Forwarded-For`, the rightmost value will be an intermediate proxy IP, not the client.
 

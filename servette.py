@@ -12,7 +12,7 @@ Architecture:
     Shell               — the interactive terminal interface
 """
 
-__version__ = "0.26.159"
+__version__ = "0.26.161"
 
 import asyncio
 import base64
@@ -539,6 +539,8 @@ async def https_app(scope, receive, send):
         (b"x-frame-options",             b"DENY"),
         (b"x-content-type-options",      b"nosniff"),
         (b"referrer-policy",             b"no-referrer"),
+        (b"cross-origin-opener-policy",  b"same-origin"),
+        (b"cross-origin-embedder-policy", b"credentialless"),
     ]
     if config.csp:
         response_headers.append((b"content-security-policy", config.csp.encode()))

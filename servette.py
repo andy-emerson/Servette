@@ -12,7 +12,7 @@ Architecture:
     Shell               — the interactive terminal interface
 """
 
-__version__ = "0.26.161"
+__version__ = "0.26.176"
 
 import asyncio
 import base64
@@ -539,8 +539,6 @@ async def https_app(scope, receive, send):
         (b"x-frame-options",             b"DENY"),
         (b"x-content-type-options",      b"nosniff"),
         (b"referrer-policy",             b"no-referrer"),
-        (b"cross-origin-opener-policy",  b"same-origin"),
-        (b"cross-origin-embedder-policy", b"credentialless"),
     ]
     if config.csp:
         response_headers.append((b"content-security-policy", config.csp.encode()))
@@ -650,7 +648,7 @@ def _bootstrap():
             print(f"  Error: failed to create virtual environment: {e}")
             sys.exit(1)
 
-        deps = ["hypercorn>=0.17", "cryptography>=41.0", "acme>=2.0", "josepy>=1.10"]
+        deps = ["hypercorn>=0.17,<1.0", "cryptography>=41.0,<50.0", "acme>=2.0,<6.0", "josepy>=1.10,<3.0"]
         result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
         if result.returncode != 0:
             print(f"  Error: failed to install dependencies")

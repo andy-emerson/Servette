@@ -470,8 +470,11 @@ async def https_app(scope, receive, send):
                 parts          = decoded.split(":", 1)
                 submitted_user = parts[0]
                 pw             = parts[1] if len(parts) == 2 else ""
-                authed = (hmac.compare_digest(submitted_user, config.username) and
-                          _check_password(pw, config.password_hash, config.password_salt))
+                # Evaluate both before combining so the password hash always runs, even
+                # when the username is wrong — no early-out timing signal for usernames.
+                user_ok = hmac.compare_digest(submitted_user, config.username)
+                pass_ok = _check_password(pw, config.password_hash, config.password_salt)
+                authed  = user_ok and pass_ok
             except (ValueError, UnicodeDecodeError):
                 pass
 

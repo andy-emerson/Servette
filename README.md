@@ -50,7 +50,7 @@ The closest alternative is Caddy, which handles HTTPS and Let's Encrypt with a f
 
 **Python 3.11 or higher.** Pre-installed on most current Linux servers. Raspberry Pi OS Bookworm (the current release) satisfies both the OS and Python requirements on a Raspberry Pi 4.
 
-**A folder with your site files.** Servette looks for `index.html` at the root and in any subdirectory. If you don't have a site yet, use the `demo/` folder from this repository to verify everything is working first.
+**A folder with your site files.** Servette serves the `site/` folder, which ships with a placeholder demo page so a fresh copy runs immediately — useful for confirming everything works before you have a site of your own. Replace it with your own files when you're ready; Servette looks for `index.html` at the root and in any subdirectory.
 
 **A domain name.** Required for a trusted certificate and recommended for any public-facing site. Without one, Servette can use a self-signed certificate, but visitors' browsers will warn them before they can access your site. Self-signed is fine for a private home network or local testing.
 
@@ -71,7 +71,7 @@ scp -r mysite/ user@your.server.ip:~/site
 
 Replace `user` with your server's login name (`ubuntu` on Ubuntu, `pi` on Raspberry Pi) and `your.server.ip` with its IP address. If your server uses a key file, add `-i your-key.pem` before the filenames.
 
-Servette serves the `site/` folder next to `servette.py`. Copy your files there and it will find them.
+Servette serves the `site/` folder next to `servette.py`. It ships with a placeholder demo page — replace its contents with your own files and Servette will find them.
 
 ### 2. SSH into your server
 

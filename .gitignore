@@ -1,8 +1,5 @@
-CLAUDE.md
-TODO.md
-
 # Runtime config — contains password hashes and cert paths
-servette.json
+servette.toml
 
 # SSL certificate, key, and release signature files
 *.pem

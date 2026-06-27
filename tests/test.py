@@ -377,6 +377,18 @@ def run_server_tests(s, serve_dir):
     check("Permissions-Policy does not deny payment",
           "payment" not in resp.headers.get("Permissions-Policy", ""))
 
+    # Security headers must be on every response, not only 200s.
+    resp404 = req("GET", path="/nonexistent.html")
+    check("X-Frame-Options on 404",
+          resp404.headers.get("X-Frame-Options") == "DENY")
+    check("X-Content-Type-Options on 404",
+          resp404.headers.get("X-Content-Type-Options") == "nosniff")
+    check("Content-Security-Policy on 404",
+          resp404.headers.get("Content-Security-Policy") is not None)
+    resp405 = req("POST")
+    check("X-Frame-Options on 405",
+          resp405.headers.get("X-Frame-Options") == "DENY")
+
     section("Method handling")
 
     check("POST returns 405",   req("POST").status   == 405)

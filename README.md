@@ -2,6 +2,8 @@
 ### The Simple, Secure Static-Site Server
 
 [![Tests](https://github.com/andy-emerson/servette/actions/workflows/test.yml/badge.svg)](https://github.com/andy-emerson/servette/actions/workflows/test.yml)
+[![CodeQL](https://github.com/andy-emerson/servette/actions/workflows/codeql.yml/badge.svg)](https://github.com/andy-emerson/servette/actions/workflows/codeql.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 
 ---
 
@@ -139,112 +141,8 @@ If you have a password set, `servette.toml` contains its hash. Sharing the file 
 
 ---
 
-## How it works
+## How it's built
 
-Servette is a single file (~2,000 lines) divided into three sections with clear boundaries — Server, System, and Shell — each of which is readable on its own.
+Servette is a single file — `servette.py`, around 2,000 lines in three clear sections (Server, System, and Shell) — readable in an afternoon. There is no hidden machinery and no framework to learn: if something ever goes wrong, you can open the file and follow it top to bottom. The full architecture, the design rationale, and the things Servette deliberately *doesn't* do are documented in [design.md](design.md).
 
-| Section | Lines | Responsibility |
-|---|---|---|
-| **Server** | ~600 | Handles every incoming request: config, rate limiting, file cache, and the two ASGI apps |
-| **System** | ~800 | Manages the environment: bootstrap, server lifecycle, certificates, and systemd integration |
-| **Shell** | ~650 | The interactive terminal interface |
-
-```mermaid
-graph LR
-    EP[Entry Point]
-
-    subgraph SERVER
-        CFG[Config]
-        LOG[Logging]
-        RL[Rate Limiter]
-        FC[File Cache]
-        HTTPS[HTTPS App]
-        HTTP[Redirect App]
-    end
-
-    subgraph SYSTEM
-        BS[Bootstrap]
-        SRV[Server Lifecycle]
-        ASG[ASGI Runner]
-        CW[Cert Watchdog]
-        ACME[ACME]
-        SD[systemd]
-    end
-
-    SH[Shell]
-
-    CFG -.-> HTTPS
-    CFG -.-> HTTP
-    CFG -.-> SRV
-    CFG -.-> SH
-
-    EP --> BS
-    BS -->|--serve| SRV
-    BS -->|interactive| SH
-
-    SH --> SRV
-    SH --> SD
-
-    SRV --> ASG
-    SRV --> CW
-    ASG --> HTTPS
-    ASG --> HTTP
-
-    CW --> ACME
-
-    HTTPS --> RL
-    HTTPS --> FC
-
-    HTTPS -.-> LOG
-    HTTP -.-> LOG
-    SRV -.-> LOG
-    SH -.-> LOG
-```
-
-### Server
-
-**Config:** reads and writes `servette.toml`. Settings take effect without a restart; the file's modification time is checked on every incoming request. Passwords are hashed with PBKDF2-HMAC-SHA256 at 260,000 iterations and never stored in plaintext. `servette.toml` is written mode `0o600`.
-
-**Logging:** in interactive mode, warnings and errors go to the terminal. In service mode, output goes to the systemd journal (`journalctl -u servette`), which handles rotation and retention automatically.
-
-**Rate Limiter:** two independent sliding-window limits per IP: total requests (default 120/min) and failed auth attempts (default 6/min). IPv6-mapped IPv4 addresses are normalized. `X-Forwarded-For` is trusted only when a `trusted_proxy` IP is configured. A background sweep thread evicts stale entries every 30 seconds.
-
-> **Proxy note:** Servette supports a single trusted proxy hop. It reads the rightmost value in `X-Forwarded-For`, which is what that proxy appended — correctly handling both overwrite-style proxies (single value) and append-style proxies like Cloudflare (client IP is the rightmost entry). Multi-hop proxy chains are not supported: if more than one proxy appends to `X-Forwarded-For`, the rightmost value will be an intermediate proxy IP, not the client.
-
-**File Cache:** files are read once, gzip-compressed, and held in memory keyed by path. Modification time is checked on each request so edits take effect immediately. ETags (SHA-256 of file contents) enable 304 Not Modified responses.
-
-**HTTPS App:** an ASGI coroutine called for every HTTPS request. Handles rate limiting, auth, path resolution, and file serving. Enforces path traversal protection (403), serves a custom `404.html` if present, infers MIME types from file extensions, and sends security headers on every response (HSTS when a domain cert is active, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, Permissions-Policy).
-
-**Redirect App:** an ASGI coroutine on port 80. Serves Let's Encrypt ACME challenge tokens during certificate issuance; redirects everything else to HTTPS with 301.
-
-### System
-
-**Bootstrap:** every invocation from the system Python re-execs the process into the managed virtualenv. On first run (or if the venv is missing), it creates the venv and installs dependencies (`hypercorn`, `cryptography`, `acme`, `josepy`) first. When running as a systemd service, the venv Python is invoked directly and bootstrap is bypassed entirely. The operator never touches pip.
-
-**Server Lifecycle:** starts the ASGI runner (Hypercorn) in a background daemon thread with its own asyncio event loop. A `threading.Event` signals graceful shutdown. Exposes `start_server` and `stop_server` to the shell and the entry point.
-
-**Cert Watchdog:** a daemon thread that polls every 60 seconds. For Let's Encrypt certs, triggers ACME renewal when fewer than 30 days remain (retrying up to 3 times with backoff). For externally managed certs, detects file changes by mtime and restarts to pick up the new cert.
-
-**ACME:** issues and renews Let's Encrypt certificates via the HTTP-01 challenge. Temporarily starts the redirect app on port 80 if the main server isn't running, then tears it down when issuance completes.
-
-**Service Management:** creates a `servette` system user, writes a systemd unit file, and delegates start/stop to `systemctl` when a service is installed.
-
-### Shell
-
-The interactive REPL. Dispatches user commands to Server and System functions. Contains only UI logic — prompts, progress spinners, and formatted output. The only layer that can write to Config interactively.
-
-### Design decisions
-
-**Dedicated system user.** `enable` creates a `servette` system user with no login shell and no home directory. The service runs as that user with `AmbientCapabilities=CAP_NET_BIND_SERVICE`, which allows binding to ports 80 and 443 without running as root. `sudo` is required to run the interactive shell, which writes the service file and calls `useradd`.
-
-**Hypercorn over a hand-rolled server.** Hypercorn provides HTTP/2, modern TLS defaults, and async concurrency. These would take significant code to implement correctly. The tradeoff is a dependency, which bootstrap manages invisibly.
-
-**Managed virtualenv over system packages.** A private virtualenv in `.servette-env/` is isolated, reproducible, and invisible to the rest of the system. The operator never interacts with it.
-
-**POST returns 405.** POST implies data going somewhere: a database, an email, a file on disk. Servette has no destination for POST data. If your site submits a form, the backend it posts to is outside Servette's scope.
-
-**CSP default: block what static sites never need.** A `Content-Security-Policy` header is sent on every response. The default blocks plugins (`object-src 'none'`), `eval()`, and plain HTTP external resources, while allowing own-origin resources, HTTPS externals, inline styles and scripts, and data URIs — things static sites might need. Use `config > csp` to tighten or replace it for your specific site. Set it to blank to disable the header entirely.
-
-**Permissions-Policy default: deny hardware APIs static sites never need.** A `Permissions-Policy` header is sent on every response denying camera, microphone, USB, MIDI, and serial port access — browser APIs that require either a backend or specialized hardware, and that no static site would use by accident. APIs a static site might legitimately use (geolocation, fullscreen, payment) are left at their browser defaults. Use `config > perms` to adjust. Set it to blank to disable the header entirely.
-
-**No SPA deep-link rewriting.** Servette serves files as-is. A request for `/about` looks for a file at that path and returns 404 if it doesn't exist. Single-page applications that rely on client-side routing (React Router, Vue Router, etc.) need a server that rewrites all paths to `index.html` — Servette doesn't do this. If your site is a SPA, either use hash-based routing (`/#/about`) or serve it from a platform that supports rewrite rules.
+**Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests — it has nowhere to put submitted data — and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, see [Scope & non-goals](design.md#scope--non-goals).

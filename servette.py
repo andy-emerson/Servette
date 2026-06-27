@@ -281,11 +281,26 @@ _file_cache       = collections.OrderedDict()
 _file_cache_lock  = threading.Lock()
 _file_cache_bytes = 0
 
+# Text-like types worth gzipping. Already-compressed formats (images, woff/woff2,
+# pdf, video, archives) gain nothing, so they're served and stored uncompressed.
+_COMPRESSIBLE_EXTS = {
+    ".html", ".css", ".js", ".json", ".svg", ".txt", ".xml", ".webmanifest", ".ttf",
+}
+
+
+def _entry_bytes(entry):
+    return len(entry["raw"]) + (len(entry["compressed"]) if entry["compressed"] else 0)
+
 
 def _get_cached_file(path):
-    """Return (raw_bytes, compressed_bytes, etag), reloading only if the file changed."""
+    """Return (raw, compressed_or_None, etag), reloading only if the file changed.
+
+    compressed is None for already-compressed types; a file larger than half the
+    cache is served but not stored, so one big file can't thrash everything else.
+    """
     try:
         mtime = os.path.getmtime(path)
+        size  = os.path.getsize(path)
     except OSError:
         return None, None, None
 
@@ -303,21 +318,26 @@ def _get_cached_file(path):
     except OSError:
         return None, None, None
 
-    compressed = gzip.compress(raw, compresslevel=6)
+    ext        = os.path.splitext(path)[1].lower()
+    compressed = gzip.compress(raw, compresslevel=6) if ext in _COMPRESSIBLE_EXTS else None
     etag       = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
+
+    cache_max = config.cache_size_mb * 1024 * 1024
+    if size > cache_max // 2:
+        return raw, compressed, etag  # too big to cache without thrashing — serve, don't store
+
     with _file_cache_lock:
         global _file_cache_bytes
         old = _file_cache.pop(path, None)
         if old:
-            _file_cache_bytes -= len(old["raw"]) + len(old["compressed"])
+            _file_cache_bytes -= _entry_bytes(old)
         _file_cache[path] = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
-        _file_cache_bytes += len(raw) + len(compressed)
-        cache_max = config.cache_size_mb * 1024 * 1024
+        _file_cache_bytes += _entry_bytes(_file_cache[path])
         if _file_cache_bytes > cache_max:
             log.warning("File cache full (%d MB) — evicting oldest entries", config.cache_size_mb)
         while _file_cache_bytes > cache_max and _file_cache:
             _, evicted = _file_cache.popitem(last=False)
-            _file_cache_bytes -= len(evicted["raw"]) + len(evicted["compressed"])
+            _file_cache_bytes -= _entry_bytes(evicted)
 
     return raw, compressed, etag
 
@@ -552,9 +572,9 @@ async def https_app(scope, receive, send):
 
     # Serve
     accept_encoding = headers.get(b"accept-encoding", b"").decode()
-    accepts_gzip    = "gzip" in accept_encoding
+    use_gzip        = compressed is not None and "gzip" in accept_encoding
     mime            = _mime_type(file_path)
-    body            = compressed if accepts_gzip else raw
+    body            = compressed if use_gzip else raw
 
     response_headers = [
         (b"content-type",   mime.encode()),
@@ -563,7 +583,7 @@ async def https_app(scope, receive, send):
         (b"cache-control",  _cache_control_header().encode()),
         (b"vary",           b"Accept-Encoding"),
     ]
-    if accepts_gzip:
+    if use_gzip:
         response_headers.append((b"content-encoding", b"gzip"))
     # Security headers (and HSTS) are added to every response by the send wrapper above.
     await _send_response(send, 200, response_headers, body=body if send_body else b"")

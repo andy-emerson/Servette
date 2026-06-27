@@ -36,12 +36,14 @@ TEST_SUB_HTML = "<!DOCTYPE html><html><body><p>subpage</p></body></html>"
 
 # Used for regular requests — advertises HTTP/1.1 only so urllib can read responses
 SSL_CTX = ssl.create_default_context()
+SSL_CTX.minimum_version = ssl.TLSVersion.TLSv1_2
 SSL_CTX.check_hostname = False
 SSL_CTX.verify_mode    = ssl.CERT_NONE
 SSL_CTX.set_alpn_protocols(["http/1.1"])
 
 # Used only for the ALPN negotiation check — advertises h2 to confirm HTTP/2 support
 SSL_CTX_H2 = ssl.create_default_context()
+SSL_CTX_H2.minimum_version = ssl.TLSVersion.TLSv1_2
 SSL_CTX_H2.check_hostname = False
 SSL_CTX_H2.verify_mode    = ssl.CERT_NONE
 SSL_CTX_H2.set_alpn_protocols(["h2", "http/1.1"])

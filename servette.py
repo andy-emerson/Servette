@@ -295,12 +295,11 @@ def _entry_bytes(entry):
 def _get_cached_file(path):
     """Return (raw, compressed_or_None, etag), reloading only if the file changed.
 
-    compressed is None for already-compressed types; a file larger than half the
-    cache is served but not stored, so one big file can't thrash everything else.
+    compressed is None for already-compressed types; a file too large to fit in
+    the cache is served but not stored, so it can't purge everything else.
     """
     try:
         mtime = os.path.getmtime(path)
-        size  = os.path.getsize(path)
     except OSError:
         return None, None, None
 
@@ -321,18 +320,19 @@ def _get_cached_file(path):
     ext        = os.path.splitext(path)[1].lower()
     compressed = gzip.compress(raw, compresslevel=6) if ext in _COMPRESSIBLE_EXTS else None
     etag       = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
+    new_entry  = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
 
     cache_max = config.cache_size_mb * 1024 * 1024
-    if size > cache_max // 2:
-        return raw, compressed, etag  # too big to cache without thrashing — serve, don't store
+    if _entry_bytes(new_entry) > cache_max:
+        return raw, compressed, etag  # can't fit — serve without caching, so it won't purge the cache
 
     with _file_cache_lock:
         global _file_cache_bytes
         old = _file_cache.pop(path, None)
         if old:
             _file_cache_bytes -= _entry_bytes(old)
-        _file_cache[path] = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
-        _file_cache_bytes += _entry_bytes(_file_cache[path])
+        _file_cache[path] = new_entry
+        _file_cache_bytes += _entry_bytes(new_entry)
         if _file_cache_bytes > cache_max:
             log.warning("File cache full (%d MB) — evicting oldest entries", config.cache_size_mb)
         while _file_cache_bytes > cache_max and _file_cache:
@@ -874,6 +874,8 @@ def start_server():
 
     for issue in _production_issues():
         print(f"  ⚠ {issue}")
+    for warning in _cache_warnings():
+        print(f"  ⚠ {warning}")
 
 
 def stop_server():
@@ -1889,6 +1891,34 @@ def _production_issues():
     return issues
 
 
+def _cache_warnings():
+    """Warn when the site, or any single file, is too big for the in-memory cache."""
+    warnings   = []
+    serve_dir  = _resolve(config.serve_dir)
+    if not os.path.isdir(serve_dir):
+        return warnings
+    cache_max = config.cache_size_mb * 1024 * 1024
+    total     = 0
+    for root, _dirs, files in os.walk(serve_dir):
+        for name in files:
+            try:
+                size = os.path.getsize(os.path.join(root, name))
+            except OSError:
+                continue
+            total += size
+            if size > cache_max:
+                warnings.append(
+                    f"{name} ({size / 1048576:.1f} MB) is larger than the cache "
+                    f"({config.cache_size_mb} MB) and is never cached"
+                )
+    if total > cache_max:
+        warnings.append(
+            f"site is {total / 1048576:.1f} MB but the cache is {config.cache_size_mb} MB "
+            f"— not all of it stays cached at once"
+        )
+    return warnings
+
+
 def cmd_status():
     service_active = _service_is_active()
     running        = service_active or _server_running()
@@ -1913,7 +1943,7 @@ def cmd_status():
         cert_str = "expired" if days <= 0 else f"{days} days remaining"
         print(f"  {'Cert':<{W}} {cert_str}")
 
-    issues = _production_issues()
+    issues = _production_issues() + _cache_warnings()
     if issues:
         print()
         for issue in issues:

@@ -311,7 +311,7 @@ def run_server_tests(s, serve_dir):
     check("No Content-Encoding header",   resp.headers.get("Content-Encoding") is None)
     check("Body matches HTML file",       resp.body.decode() == TEST_HTML)
 
-    section("Compression by type and cache cap")
+    section("Compression by type")
 
     # Already-compressed types aren't gzipped, even when the client offers gzip.
     png_path = os.path.join(serve_dir, "pic.png")
@@ -323,26 +323,43 @@ def run_server_tests(s, serve_dir):
     check(".png not gzipped",      resp.headers.get("Content-Encoding") is None)
     os.remove(png_path)
 
-    # A file larger than half the cache is served but not stored.
+    section("Cache fit — can't-fit guard")
+
+    # A file larger than the whole cache is served but not stored, and doesn't
+    # purge what's already cached.
     orig_cache_mb = s.config.cache_size_mb
-    s.config.cache_size_mb = 1                     # cap = 0.5 MB
+    s.config.cache_size_mb = 1                     # 1 MB cache
     s._file_cache.clear()
     s._file_cache_bytes = 0
-    big_path = os.path.join(serve_dir, "big.bin")
-    with open(big_path, "wb") as f:
-        f.write(b"x" * (600 * 1024))               # 600 KB > 0.5 MB cap
-    raw_big, _, _ = s._get_cached_file(big_path)
-    check("Large file returned",   raw_big is not None and len(raw_big) == 600 * 1024)
-    check("Large file not cached",  big_path not in s._file_cache)
     small_path = os.path.join(serve_dir, "small.bin")
     with open(small_path, "wb") as f:
         f.write(b"y" * 100)
     s._get_cached_file(small_path)
-    check("Small file is cached",   small_path in s._file_cache)
-    os.remove(big_path); os.remove(small_path)
-    s.config.cache_size_mb = orig_cache_mb
+    check("Small file is cached",       small_path in s._file_cache)
+    big_path = os.path.join(serve_dir, "toobig.bin")
+    with open(big_path, "wb") as f:
+        f.write(b"x" * (1200 * 1024))              # 1.2 MB > 1 MB cache
+    raw_big, _, _ = s._get_cached_file(big_path)
+    check("Oversized file served",      raw_big is not None and len(raw_big) == 1200 * 1024)
+    check("Oversized file not cached",  big_path not in s._file_cache)
+    check("Cache not purged",           small_path in s._file_cache)
+    os.remove(small_path); os.remove(big_path)
     s._file_cache.clear()
     s._file_cache_bytes = 0
+
+    section("Cache fit — warnings")
+
+    s.config.cache_size_mb = 128
+    check("No warnings when site fits", s._cache_warnings() == [])
+    s.config.cache_size_mb = 1
+    huge_path = os.path.join(serve_dir, "huge.bin")
+    with open(huge_path, "wb") as f:
+        f.write(b"z" * (1300 * 1024))              # 1.3 MB > 1 MB cache
+    w = s._cache_warnings()
+    check("Warns: single file too big", any("never cached" in x for x in w))
+    check("Warns: site exceeds cache",  any("not all of it" in x for x in w))
+    os.remove(huge_path)
+    s.config.cache_size_mb = orig_cache_mb
 
     section("HEAD")
 

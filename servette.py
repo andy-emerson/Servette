@@ -1456,25 +1456,30 @@ def _config_show():
     if config.cache_policy == "max-age":
         cache_display += f" ({config.cache_max_age}s)"
 
+    rows = [
+        ("Directory",          val(config.serve_dir)),
+        ("HTTPS port",         config.port),
+        ("Certificate",        val(config.cert_file)),
+        ("Key",                val(config.key_file)),
+        ("Username",           val(config.username)),
+        ("Password",           "(set)" if config.password_hash else "(not set)"),
+        ("Email",              val(config.email)),
+        ("Rate limit",         f"{config.rate_limit} req/min"),
+        ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
+        ("Cache policy",       cache_display),
+        ("Cache size",         f"{config.cache_size_mb} MB"),
+        ("Trusted proxy",      val(config.trusted_proxy)),
+        ("TLS min version",    config.tls_min_version),
+        ("Cipher suites",      config.ciphers or "(system default)"),
+        ("CSP",                config.csp or "(disabled)"),
+        ("Permissions-Policy", config.permissions_policy or "(disabled)"),
+    ]
+
     print()
     print("  Current Settings")
     print("  " + "─" * 38)
-    print(f"  {'Directory':<22} {val(config.serve_dir)}")
-    print(f"  {'HTTPS port':<22} {config.port}")
-    print(f"  {'Certificate':<22} {val(config.cert_file)}")
-    print(f"  {'Key':<22} {val(config.key_file)}")
-    print(f"  {'Username':<22} {val(config.username)}")
-    print(f"  {'Password':<22} {'(set)' if config.password_hash else '(not set)'}")
-    print(f"  {'Email':<22} {val(config.email)}")
-    print(f"  {'Rate limit':<22} {config.rate_limit} req/min")
-    print(f"  {'Auth rate limit':<22} {config.auth_rate_limit} fails/min")
-    print(f"  {'Cache policy':<22} {cache_display}")
-    print(f"  {'Cache size':<22} {config.cache_size_mb} MB")
-    print(f"  {'Trusted proxy':<22} {val(config.trusted_proxy)}")
-    print(f"  {'TLS min version':<22} {config.tls_min_version}")
-    print(f"  {'Cipher suites':<22} {config.ciphers or '(system default)'}")
-    print(f"  {'CSP':<22} {config.csp or '(disabled)'}")
-    print(f"  {'Permissions-Policy':<22} {config.permissions_policy or '(disabled)'}")
+    for label, value in rows:
+        print(f"  {label:<{_PAD}} {value}")
     print()
 
 

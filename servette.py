@@ -375,6 +375,22 @@ def _cache_control_header():
     return f"{scope}, max-age={config.cache_max_age}"
 
 
+def _security_headers():
+    """Security headers sent on every HTTPS response — success or error."""
+    headers = [
+        (b"x-frame-options",        b"DENY"),
+        (b"x-content-type-options", b"nosniff"),
+        (b"referrer-policy",        b"no-referrer"),
+    ]
+    if config.csp:
+        headers.append((b"content-security-policy", config.csp.encode()))
+    if config.permissions_policy:
+        headers.append((b"permissions-policy", config.permissions_policy.encode()))
+    if _cert_domain:
+        headers.append((b"strict-transport-security", b"max-age=31536000; includeSubDomains"))
+    return headers
+
+
 # ── ASGI apps ─────────────────────────────────────────────────────────────────
 
 async def _send_response(send, status, headers_list, body=b""):
@@ -402,6 +418,13 @@ async def https_app(scope, receive, send):
 
     if scope["type"] != "http":
         return
+
+    # Wrap send so the security headers go on every response (errors included), not just 200s.
+    _raw_send = send
+    async def send(event):
+        if event["type"] == "http.response.start":
+            event = {**event, "headers": _security_headers() + list(event["headers"])}
+        await _raw_send(event)
 
     method  = scope["method"]
     headers = dict(scope["headers"])
@@ -531,23 +554,15 @@ async def https_app(scope, receive, send):
     body            = compressed if accepts_gzip else raw
 
     response_headers = [
-        (b"content-type",                mime.encode()),
-        (b"content-length",              str(len(body)).encode()),
-        (b"etag",                        etag.encode()),
-        (b"cache-control",               _cache_control_header().encode()),
-        (b"vary",                        b"Accept-Encoding"),
-        (b"x-frame-options",             b"DENY"),
-        (b"x-content-type-options",      b"nosniff"),
-        (b"referrer-policy",             b"no-referrer"),
+        (b"content-type",   mime.encode()),
+        (b"content-length", str(len(body)).encode()),
+        (b"etag",           etag.encode()),
+        (b"cache-control",  _cache_control_header().encode()),
+        (b"vary",           b"Accept-Encoding"),
     ]
-    if config.csp:
-        response_headers.append((b"content-security-policy", config.csp.encode()))
-    if config.permissions_policy:
-        response_headers.append((b"permissions-policy", config.permissions_policy.encode()))
     if accepts_gzip:
         response_headers.append((b"content-encoding", b"gzip"))
-    if _cert_domain:
-        response_headers.append((b"strict-transport-security", b"max-age=31536000; includeSubDomains"))
+    # Security headers (and HSTS) are added to every response by the send wrapper above.
     await _send_response(send, 200, response_headers, body=body if send_body else b"")
     log.info("200 %s to %s", url_path, ip)
 

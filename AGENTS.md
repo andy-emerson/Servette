@@ -13,6 +13,7 @@ Read [`design.md`](design.md#how-we-work) before your first change — its metho
 - **Run the bar before calling anything done** — tests green, and CodeQL clean for security-relevant work (auth, TLS, rate limiting, path resolution).
 - **Update the docs in the same change** — they're part of the work, not cleanup. A doc that lags the code is the first step of the next over-claim.
 - **Prefer understatement.** Report what a change is *verified* to do, not what you hope it does. The recurring failure mode is a claim sitting one rung above its evidence (`design.md`'s claim ladder); the process exists to keep your claims honest.
+- **Don't change an agreed plan on your own.** If a plan you and the human settled on hits a snag or new information, bring the revised plan back for approval before acting. An observation or aside from the human is not approval for a new plan.
 
 ## Running
 
@@ -35,7 +36,7 @@ Three areas are intentionally not covered: the interactive shell and its config 
 
 ## Git and commits
 
-Remote: `git@github.com:andy-emerson/servette.git`. Development happens on short-lived branches: push the branch, open a pull request, and merge into `main` after checks pass. `main` is protected — no direct pushes, no force-pushes, no deletion, and the test and CodeQL checks must be green before a PR can merge.
+Remote: `git@github.com:andy-emerson/servette.git`. Development happens on branches merged via pull request — never directly on `main`, which is protected (no direct pushes, no force-pushes, no deletion; the test and CodeQL checks must be green before a PR can merge). Batch a round of related work as separate commits on a single, generically-named branch (e.g. `work`, not `fix-headers`) with one PR — don't open a new branch per change.
 
 **Pushes and merges never touch `__version__`.** The version is a release concept, not a development one; it changes only as part of cutting a release (see below). Everyday work is version-agnostic.
 

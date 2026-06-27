@@ -24,7 +24,9 @@ import time
 import urllib.error
 import urllib.request
 
-SERVETTE_DIR = os.path.dirname(os.path.abspath(__file__))
+# test.py lives in tests/; the repo root (containing servette.py and servette.toml) is its parent.
+SERVETTE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, SERVETTE_DIR)  # so `import servette` resolves to the file under test
 TEST_PORT    = 8443
 BASE_URL     = f"https://127.0.0.1:{TEST_PORT}"
 TEST_HTML    = "<!DOCTYPE html><html><body><p>Servette test</p></body></html>"

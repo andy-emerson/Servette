@@ -6,17 +6,23 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
           python3 -m venv .servette-env
-          .servette-env/bin/pip install --quiet hypercorn cryptography acme josepy
+          .servette-env/bin/pip install --quiet "hypercorn>=0.17,<1.0" "cryptography>=41.0,<50.0" "acme>=2.0,<6.0" "josepy>=1.10,<3.0"
       - name: Run tests
-        run: .servette-env/bin/python3 test.py
+        run: .servette-env/bin/python3 tests/test.py

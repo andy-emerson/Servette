@@ -176,8 +176,8 @@ The methodology is scaled to the project. A 2,000-line finished server does not 
 1. **Pick a scoped change.** One thing. If it argues for a non-goal above, stop — that's a different program.
 2. **Make it with a test that can fail.** A bug fix ships in the same commit as the test that would have caught it. (A few areas are intentionally uncovered — see [`AGENTS.md`](AGENTS.md#tests).)
 3. **Run the bar.** `tests/test.py` green; CodeQL clean for security-relevant work; for anything touching auth, TLS, rate limiting, or path resolution, a human read.
-4. **Update the docs in the same commit.** README for user-facing surface, this file for architecture or scope, AGENTS.md for operating detail. Docs that lag the code are the first step of the next over-claim. Before a push, reconcile README and this file against the code — names, thread lifecycle, defaults, section line counts.
-5. **Commit and push honestly** per the conventions in [`AGENTS.md`](AGENTS.md).
+4. **Update the docs in the same change.** README for user-facing surface, this file for architecture or scope, AGENTS.md for operating detail. Docs that lag the code are the first step of the next over-claim. Before merging, reconcile README and this file against the code — names, thread lifecycle, defaults, section line counts.
+5. **Open a pull request; merge after checks pass.** Work reaches `main` only through PRs — `main` is protected, and the test and CodeQL checks must be green to merge, which makes the bar in step 3 an enforced gate rather than a habit. Never touch `__version__` here; the version changes only when cutting a release ([`AGENTS.md`](AGENTS.md#releasing-maintainer-task)). Commit and PR conventions are in [`AGENTS.md`](AGENTS.md#git-and-commits).
 
 ### Audits
 

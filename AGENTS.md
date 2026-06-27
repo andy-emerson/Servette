@@ -35,9 +35,11 @@ Three areas are intentionally not covered: the interactive shell and its config 
 
 ## Git and commits
 
-Remote: `git@github.com:andy-emerson/servette.git`. Develop on `main` and push with `git push origin main`.
+Remote: `git@github.com:andy-emerson/servette.git`. Development happens on short-lived branches: push the branch, open a pull request, and merge into `main` after checks pass. `main` is protected — no direct pushes, no force-pushes, no deletion, and the test and CodeQL checks must be green before a PR can merge.
 
-**Commit messages** are an imperative one-line summary (e.g. `Raise default rate_limit from 30 to 120 requests/min`), with a short body when the change needs explaining. Version bumps are `Release <version>`. Don't enumerate tests or docs unless they are the point of the change.
+**Pushes and merges never touch `__version__`.** The version is a release concept, not a development one; it changes only as part of cutting a release (see below). Everyday work is version-agnostic.
+
+**Commit messages** are an imperative one-line summary (e.g. `Raise default rate_limit from 30 to 120 requests/min`), with a short body when the change needs explaining. Don't enumerate tests or docs unless they are the point of the change.
 
 **Attribution.** Credit yourself — whichever agent you are — as a co-author on every commit containing substantial agent work, the same way you'd credit a person, using your tooling's default trailer. For Claude that is:
 
@@ -49,11 +51,11 @@ Other agents use their own identity, not Claude's. This is credit, not a disclai
 
 ## Releasing (maintainer task)
 
-Servette updates itself from signed GitHub Releases, not from `main` — see [`design.md`](design.md#how-it-works) for the trust model. Publishing requires the private signing key, so it is a maintainer task; an agent's role is limited to bumping `__version__` and committing. Versions are date-based: `0.<yy>.<doy>` — two-digit year and day-of-year, e.g. `0.26.176`.
+Servette updates itself from signed GitHub Releases, not from `main` — see [`design.md`](design.md#how-it-works) for the trust model. A release is the one and only place `__version__` changes; it never moves during ordinary development. Publishing requires the private signing key, so it is a maintainer task. Versions are date-based: `0.<yy>.<doy>` — two-digit year and day-of-year, e.g. `0.26.178`.
 
 To publish (maintainer):
 
-1. Bump `__version__` in `servette.py`; commit and push to `main`.
+1. Bump `__version__` in `servette.py` via its own pull request, and merge it — the only change that ever touches the version.
 2. Sign the file with the Ed25519 private key (gitignored):
    ```bash
    .servette-env/bin/python3 -c "

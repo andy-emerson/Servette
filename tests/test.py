@@ -388,6 +388,8 @@ def run_server_tests(s, serve_dir):
     resp405 = req("POST")
     check("X-Frame-Options on 405",
           resp405.headers.get("X-Frame-Options") == "DENY")
+    check("Server header suppressed",
+          req("GET").headers.get("Server") is None)
 
     section("Method handling")
 

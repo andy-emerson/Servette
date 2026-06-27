@@ -702,6 +702,7 @@ async def _serve_http_redirect(stop_event):
     cfg      = HypercornConfig()
     cfg.bind = ["0.0.0.0:80"]
     cfg.loglevel = "warning"
+    cfg.include_server_header = False  # don't advertise the server software
 
     async def trigger():
         await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)
@@ -734,6 +735,7 @@ async def _run_servers(stop_event):
     https_cfg.certfile = cert_file
     https_cfg.keyfile  = key_file
     https_cfg.loglevel = "warning"
+    https_cfg.include_server_header = False  # don't advertise the server software
     async def run_https():
         try:
             await hypercorn_serve(https_app, https_cfg, shutdown_trigger=trigger)
@@ -746,6 +748,7 @@ async def _run_servers(stop_event):
             http_cfg          = HypercornConfig()
             http_cfg.bind     = ["0.0.0.0:80"]
             http_cfg.loglevel = "warning"
+            http_cfg.include_server_header = False  # don't advertise the server software
             await hypercorn_serve(redirect_app, http_cfg, shutdown_trigger=trigger)
         except OSError as e:
             log.warning("Could not bind to port 80: %s", e)

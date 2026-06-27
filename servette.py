@@ -1403,39 +1403,43 @@ def _cert_days_remaining(cert_path):
 # is delegated to functions in the SYSTEM section.
 # ─────────────────────────────────────────────────────────────────────────────
 
-HELP = """
-Commands:
-  setup             — guided walkthrough for getting started
-  config            — view and edit settings
-  enable            — enable Servette as a system service
-  disable           — remove the system service
-  start             — start the server
-  stop              — stop the server
-  status            — show whether the server is running
-  log [n]           — show the last n log entries
-  update            — download the latest version of servette.py
-  help              — show this message
-  quit              — exit
-"""
+# Menus are generated so the right-hand column always begins at the same place
+# (2-space indent + a 22-wide label) as the status and config displays.
+_PAD = 22
 
-CONFIG_HELP = """
-  Commands
-  ──────────────────────────────────────
-    dir       — directory to serve
-    port      — HTTPS port
-    cert      — SSL certificate and key
-    username  — login username
-    password  — login password
-    email     — email address
-    limits    — rate limits
-    cache     — browser cache policy
-    proxy     — trusted proxy IP for X-Forwarded-For
-    tls       — minimum TLS version and cipher suites
-    csp       — Content-Security-Policy header
-    perms     — Permissions-Policy header
-    show      — show current settings
-    back      — return to main shell
-"""
+_COMMANDS = [
+    ("setup",   "guided walkthrough for getting started"),
+    ("config",  "view and edit settings"),
+    ("enable",  "enable Servette as a system service"),
+    ("disable", "remove the system service"),
+    ("start",   "start the server"),
+    ("stop",    "stop the server"),
+    ("status",  "show whether the server is running"),
+    ("log [n]", "show the last n log entries"),
+    ("update",  "download the latest version of servette.py"),
+    ("help",    "show this message"),
+    ("quit",    "exit"),
+]
+HELP = "\nCommands:\n" + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
+
+_CONFIG_COMMANDS = [
+    ("dir",      "directory to serve"),
+    ("port",     "HTTPS port"),
+    ("cert",     "SSL certificate and key"),
+    ("username", "login username"),
+    ("password", "login password"),
+    ("email",    "email address"),
+    ("limits",   "rate limits"),
+    ("cache",    "browser cache policy"),
+    ("proxy",    "trusted proxy IP for X-Forwarded-For"),
+    ("tls",      "minimum TLS version and cipher suites"),
+    ("csp",      "Content-Security-Policy header"),
+    ("perms",    "Permissions-Policy header"),
+    ("show",     "show current settings"),
+    ("back",     "return to main shell"),
+]
+CONFIG_HELP = ("\n  Commands\n  " + "─" * 38 + "\n"
+               + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS))
 
 
 def _prompt(question):
@@ -1455,22 +1459,22 @@ def _config_show():
     print()
     print("  Current Settings")
     print("  " + "─" * 38)
-    print(f"  {'Directory':<22}  {val(config.serve_dir)}")
-    print(f"  {'HTTPS port':<22}  {config.port}")
-    print(f"  {'Certificate':<22}  {val(config.cert_file)}")
-    print(f"  {'Key':<22}  {val(config.key_file)}")
-    print(f"  {'Username':<22}  {val(config.username)}")
-    print(f"  {'Password':<22}  {'(set)' if config.password_hash else '(not set)'}")
-    print(f"  {'Email':<22}  {val(config.email)}")
-    print(f"  {'Rate limit':<22}  {config.rate_limit} req/min")
-    print(f"  {'Auth rate limit':<22}  {config.auth_rate_limit} fails/min")
-    print(f"  {'Cache policy':<22}  {cache_display}")
-    print(f"  {'Cache size':<22}  {config.cache_size_mb} MB")
-    print(f"  {'Trusted proxy':<22}  {val(config.trusted_proxy)}")
-    print(f"  {'TLS min version':<22}  {config.tls_min_version}")
-    print(f"  {'Cipher suites':<22}  {config.ciphers or '(system default)'}")
-    print(f"  {'CSP':<22}  {config.csp or '(disabled)'}")
-    print(f"  {'Permissions-Policy':<22}  {config.permissions_policy or '(disabled)'}")
+    print(f"  {'Directory':<22} {val(config.serve_dir)}")
+    print(f"  {'HTTPS port':<22} {config.port}")
+    print(f"  {'Certificate':<22} {val(config.cert_file)}")
+    print(f"  {'Key':<22} {val(config.key_file)}")
+    print(f"  {'Username':<22} {val(config.username)}")
+    print(f"  {'Password':<22} {'(set)' if config.password_hash else '(not set)'}")
+    print(f"  {'Email':<22} {val(config.email)}")
+    print(f"  {'Rate limit':<22} {config.rate_limit} req/min")
+    print(f"  {'Auth rate limit':<22} {config.auth_rate_limit} fails/min")
+    print(f"  {'Cache policy':<22} {cache_display}")
+    print(f"  {'Cache size':<22} {config.cache_size_mb} MB")
+    print(f"  {'Trusted proxy':<22} {val(config.trusted_proxy)}")
+    print(f"  {'TLS min version':<22} {config.tls_min_version}")
+    print(f"  {'Cipher suites':<22} {config.ciphers or '(system default)'}")
+    print(f"  {'CSP':<22} {config.csp or '(disabled)'}")
+    print(f"  {'Permissions-Policy':<22} {config.permissions_policy or '(disabled)'}")
     print()
 
 
@@ -1925,7 +1929,7 @@ def cmd_status():
     domain         = _domain_from_cert(config.cert_file)
     url            = f"https://{domain}" if domain else f"https://localhost:{config.port}"
     cert_path      = _resolve(config.cert_file)
-    W              = 8
+    W              = _PAD
 
     print()
     print(f"● Running  (v{__version__})" if running else f"○ Stopped  (v{__version__})")

@@ -1055,6 +1055,8 @@ def _wait_for_port_free(port, timeout=15):
         try:
             with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
                 s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                # Bind all interfaces (0.0.0.0) by design: Servette is a public-facing
+                # server, and this probe must mirror its bind to detect a real conflict.
                 s.bind(("0.0.0.0", port))
             return True
         except OSError:

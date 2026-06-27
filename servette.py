@@ -281,9 +281,23 @@ _file_cache       = collections.OrderedDict()
 _file_cache_lock  = threading.Lock()
 _file_cache_bytes = 0
 
+# Text-like types worth gzipping. Already-compressed formats (images, woff/woff2,
+# pdf, video, archives) gain nothing, so they're served and stored uncompressed.
+_COMPRESSIBLE_EXTS = {
+    ".html", ".css", ".js", ".json", ".svg", ".txt", ".xml", ".webmanifest", ".ttf",
+}
+
+
+def _entry_bytes(entry):
+    return len(entry["raw"]) + (len(entry["compressed"]) if entry["compressed"] else 0)
+
 
 def _get_cached_file(path):
-    """Return (raw_bytes, compressed_bytes, etag), reloading only if the file changed."""
+    """Return (raw, compressed_or_None, etag), reloading only if the file changed.
+
+    compressed is None for already-compressed types; a file too large to fit in
+    the cache is served but not stored, so it can't purge everything else.
+    """
     try:
         mtime = os.path.getmtime(path)
     except OSError:
@@ -303,21 +317,27 @@ def _get_cached_file(path):
     except OSError:
         return None, None, None
 
-    compressed = gzip.compress(raw, compresslevel=6)
+    ext        = os.path.splitext(path)[1].lower()
+    compressed = gzip.compress(raw, compresslevel=6) if ext in _COMPRESSIBLE_EXTS else None
     etag       = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
+    new_entry  = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
+
+    cache_max = config.cache_size_mb * 1024 * 1024
+    if _entry_bytes(new_entry) > cache_max:
+        return raw, compressed, etag  # can't fit — serve without caching, so it won't purge the cache
+
     with _file_cache_lock:
         global _file_cache_bytes
         old = _file_cache.pop(path, None)
         if old:
-            _file_cache_bytes -= len(old["raw"]) + len(old["compressed"])
-        _file_cache[path] = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
-        _file_cache_bytes += len(raw) + len(compressed)
-        cache_max = config.cache_size_mb * 1024 * 1024
+            _file_cache_bytes -= _entry_bytes(old)
+        _file_cache[path] = new_entry
+        _file_cache_bytes += _entry_bytes(new_entry)
         if _file_cache_bytes > cache_max:
             log.warning("File cache full (%d MB) — evicting oldest entries", config.cache_size_mb)
         while _file_cache_bytes > cache_max and _file_cache:
             _, evicted = _file_cache.popitem(last=False)
-            _file_cache_bytes -= len(evicted["raw"]) + len(evicted["compressed"])
+            _file_cache_bytes -= _entry_bytes(evicted)
 
     return raw, compressed, etag
 
@@ -470,8 +490,11 @@ async def https_app(scope, receive, send):
                 parts          = decoded.split(":", 1)
                 submitted_user = parts[0]
                 pw             = parts[1] if len(parts) == 2 else ""
-                authed = (hmac.compare_digest(submitted_user, config.username) and
-                          _check_password(pw, config.password_hash, config.password_salt))
+                # Evaluate both before combining so the password hash always runs, even
+                # when the username is wrong — no early-out timing signal for usernames.
+                user_ok = hmac.compare_digest(submitted_user, config.username)
+                pass_ok = _check_password(pw, config.password_hash, config.password_salt)
+                authed  = user_ok and pass_ok
             except (ValueError, UnicodeDecodeError):
                 pass
 
@@ -549,9 +572,9 @@ async def https_app(scope, receive, send):
 
     # Serve
     accept_encoding = headers.get(b"accept-encoding", b"").decode()
-    accepts_gzip    = "gzip" in accept_encoding
+    use_gzip        = compressed is not None and "gzip" in accept_encoding
     mime            = _mime_type(file_path)
-    body            = compressed if accepts_gzip else raw
+    body            = compressed if use_gzip else raw
 
     response_headers = [
         (b"content-type",   mime.encode()),
@@ -560,7 +583,7 @@ async def https_app(scope, receive, send):
         (b"cache-control",  _cache_control_header().encode()),
         (b"vary",           b"Accept-Encoding"),
     ]
-    if accepts_gzip:
+    if use_gzip:
         response_headers.append((b"content-encoding", b"gzip"))
     # Security headers (and HSTS) are added to every response by the send wrapper above.
     await _send_response(send, 200, response_headers, body=body if send_body else b"")
@@ -699,6 +722,7 @@ async def _serve_http_redirect(stop_event):
     cfg      = HypercornConfig()
     cfg.bind = ["0.0.0.0:80"]
     cfg.loglevel = "warning"
+    cfg.include_server_header = False  # don't advertise the server software
 
     async def trigger():
         await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)
@@ -731,6 +755,7 @@ async def _run_servers(stop_event):
     https_cfg.certfile = cert_file
     https_cfg.keyfile  = key_file
     https_cfg.loglevel = "warning"
+    https_cfg.include_server_header = False  # don't advertise the server software
     async def run_https():
         try:
             await hypercorn_serve(https_app, https_cfg, shutdown_trigger=trigger)
@@ -743,6 +768,7 @@ async def _run_servers(stop_event):
             http_cfg          = HypercornConfig()
             http_cfg.bind     = ["0.0.0.0:80"]
             http_cfg.loglevel = "warning"
+            http_cfg.include_server_header = False  # don't advertise the server software
             await hypercorn_serve(redirect_app, http_cfg, shutdown_trigger=trigger)
         except OSError as e:
             log.warning("Could not bind to port 80: %s", e)
@@ -848,6 +874,8 @@ def start_server():
 
     for issue in _production_issues():
         print(f"  ⚠ {issue}")
+    for warning in _cache_warnings():
+        print(f"  ⚠ {warning}")
 
 
 def stop_server():
@@ -1375,39 +1403,43 @@ def _cert_days_remaining(cert_path):
 # is delegated to functions in the SYSTEM section.
 # ─────────────────────────────────────────────────────────────────────────────
 
-HELP = """
-Commands:
-  setup             — guided walkthrough for getting started
-  config            — view and edit settings
-  enable            — enable Servette as a system service
-  disable           — remove the system service
-  start             — start the server
-  stop              — stop the server
-  status            — show whether the server is running
-  log [n]           — show the last n log entries
-  update            — download the latest version of servette.py
-  help              — show this message
-  quit              — exit
-"""
+# Menus are generated so the right-hand column always begins at the same place
+# (2-space indent + a 22-wide label) as the status and config displays.
+_PAD = 22
 
-CONFIG_HELP = """
-  Commands
-  ──────────────────────────────────────
-    dir       — directory to serve
-    port      — HTTPS port
-    cert      — SSL certificate and key
-    username  — login username
-    password  — login password
-    email     — email address
-    limits    — rate limits
-    cache     — browser cache policy
-    proxy     — trusted proxy IP for X-Forwarded-For
-    tls       — minimum TLS version and cipher suites
-    csp       — Content-Security-Policy header
-    perms     — Permissions-Policy header
-    show      — show current settings
-    back      — return to main shell
-"""
+_COMMANDS = [
+    ("setup",   "guided walkthrough for getting started"),
+    ("config",  "view and edit settings"),
+    ("enable",  "enable Servette as a system service"),
+    ("disable", "remove the system service"),
+    ("start",   "start the server"),
+    ("stop",    "stop the server"),
+    ("status",  "show whether the server is running"),
+    ("log [n]", "show the last n log entries"),
+    ("update",  "download the latest version of servette.py"),
+    ("help",    "show this message"),
+    ("quit",    "exit"),
+]
+HELP = "\nCommands:\n" + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
+
+_CONFIG_COMMANDS = [
+    ("dir",      "directory to serve"),
+    ("port",     "HTTPS port"),
+    ("cert",     "SSL certificate and key"),
+    ("username", "login username"),
+    ("password", "login password"),
+    ("email",    "email address"),
+    ("limits",   "rate limits"),
+    ("cache",    "browser cache policy"),
+    ("proxy",    "trusted proxy IP for X-Forwarded-For"),
+    ("tls",      "minimum TLS version and cipher suites"),
+    ("csp",      "Content-Security-Policy header"),
+    ("perms",    "Permissions-Policy header"),
+    ("show",     "show current settings"),
+    ("back",     "return to main shell"),
+]
+CONFIG_HELP = ("\n  Commands\n  " + "─" * 38 + "\n"
+               + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS))
 
 
 def _prompt(question):
@@ -1424,25 +1456,30 @@ def _config_show():
     if config.cache_policy == "max-age":
         cache_display += f" ({config.cache_max_age}s)"
 
+    rows = [
+        ("Directory",          val(config.serve_dir)),
+        ("HTTPS port",         config.port),
+        ("Certificate",        val(config.cert_file)),
+        ("Key",                val(config.key_file)),
+        ("Username",           val(config.username)),
+        ("Password",           "(set)" if config.password_hash else "(not set)"),
+        ("Email",              val(config.email)),
+        ("Rate limit",         f"{config.rate_limit} req/min"),
+        ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
+        ("Cache policy",       cache_display),
+        ("Cache size",         f"{config.cache_size_mb} MB"),
+        ("Trusted proxy",      val(config.trusted_proxy)),
+        ("TLS min version",    config.tls_min_version),
+        ("Cipher suites",      config.ciphers or "(system default)"),
+        ("CSP",                config.csp or "(disabled)"),
+        ("Permissions-Policy", config.permissions_policy or "(disabled)"),
+    ]
+
     print()
     print("  Current Settings")
     print("  " + "─" * 38)
-    print(f"  {'Directory':<22}  {val(config.serve_dir)}")
-    print(f"  {'HTTPS port':<22}  {config.port}")
-    print(f"  {'Certificate':<22}  {val(config.cert_file)}")
-    print(f"  {'Key':<22}  {val(config.key_file)}")
-    print(f"  {'Username':<22}  {val(config.username)}")
-    print(f"  {'Password':<22}  {'(set)' if config.password_hash else '(not set)'}")
-    print(f"  {'Email':<22}  {val(config.email)}")
-    print(f"  {'Rate limit':<22}  {config.rate_limit} req/min")
-    print(f"  {'Auth rate limit':<22}  {config.auth_rate_limit} fails/min")
-    print(f"  {'Cache policy':<22}  {cache_display}")
-    print(f"  {'Cache size':<22}  {config.cache_size_mb} MB")
-    print(f"  {'Trusted proxy':<22}  {val(config.trusted_proxy)}")
-    print(f"  {'TLS min version':<22}  {config.tls_min_version}")
-    print(f"  {'Cipher suites':<22}  {config.ciphers or '(system default)'}")
-    print(f"  {'CSP':<22}  {config.csp or '(disabled)'}")
-    print(f"  {'Permissions-Policy':<22}  {config.permissions_policy or '(disabled)'}")
+    for label, value in rows:
+        print(f"  {label:<{_PAD}} {value}")
     print()
 
 
@@ -1863,13 +1900,41 @@ def _production_issues():
     return issues
 
 
+def _cache_warnings():
+    """Warn when the site, or any single file, is too big for the in-memory cache."""
+    warnings   = []
+    serve_dir  = _resolve(config.serve_dir)
+    if not os.path.isdir(serve_dir):
+        return warnings
+    cache_max = config.cache_size_mb * 1024 * 1024
+    total     = 0
+    for root, _dirs, files in os.walk(serve_dir):
+        for name in files:
+            try:
+                size = os.path.getsize(os.path.join(root, name))
+            except OSError:
+                continue
+            total += size
+            if size > cache_max:
+                warnings.append(
+                    f"{name} ({size / 1048576:.1f} MB) is larger than the cache "
+                    f"({config.cache_size_mb} MB) and is never cached"
+                )
+    if total > cache_max:
+        warnings.append(
+            f"site is {total / 1048576:.1f} MB but the cache is {config.cache_size_mb} MB "
+            f"— not all of it stays cached at once"
+        )
+    return warnings
+
+
 def cmd_status():
     service_active = _service_is_active()
     running        = service_active or _server_running()
     domain         = _domain_from_cert(config.cert_file)
     url            = f"https://{domain}" if domain else f"https://localhost:{config.port}"
     cert_path      = _resolve(config.cert_file)
-    W              = 8
+    W              = _PAD
 
     print()
     print(f"● Running  (v{__version__})" if running else f"○ Stopped  (v{__version__})")
@@ -1887,7 +1952,7 @@ def cmd_status():
         cert_str = "expired" if days <= 0 else f"{days} days remaining"
         print(f"  {'Cert':<{W}} {cert_str}")
 
-    issues = _production_issues()
+    issues = _production_issues() + _cache_warnings()
     if issues:
         print()
         for issue in issues:

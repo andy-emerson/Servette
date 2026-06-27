@@ -38,6 +38,8 @@ Three areas are intentionally not covered: the interactive shell and its config 
 
 Remote: `git@github.com:andy-emerson/servette.git`. Development happens on branches merged via pull request — never directly on `main`, which is protected (no direct pushes, no force-pushes, no deletion; the test and CodeQL checks must be green before a PR can merge). Batch a round of related work as separate commits on a single, generically-named branch (e.g. `work`, not `fix-headers`) with one PR — don't open a new branch per change.
 
+**Close issues only on merge.** Reference the issue with `Closes #N` in the PR; it closes when the PR merges to `main`. Never close an issue before its fix has landed on `main`.
+
 **Pushes and merges never touch `__version__`.** The version is a release concept, not a development one; it changes only as part of cutting a release (see below). Everyday work is version-agnostic.
 
 **Commit messages** are an imperative one-line summary (e.g. `Raise default rate_limit from 30 to 120 requests/min`), with a short body when the change needs explaining. Don't enumerate tests or docs unless they are the point of the change.

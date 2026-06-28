@@ -1,10 +1,8 @@
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="servette-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="servette-light.svg">
-    <img alt="Servette" src="servette-light.svg" width="300">
-  </picture>
-</div>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="servette-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="servette-light.svg">
+  <img alt="Servette" src="servette-light.svg" width="300">
+</picture>
 
 ### The Simple, Secure Static-Site Server
 

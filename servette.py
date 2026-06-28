@@ -582,7 +582,7 @@ async def https_app(scope, receive, send):
         # Try custom 404.html in serve_dir root
         custom_404 = os.path.join(_resolve(config.serve_dir), "404.html")
         if os.path.isfile(custom_404):
-            raw_404, _, _ = _get_cached_file(custom_404)
+            raw_404, _, _ = await asyncio.to_thread(_get_cached_file, custom_404)
             body_404 = raw_404 or b"Not found."
             content_type_404 = b"text/html; charset=utf-8"
         else:
@@ -594,7 +594,11 @@ async def https_app(scope, receive, send):
         log.warning("404 Not Found %s from %s", url_path, ip)
         return
 
-    raw, compressed, etag = _get_cached_file(file_path)
+    # Reading and gzip-compressing a file is synchronous, CPU-bound work; running it
+    # inline would block the event loop and starve every other connection (including
+    # TLS teardowns, which then time out). Offload to a worker thread — zlib and
+    # hashlib release the GIL, so compression genuinely runs off the loop.
+    raw, compressed, etag = await asyncio.to_thread(_get_cached_file, file_path)
     if raw is None:
         body_500 = b"Internal server error."
         await _send_response(send, 500,

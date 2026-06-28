@@ -360,6 +360,38 @@ def run_dispatch_tests(s):
     check("'start' routed to cmd_start",   "start" in calls)
     check("'quit' stops server and exits", calls[-1] == "stop")
 
+    section("File serving runs off the event loop")
+    # Regression test for the event-loop starvation bug (#16): _get_cached_file does
+    # synchronous read + gzip, so the handler must run it in a worker thread, not on
+    # the loop — otherwise compressing one large file blocks every other connection.
+    import threading
+    tmpd = tempfile.mkdtemp()
+    with open(os.path.join(tmpd, "index.html"), "w") as f:
+        f.write("<h1>hi</h1>")
+    saved_serve, saved_pw, saved_get = s.config.serve_dir, s.config.password_hash, s._get_cached_file
+    ran_on = {}
+    def spy(path):
+        ran_on["thread"] = threading.get_ident()
+        return saved_get(path)
+    s.config.serve_dir     = tmpd
+    s.config.password_hash = ""
+    s._get_cached_file     = spy
+    try:
+        sent = []
+        async def send(m):    sent.append(m)
+        async def receive():  return {"type": "http.request", "body": b""}
+        scope = {"type": "http", "method": "GET", "path": "/",
+                 "headers": [], "client": ("127.0.0.1", 1)}
+        loop_thread = threading.get_ident()   # asyncio.run drives the loop on this thread
+        asyncio.run(s.https_app(scope, receive, send))
+    finally:
+        s._get_cached_file     = saved_get
+        s.config.serve_dir     = saved_serve
+        s.config.password_hash = saved_pw
+
+    check("File read/gzip offloaded to a worker thread (not the loop)",
+          ran_on.get("thread") is not None and ran_on["thread"] != loop_thread)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INTEGRATION TESTS

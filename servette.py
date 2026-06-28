@@ -709,8 +709,10 @@ async def redirect_app(scope, receive, send):
 
     # Redirect everything else to HTTPS
     host      = headers.get(b"host", b"localhost").decode().split(":")[0]
-    https_url = (f"https://{host}{path}" if config.port == 443
-                 else f"https://{host}:{config.port}{path}")
+    query     = scope.get("query_string", b"").decode()
+    target    = path + (f"?{query}" if query else "")
+    https_url = (f"https://{host}{target}" if config.port == 443
+                 else f"https://{host}:{config.port}{target}")
 
     await _send_response(send, 301, [
         (b"location",       https_url.encode()),
@@ -946,7 +948,18 @@ def start_server():
 
     _server_thread = threading.Thread(target=run, daemon=True)
     _server_thread.start()
-    _wait_for_server(config.port)
+
+    if not _wait_for_server(config.port):
+        # The listener never came up (bind conflict, TLS/cert error, bad config).
+        # Fail closed rather than leave a live-but-not-serving process — under
+        # systemd a silent non-serving process looks healthy and never recovers.
+        _shutdown_event.set()
+        _server_thread = None
+        log.error("Server failed to start on port %d (see earlier errors)", config.port)
+        print(f"Server failed to start on port {config.port}.")
+        if "--serve" in sys.argv:
+            sys.exit(1)
+        return
 
     if _watchdog_thread is None or not _watchdog_thread.is_alive():
         _watchdog_thread = threading.Thread(target=_cert_watchdog, daemon=True)
@@ -1026,14 +1039,14 @@ def _chown_servette(path):
         subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
-def cmd_install():
-    updating      = _service_file_exists()
-    servette_path = os.path.abspath(__file__)
-    python_path   = _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(
-        ["which", "python3"], capture_output=True, text=True
-    ).stdout.strip()
-
-    service = f"""[Unit]
+def _systemd_unit(python_path, servette_path):
+    """The systemd unit for the service. Writes are confined to where Servette
+    actually writes — its own directory (config, certs, ACME account) and the ACME
+    webroot (HTTP-01 challenge files during renewal); ProtectSystem=strict makes the
+    rest of the filesystem read-only, and the unit runs as a least-privilege user
+    holding only CAP_NET_BIND_SERVICE. The served directory ends up read-write only
+    because it lives under the server's own directory; the server never writes it."""
+    return f"""[Unit]
 Description=Servette — The Simple Secure Server
 After=network.target
 
@@ -1041,6 +1054,16 @@ After=network.target
 User=servette
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths={BASE_DIR} {ACME_WEBROOT}
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
 ExecStart={python_path} {servette_path} --serve
 Restart=always
 RestartSec=3
@@ -1052,6 +1075,16 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 """
+
+
+def cmd_install():
+    updating      = _service_file_exists()
+    servette_path = os.path.abspath(__file__)
+    python_path   = _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(
+        ["which", "python3"], capture_output=True, text=True
+    ).stdout.strip()
+
+    service = _systemd_unit(python_path, servette_path)
 
     try:
         # Create system user if needed
@@ -1077,6 +1110,9 @@ WantedBy=multi-user.target
         _chown_servette(_resolve(config.serve_dir))
         _chown_servette(os.path.join(BASE_DIR, "certs"))
         _chown_servette(os.path.join(BASE_DIR, ".acme-account.pem"))
+        # Create the ACME webroot now so it exists when systemd applies ReadWritePaths
+        # — a missing ReadWritePaths target makes the unit fail to start.
+        os.makedirs(ACME_WEBROOT, exist_ok=True)
         _chown_servette(ACME_WEBROOT)
 
         # Warn if serve_dir isn't world-readable

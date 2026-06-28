@@ -703,6 +703,62 @@ class _RedirectHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+# Ceiling on concurrent connections. Each connection holds one worker thread for its
+# lifetime (up to the 30s idle timeout on keep-alive), so the cap bounds thread/memory
+# use under a connection flood — light enough for a Raspberry Pi, ample for a static site.
+MAX_CONNECTIONS = 128
+
+
+class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    """ThreadingHTTPServer with a ceiling on concurrent connections. Past the cap,
+    new connections are closed immediately rather than spawning unbounded threads —
+    a connection-exhaustion / slowloris mitigation that pairs with the per-connection
+    socket timeout on the handlers (which reaps slow or idle connections)."""
+    daemon_threads = True
+
+    def __init__(self, address, handler, max_connections=MAX_CONNECTIONS):
+        super().__init__(address, handler)
+        self._slots = threading.BoundedSemaphore(max_connections)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)   # at capacity — shed load, don't queue
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def handle_error(self, request, client_address):
+        # A public server sees constant aborted handshakes and dropped connections
+        # from scanners and impatient clients. Those are expected noise, not faults —
+        # log at debug instead of dumping a traceback to stderr.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ssl.SSLError, ConnectionError, TimeoutError)):
+            log.debug("Connection error from %s: %s",
+                      client_address[0] if client_address else "?", exc)
+            return
+        super().handle_error(request, client_address)
+
+
+class _TLSThreadingHTTPServer(_CappedThreadingHTTPServer):
+    """Adds TLS, with the handshake performed in the per-connection worker thread
+    (not the accept loop) so a slow handshake can't stall every new connection."""
+    def __init__(self, address, handler, ssl_context, max_connections=MAX_CONNECTIONS):
+        super().__init__(address, handler, max_connections)
+        self._ssl_context = ssl_context
+
+    def get_request(self):
+        sock, addr = super().get_request()
+        # Defer the handshake to the worker thread's first read (under the handler's
+        # socket timeout) rather than doing it here on the single accept loop.
+        return self._ssl_context.wrap_socket(sock, server_side=True,
+                                             do_handshake_on_connect=False), addr
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM
 #
@@ -843,9 +899,7 @@ def start_server():
     # unreadable — better than a live process that serves nothing. Both surface here
     # synchronously: the bind happens in the constructor, the cert in _build_ssl_context.
     try:
-        https = http.server.ThreadingHTTPServer(("0.0.0.0", config.port), _Handler)
-        https.daemon_threads = True
-        https.socket = _build_ssl_context().wrap_socket(https.socket, server_side=True)
+        https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_ssl_context())
     except Exception as e:
         log.error("Server failed to start on port %d: %s", config.port, e)
         print(f"Server failed to start on port {config.port}: {e}")
@@ -855,8 +909,7 @@ def start_server():
 
     # The port-80 redirect is best-effort (needs privilege and a free port).
     try:
-        redirect = http.server.ThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
-        redirect.daemon_threads = True
+        redirect = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
     except OSError as e:
         log.warning("Could not bind to port 80: %s", e)
         print("Note: could not bind to port 80. HTTP redirects unavailable.")
@@ -1209,8 +1262,7 @@ def _run_acme(domain):
     tmp_server = None
     if not _server_running():
         try:
-            tmp_server = http.server.ThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
-            tmp_server.daemon_threads = True
+            tmp_server = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
             threading.Thread(target=tmp_server.serve_forever, daemon=True).start()
         except OSError as e:
             log.warning("Could not start temporary port-80 listener: %s", e)

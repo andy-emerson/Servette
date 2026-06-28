@@ -427,6 +427,24 @@ def run_server_tests(s, serve_dir):
         raised = True
     check("Second bind on the live port raises OSError", raised)
 
+    section("Connection cap (slowloris mitigation)")
+
+    # The live HTTPS server enforces a bounded connection pool.
+    check("Live server exposes a connection cap", hasattr(s._https_server, "_slots"))
+
+    # With every slot taken, process_request must drop the connection immediately
+    # rather than spawn another worker thread. Drive it directly (no sockets) on a
+    # throwaway server capped at one.
+    capped = s._CappedThreadingHTTPServer(("127.0.0.1", 0), s._RedirectHandler, max_connections=1)
+    try:
+        check("Slot pool grants up to the cap", capped._slots.acquire(blocking=False) is True)
+        dropped = {"hit": False}
+        capped.shutdown_request = lambda req: dropped.__setitem__("hit", True)
+        capped.process_request(object(), ("127.0.0.1", 5555))   # at capacity now
+        check("At capacity, new connection is dropped", dropped["hit"] is True)
+    finally:
+        capped.server_close()
+
     section("GET — gzip response")
 
     resp = req("GET", headers={"Accept-Encoding": "gzip"})

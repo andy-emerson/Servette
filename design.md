@@ -38,17 +38,17 @@ The refusals below are not an exhaustive blocklist; they are the common cases, e
 | **Plugins, configuration language** | Settings are a handful of defaulted fields in `servette.toml`. Nothing to learn, nothing to extend — by design. |
 | **Runtime dependencies beyond the managed venv** | Stdlib (Python 3.11+) plus four packages Servette installs into `.servette-env/` itself. The operator never runs pip. |
 
-A request to add any of these is not a feature request; it is a request for a different program. The honest answer is usually "use Caddy."
+A request to add any of these is not a feature request; it is a request for a different program. The honest answer is usually to reach for a general-purpose server that does more.
 
 ## How it works
 
-Servette is a single file (`servette.py`, ~2,000 lines) with three sections, each readable on its own. Settings persist to `servette.toml` beside it.
+Servette is a single file (`servette.py`, ~2,200 lines) with three sections, each readable on its own. Settings persist to `servette.toml` beside it.
 
 | Section | Lines | Responsibility |
 | - | - | - |
-| **Server** | ~550 | every incoming request: config, rate limiting, file cache, the two ASGI apps |
-| **System** | ~750 | the environment: bootstrap, server lifecycle, certificates, systemd |
-| **Shell** | ~675 | the interactive terminal interface |
+| **Server** | ~660 | every incoming request: config, rate limiting, file cache, the two ASGI apps |
+| **System** | ~760 | the environment: bootstrap, server lifecycle, certificates, systemd |
+| **Shell** | ~720 | the interactive terminal interface |
 
 ```mermaid
 graph LR
@@ -169,7 +169,7 @@ Servette is complete within its scope; "where are we?" is mostly "here is the fi
 
 Servette is built in human–agent collaboration, and says so. The human holds design authority and is the author of record; the agent writes code and surfaces trade-offs. This works because openness is paired with verification and responsibility — credit is *earned by the rigor*, not granted by a trailer. Energy spent hiding how a security tool is built is the wrong kind of energy; it belongs in the evidence instead. (Mechanics of attribution live in [`AGENTS.md`](AGENTS.md); the contributor's view in [`CONTRIBUTING.md`](CONTRIBUTING.md).)
 
-The methodology is scaled to the project. A 2,000-line finished server does not need a dependency frontier or a reference oracle; reproducing that machinery would itself be the scope creep this document exists to prevent. What ports is the principle, not the apparatus.
+The methodology is scaled to the project. A ~2,200-line finished server does not need a dependency frontier or a reference oracle; reproducing that machinery would itself be the scope creep this document exists to prevent. What ports is the principle, not the apparatus.
 
 ### The change loop
 

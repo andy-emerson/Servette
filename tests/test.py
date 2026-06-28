@@ -281,6 +281,20 @@ def run_unit_tests(s):
     check("Hours",    s._format_uptime(3700)  == "1h 1m")
     check("Days",     s._format_uptime(90061) == "1d 1h")
 
+    section("Event-loop exception handler")
+
+    class _FakeLoop:
+        def __init__(self):          self.delegated = []
+        def default_exception_handler(self, ctx): self.delegated.append(ctx)
+
+    lp = _FakeLoop()
+    s._loop_exception_handler(lp, {"message": "Fatal error on transport",
+                                   "exception": TimeoutError("SSL shutdown timed out")})
+    check("Benign SSL-shutdown timeout swallowed (not delegated)", lp.delegated == [])
+    other = {"message": "boom", "exception": ValueError("nope")}
+    s._loop_exception_handler(lp, other)
+    check("Unrelated error delegated to default handler", lp.delegated == [other])
+
 
 def run_dispatch_tests(s):
     # Covers two seams the live-server tests can't reach:
@@ -456,6 +470,14 @@ def run_server_tests(s, serve_dir):
     check("Oversized file served",      raw_big is not None and len(raw_big) == 1200 * 1024)
     check("Oversized file not cached",  big_path not in s._file_cache)
     check("Cache not purged",           small_path in s._file_cache)
+    # #2: an oversized *compressible* file is served raw, not re-gzipped on every request
+    big_css = os.path.join(serve_dir, "toobig.css")
+    with open(big_css, "wb") as f:
+        f.write(b"a{color:red}" * 120000)             # ~1.4 MB compressible > 1 MB cache
+    raw_css, comp_css, etag_css = s._get_cached_file(big_css)
+    check("Oversized compressible file served raw (not gzipped)", comp_css is None and raw_css is not None)
+    check("Oversized compressible file keeps its etag", bool(etag_css))
+    os.remove(big_css)
     os.remove(small_path); os.remove(big_path)
     s._file_cache.clear()
     s._file_cache_bytes = 0

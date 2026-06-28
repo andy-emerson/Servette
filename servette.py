@@ -313,7 +313,7 @@ def _get_cached_file(path):
     """Return (raw, compressed_or_None, etag), reloading only if the file changed.
 
     compressed is None for already-compressed types; a file too large to fit in
-    the cache is served but not stored, so it can't purge everything else.
+    the cache is served raw and not stored, so it can't purge everything else.
     """
     try:
         mtime = os.path.getmtime(path)
@@ -334,14 +334,21 @@ def _get_cached_file(path):
     except OSError:
         return None, None, None
 
+    etag      = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
+    cache_max = config.cache_size_mb * 1024 * 1024
+
+    # A file too big to cache is re-read on every request regardless; don't also
+    # re-compress it each time — serve it raw (uncompressed) and uncached. The etag
+    # is still cheap and lets big files benefit from 304s.
+    if len(raw) > cache_max:
+        return raw, None, etag
+
     ext        = os.path.splitext(path)[1].lower()
     compressed = gzip.compress(raw, compresslevel=6) if ext in _COMPRESSIBLE_EXTS else None
-    etag       = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
     new_entry  = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
 
-    cache_max = config.cache_size_mb * 1024 * 1024
     if _entry_bytes(new_entry) > cache_max:
-        return raw, compressed, etag  # can't fit — serve without caching, so it won't purge the cache
+        return raw, compressed, etag  # rare: raw fit but raw+gzip doesn't — serve, don't store
 
     with _file_cache_lock:
         global _file_cache_bytes
@@ -807,9 +814,26 @@ async def _serve_http_redirect(stop_event):
     await hypercorn_serve(redirect_app, cfg, shutdown_trigger=trigger)
 
 
+def _loop_exception_handler(loop, context):
+    """Quiet the benign TLS-teardown noise; surface everything else.
+
+    Clients on the public internet routinely drop a TLS connection without a clean
+    close_notify, so asyncio waits, times out, and would otherwise dump a full
+    traceback to the journal. That's expected, not a fault, so log a single debug
+    line for it and delegate every other error to the default handler.
+    """
+    exc = context.get("exception")
+    if isinstance(exc, TimeoutError) and "ssl shutdown timed out" in str(exc).lower():
+        log.debug("TLS connection closed without clean shutdown by peer")
+        return
+    loop.default_exception_handler(context)
+
+
 async def _run_servers(stop_event):
     from hypercorn.config import Config as HypercornConfig
     from hypercorn.asyncio import serve as hypercorn_serve
+
+    asyncio.get_running_loop().set_exception_handler(_loop_exception_handler)
 
     async def trigger():
         await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)

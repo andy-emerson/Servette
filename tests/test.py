@@ -305,8 +305,9 @@ def run_dispatch_tests(s):
     # infrastructure and remain integration-territory, intentionally uncovered.
     import builtins, io, contextlib
 
-    def call_asgi(app, method, path, headers=None):
-        scope = {"type": "http", "method": method, "path": path, "headers": headers or []}
+    def call_asgi(app, method, path, headers=None, query_string=b""):
+        scope = {"type": "http", "method": method, "path": path,
+                 "headers": headers or [], "query_string": query_string}
         sent = []
         async def send(msg):    sent.append(msg)
         async def receive():    return {"type": "http.request", "body": b""}
@@ -324,6 +325,11 @@ def run_dispatch_tests(s):
                 else f"https://example.com:{port}/some/page")
     check("Plain HTTP → 301",            status == 301)
     check("Location is https host+path", headers.get(b"location") == expected.encode())
+
+    _, qheaders, _ = call_asgi(s.redirect_app, "GET", "/p",
+                               headers=[(b"host", b"example.com")], query_string=b"a=1&b=2")
+    check("Redirect preserves the query string",
+          qheaders.get(b"location", b"").decode().endswith("/p?a=1&b=2"))
 
     section("Redirect app — ACME HTTP-01 challenge")
 
@@ -422,6 +428,13 @@ def run_server_tests(s, serve_dir):
     proto = tls.selected_alpn_protocol()
     tls.close()
     check("ALPN negotiates HTTP/2 (h2)", proto == "h2")
+
+    section("Startup readiness probe (fail-closed)")
+
+    # The fix that makes start_server fail closed relies on _wait_for_server's bool.
+    check("_wait_for_server True for the live port", s._wait_for_server(TEST_PORT, timeout=2.0) is True)
+    _t = socket.socket(); _t.bind(("127.0.0.1", 0)); _closed = _t.getsockname()[1]; _t.close()
+    check("_wait_for_server False for a closed port", s._wait_for_server(_closed, timeout=0.4) is False)
 
     section("GET — gzip response")
 
@@ -808,31 +821,30 @@ def run_install_tests(s, tmpdir):
 
     section("Service file content")
 
+    # Test the real generated unit, not a reconstructed copy.
     servette_path = os.path.abspath(s.__file__)
     python_path   = s._VENV_PY if os.path.exists(s._VENV_PY) else "python3"
-    service = f"""[Unit]
-Description=Servette — The Simple Secure Server
-After=network.target
+    service = s._systemd_unit(python_path, servette_path)
+    check("Service runs as the least-privilege user",  "User=servette" in service)
+    check("Capabilities bounded to net-bind only",     "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" in service)
+    check("NoNewPrivileges is set",                    "NoNewPrivileges=yes" in service)
+    check("Filesystem is read-only (ProtectSystem=strict)", "ProtectSystem=strict" in service)
+    check("Private /tmp",                              "PrivateTmp=yes" in service)
+    check("Writes confined to BASE_DIR + ACME webroot",
+          f"ReadWritePaths={s.BASE_DIR} {s.ACME_WEBROOT}" in service)
 
-[Service]
-User=servette
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-ExecStart={python_path} {servette_path} --serve
-Restart=always
-RestartSec=3
-StandardInput=null
-StandardOutput=journal
-StandardError=journal
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-"""
-    check("Service file includes User=servette",                   "User=servette" in service)
-    check("Service file includes AmbientCapabilities",             "AmbientCapabilities=CAP_NET_BIND_SERVICE" in service)
-    check("Service file includes CapabilityBoundingSet",           "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" in service)
-    check("Service file does not run as root (no User= absent)",   "User=" in service)
+    # Validate the real unit with systemd-analyze where available (Ubuntu CI has it;
+    # skipped on macOS / non-systemd hosts). Catches typo'd or unknown directives.
+    if shutil.which("systemd-analyze"):
+        unit_path = os.path.join(tmpdir, "servette.service")
+        with open(unit_path, "w") as f:
+            f.write(s._systemd_unit(sys.executable, os.path.abspath(s.__file__)))
+        out  = subprocess.run(["systemd-analyze", "verify", unit_path], capture_output=True, text=True)
+        text = (out.stdout + out.stderr).lower()
+        check("systemd-analyze verify: no unknown directives",
+              "unknown lvalue" not in text and "unknown key name" not in text)
+    else:
+        print("  (systemd-analyze unavailable — unit syntax check skipped)")
 
     section("serve_dir world-readable check")
 

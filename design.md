@@ -38,17 +38,17 @@ The refusals below are not an exhaustive blocklist; they are the common cases, e
 | **Plugins, configuration language** | Settings are a handful of defaulted fields in `servette.toml`. Nothing to learn, nothing to extend — by design. |
 | **Runtime dependencies beyond the managed venv** | Stdlib (Python 3.11+) plus four packages Servette installs into `.servette-env/` itself. The operator never runs pip. |
 
-A request to add any of these is not a feature request; it is a request for a different program. The honest answer is usually "use Caddy."
+A request to add any of these is not a feature request; it is a request for a different program. The honest answer is usually to reach for a general-purpose server that does more.
 
 ## How it works
 
-Servette is a single file (`servette.py`, ~2,000 lines) with three sections, each readable on its own. Settings persist to `servette.toml` beside it.
+Servette is a single file (`servette.py`, ~2,200 lines) with three sections, each readable on its own. Settings persist to `servette.toml` beside it.
 
 | Section | Lines | Responsibility |
 | - | - | - |
-| **Server** | ~550 | every incoming request: config, rate limiting, file cache, the two ASGI apps |
-| **System** | ~750 | the environment: bootstrap, server lifecycle, certificates, systemd |
-| **Shell** | ~675 | the interactive terminal interface |
+| **Server** | ~660 | every incoming request: config, rate limiting, file cache, the two ASGI apps |
+| **System** | ~760 | the environment: bootstrap, server lifecycle, certificates, systemd |
+| **Shell** | ~720 | the interactive terminal interface |
 
 ```mermaid
 graph LR
@@ -110,7 +110,7 @@ graph LR
 
 **Rate limiter.** Two independent in-memory sliding-window dicts per IP — total requests (default 120/min) and failed auth attempts (default 6/min) — under a `threading.Lock`. The auth limiter activates only when credentials are actually submitted, not on unauthenticated requests. IPv6-mapped IPv4 addresses are normalized. `X-Forwarded-For` is trusted only when a `trusted_proxy` IP is configured, and only its rightmost value (one hop). Stale-IP eviction runs in a background `_rate_sweep` thread every 30 seconds, off the request hot path; it starts and stops with the server, not at import.
 
-**File cache.** Files are read once and cached in `_file_cache` keyed by path; compressible (text-like) types are also gzip-stored and the right encoding is sent per `Accept-Encoding`, while already-compressed types (images, fonts, video) are served raw. A file too large to fit the cache is served without being stored, so it can't purge everything else. `mtime` is checked on each request, so the cache refreshes when a file changes — this is the live reload. ETags (SHA-256 of contents) drive 304 responses.
+**File cache.** Files are read once and cached in `_file_cache` keyed by path; compressible (text-like) types are also gzip-stored and the right encoding is sent per `Accept-Encoding`, while already-compressed types (images, fonts, video) are served raw. A file too large to fit the cache is served raw (uncompressed) without being stored, so it can't purge everything else and isn't re-compressed on every request. `mtime` is checked on each request, so the cache refreshes when a file changes — this is the live reload. ETags (SHA-256 of contents) drive 304 responses. Reading and compressing happen in a worker thread (via `asyncio.to_thread`), so a large file never blocks the event loop and starves other connections.
 
 **HTTPS app.** The ASGI coroutine for every HTTPS request: rate limiting → auth → path resolution → file serving. `_resolve_request_path()` resolves URLs within `serve_dir`, enforces path-traversal protection (403), and falls directories back to `index.html`. Serves a custom `404.html` if present, infers MIME types from extensions, honors single byte ranges (`206` / `416`) for media seeking, and sends security headers on every response: X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, Permissions-Policy, and HSTS when a domain cert is active.
 
@@ -169,7 +169,7 @@ Servette is complete within its scope; "where are we?" is mostly "here is the fi
 
 Servette is built in human–agent collaboration, and says so. The human holds design authority and is the author of record; the agent writes code and surfaces trade-offs. This works because openness is paired with verification and responsibility — credit is *earned by the rigor*, not granted by a trailer. Energy spent hiding how a security tool is built is the wrong kind of energy; it belongs in the evidence instead. (Mechanics of attribution live in [`AGENTS.md`](AGENTS.md); the contributor's view in [`CONTRIBUTING.md`](CONTRIBUTING.md).)
 
-The methodology is scaled to the project. A 2,000-line finished server does not need a dependency frontier or a reference oracle; reproducing that machinery would itself be the scope creep this document exists to prevent. What ports is the principle, not the apparatus.
+The methodology is scaled to the project. A ~2,200-line finished server does not need a dependency frontier or a reference oracle; reproducing that machinery would itself be the scope creep this document exists to prevent. What ports is the principle, not the apparatus.
 
 ### The change loop
 

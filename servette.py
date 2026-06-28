@@ -313,7 +313,7 @@ def _get_cached_file(path):
     """Return (raw, compressed_or_None, etag), reloading only if the file changed.
 
     compressed is None for already-compressed types; a file too large to fit in
-    the cache is served but not stored, so it can't purge everything else.
+    the cache is served raw and not stored, so it can't purge everything else.
     """
     try:
         mtime = os.path.getmtime(path)
@@ -334,14 +334,21 @@ def _get_cached_file(path):
     except OSError:
         return None, None, None
 
+    etag      = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
+    cache_max = config.cache_size_mb * 1024 * 1024
+
+    # A file too big to cache is re-read on every request regardless; don't also
+    # re-compress it each time — serve it raw (uncompressed) and uncached. The etag
+    # is still cheap and lets big files benefit from 304s.
+    if len(raw) > cache_max:
+        return raw, None, etag
+
     ext        = os.path.splitext(path)[1].lower()
     compressed = gzip.compress(raw, compresslevel=6) if ext in _COMPRESSIBLE_EXTS else None
-    etag       = '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
     new_entry  = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
 
-    cache_max = config.cache_size_mb * 1024 * 1024
     if _entry_bytes(new_entry) > cache_max:
-        return raw, compressed, etag  # can't fit — serve without caching, so it won't purge the cache
+        return raw, compressed, etag  # rare: raw fit but raw+gzip doesn't — serve, don't store
 
     with _file_cache_lock:
         global _file_cache_bytes
@@ -582,7 +589,7 @@ async def https_app(scope, receive, send):
         # Try custom 404.html in serve_dir root
         custom_404 = os.path.join(_resolve(config.serve_dir), "404.html")
         if os.path.isfile(custom_404):
-            raw_404, _, _ = _get_cached_file(custom_404)
+            raw_404, _, _ = await asyncio.to_thread(_get_cached_file, custom_404)
             body_404 = raw_404 or b"Not found."
             content_type_404 = b"text/html; charset=utf-8"
         else:
@@ -594,7 +601,11 @@ async def https_app(scope, receive, send):
         log.warning("404 Not Found %s from %s", url_path, ip)
         return
 
-    raw, compressed, etag = _get_cached_file(file_path)
+    # Reading and gzip-compressing a file is synchronous, CPU-bound work; running it
+    # inline would block the event loop and starve every other connection (including
+    # TLS teardowns, which then time out). Offload to a worker thread — zlib and
+    # hashlib release the GIL, so compression genuinely runs off the loop.
+    raw, compressed, etag = await asyncio.to_thread(_get_cached_file, file_path)
     if raw is None:
         body_500 = b"Internal server error."
         await _send_response(send, 500,
@@ -803,9 +814,26 @@ async def _serve_http_redirect(stop_event):
     await hypercorn_serve(redirect_app, cfg, shutdown_trigger=trigger)
 
 
+def _loop_exception_handler(loop, context):
+    """Quiet the benign TLS-teardown noise; surface everything else.
+
+    Clients on the public internet routinely drop a TLS connection without a clean
+    close_notify, so asyncio waits, times out, and would otherwise dump a full
+    traceback to the journal. That's expected, not a fault, so log a single debug
+    line for it and delegate every other error to the default handler.
+    """
+    exc = context.get("exception")
+    if isinstance(exc, TimeoutError) and "ssl shutdown timed out" in str(exc).lower():
+        log.debug("TLS connection closed without clean shutdown by peer")
+        return
+    loop.default_exception_handler(context)
+
+
 async def _run_servers(stop_event):
     from hypercorn.config import Config as HypercornConfig
     from hypercorn.asyncio import serve as hypercorn_serve
+
+    asyncio.get_running_loop().set_exception_handler(_loop_exception_handler)
 
     async def trigger():
         await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)

@@ -14,24 +14,34 @@
 
 Servette is a production nanoserver. A nanoserver focuses on doing one thing well, minimizing complexity and file size, which makes them very popular as dev tools. Servette, however, is not a dev tool. It serves a real site on the public internet and, therefore, inherits features that a dev tool may not have: a trusted certificate, automatic renewal, HTTPS enforced at the redirect level, a password if you want one. No configuration language to learn. No certificates to manage. No dependencies to install. Simply copy Servette to a server, run it, follow the wizard, done.
 
-Most ways to host a static site ask you to choose between simplicity and control:
+Most ways to serve a website sit at an extreme. **General-purpose servers** — nginx, Apache, Caddy — do *everything*: any site at any scale, once you've configured them. **Development tools** — `python -m http.server` — do *one thing*: serve a folder right now, nothing else. And **managed platforms** — GitHub Pages, Netlify, Vercel — do it for you, on infrastructure and terms that are theirs, not yours.
 
-- **Platforms** (GitHub Pages, Netlify, Vercel) are easy but live on someone else's infrastructure, don't support password protection, and disappear if the free tier changes.
-- **General-purpose servers** (nginx, Caddy, Apache) give you full control but require learning configuration languages, managing certificates manually, and wiring everything together yourself.
+Servette aims at the space between: **do everything _necessary_ to do one thing _well_.** The one thing is hosting a static site you own — anything that runs in a browser, from a simple portfolio to a serious client-side app. *Everything necessary* is what you can't honestly skip on the public internet — trusted HTTPS that renews itself, optional passwords, rate limiting, a hardened service that survives reboots — and nothing past that line. Within that domain, nothing is missing.
 
-Servette is the middle option: your own server, with the simplicity of a platform. It serves anything that runs in a browser, from a simple portfolio to a serious client-side application. The decrease in complexity is not a decrease in capability — within its domain, nothing is missing.
+The tools closest in spirit are small and focused, like Servette. Here is how they line up against that one job:
 
-The closest alternative is Caddy, which handles HTTPS and Let's Encrypt with a famously simple config syntax. But Caddy's core is ~73,000 lines of Go; Servette is around 2,000 lines of Python. For serving a static site, they cover the same ground. Caddy's additional bulk comes from features like reverse proxying, load balancing, and a live config API that a Pi-hosted static site doesn't need. That size difference matters: if something goes wrong, Servette is readily debuggable where Caddy is effectively a black box, and on more constrained hardware like a Raspberry Pi, a smaller footprint has real advantages.
+| | Servette | `http.server` | bottle.py | srv | Static Web Server |
+|---|:--:|:--:|:--:|:--:|:--:|
+| **Built for** | static sites | development | dynamic web apps | static sites | static sites |
+| Automatic trusted HTTPS | ✓ | ✗ | ✗ | ✓ | ✗ |
+| Hardened for production | ✓ | ✗ | ✗ | ✗ | ~ |
+| Readable source | ~2,200 lines | ~1,300 lines | ~4,600 lines | binary | binary |
+| Actively maintained | ✓ | ✓ | ✓ | ✗ | ✓ |
+| Runs on a Raspberry Pi out of the box | ✓ | ✓ | ✓ | ✗ | ✗ |
+
+All of these are excellent at what they're built for. None of them do what Servette does: serve a static site you own — safely, on the public internet, from a single file you can read.
 
 ---
 
 ## Who is Servette for?
 
-**People who want to own what they ship.** You built something, and you want it on the internet. Not on someone else's platform. Not dependent on a free tier that might disappear. On your own server, with a real certificate, behind a password if you want one. You want to copy a file to a server, answer a few questions, and walk away.
+**People who want to understand what their server is running.** General-purpose servers do the job, but they're large systems you configure and take on trust. Servette is one readable file — ~2,200 lines of Python, no hidden machinery — that you can follow top to bottom in an afternoon.
 
-**Raspberry Pi users.** Servette was designed with the Pi in mind. If you can SSH in and run a Python script, you can have a real HTTPS site running on your Pi in under ten minutes, with a trusted certificate, automatic renewal, and a server that survives reboots.
+**People with a real site that needs a real server.** Development servers (like `python -m http.server`) are perfect while you build, but they aren't meant to face the internet — no trusted HTTPS, no auth, gone when you close the terminal. Servette is built to stay up: a trusted certificate that renews itself, and a hardened service that survives reboots.
 
-**Developers who want to understand what they're running.** Servette is around 2,000 lines of Python with no hidden magic. It is a working server, not a toy example, and it is readable in an afternoon.
+**People who want to own what they serve.** Managed platforms host it for you, on their infrastructure and their terms. Servette runs on your own server, with your own certificate, behind a password if you want one — copy a file, answer a few questions, walk away.
+
+**Raspberry Pi users.** Servette was designed with the Pi in mind. If you can SSH in and run a Python script, you can have a real HTTPS site live in under ten minutes — trusted certificate, automatic renewal, and a server that survives reboots.
 
 ---
 
@@ -55,7 +65,7 @@ The closest alternative is Caddy, which handles HTTPS and Let's Encrypt with a f
 
 **Python 3.11 or higher.** Pre-installed on most current Linux servers. Raspberry Pi OS Bookworm (the current release) satisfies both the OS and Python requirements on a Raspberry Pi 4.
 
-**A folder with your site files.** Servette serves the `site/` folder, which ships with a placeholder demo page so a fresh copy runs immediately — useful for confirming everything works before you have a site of your own. Replace it with your own files when you're ready; Servette looks for `index.html` at the root and in any subdirectory.
+**A folder with your site files.** Servette serves the `site/` folder, which ships with a demo page that runs a live self-test in your browser — so a fresh copy not only runs immediately but confirms the server is working before you have a site of your own. Replace it with your own files when you're ready; Servette looks for `index.html` at the root and in any subdirectory.
 
 **A domain name.** Required for a trusted certificate and recommended for any public-facing site. Without one, Servette can use a self-signed certificate, but visitors' browsers will warn them before they can access your site. Self-signed is fine for a private home network or local testing.
 
@@ -76,7 +86,7 @@ scp -r mysite/ user@your.server.ip:~/site
 
 Replace `user` with your server's login name (`ubuntu` on Ubuntu, `pi` on Raspberry Pi) and `your.server.ip` with its IP address. If your server uses a key file, add `-i your-key.pem` before the filenames.
 
-Servette serves the `site/` folder next to `servette.py`. It ships with a placeholder demo page — replace its contents with your own files and Servette will find them.
+Servette serves the `site/` folder next to `servette.py`. It ships with a self-testing demo page — replace its contents with your own files and Servette will find them.
 
 ### 2. SSH into your server
 
@@ -160,6 +170,6 @@ If you have a password set, `servette.toml` contains its hash. Sharing the file 
 
 ## How it's built
 
-Servette is a single file — `servette.py`, around 2,000 lines in three clear sections (Server, System, and Shell) — readable in an afternoon. There is no hidden machinery and no framework to learn: if something ever goes wrong, you can open the file and follow it top to bottom. The full architecture, the design rationale, and the things Servette deliberately *doesn't* do are documented in [design.md](design.md).
+Servette is a single file — `servette.py`, in three clear sections (Server, System, and Shell) — readable in an afternoon. There is no hidden machinery and no framework to learn: if something ever goes wrong, you can open the file and follow it top to bottom. The full architecture, the design rationale, and the things Servette deliberately *doesn't* do are documented in [design.md](design.md).
 
 **Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests — it has nowhere to put submitted data — and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, see [Scope & non-goals](design.md#scope--non-goals).

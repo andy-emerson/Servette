@@ -281,6 +281,20 @@ def run_unit_tests(s):
     check("Hours",    s._format_uptime(3700)  == "1h 1m")
     check("Days",     s._format_uptime(90061) == "1d 1h")
 
+    section("Event-loop exception handler")
+
+    class _FakeLoop:
+        def __init__(self):          self.delegated = []
+        def default_exception_handler(self, ctx): self.delegated.append(ctx)
+
+    lp = _FakeLoop()
+    s._loop_exception_handler(lp, {"message": "Fatal error on transport",
+                                   "exception": TimeoutError("SSL shutdown timed out")})
+    check("Benign SSL-shutdown timeout swallowed (not delegated)", lp.delegated == [])
+    other = {"message": "boom", "exception": ValueError("nope")}
+    s._loop_exception_handler(lp, other)
+    check("Unrelated error delegated to default handler", lp.delegated == [other])
+
 
 def run_dispatch_tests(s):
     # Covers two seams the live-server tests can't reach:
@@ -360,6 +374,38 @@ def run_dispatch_tests(s):
     check("'start' routed to cmd_start",   "start" in calls)
     check("'quit' stops server and exits", calls[-1] == "stop")
 
+    section("File serving runs off the event loop")
+    # Regression test for the event-loop starvation bug (#16): _get_cached_file does
+    # synchronous read + gzip, so the handler must run it in a worker thread, not on
+    # the loop — otherwise compressing one large file blocks every other connection.
+    import threading
+    tmpd = tempfile.mkdtemp()
+    with open(os.path.join(tmpd, "index.html"), "w") as f:
+        f.write("<h1>hi</h1>")
+    saved_serve, saved_pw, saved_get = s.config.serve_dir, s.config.password_hash, s._get_cached_file
+    ran_on = {}
+    def spy(path):
+        ran_on["thread"] = threading.get_ident()
+        return saved_get(path)
+    s.config.serve_dir     = tmpd
+    s.config.password_hash = ""
+    s._get_cached_file     = spy
+    try:
+        sent = []
+        async def send(m):    sent.append(m)
+        async def receive():  return {"type": "http.request", "body": b""}
+        scope = {"type": "http", "method": "GET", "path": "/",
+                 "headers": [], "client": ("127.0.0.1", 1)}
+        loop_thread = threading.get_ident()   # asyncio.run drives the loop on this thread
+        asyncio.run(s.https_app(scope, receive, send))
+    finally:
+        s._get_cached_file     = saved_get
+        s.config.serve_dir     = saved_serve
+        s.config.password_hash = saved_pw
+
+    check("File read/gzip offloaded to a worker thread (not the loop)",
+          ran_on.get("thread") is not None and ran_on["thread"] != loop_thread)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INTEGRATION TESTS
@@ -424,6 +470,14 @@ def run_server_tests(s, serve_dir):
     check("Oversized file served",      raw_big is not None and len(raw_big) == 1200 * 1024)
     check("Oversized file not cached",  big_path not in s._file_cache)
     check("Cache not purged",           small_path in s._file_cache)
+    # #2: an oversized *compressible* file is served raw, not re-gzipped on every request
+    big_css = os.path.join(serve_dir, "toobig.css")
+    with open(big_css, "wb") as f:
+        f.write(b"a{color:red}" * 120000)             # ~1.4 MB compressible > 1 MB cache
+    raw_css, comp_css, etag_css = s._get_cached_file(big_css)
+    check("Oversized compressible file served raw (not gzipped)", comp_css is None and raw_css is not None)
+    check("Oversized compressible file keeps its etag", bool(etag_css))
+    os.remove(big_css)
     os.remove(small_path); os.remove(big_path)
     s._file_cache.clear()
     s._file_cache_bytes = 0

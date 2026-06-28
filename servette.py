@@ -62,10 +62,18 @@ def _resolve(path):
     return path if os.path.isabs(path) else os.path.join(BASE_DIR, path)
 
 
+# scrypt cost parameters — OWASP baseline (N=2**14, r=8, p=1 ≈ 16 MB per hash).
+# scrypt is memory-hard: each guess must hold that much RAM, denying an attacker
+# who steals the hash the cheap GPU parallelism that PBKDF2 (CPU-hard) allows.
+# ~16 MB and ~30 ms per check stays comfortable even on a Raspberry Pi.
+_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1
+
+
 def _hash_password(password):
-    """Hash a password with a random salt using PBKDF2-HMAC-SHA256."""
+    """Hash a password with a random salt using scrypt (memory-hard)."""
     salt = os.urandom(16)
-    key  = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 260000)
+    key  = hashlib.scrypt(password.encode("utf-8"), salt=salt,
+                          n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
     return key.hex(), salt.hex()
 
 
@@ -75,7 +83,8 @@ def _check_password(submitted, stored_hash, stored_salt):
         return False
     try:
         salt = bytes.fromhex(stored_salt)
-        key  = hashlib.pbkdf2_hmac("sha256", submitted.encode("utf-8"), salt, 260000)
+        key  = hashlib.scrypt(submitted.encode("utf-8"), salt=salt,
+                              n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
         return hmac.compare_digest(key.hex(), stored_hash)
     except Exception:
         return False

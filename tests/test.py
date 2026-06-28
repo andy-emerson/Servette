@@ -213,6 +213,7 @@ def run_unit_tests(s):
     check("Wrong password fails",         not s._check_password("wrong", h1, salt1))
     check("Empty hash returns False",     not s._check_password("hello", "", salt1))
     check("Empty salt returns False",     not s._check_password("hello", h1, ""))
+    check("Hash does not contain plaintext", "hello" not in h1)
 
     section("Versioning")
 

@@ -441,6 +441,24 @@ def run_server_tests(s, serve_dir):
     os.remove(huge_path)
     s.config.cache_size_mb = orig_cache_mb
 
+    section("Range requests")
+
+    full  = req("GET", path="/style.css")
+    total = len(full.body)
+    check("Accept-Ranges advertised",  full.headers.get("Accept-Ranges") == "bytes")
+    r = req("GET", path="/style.css", headers={"Range": "bytes=0-3"})
+    check("Range → 206",               r.status == 206)
+    check("206 returns the slice",     r.body == full.body[:4])
+    check("Content-Range header",      r.headers.get("Content-Range") == f"bytes 0-3/{total}")
+    r = req("GET", path="/style.css", headers={"Range": "bytes=-3"})
+    check("Suffix range",              r.status == 206 and r.body == full.body[-3:])
+    r = req("GET", path="/style.css", headers={"Range": "bytes=2-"})
+    check("Open-ended range",          r.status == 206 and r.body == full.body[2:])
+    r = req("GET", path="/style.css", headers={"Range": f"bytes={total + 10}-"})
+    check("Unsatisfiable → 416",       r.status == 416)
+    r = req("GET", path="/style.css", headers={"Range": "bytes=0-1,3-4"})
+    check("Multi-range → full 200",    r.status == 200 and r.body == full.body)
+
     section("HEAD")
 
     resp = req("HEAD", headers={"Accept-Encoding": "gzip"})

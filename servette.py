@@ -403,6 +403,32 @@ def _cache_control_header():
     return f"{scope}, max-age={config.cache_max_age}"
 
 
+def _parse_range(header, total):
+    """Parse a single HTTP byte range against a body of `total` bytes. Returns
+    (start, end) inclusive, "invalid" if unsatisfiable, or None if absent or
+    unsupported (multi-range / malformed) — caller then serves the full body."""
+    if not header.startswith("bytes="):
+        return None
+    spec = header[len("bytes="):].strip()
+    if "," in spec or "-" not in spec:
+        return None
+    start_s, _, end_s = spec.partition("-")
+    try:
+        if start_s == "":
+            n = int(end_s)                       # suffix: the last n bytes
+            if n <= 0:
+                return "invalid"
+            start, end = max(0, total - n), total - 1
+        else:
+            start = int(start_s)
+            end   = min(int(end_s), total - 1) if end_s else total - 1
+    except ValueError:
+        return None
+    if total == 0 or start > end or start >= total:
+        return "invalid"
+    return (start, end)
+
+
 def _security_headers():
     """Security headers sent on every HTTPS response — success or error."""
     headers = [
@@ -578,23 +604,53 @@ async def https_app(scope, receive, send):
         log.info("304 Not Modified %s to %s", url_path, ip)
         return
 
-    # Serve
+    # Serve. Security headers (and HSTS) are added to every response by the send wrapper above.
     accept_encoding = headers.get(b"accept-encoding", b"").decode()
     use_gzip        = compressed is not None and "gzip" in accept_encoding
     mime            = _mime_type(file_path)
-    body            = compressed if use_gzip else raw
-
-    response_headers = [
-        (b"content-type",   mime.encode()),
-        (b"content-length", str(len(body)).encode()),
-        (b"etag",           etag.encode()),
-        (b"cache-control",  _cache_control_header().encode()),
-        (b"vary",           b"Accept-Encoding"),
+    common = [
+        (b"content-type",  mime.encode()),
+        (b"etag",          etag.encode()),
+        (b"cache-control", _cache_control_header().encode()),
+        (b"vary",          b"Accept-Encoding"),
     ]
+
     if use_gzip:
-        response_headers.append((b"content-encoding", b"gzip"))
-    # Security headers (and HSTS) are added to every response by the send wrapper above.
-    await _send_response(send, 200, response_headers, body=body if send_body else b"")
+        # Byte ranges apply to the identity representation, so they aren't combined
+        # with gzip; compressible types are small text anyway.
+        await _send_response(send, 200, common + [
+            (b"content-length",   str(len(compressed)).encode()),
+            (b"content-encoding", b"gzip"),
+        ], body=compressed if send_body else b"")
+        log.info("200 %s to %s", url_path, ip)
+        return
+
+    # Serving raw: advertise and honor byte ranges (needed for media seeking).
+    total = len(raw)
+    rng   = _parse_range(headers.get(b"range", b"").decode(), total)
+    if rng == "invalid":
+        await _send_response(send, 416, [
+            (b"content-range",  f"bytes */{total}".encode()),
+            (b"content-length", b"0"),
+            (b"accept-ranges",  b"bytes"),
+        ])
+        log.info("416 Range Not Satisfiable %s to %s", url_path, ip)
+        return
+    if rng is not None:
+        start, end = rng
+        chunk = raw[start:end + 1]
+        await _send_response(send, 206, common + [
+            (b"content-range",  f"bytes {start}-{end}/{total}".encode()),
+            (b"content-length", str(len(chunk)).encode()),
+            (b"accept-ranges",  b"bytes"),
+        ], body=chunk if send_body else b"")
+        log.info("206 %s [%d-%d] to %s", url_path, start, end, ip)
+        return
+
+    await _send_response(send, 200, common + [
+        (b"content-length", str(total).encode()),
+        (b"accept-ranges",  b"bytes"),
+    ], body=raw if send_body else b"")
     log.info("200 %s to %s", url_path, ip)
 
 

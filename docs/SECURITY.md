@@ -8,7 +8,7 @@ to report a vulnerability and what to expect in return.
 
 Servette is pre-1.0 and ships as a single file that updates itself to the
 latest **signed** GitHub Release (the trust model is described in
-[`design.md`](design.md#how-it-works)). Only the latest release receives
+[`architecture.md`](architecture.md#how-it-works)). Only the latest release receives
 security fixes — run `update` from the Servette shell to stay current.
 
 ## Reporting a vulnerability
@@ -45,6 +45,6 @@ against any of those are in scope, for example:
 - Flaws in update signature verification.
 
 Out of scope: the deliberate design choices documented under
-[Scope & non-goals](design.md#scope--non-goals) (e.g. binding to all interfaces,
+[Scope & non-goals](principles.md#scope--non-goals) (e.g. binding to all interfaces,
 which a public server requires), and issues that depend on an attacker who
 already has local/root access to the host.

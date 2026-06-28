@@ -2,17 +2,17 @@
 
 Operating instructions for any coding agent working in this repository. This is the master agent doc; tool-specific files (e.g. `CLAUDE.md`) defer to it so there is one source of truth.
 
-Everything lives in one file, `servette.py` (Python 3.11+, stdlib plus four packages installed into `.servette-env/`). Settings persist to `servette.toml` beside it. The architecture, scope, and methodology live in [`design.md`](design.md); contributor-facing framing in [`CONTRIBUTING.md`](CONTRIBUTING.md). This file covers the operational mechanics: how we work, run, test, release, and commit.
+Everything lives in one file, `servette.py` (Python 3.11+, stdlib plus four packages installed into `.servette-env/`). Settings persist to `servette.toml` beside it. The architecture lives in [`architecture.md`](docs/architecture.md), scope and methodology in [`principles.md`](docs/principles.md); contributor-facing framing in [`CONTRIBUTING.md`](docs/CONTRIBUTING.md). This file covers the operational mechanics: how we work, run, test, release, and commit.
 
 ## How we work here
 
-Read [`design.md`](design.md#how-we-work) before your first change — its methodology is binding, not background. In operational terms:
+Read [`principles.md`](docs/principles.md#how-we-work) before your first change — its methodology is binding, not background. In operational terms:
 
-- **One scoped change at a time.** If a change argues for one of the non-goals in `design.md`, stop and raise it — that's a different program, not a feature.
+- **One scoped change at a time.** If a change argues for one of the non-goals in [`principles.md`](docs/principles.md#scope--non-goals), stop and raise it — that's a different program, not a feature.
 - **Write a test that can fail** alongside the change; a bug fix ships with the test that would have caught it.
 - **Run the bar before calling anything done** — tests green, and CodeQL clean for security-relevant work (auth, TLS, rate limiting, path resolution).
 - **Update the docs in the same change** — they're part of the work, not cleanup. A doc that lags the code is the first step of the next over-claim.
-- **Prefer understatement.** Report what a change is *verified* to do, not what you hope it does. The recurring failure mode is a claim sitting one rung above its evidence (`design.md`'s claim ladder); the process exists to keep your claims honest.
+- **Prefer understatement.** Report what a change is *verified* to do, not what you hope it does. The recurring failure mode is a claim sitting one rung above its evidence (`principles.md`'s claim ladder); the process exists to keep your claims honest.
 - **Don't change an agreed plan on your own.** If a plan you and the human settled on hits a snag or new information, bring the revised plan back for approval before acting. An observation or aside from the human is not approval for a new plan.
 
 ## Running
@@ -50,11 +50,11 @@ Remote: `git@github.com:andy-emerson/servette.git`. Development happens on branc
 Co-Authored-By: Claude <noreply@anthropic.com>
 ```
 
-Other agents use their own identity, not Claude's. This is credit, not a disclaimer: it is paired with the responsibility and verification in [`design.md`](design.md#how-we-work), and the human remains the author of record.
+Other agents use their own identity, not Claude's. This is credit, not a disclaimer: it is paired with the responsibility and verification in [`principles.md`](docs/principles.md#how-we-work), and the human remains the author of record.
 
 ## Releasing (maintainer task)
 
-Servette updates itself from signed GitHub Releases, not from `main` — see [`design.md`](design.md#how-it-works) for the trust model. A release is the one and only place `__version__` changes; it never moves during ordinary development. Publishing requires the private signing key, so it is a maintainer task. Versions are date-based: `0.<yy>.<doy>` — two-digit year and day-of-year, e.g. `0.26.178`.
+Servette updates itself from signed GitHub Releases, not from `main` — see [`architecture.md`](docs/architecture.md#how-it-works) for the trust model. A release is the one and only place `__version__` changes; it never moves during ordinary development. Publishing requires the private signing key, so it is a maintainer task. Versions are date-based: `0.<yy>.<doy>` — two-digit year and day-of-year, e.g. `0.26.178`.
 
 To publish (maintainer):
 

@@ -479,28 +479,13 @@ async def _handle_lifespan(receive, send):
             return
 
 
-async def https_app(scope, receive, send):
-    """ASGI app — HTTPS server."""
-
-    if scope["type"] == "lifespan":
-        await _handle_lifespan(receive, send)
-        return
-
-    if scope["type"] != "http":
-        return
-
-    # Wrap send so the security headers go on every response (errors included), not just 200s.
-    _raw_send = send
-    async def send(event):
-        if event["type"] == "http.response.start":
-            event = {**event, "headers": _security_headers() + list(event["headers"])}
-        await _raw_send(event)
-
-    method  = scope["method"]
-    headers = dict(scope["headers"])
-
-    client = scope.get("client")
-    ip     = _normalize_ip(client[0] if client else "unknown")
+def _handle_request(method, url_path, headers, raw_ip):
+    """Transport-agnostic request handler. Given the method, URL path, a dict of
+    lowercased byte headers, and the raw client IP, returns (status, headers, body)
+    — security headers included on every response, body blanked for HEAD. Pure and
+    synchronous, so it can be driven by any server (ASGI or otherwise) and run off
+    the event loop. The decision logic lives here; the transport just sends it."""
+    ip = _normalize_ip(raw_ip)
     if config.trusted_proxy:
         xff = headers.get(b"x-forwarded-for", b"").decode()
         # Rightmost XFF value is what the single trusted proxy appended.
@@ -509,23 +494,19 @@ async def https_app(scope, receive, send):
         if xff and ip == config.trusted_proxy:
             ip = _normalize_ip(xff.split(",")[-1].strip())
 
-    send_body = (method != "HEAD")
+    def resp(status, hdrs, body=b""):
+        # Security headers (and HSTS) go on every response; HEAD keeps the headers but drops the body.
+        return status, _security_headers() + hdrs, (b"" if method == "HEAD" else body)
 
     if method not in ("GET", "HEAD"):
-        await _send_response(send, 405,
-            [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
-        return
+        return resp(405, [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
 
     config.reload_if_changed()
 
     # Rate limiting
     if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
-        await _send_response(send, 429, [
-            (b"retry-after", str(RATE_WINDOW).encode()),
-            (b"content-length", b"0"),
-        ])
         log.warning("Rate limited %s", ip)
-        return
+        return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
     # Authentication
     if config.username:
@@ -550,81 +531,53 @@ async def https_app(scope, receive, send):
 
         if not authed:
             if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit):
-                await _send_response(send, 429, [
-                    (b"retry-after", str(RATE_WINDOW).encode()),
-                    (b"content-length", b"0"),
-                ])
                 log.warning("Auth rate limited %s", ip)
-                return
-            await _send_response(send, 401, [
+                return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
+            if credentials_submitted:
+                log.warning("Failed auth attempt from %s", ip)
+            return resp(401, [
                 (b"www-authenticate", b'Basic realm="Access Required"'),
                 (b"content-type",     b"text/plain"),
                 (b"content-length",   b"12"),
-            ], body=b"Unauthorized" if send_body else b"")
-            if credentials_submitted:
-                log.warning("Failed auth attempt from %s", ip)
-            return
+            ], b"Unauthorized")
 
     # Resolve request path to a file
-    url_path = scope.get("path", "/")
     try:
         file_path, status = _resolve_request_path(url_path)
     except Exception as e:
         log.error("500 resolving %s: %s", url_path, e)
         body_500 = b"Internal server error."
-        await _send_response(send, 500,
-            [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())],
-            body=body_500 if send_body else b"")
-        return
+        return resp(500, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())], body_500)
 
     if status == 403:
-        body_403 = b"Forbidden."
-        await _send_response(send, 403,
-            [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())],
-            body=body_403 if send_body else b"")
         log.warning("403 Forbidden %s from %s", url_path, ip)
-        return
+        body_403 = b"Forbidden."
+        return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
         # Try custom 404.html in serve_dir root
         custom_404 = os.path.join(_resolve(config.serve_dir), "404.html")
         if os.path.isfile(custom_404):
-            raw_404, _, _ = await asyncio.to_thread(_get_cached_file, custom_404)
+            raw_404, _, _ = _get_cached_file(custom_404)
             body_404 = raw_404 or b"Not found."
             content_type_404 = b"text/html; charset=utf-8"
         else:
             body_404 = b"Not found."
             content_type_404 = b"text/plain"
-        await _send_response(send, 404,
-            [(b"content-type", content_type_404), (b"content-length", str(len(body_404)).encode())],
-            body=body_404 if send_body else b"")
         log.warning("404 Not Found %s from %s", url_path, ip)
-        return
+        return resp(404, [(b"content-type", content_type_404), (b"content-length", str(len(body_404)).encode())], body_404)
 
-    # Reading and gzip-compressing a file is synchronous, CPU-bound work; running it
-    # inline would block the event loop and starve every other connection (including
-    # TLS teardowns, which then time out). Offload to a worker thread — zlib and
-    # hashlib release the GIL, so compression genuinely runs off the loop.
-    raw, compressed, etag = await asyncio.to_thread(_get_cached_file, file_path)
+    raw, compressed, etag = _get_cached_file(file_path)
     if raw is None:
-        body_500 = b"Internal server error."
-        await _send_response(send, 500,
-            [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())],
-            body=body_500 if send_body else b"")
         log.error("500 could not read %s", file_path)
-        return
+        body_500 = b"Internal server error."
+        return resp(500, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())], body_500)
 
     # 304 Not Modified
-    if_none_match = headers.get(b"if-none-match", b"").decode()
-    if if_none_match == etag:
-        await _send_response(send, 304, [
-            (b"etag",          etag.encode()),
-            (b"cache-control", _cache_control_header().encode()),
-        ])
+    if headers.get(b"if-none-match", b"").decode() == etag:
         log.info("304 Not Modified %s to %s", url_path, ip)
-        return
+        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header().encode())])
 
-    # Serve. Security headers (and HSTS) are added to every response by the send wrapper above.
     accept_encoding = headers.get(b"accept-encoding", b"").decode()
     use_gzip        = compressed is not None and "gzip" in accept_encoding
     mime            = _mime_type(file_path)
@@ -638,40 +591,60 @@ async def https_app(scope, receive, send):
     if use_gzip:
         # Byte ranges apply to the identity representation, so they aren't combined
         # with gzip; compressible types are small text anyway.
-        await _send_response(send, 200, common + [
+        log.info("200 %s to %s", url_path, ip)
+        return resp(200, common + [
             (b"content-length",   str(len(compressed)).encode()),
             (b"content-encoding", b"gzip"),
-        ], body=compressed if send_body else b"")
-        log.info("200 %s to %s", url_path, ip)
-        return
+        ], compressed)
 
     # Serving raw: advertise and honor byte ranges (needed for media seeking).
     total = len(raw)
     rng   = _parse_range(headers.get(b"range", b"").decode(), total)
     if rng == "invalid":
-        await _send_response(send, 416, [
+        log.info("416 Range Not Satisfiable %s to %s", url_path, ip)
+        return resp(416, [
             (b"content-range",  f"bytes */{total}".encode()),
             (b"content-length", b"0"),
             (b"accept-ranges",  b"bytes"),
         ])
-        log.info("416 Range Not Satisfiable %s to %s", url_path, ip)
-        return
     if rng is not None:
         start, end = rng
         chunk = raw[start:end + 1]
-        await _send_response(send, 206, common + [
+        log.info("206 %s [%d-%d] to %s", url_path, start, end, ip)
+        return resp(206, common + [
             (b"content-range",  f"bytes {start}-{end}/{total}".encode()),
             (b"content-length", str(len(chunk)).encode()),
             (b"accept-ranges",  b"bytes"),
-        ], body=chunk if send_body else b"")
-        log.info("206 %s [%d-%d] to %s", url_path, start, end, ip)
-        return
+        ], chunk)
 
-    await _send_response(send, 200, common + [
+    log.info("200 %s to %s", url_path, ip)
+    return resp(200, common + [
         (b"content-length", str(total).encode()),
         (b"accept-ranges",  b"bytes"),
-    ], body=raw if send_body else b"")
-    log.info("200 %s to %s", url_path, ip)
+    ], raw)
+
+
+async def https_app(scope, receive, send):
+    """ASGI app — HTTPS server. Thin shell over _handle_request, which holds the
+    logic; the request is handled in a worker thread so its synchronous file I/O
+    and compression never block the event loop."""
+
+    if scope["type"] == "lifespan":
+        await _handle_lifespan(receive, send)
+        return
+
+    if scope["type"] != "http":
+        return
+
+    client = scope.get("client")
+    status, headers, body = await asyncio.to_thread(
+        _handle_request,
+        scope["method"],
+        scope.get("path", "/"),
+        dict(scope["headers"]),
+        client[0] if client else "unknown",
+    )
+    await _send_response(send, status, headers, body=body)
 
 
 async def redirect_app(scope, receive, send):

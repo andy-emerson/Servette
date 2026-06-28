@@ -223,6 +223,14 @@ log = logging.getLogger(__name__)
 setup_logging()
 
 
+def _c(text, color):
+    """Wrap text in an ANSI color for interactive (TTY) output; plain text otherwise."""
+    codes = {"green": "32", "red": "31", "yellow": "33"}
+    if color not in codes or not sys.stdout.isatty():
+        return text
+    return f"\033[{codes[color]}m{text}\033[0m"
+
+
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 #
 # Uses threading.Lock because the critical section is in-memory deque
@@ -873,9 +881,9 @@ def start_server():
             log.warning("SSL certificate expires in %d days", days)
 
     for issue in _production_issues():
-        print(f"  ⚠ {issue}")
+        print(_c(f"  ⚠ {issue}", "yellow"))
     for warning in _cache_warnings():
-        print(f"  ⚠ {warning}")
+        print(_c(f"  ⚠ {warning}", "yellow"))
 
 
 def stop_server():
@@ -1937,7 +1945,8 @@ def cmd_status():
     W              = _PAD
 
     print()
-    print(f"● Running  (v{__version__})" if running else f"○ Stopped  (v{__version__})")
+    status_dot = _c("● Running", "green") if running else _c("○ Stopped", "red")
+    print(f"{status_dot}  (v{__version__})")
 
     if running:
         mode = "System service" if service_active else "Session only"
@@ -1945,18 +1954,22 @@ def cmd_status():
 
     print(f"  {'URL':<{W}} {url}")
     print(f"  {'Directory':<{W}} {config.serve_dir or '(not configured)'}")
-    print(f"  {'Auth':<{W}} {'enabled' if config.username else 'disabled'}")
+    auth_str = _c("enabled", "green") if config.username else _c("disabled", "yellow")
+    print(f"  {'Auth':<{W}} {auth_str}")
 
     days = _cert_days_remaining(cert_path)
     if days is not None:
-        cert_str = "expired" if days <= 0 else f"{days} days remaining"
+        if days <= 0:
+            cert_str = _c("expired", "red")
+        else:
+            cert_str = _c(f"{days} days remaining", "yellow" if days < 30 else "green")
         print(f"  {'Cert':<{W}} {cert_str}")
 
     issues = _production_issues() + _cache_warnings()
     if issues:
         print()
         for issue in issues:
-            print(f"  ⚠ {issue}")
+            print(_c(f"  ⚠ {issue}", "yellow"))
 
     if running:
         if service_active:

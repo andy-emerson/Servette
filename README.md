@@ -1,10 +1,8 @@
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="servette-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="servette-light.svg">
-    <img alt="Servette" src="servette-light.svg" width="300">
-  </picture>
-</div>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="servette-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="servette-light.svg">
+  <img alt="Servette" src="servette-light.svg" width="300">
+</picture>
 
 ### The Simple, Secure Static-Site Server
 
@@ -145,6 +143,18 @@ Changes appear immediately, no restart required.
 To update Servette itself, run `update` from the Servette shell. Your settings are stored in `servette.toml` and are never affected by updates.
 
 If you have a password set, `servette.toml` contains its hash. Sharing the file — for troubleshooting, for example — gives anyone who receives it material they can use to attempt an offline cracking attack against your password.
+
+---
+
+## Troubleshooting
+
+**The site isn't reachable.** Make sure your server's firewall allows inbound traffic on **ports 80 and 443**. On a cloud VPS this is often a separate "security group" or firewall panel in the provider's dashboard, not just the OS firewall — port 80 carries the HTTP→HTTPS redirect and Let's Encrypt's validation, and 443 serves the site.
+
+**Let's Encrypt won't issue a certificate.** Your **domain must already point at this server's IP** before you request a trusted certificate — Let's Encrypt validates by connecting back to your domain over port 80. Confirm DNS with `dig +short yourdomain.com`, make sure port 80 is reachable from the internet, and check that nothing else is bound to it. If `www.yourdomain.com` has no DNS record, Servette falls back to a certificate for the bare domain and tells you.
+
+**The browser warns the certificate isn't trusted.** That's expected with a self-signed certificate (no domain). Add a domain and run `config` then `cert` to get a trusted Let's Encrypt certificate.
+
+**Something else is wrong.** Run `log` in the Servette shell (or `journalctl -u servette`) to see recent activity and errors.
 
 ---
 

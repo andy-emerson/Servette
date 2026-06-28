@@ -57,119 +57,25 @@ All of these are excellent at what they're built for. None of them do what Serve
 | Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 
----
-
-## What you'll need
-
-**A Linux server.** A Raspberry Pi works. So does any VPS. Common choices include [DigitalOcean](https://digitalocean.com), [Linode](https://linode.com), [Vultr](https://vultr.com), and [AWS Lightsail](https://aws.amazon.com/lightsail/). Ubuntu 22.04 is a reliable starting point. You'll need the server's IP address and SSH access.
-
-**Python 3.11 or higher.** Pre-installed on most current Linux servers. Raspberry Pi OS Bookworm (the current release) satisfies both the OS and Python requirements on a Raspberry Pi 4.
-
-**A folder with your site files.** Servette serves the `site/` folder, which ships with a demo page that runs a live self-test in your browser — so a fresh copy not only runs immediately but confirms the server is working before you have a site of your own. Replace it with your own files when you're ready; Servette looks for `index.html` at the root and in any subdirectory.
-
-**A domain name.** Required for a trusted certificate and recommended for any public-facing site. Without one, Servette can use a self-signed certificate, but visitors' browsers will warn them before they can access your site. Self-signed is fine for a private home network or local testing.
-
-Servette depends on a handful of Python packages — Hypercorn, cryptography, and two ACME libraries — but manages them itself. On first run it creates a private virtualenv and installs everything. You will not need to run pip.
+**Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests — it has nowhere to put submitted data — and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, see [Scope & non-goals](docs/principles.md#scope--non-goals).
 
 ---
 
-## Getting started
+## Get started
 
-### 1. Copy your files to the server
-
-From your local machine:
+Copy one file to your server, run it, and follow the wizard:
 
 ```
 scp servette.py user@your.server.ip:~
-scp -r mysite/ user@your.server.ip:~/site
-```
-
-Replace `user` with your server's login name (`ubuntu` on Ubuntu, `pi` on Raspberry Pi) and `your.server.ip` with its IP address. If your server uses a key file, add `-i your-key.pem` before the filenames.
-
-Servette serves the `site/` folder next to `servette.py`. It ships with a self-testing demo page — replace its contents with your own files and Servette will find them.
-
-### 2. SSH into your server
-
-```
 ssh user@your.server.ip
+sudo python3 servette.py   # then: setup
 ```
 
-### 3. Run Servette
+Full step-by-step walkthroughs for **AWS Lightsail** and **Raspberry Pi**, plus day-to-day operation, are in the [tutorial](docs/tutorial.md).
 
-```
-sudo python3 servette.py
-```
+## Documentation
 
-`sudo` is required because setup writes a service file to `/etc/systemd/system/` and creates a system user. The server itself runs as a restricted system user afterward, not as root.
-
-On first run, Servette installs its dependencies before dropping you into the shell. This takes about a minute.
-
-### 4. Run setup
-
-```
-setup
-```
-
-The wizard walks you through everything:
-
-1. Set a password (optional)
-2. Set up an SSL certificate
-3. Confirm you're ready. Servette enables itself as a service and starts.
-
-That's it. Your site is live. Close your terminal. Servette keeps running and restarts automatically if the server reboots. If you used a domain name, SSL certificates renew automatically.
-
----
-
-## The Servette shell
-
-Any time you want to check on Servette or change a setting, SSH into your server and run `sudo python3 servette.py` again.
-
-| Command | What it does |
-|---|---|
-| `setup` | Guided walkthrough for getting started |
-| `config` | View and edit your settings |
-| `enable` | Enable Servette as a permanent background service |
-| `disable` | Remove the background service |
-| `start` | Start the server |
-| `stop` | Stop the server |
-| `status` | Show whether the server is running |
-| `log` | Show recent activity |
-| `update` | Download the latest version of Servette |
-| `help` | Show the command list |
-| `quit` | Exit the shell |
-
----
-
-## Updating your site
-
-To update your site files, copy the new version to your server:
-
-```
-scp -r mysite/ user@your.server.ip:~
-```
-
-Changes appear immediately, no restart required.
-
-To update Servette itself, run `update` from the Servette shell. Your settings are stored in `servette.toml` and are never affected by updates.
-
-If you have a password set, `servette.toml` contains its hash. Sharing the file — for troubleshooting, for example — gives anyone who receives it material they can use to attempt an offline cracking attack against your password.
-
----
-
-## Troubleshooting
-
-**The site isn't reachable.** Make sure your server's firewall allows inbound traffic on **ports 80 and 443**. On a cloud VPS this is often a separate "security group" or firewall panel in the provider's dashboard, not just the OS firewall — port 80 carries the HTTP→HTTPS redirect and Let's Encrypt's validation, and 443 serves the site.
-
-**Let's Encrypt won't issue a certificate.** Your **domain must already point at this server's IP** before you request a trusted certificate — Let's Encrypt validates by connecting back to your domain over port 80. Confirm DNS with `dig +short yourdomain.com`, make sure port 80 is reachable from the internet, and check that nothing else is bound to it. If `www.yourdomain.com` has no DNS record, Servette falls back to a certificate for the bare domain and tells you.
-
-**The browser warns the certificate isn't trusted.** That's expected with a self-signed certificate (no domain). Add a domain and run `config` then `cert` to get a trusted Let's Encrypt certificate.
-
-**Something else is wrong.** Run `log` in the Servette shell (or `journalctl -u servette`) to see recent activity and errors.
-
----
-
-## How it's built
-
-Servette is a single file — `servette.py`, in three clear sections (Server, System, and Shell) — readable in an afternoon. There is no hidden machinery and no framework to learn: if something ever goes wrong, you can open the file and follow it top to bottom. The full architecture, the design rationale, and the things Servette deliberately *doesn't* do are documented in [design.md](design.md).
-
-**Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests — it has nowhere to put submitted data — and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, see [Scope & non-goals](design.md#scope--non-goals).
+- [**Tutorial**](docs/tutorial.md) — deploy on Lightsail or a Raspberry Pi, then operate it.
+- [**Architecture**](docs/architecture.md) — how `servette.py` is built, section by section.
+- [**Design principles**](docs/principles.md) — scope, non-goals, and how we work.
+- [**Contributing**](docs/CONTRIBUTING.md) · [**Security policy**](docs/SECURITY.md)

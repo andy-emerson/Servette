@@ -14,7 +14,6 @@ Architecture:
 
 __version__ = "0.26.178"
 
-import asyncio
 import base64
 import collections
 import datetime
@@ -22,6 +21,7 @@ import getpass
 import gzip
 import hashlib
 import hmac
+import http.server
 import ipaddress
 import json
 import logging
@@ -461,22 +461,7 @@ def _security_headers():
     return headers
 
 
-# ── ASGI apps ─────────────────────────────────────────────────────────────────
-
-async def _send_response(send, status, headers_list, body=b""):
-    await send({"type": "http.response.start", "status": status, "headers": headers_list})
-    await send({"type": "http.response.body",  "body": body})
-
-
-async def _handle_lifespan(receive, send):
-    """Handle ASGI lifespan events (server startup/shutdown signals from Hypercorn)."""
-    while True:
-        event = await receive()
-        if event["type"] == "lifespan.startup":
-            await send({"type": "lifespan.startup.complete"})
-        elif event["type"] == "lifespan.shutdown":
-            await send({"type": "lifespan.shutdown.complete"})
-            return
+# ── HTTP server ───────────────────────────────────────────────────────────────
 
 
 def _handle_request(method, url_path, headers, raw_ip):
@@ -624,74 +609,98 @@ def _handle_request(method, url_path, headers, raw_ip):
     ], raw)
 
 
-async def https_app(scope, receive, send):
-    """ASGI app — HTTPS server. Thin shell over _handle_request, which holds the
-    logic; the request is handled in a worker thread so its synchronous file I/O
-    and compression never block the event loop."""
-
-    if scope["type"] == "lifespan":
-        await _handle_lifespan(receive, send)
-        return
-
-    if scope["type"] != "http":
-        return
-
-    client = scope.get("client")
-    status, headers, body = await asyncio.to_thread(
-        _handle_request,
-        scope["method"],
-        scope.get("path", "/"),
-        dict(scope["headers"]),
-        client[0] if client else "unknown",
-    )
-    await _send_response(send, status, headers, body=body)
+def _build_ssl_context():
+    """TLS context for the HTTPS server — cert/key loaded, minimum version enforced,
+    optional cipher override, ALPN pinned to HTTP/1.1. Raises if the cert or key is
+    unreadable, so startup can fail closed rather than serve nothing."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
+    if config.ciphers:
+        ctx.set_ciphers(config.ciphers)
+    ctx.load_cert_chain(_resolve(config.cert_file), _resolve(config.key_file))
+    ctx.set_alpn_protocols(["http/1.1"])
+    return ctx
 
 
-async def redirect_app(scope, receive, send):
-    """ASGI app — HTTP redirect to HTTPS and ACME challenge serving."""
+class _Handler(http.server.BaseHTTPRequestHandler):
+    """Serves every request through the transport-agnostic _handle_request. Each
+    connection gets its own thread (ThreadingHTTPServer), so the synchronous file
+    read and gzip run off any shared loop — no request can starve another."""
+    protocol_version = "HTTP/1.1"
+    timeout          = 30          # drop idle/slow connections (slowloris mitigation)
 
-    if scope["type"] == "lifespan":
-        await _handle_lifespan(receive, send)
-        return
+    def _serve(self):
+        hdrs   = {k.lower().encode(): v.encode() for k, v in self.headers.items()}
+        raw_ip = self.client_address[0] if self.client_address else "unknown"
+        status, headers, body = _handle_request(self.command, self.path, hdrs, raw_ip)
+        # We never read a request body; on a method that may carry one (all rejected
+        # with 405), close rather than let the unread body poison the next keep-alive
+        # request on this connection.
+        if self.command not in ("GET", "HEAD"):
+            self.close_connection = True
+        self.send_response_only(status)
+        self.send_header("Date", self.date_time_string())
+        for k, v in headers:
+            self.send_header(k.decode(), v.decode())
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
 
-    if scope["type"] != "http":
-        return
+    # Route every method here; _handle_request answers non-GET/HEAD with 405.
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _serve
 
-    path      = scope["path"]
-    headers   = dict(scope["headers"])
-    send_body = (scope["method"] != "HEAD")
+    def log_message(self, *args):
+        pass  # Servette logs through `log`, not stderr
 
-    # ACME HTTP-01 challenges arrive on port 80 during Let's Encrypt verification
-    prefix = "/.well-known/acme-challenge/"
-    if path.startswith(prefix):
-        token = path[len(prefix):]
-        if not token or "/" in token or ".." in token:
-            await _send_response(send, 404, [(b"content-length", b"0")])
+
+class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+    """Port-80 handler: serves ACME HTTP-01 challenge tokens during issuance, and
+    301-redirects everything else to HTTPS (preserving the query string)."""
+    protocol_version = "HTTP/1.1"
+    timeout          = 30
+
+    def _serve(self):
+        # Body is never read; close on methods that may carry one so it can't poison
+        # the next keep-alive request.
+        if self.command not in ("GET", "HEAD"):
+            self.close_connection = True
+        path   = self.path.split("?", 1)[0]
+        prefix = "/.well-known/acme-challenge/"
+        if path.startswith(prefix):
+            token = path[len(prefix):]
+            if token and "/" not in token and ".." not in token:
+                try:
+                    with open(os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token), "rb") as f:
+                        data = f.read()
+                    self.send_response_only(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        self.wfile.write(data)
+                    return
+                except OSError:
+                    pass
+            self.send_response_only(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
-        file_path = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
-        try:
-            with open(file_path, "rb") as f:
-                data = f.read()
-            await _send_response(send, 200, [
-                (b"content-type",   b"text/plain"),
-                (b"content-length", str(len(data)).encode()),
-            ], body=data if send_body else b"")
-        except OSError:
-            await _send_response(send, 404, [(b"content-length", b"0")])
-        return
 
-    # Redirect everything else to HTTPS
-    host      = headers.get(b"host", b"localhost").decode().split(":")[0]
-    query     = scope.get("query_string", b"").decode()
-    target    = path + (f"?{query}" if query else "")
-    https_url = (f"https://{host}{target}" if config.port == 443
-                 else f"https://{host}:{config.port}{target}")
+        host = self.headers.get("Host", "localhost").split(":")[0]
+        url  = (f"https://{host}{self.path}" if config.port == 443
+                else f"https://{host}:{config.port}{self.path}")
+        self.send_response_only(301)
+        self.send_header("Location", url)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        log.info("Redirected to %s", url)
 
-    await _send_response(send, 301, [
-        (b"location",       https_url.encode()),
-        (b"content-length", b"0"),
-    ])
-    log.info("Redirected to %s", https_url)
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _serve
+
+    def log_message(self, *args):
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -745,7 +754,7 @@ def _bootstrap():
             print(f"  Error: failed to create virtual environment: {e}")
             sys.exit(1)
 
-        deps = ["hypercorn>=0.17,<1.0", "cryptography>=41.0,<50.0", "acme>=2.0,<6.0", "josepy>=1.10,<3.0"]
+        deps = ["cryptography>=41.0,<50.0", "acme>=2.0,<6.0", "josepy>=1.10,<3.0"]
         result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
         if result.returncode != 0:
             print(f"  Error: failed to install dependencies")
@@ -757,12 +766,12 @@ def _bootstrap():
 
 # ── Server lifecycle ──────────────────────────────────────────────────────────
 #
-# Hypercorn runs in a background thread with its own asyncio event loop.
-# A threading.Event signals graceful shutdown from the shell thread.
+# Each server is a ThreadingHTTPServer run by serve_forever() in a daemon thread;
+# stop_server() calls shutdown() on it from the shell thread to stop gracefully.
 
-_server_thread        = None
+_https_server         = None  # the running HTTPS ThreadingHTTPServer (None when stopped)
+_http_server          = None  # the port-80 redirect server (None if unavailable)
 _server_start_time    = None
-_shutdown_event       = threading.Event()
 _watchdog_thread      = None
 _sweep_thread         = None
 _sweep_stop           = threading.Event()
@@ -773,92 +782,8 @@ _TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
 ACME_RETRIES  = 3
 
 
-async def _serve_http_redirect(stop_event):
-    """Run only the HTTP redirect server — used as a temporary listener during cert issuance."""
-    from hypercorn.config import Config as HypercornConfig
-    from hypercorn.asyncio import serve as hypercorn_serve
-
-    cfg      = HypercornConfig()
-    cfg.bind = ["0.0.0.0:80"]
-    cfg.loglevel = "warning"
-    cfg.include_server_header = False  # don't advertise the server software
-
-    async def trigger():
-        await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)
-
-    await hypercorn_serve(redirect_app, cfg, shutdown_trigger=trigger)
-
-
-def _loop_exception_handler(loop, context):
-    """Quiet the benign TLS-teardown noise; surface everything else.
-
-    Clients on the public internet routinely drop a TLS connection without a clean
-    close_notify, so asyncio waits, times out, and would otherwise dump a full
-    traceback to the journal. That's expected, not a fault, so log a single debug
-    line for it and delegate every other error to the default handler.
-    """
-    exc = context.get("exception")
-    if isinstance(exc, TimeoutError) and "ssl shutdown timed out" in str(exc).lower():
-        log.debug("TLS connection closed without clean shutdown by peer")
-        return
-    loop.default_exception_handler(context)
-
-
-async def _run_servers(stop_event):
-    from hypercorn.config import Config as HypercornConfig
-    from hypercorn.asyncio import serve as hypercorn_serve
-
-    asyncio.get_running_loop().set_exception_handler(_loop_exception_handler)
-
-    async def trigger():
-        await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)
-
-    class _TLSConfig(HypercornConfig):
-        def create_ssl_context(self):
-            ctx = super().create_ssl_context()
-            if ctx is None:
-                return ctx
-            ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
-            if config.ciphers:
-                ctx.set_ciphers(config.ciphers)
-            return ctx
-
-    cert_file = _resolve(config.cert_file)
-    key_file  = _resolve(config.key_file)
-
-    https_cfg          = _TLSConfig()
-    https_cfg.bind     = [f"0.0.0.0:{config.port}"]
-    https_cfg.certfile = cert_file
-    https_cfg.keyfile  = key_file
-    https_cfg.loglevel = "warning"
-    https_cfg.include_server_header = False  # don't advertise the server software
-    async def run_https():
-        try:
-            await hypercorn_serve(https_app, https_cfg, shutdown_trigger=trigger)
-        except Exception as e:
-            log.error("HTTPS server error: %s", e)
-            raise
-
-    async def run_http_redirect():
-        try:
-            http_cfg          = HypercornConfig()
-            http_cfg.bind     = ["0.0.0.0:80"]
-            http_cfg.loglevel = "warning"
-            http_cfg.include_server_header = False  # don't advertise the server software
-            await hypercorn_serve(redirect_app, http_cfg, shutdown_trigger=trigger)
-        except OSError as e:
-            log.warning("Could not bind to port 80: %s", e)
-            print("Note: could not bind to port 80 (requires root). HTTP redirects unavailable.")
-
-    await asyncio.gather(
-        run_https(),
-        run_http_redirect(),
-        return_exceptions=True,
-    )
-
-
 def _server_running():
-    return _server_thread is not None and _server_thread.is_alive()
+    return _https_server is not None
 
 
 def _cert_watchdog():
@@ -895,7 +820,7 @@ def _cert_watchdog():
 
 
 def start_server():
-    global _server_thread, _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread
+    global _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread, _https_server, _http_server
 
     if _server_running():
         print("Server is already running.")
@@ -914,25 +839,34 @@ def start_server():
                 sys.exit(1)
             return
 
-    _shutdown_event.clear()
-
-    def run():
-        asyncio.run(_run_servers(_shutdown_event))
-
-    _server_thread = threading.Thread(target=run, daemon=True)
-    _server_thread.start()
-
-    if not _wait_for_server(config.port):
-        # The listener never came up (bind conflict, TLS/cert error, bad config).
-        # Fail closed rather than leave a live-but-not-serving process — under
-        # systemd a silent non-serving process looks healthy and never recovers.
-        _shutdown_event.set()
-        _server_thread = None
-        log.error("Server failed to start on port %d (see earlier errors)", config.port)
-        print(f"Server failed to start on port {config.port}.")
+    # Build the HTTPS server, failing closed if the socket can't bind or the cert is
+    # unreadable — better than a live process that serves nothing. Both surface here
+    # synchronously: the bind happens in the constructor, the cert in _build_ssl_context.
+    try:
+        https = http.server.ThreadingHTTPServer(("0.0.0.0", config.port), _Handler)
+        https.daemon_threads = True
+        https.socket = _build_ssl_context().wrap_socket(https.socket, server_side=True)
+    except Exception as e:
+        log.error("Server failed to start on port %d: %s", config.port, e)
+        print(f"Server failed to start on port {config.port}: {e}")
         if "--serve" in sys.argv:
             sys.exit(1)
         return
+
+    # The port-80 redirect is best-effort (needs privilege and a free port).
+    try:
+        redirect = http.server.ThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
+        redirect.daemon_threads = True
+    except OSError as e:
+        log.warning("Could not bind to port 80: %s", e)
+        print("Note: could not bind to port 80. HTTP redirects unavailable.")
+        redirect = None
+
+    _https_server = https
+    _http_server  = redirect
+    threading.Thread(target=https.serve_forever, daemon=True).start()
+    if redirect is not None:
+        threading.Thread(target=redirect.serve_forever, daemon=True).start()
 
     if _watchdog_thread is None or not _watchdog_thread.is_alive():
         _watchdog_thread = threading.Thread(target=_cert_watchdog, daemon=True)
@@ -966,14 +900,17 @@ def start_server():
 
 
 def stop_server():
-    global _server_thread, _server_start_time, _sweep_thread
+    global _server_start_time, _sweep_thread, _https_server, _http_server
 
     if not _server_running():
         return
 
-    _shutdown_event.set()
-    _server_thread.join(timeout=10)
-    _server_thread     = None
+    for srv in (_https_server, _http_server):
+        if srv is not None:
+            srv.shutdown()
+            srv.server_close()
+    _https_server      = None
+    _http_server       = None
     _server_start_time = None
 
     _sweep_stop.set()
@@ -1218,19 +1155,6 @@ def _wait_for_port_free(port, timeout=15):
     return False
 
 
-def _wait_for_server(port, timeout=5.0):
-    """Poll until the server is accepting TCP connections or timeout elapses."""
-    import socket as _socket
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with _socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                return True
-        except OSError:
-            time.sleep(0.05)
-    return False
-
-
 def _reload_server():
     """Reload the server to pick up a new certificate."""
     if _service_is_active():
@@ -1282,15 +1206,14 @@ def _run_acme(domain):
         _chown_servette(ACCOUNT_KEY_FILE)
 
     # Start a temporary HTTP listener on port 80 if the main server isn't running
-    tmp_stop   = None
-    tmp_thread = None
+    tmp_server = None
     if not _server_running():
-        tmp_stop   = threading.Event()
-        tmp_thread = threading.Thread(
-            target=lambda: asyncio.run(_serve_http_redirect(tmp_stop)), daemon=True
-        )
-        tmp_thread.start()
-        time.sleep(0.5)
+        try:
+            tmp_server = http.server.ThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
+            tmp_server.daemon_threads = True
+            threading.Thread(target=tmp_server.serve_forever, daemon=True).start()
+        except OSError as e:
+            log.warning("Could not start temporary port-80 listener: %s", e)
 
     www_domain  = f"www.{domain}"
     last_error  = None
@@ -1445,10 +1368,9 @@ def _run_acme(domain):
         print(f"  Error getting certificate: {last_error}")
         log.error("ACME failed for %s after %d attempts: %s", domain, ACME_RETRIES, last_error)
 
-    if tmp_stop:
-        tmp_stop.set()
-        if tmp_thread:
-            tmp_thread.join(timeout=5)
+    if tmp_server is not None:
+        tmp_server.shutdown()
+        tmp_server.server_close()
 
 
 def _load_cert(cert_path):

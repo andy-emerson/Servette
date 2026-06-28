@@ -372,8 +372,14 @@ def run_dispatch_tests(s):
     check("'quit' stops server and exits", calls[-1] == "stop")
 
     section("Request core — _handle_request")
-    # The transport-agnostic core returns (status, headers, body) directly; the
-    # http.server handler is a thin shell over it, so exercise it without a socket.
+    # The core returns (status, headers, body) directly and reads the request headers
+    # straight off http.server's parsed HTTPMessage, so exercise it without a socket.
+    def msg(pairs=()):
+        m = http.client.HTTPMessage()
+        for k, v in pairs:
+            m[k] = v
+        return m
+
     tmpd = tempfile.mkdtemp()
     with open(os.path.join(tmpd, "index.html"), "w") as f:
         f.write("<h1>hi</h1>")
@@ -381,15 +387,20 @@ def run_dispatch_tests(s):
     s.config.serve_dir     = tmpd
     s.config.password_hash = ""
     try:
-        status, headers, body = s._handle_request("GET", "/", {}, "127.0.0.1")
+        status, headers, body = s._handle_request("GET", "/", msg(), "127.0.0.1")
         hdict = dict(headers)
         check("GET / → 200",                 status == 200)
         check("Body is the file content",    body == b"<h1>hi</h1>")
         check("Content-Length matches body", hdict.get(b"content-length") == b"11")
-        _, _, head_body = s._handle_request("HEAD", "/", {}, "127.0.0.1")
+        _, _, head_body = s._handle_request("HEAD", "/", msg(), "127.0.0.1")
         check("HEAD drops the body",          head_body == b"")
-        pstatus, _, _ = s._handle_request("POST", "/", {}, "127.0.0.1")
+        pstatus, _, _ = s._handle_request("POST", "/", msg(), "127.0.0.1")
         check("POST → 405",                  pstatus == 405)
+        # Reads request headers off the parsed (case-insensitive) HTTPMessage.
+        _, gz_headers, gz_body = s._handle_request("GET", "/", msg([("accept-encoding", "gzip")]), "127.0.0.1")
+        gzd = dict(gz_headers)
+        check("Accept-Encoding honored via parsed headers",
+              gzd.get(b"content-encoding") == b"gzip" and gzip.decompress(gz_body) == b"<h1>hi</h1>")
     finally:
         s.config.serve_dir     = saved_serve
         s.config.password_hash = saved_pw

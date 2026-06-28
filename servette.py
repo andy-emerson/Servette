@@ -466,14 +466,14 @@ def _security_headers():
 
 
 def _handle_request(method, url_path, headers, raw_ip):
-    """Transport-agnostic request handler. Given the method, URL path, a dict of
-    lowercased byte headers, and the raw client IP, returns (status, headers, body)
-    — security headers included on every response, body blanked for HEAD. Pure and
-    synchronous, so it can be driven by any transport and needs no event loop. The
-    decision logic lives here; the transport just feeds it and sends the result."""
+    """The request core. Given the method, URL path, the parsed request headers (a
+    case-insensitive mapping — an http.client.HTTPMessage in production), and the raw
+    client IP, returns (status, headers, body), with security headers on every
+    response and the body blanked for HEAD. All the decision logic lives here; the
+    handler just feeds it what http.server parsed and sends the result back."""
     ip = _normalize_ip(raw_ip)
     if config.trusted_proxy:
-        xff = headers.get(b"x-forwarded-for", b"").decode()
+        xff = headers.get("X-Forwarded-For", "")
         # Rightmost XFF value is what the single trusted proxy appended.
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
@@ -496,7 +496,7 @@ def _handle_request(method, url_path, headers, raw_ip):
 
     # Authentication
     if config.username:
-        auth                  = headers.get(b"authorization", b"").decode()
+        auth                  = headers.get("Authorization", "")
         authed                = False
         credentials_submitted = False
 
@@ -560,11 +560,11 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(500, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())], body_500)
 
     # 304 Not Modified
-    if headers.get(b"if-none-match", b"").decode() == etag:
+    if headers.get("If-None-Match", "") == etag:
         log.info("304 Not Modified %s to %s", url_path, ip)
         return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header().encode())])
 
-    accept_encoding = headers.get(b"accept-encoding", b"").decode()
+    accept_encoding = headers.get("Accept-Encoding", "")
     use_gzip        = compressed is not None and "gzip" in accept_encoding
     mime            = _mime_type(file_path)
     common = [
@@ -585,7 +585,7 @@ def _handle_request(method, url_path, headers, raw_ip):
 
     # Serving raw: advertise and honor byte ranges (needed for media seeking).
     total = len(raw)
-    rng   = _parse_range(headers.get(b"range", b"").decode(), total)
+    rng   = _parse_range(headers.get("Range", ""), total)
     if rng == "invalid":
         log.info("416 Range Not Satisfiable %s to %s", url_path, ip)
         return resp(416, [
@@ -631,9 +631,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     timeout          = 30          # drop idle/slow connections (slowloris mitigation)
 
     def _serve(self):
-        hdrs   = {k.lower().encode(): v.encode() for k, v in self.headers.items()}
+        # self.headers is already a parsed, case-insensitive http.client.HTTPMessage —
+        # hand it straight to the core rather than rebuilding it.
         raw_ip = self.client_address[0] if self.client_address else "unknown"
-        status, headers, body = _handle_request(self.command, self.path, hdrs, raw_ip)
+        status, headers, body = _handle_request(self.command, self.path, self.headers, raw_ip)
         # We never read a request body; on a method that may carry one (all rejected
         # with 405), close rather than let the unread body poison the next keep-alive
         # request on this connection.

@@ -1,4 +1,11 @@
-# Servette
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="servette-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="servette-light.svg">
+    <img alt="Servette" src="servette-light.svg" width="300">
+  </picture>
+</div>
+
 ### The Simple, Secure Static-Site Server
 
 [![Tests](https://github.com/andy-emerson/servette/actions/workflows/test.yml/badge.svg)](https://github.com/andy-emerson/servette/actions/workflows/test.yml)

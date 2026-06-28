@@ -10,6 +10,7 @@ Or, after first-run bootstrap:
     .servette-env/bin/python3 test.py
 """
 
+import asyncio
 import base64
 import gzip
 import os
@@ -278,6 +279,85 @@ def run_unit_tests(s):
     check("Minutes",  s._format_uptime(90)    == "1m 30s")
     check("Hours",    s._format_uptime(3700)  == "1h 1m")
     check("Days",     s._format_uptime(90061) == "1d 1h")
+
+
+def run_dispatch_tests(s):
+    # Covers two seams the live-server tests can't reach:
+    #   - redirect_app (the port-80 HTTP->HTTPS redirect + ACME HTTP-01 challenge
+    #     serving), invoked directly as an ASGI app so no port 80 or root is needed;
+    #   - the interactive shell's command dispatch, driven with scripted input.
+    # Full Let's Encrypt issuance and systemd integration need external
+    # infrastructure and remain integration-territory, intentionally uncovered.
+    import builtins, io, contextlib
+
+    def call_asgi(app, method, path, headers=None):
+        scope = {"type": "http", "method": method, "path": path, "headers": headers or []}
+        sent = []
+        async def send(msg):    sent.append(msg)
+        async def receive():    return {"type": "http.request", "body": b""}
+        asyncio.run(app(scope, receive, send))
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        body  = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+        return start["status"], dict(start["headers"]), body
+
+    section("Redirect app — HTTPS redirect")
+
+    status, headers, _ = call_asgi(s.redirect_app, "GET", "/some/page",
+                                   headers=[(b"host", b"example.com")])
+    port     = s.config.port
+    expected = (f"https://example.com/some/page" if port == 443
+                else f"https://example.com:{port}/some/page")
+    check("Plain HTTP → 301",            status == 301)
+    check("Location is https host+path", headers.get(b"location") == expected.encode())
+
+    section("Redirect app — ACME HTTP-01 challenge")
+
+    orig_webroot = s.ACME_WEBROOT
+    acme_dir = tempfile.mkdtemp()
+    s.ACME_WEBROOT = acme_dir
+    try:
+        chall_dir = os.path.join(acme_dir, ".well-known", "acme-challenge")
+        os.makedirs(chall_dir)
+        with open(os.path.join(chall_dir, "token123"), "w") as f:
+            f.write("keyauth-value")
+        status, _, body = call_asgi(s.redirect_app, "GET", "/.well-known/acme-challenge/token123")
+        check("Valid token → 200",        status == 200)
+        check("Serves challenge content", body == b"keyauth-value")
+        status, _, _ = call_asgi(s.redirect_app, "GET", "/.well-known/acme-challenge/missing")
+        check("Unknown token → 404",      status == 404)
+        for bad in ["/.well-known/acme-challenge/",
+                    "/.well-known/acme-challenge/a/b",
+                    "/.well-known/acme-challenge/..%2f..%2fpasswd"]:
+            st, _, _ = call_asgi(s.redirect_app, "GET", bad)
+            check(f"Rejected token path {bad!r}", st == 404)
+    finally:
+        s.ACME_WEBROOT = orig_webroot
+        shutil.rmtree(acme_dir, ignore_errors=True)
+
+    section("Shell — command dispatch")
+
+    # Spy on the handlers so we verify routing without their side effects, and
+    # feed scripted input. 'quit' calls stop_server, so stub it to keep the
+    # live test server up for the integration tests that follow.
+    calls       = []
+    saved       = {n: getattr(s, n) for n in ("cmd_status", "cmd_start", "stop_server")}
+    saved_input = builtins.input
+    try:
+        s.cmd_status  = lambda: calls.append("status")
+        s.cmd_start   = lambda: calls.append("start")
+        s.stop_server = lambda: calls.append("stop")
+        script = iter(["status", "start", "bogus", "quit"])
+        builtins.input = lambda prompt="": next(script, "quit")
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.shell()
+    finally:
+        builtins.input = saved_input
+        for n, fn in saved.items():
+            setattr(s, n, fn)
+
+    check("'status' routed to cmd_status", "status" in calls)
+    check("'start' routed to cmd_start",   "start" in calls)
+    check("'quit' stops server and exits", calls[-1] == "stop")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -711,6 +791,7 @@ def main():
 
     try:
         run_unit_tests(s)
+        run_dispatch_tests(s)
         run_server_tests(s, serve_dir)
         run_cert_tests(s, tmpdir)
         run_install_tests(s, tmpdir)

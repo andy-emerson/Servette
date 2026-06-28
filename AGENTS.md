@@ -2,7 +2,7 @@
 
 Operating instructions for any coding agent working in this repository. This is the master agent doc; tool-specific files (e.g. `CLAUDE.md`) defer to it so there is one source of truth.
 
-Everything lives in one file, `servette.py` (Python 3.11+, stdlib plus three packages installed into `.servette-env/`). Settings persist to `servette.toml` beside it. The architecture lives in [`architecture.md`](docs/architecture.md), scope and methodology in [`principles.md`](docs/principles.md); contributor-facing framing in [`CONTRIBUTING.md`](docs/CONTRIBUTING.md). This file covers the operational mechanics: how we work, run, test, release, and commit.
+Everything lives in one file, `servette.py` (Python 3.11+, stdlib plus a single package, `cryptography`, installed into `.servette-env/`). Settings persist to `servette.toml` beside it. The architecture lives in [`architecture.md`](docs/architecture.md), scope and methodology in [`principles.md`](docs/principles.md); contributor-facing framing in [`CONTRIBUTING.md`](docs/CONTRIBUTING.md). This file covers the operational mechanics: how we work, run, test, release, and commit.
 
 ## How we work here
 
@@ -22,7 +22,7 @@ sudo python3 servette.py          # interactive shell (bootstrap re-execs into t
 python3 servette.py --serve       # non-interactive service mode (used by systemd)
 ```
 
-First run creates `.servette-env/` (a managed virtualenv), installs `cryptography acme josepy` into it, then re-execs inside that environment. Subsequent runs skip straight to the re-exec. `sudo` is needed only for the interactive shell (it writes the systemd unit and calls `useradd`); the service itself runs as the restricted `servette` user.
+First run creates `.servette-env/` (a managed virtualenv), installs `cryptography` into it, then re-execs inside that environment. Subsequent runs skip straight to the re-exec. `sudo` is needed only for the interactive shell (it writes the systemd unit and calls `useradd`); the service itself runs as the restricted `servette` user.
 
 ## Tests
 

@@ -35,6 +35,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import unquote
 
@@ -831,7 +832,7 @@ def _bootstrap():
             print(f"  Error: failed to create virtual environment: {e}")
             sys.exit(1)
 
-        deps = ["cryptography>=41.0,<50.0", "acme>=2.0,<6.0", "josepy>=1.10,<3.0"]
+        deps = ["cryptography>=41.0,<50.0"]
         result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
         if result.returncode != 0:
             print(f"  Error: failed to install dependencies")
@@ -1243,35 +1244,209 @@ def _reload_server():
         start_server()
 
 
+def _b64url(data):
+    """base64url without padding — the encoding JOSE/ACME uses everywhere."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_int(n):
+    """A non-negative integer as a base64url big-endian byte string (for JWK n/e)."""
+    return _b64url(n.to_bytes((n.bit_length() + 7) // 8 or 1, "big"))
+
+
+class _Resp:
+    """A tiny HTTP response holder so the ACME client can read status/headers/body
+    uniformly whether urllib returned success or raised HTTPError."""
+    __slots__ = ("status", "headers", "body")
+
+    def __init__(self, status, headers, body):
+        self.status, self.headers, self.body = status, headers, body
+
+    def json(self):
+        return json.loads(self.body)
+
+    @property
+    def text(self):
+        return self.body.decode()
+
+
+class _ACMEError(Exception):
+    """An ACME failure. `failed` holds the DNS names whose authorization was rejected,
+    so the caller can decide whether to fall back (e.g. drop a www with no DNS)."""
+
+    def __init__(self, message, failed=None):
+        super().__init__(message)
+        self.failed = failed or set()
+
+
+class _ACMEClient:
+    """A minimal ACME (RFC 8555) client — just enough of the protocol for HTTP-01
+    issuance with a single account key, replacing the certbot `acme` + `josepy`
+    libraries with stdlib urllib + cryptography. Deliberately narrow: HTTP-01 only,
+    no revocation, no key rollover. Requests are RS256-signed JWS; the replay nonce
+    is tracked from each response's Replay-Nonce header. The directory is fetched
+    lazily, so constructing a client touches no network (and stays unit-testable)."""
+
+    def __init__(self, directory_url, account_key):
+        self._url   = directory_url
+        self._key   = account_key   # a cryptography RSA private key
+        self._nonce = None
+        self._kid   = None          # account URL; until set, requests carry the JWK
+        self._dir   = None
+
+    def _directory(self):
+        if self._dir is None:
+            self._dir = self._request(self._url).json()
+        return self._dir
+
+    # ── HTTP + nonce ──
+    def _request(self, url, data=None, method=None):
+        headers = {"User-Agent": "servette"}
+        if data is not None:
+            headers["Content-Type"] = "application/jose+json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            r    = urllib.request.urlopen(req, timeout=30)
+            resp = _Resp(r.status, r.headers, r.read())
+        except urllib.error.HTTPError as e:
+            resp = _Resp(e.code, e.headers, e.read())
+        if resp.headers.get("Replay-Nonce"):
+            self._nonce = resp.headers["Replay-Nonce"]
+        return resp
+
+    # ── JWS ──
+    def _jwk(self):
+        nums = self._key.public_key().public_numbers()
+        return {"e": _b64url_int(nums.e), "kty": "RSA", "n": _b64url_int(nums.n)}
+
+    def thumbprint(self):
+        canon = json.dumps(self._jwk(), sort_keys=True, separators=(",", ":")).encode()
+        return _b64url(hashlib.sha256(canon).digest())
+
+    def key_authorization(self, token):
+        return f"{token}.{self.thumbprint()}"
+
+    def _sign(self, url, payload):
+        from cryptography.hazmat.primitives import hashes as _hashes
+        from cryptography.hazmat.primitives.asymmetric import padding as _padding
+        protected = {"alg": "RS256", "nonce": self._nonce, "url": url}
+        protected["kid" if self._kid else "jwk"] = self._kid or self._jwk()
+        p = _b64url(json.dumps(protected, separators=(",", ":")).encode())
+        # payload=None is ACME "POST-as-GET" (empty string); {} is a real empty object.
+        y = "" if payload is None else _b64url(json.dumps(payload, separators=(",", ":")).encode())
+        sig = self._key.sign(f"{p}.{y}".encode(), _padding.PKCS1v15(), _hashes.SHA256())
+        return json.dumps({"protected": p, "payload": y, "signature": _b64url(sig)}).encode()
+
+    def _post(self, url, payload):
+        for first in (True, False):
+            if self._nonce is None:
+                self._request(self._directory()["newNonce"], method="HEAD")
+            resp = self._request(url, data=self._sign(url, payload))
+            if resp.status < 400:
+                return resp
+            problem = {}
+            try:
+                problem = resp.json()
+            except Exception:
+                pass
+            if first and problem.get("type", "").endswith("badNonce"):
+                continue   # nonce refreshed from this response; retry once
+            raise _ACMEError(problem.get("detail") or f"ACME error {resp.status} at {url}")
+        raise _ACMEError("ACME request failed after a nonce retry")
+
+    def _post_as_get(self, url):
+        return self._post(url, None)
+
+    # ── protocol steps ──
+    def new_account(self, email):
+        payload = {"termsOfServiceAgreed": True}
+        if email:
+            payload["contact"] = [f"mailto:{email}"]
+        resp = self._post(self._directory()["newAccount"], payload)
+        self._kid = resp.headers.get("Location")
+        if not self._kid:
+            raise _ACMEError("ACME did not return an account URL")
+
+    def _poll(self, url, tries=20, delay=2):
+        """POST-as-GET a resource until it settles (valid/invalid) or we give up."""
+        for _ in range(tries):
+            obj = self._post_as_get(url).json()
+            if obj.get("status") in ("valid", "invalid"):
+                return obj
+            time.sleep(delay)
+        return obj
+
+    def issue(self, names, csr_der, challenge_dir):
+        """Run one HTTP-01 issuance for `names`, writing challenge files under
+        challenge_dir and returning the PEM certificate chain. Raises _ACMEError on
+        failure, with `.failed` set to the names whose validation was rejected."""
+        resp      = self._post(self._directory()["newOrder"],
+                               {"identifiers": [{"type": "dns", "value": n} for n in names]})
+        order     = resp.json()
+        order_url = resp.headers.get("Location")
+
+        written = []
+        try:
+            for authz_url in order["authorizations"]:
+                authz = self._post_as_get(authz_url).json()
+                chall = next(c for c in authz["challenges"] if c["type"] == "http-01")
+                path  = os.path.join(challenge_dir, chall["token"])
+                with open(path, "w") as f:
+                    f.write(self.key_authorization(chall["token"]))
+                written.append(path)
+                self._post(chall["url"], {})   # tell the server the file is in place
+
+            failed = set()
+            for authz_url in order["authorizations"]:
+                authz = self._poll(authz_url)
+                if authz.get("status") != "valid":
+                    failed.add(authz["identifier"]["value"])
+            if failed:
+                raise _ACMEError("domain validation failed", failed=failed)
+
+            self._post(order["finalize"], {"csr": _b64url(csr_der)})
+            final = self._poll(order_url)
+            if final.get("status") != "valid":
+                raise _ACMEError(f"order did not complete (status: {final.get('status')})")
+            return self._post_as_get(final["certificate"]).text
+        finally:
+            for p in written:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
 def _run_acme(domain):
-    """Get a trusted SSL certificate from Let's Encrypt using the acme library."""
-    from acme import client as _acme_client, challenges as _challenges, messages as _messages, errors as _acme_errors
-    import josepy as _jose
+    """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
+    minimal ACME client (_ACMEClient) on stdlib urllib + cryptography."""
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
     from cryptography.hazmat.primitives import hashes as _hashes, serialization as _serialization
 
-    ACME_URL        = "https://acme-v02.api.letsencrypt.org/directory"
+    ACME_URL         = "https://acme-v02.api.letsencrypt.org/directory"
     ACCOUNT_KEY_FILE = os.path.join(BASE_DIR, ".acme-account.pem")
-    CERTS_DIR       = os.path.join(BASE_DIR, "certs", domain)
+    CERTS_DIR        = os.path.join(BASE_DIR, "certs", domain)
+    challenge_dir    = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
 
     print(f"\nGetting a trusted SSL certificate for {domain}...")
     print("Make sure your domain points to this server's IP first.\n")
 
-    os.makedirs(os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge"), exist_ok=True)
+    os.makedirs(challenge_dir, exist_ok=True)
     os.makedirs(CERTS_DIR, exist_ok=True)
     _chown_servette(ACME_WEBROOT)
     _chown_servette(CERTS_DIR)
 
+    # Load or create the ACME account key — a standard RSA PEM (any existing
+    # .acme-account.pem from the old josepy path loads unchanged).
     if os.path.exists(ACCOUNT_KEY_FILE):
         with open(ACCOUNT_KEY_FILE, "rb") as f:
-            account_key = _jose.JWKRSA.load(f.read())
+            account_key = _serialization.load_pem_private_key(f.read(), password=None)
     else:
-        rsa_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        account_key = _jose.JWKRSA(key=rsa_key)
+        account_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
         with open(ACCOUNT_KEY_FILE, "wb") as f:
-            f.write(rsa_key.private_bytes(
+            f.write(account_key.private_bytes(
                 _serialization.Encoding.PEM,
                 _serialization.PrivateFormat.TraditionalOpenSSL,
                 _serialization.NoEncryption()
@@ -1308,62 +1483,32 @@ def _run_acme(domain):
             else:
                 t = None
 
-            token_paths = []
             try:
-                net       = _acme_client.ClientNetwork(account_key, user_agent="servette/1.0")
-                directory = _messages.Directory.from_json(net.get(ACME_URL).json())
-                ac        = _acme_client.ClientV2(directory, net)
-
-                # Register account; if key is already registered, fetch the account
-                # to load its URL (kid) into the ClientNetwork — without this,
-                # all subsequent signed requests fail with "No Key ID in JWS header".
-                try:
-                    ac.new_account(_messages.NewRegistration.from_data(
-                        email=config.email if config.email else None,
-                        terms_of_service_agreed=True
-                    ))
-                except _acme_errors.ConflictError as e:
-                    ac.query_registration(_messages.RegistrationResource(
-                        body=_messages.Registration(), uri=e.location
-                    ))
-
-                domain_key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
                 domain_key_pem = domain_key.private_bytes(
                     _serialization.Encoding.PEM,
                     _serialization.PrivateFormat.TraditionalOpenSSL,
                     _serialization.NoEncryption()
                 )
-                csr_pem = (
+                csr_der = (
                     _x509.CertificateSigningRequestBuilder()
                     .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
                     .add_extension(_x509.SubjectAlternativeName([
                         _x509.DNSName(n) for n in names
                     ]), critical=False)
                     .sign(domain_key, _hashes.SHA256())
-                    .public_bytes(_serialization.Encoding.PEM)
+                    .public_bytes(_serialization.Encoding.DER)
                 )
 
-                # Order certificate and answer HTTP-01 challenges (one per name)
-                order = ac.new_order(csr_pem)
-                for authz in order.authorizations:
-                    for challenge in authz.body.challenges:
-                        if isinstance(challenge.chall, _challenges.HTTP01):
-                            token    = challenge.chall.encode("token")
-                            key_auth = challenge.chall.key_authorization(account_key)
-                            path     = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
-                            with open(path, "w") as f:
-                                f.write(key_auth)
-                            token_paths.append(path)
-                            ac.answer_challenge(challenge, challenge.chall.response(account_key))
-                            break
-
-                finalized = ac.poll_and_finalize(order)
+                client = _ACMEClient(ACME_URL, account_key)
+                client.new_account(config.email if config.email else None)
+                fullchain = client.issue(names, csr_der, challenge_dir)
 
                 cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
                 key_path  = os.path.join(CERTS_DIR, "privkey.pem")
 
                 with open(cert_path, "w") as f:
-                    f.write(finalized.fullchain_pem)
+                    f.write(fullchain)
                 with open(key_path, "wb") as f:
                     f.write(domain_key_pem)
                 os.chmod(key_path, 0o600)
@@ -1389,20 +1534,14 @@ def _run_acme(domain):
                 last_error = None
                 break
 
-            except _acme_errors.ValidationError as e:
+            except _ACMEError as e:
                 last_error = e
                 stop.set()
                 if t:
                     t.join()
-                for path in token_paths:
-                    if os.path.exists(path):
-                        os.remove(path)
-                token_paths = []
-                if include_www:
-                    failed_domains = {a.body.identifier.value for a in e.failed_authzrs}
-                    if failed_domains == {www_domain}:
-                        www_dns_only_failure = True
-                        break  # don't retry; fall back to bare domain
+                if include_www and e.failed == {www_domain}:
+                    www_dns_only_failure = True
+                    break  # don't retry; fall back to bare domain
                 if attempt < ACME_RETRIES:
                     delay = 5 * attempt
                     log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
@@ -1413,18 +1552,10 @@ def _run_acme(domain):
                 stop.set()
                 if t:
                     t.join()
-                for path in token_paths:
-                    if os.path.exists(path):
-                        os.remove(path)
-                token_paths = []
                 if attempt < ACME_RETRIES:
                     delay = 5 * attempt
                     log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
                     time.sleep(delay)
-            finally:
-                for path in token_paths:
-                    if os.path.exists(path):
-                        os.remove(path)
 
         if last_error is None:
             break  # success

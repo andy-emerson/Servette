@@ -286,6 +286,46 @@ def run_unit_tests(s):
     check("Hours",    s._format_uptime(3700)  == "1h 1m")
     check("Days",     s._format_uptime(90061) == "1d 1h")
 
+    section("Minimal ACME client (JWS)")
+    # Exercise the crypto the hand-rolled ACME client does — base64url, the JWK
+    # thumbprint, and RS256 JWS signing — without touching the network (the client
+    # fetches its directory lazily, so construction makes no requests).
+    import json as _json
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa, padding as _pad
+    from cryptography.hazmat.primitives import hashes as _h
+
+    def unb64(x):
+        return base64.urlsafe_b64decode(x + "=" * (-len(x) % 4))
+
+    check("_b64url strips padding",        s._b64url(b"\x00\x00") == "AAA")
+    check("_b64url_int encodes exponent",  s._b64url_int(65537) == "AQAB")
+
+    akey = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    c    = s._ACMEClient("https://acme.example/directory", akey)
+    tp   = c.thumbprint()
+    check("thumbprint is url-safe + unpadded", not (set(tp) & set("=+/")))
+    check("key_authorization is token.thumbprint", c.key_authorization("tok") == f"tok.{tp}")
+
+    c._nonce = "testnonce"
+    jws  = _json.loads(c._sign("https://acme.example/new-order", {"x": 1}))
+    prot = _json.loads(unb64(jws["protected"]))
+    check("JWS alg is RS256",               prot["alg"] == "RS256")
+    check("JWS carries jwk before account known", "jwk" in prot and "kid" not in prot)
+    check("JWS pins url + nonce",            prot["url"].endswith("/new-order") and prot["nonce"] == "testnonce")
+    try:
+        akey.public_key().verify(unb64(jws["signature"]),
+                                 (jws["protected"] + "." + jws["payload"]).encode(),
+                                 _pad.PKCS1v15(), _h.SHA256())
+        sig_ok = True
+    except Exception:
+        sig_ok = False
+    check("JWS signature verifies (RS256)", sig_ok)
+    check("POST-as-GET payload is empty",   _json.loads(c._sign("https://acme.example/a", None))["payload"] == "")
+
+    c._kid = "https://acme.example/acct/1"
+    prot2  = _json.loads(unb64(_json.loads(c._sign("https://acme.example/a", None))["protected"]))
+    check("kid replaces jwk once account known", "kid" in prot2 and "jwk" not in prot2)
+
 
 def run_dispatch_tests(s):
     # Covers two seams the live-server tests can't reach:

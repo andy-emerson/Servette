@@ -709,8 +709,10 @@ async def redirect_app(scope, receive, send):
 
     # Redirect everything else to HTTPS
     host      = headers.get(b"host", b"localhost").decode().split(":")[0]
-    https_url = (f"https://{host}{path}" if config.port == 443
-                 else f"https://{host}:{config.port}{path}")
+    query     = scope.get("query_string", b"").decode()
+    target    = path + (f"?{query}" if query else "")
+    https_url = (f"https://{host}{target}" if config.port == 443
+                 else f"https://{host}:{config.port}{target}")
 
     await _send_response(send, 301, [
         (b"location",       https_url.encode()),

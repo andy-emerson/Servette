@@ -305,8 +305,9 @@ def run_dispatch_tests(s):
     # infrastructure and remain integration-territory, intentionally uncovered.
     import builtins, io, contextlib
 
-    def call_asgi(app, method, path, headers=None):
-        scope = {"type": "http", "method": method, "path": path, "headers": headers or []}
+    def call_asgi(app, method, path, headers=None, query_string=b""):
+        scope = {"type": "http", "method": method, "path": path,
+                 "headers": headers or [], "query_string": query_string}
         sent = []
         async def send(msg):    sent.append(msg)
         async def receive():    return {"type": "http.request", "body": b""}
@@ -324,6 +325,11 @@ def run_dispatch_tests(s):
                 else f"https://example.com:{port}/some/page")
     check("Plain HTTP → 301",            status == 301)
     check("Location is https host+path", headers.get(b"location") == expected.encode())
+
+    _, qheaders, _ = call_asgi(s.redirect_app, "GET", "/p",
+                               headers=[(b"host", b"example.com")], query_string=b"a=1&b=2")
+    check("Redirect preserves the query string",
+          qheaders.get(b"location", b"").decode().endswith("/p?a=1&b=2"))
 
     section("Redirect app — ACME HTTP-01 challenge")
 
@@ -826,6 +832,19 @@ def run_install_tests(s, tmpdir):
     check("Private /tmp",                              "PrivateTmp=yes" in service)
     check("Writes confined to BASE_DIR + ACME webroot",
           f"ReadWritePaths={s.BASE_DIR} {s.ACME_WEBROOT}" in service)
+
+    # Validate the real unit with systemd-analyze where available (Ubuntu CI has it;
+    # skipped on macOS / non-systemd hosts). Catches typo'd or unknown directives.
+    if shutil.which("systemd-analyze"):
+        unit_path = os.path.join(tmpdir, "servette.service")
+        with open(unit_path, "w") as f:
+            f.write(s._systemd_unit(sys.executable, os.path.abspath(s.__file__)))
+        out  = subprocess.run(["systemd-analyze", "verify", unit_path], capture_output=True, text=True)
+        text = (out.stdout + out.stderr).lower()
+        check("systemd-analyze verify: no unknown directives",
+              "unknown lvalue" not in text and "unknown key name" not in text)
+    else:
+        print("  (systemd-analyze unavailable — unit syntax check skipped)")
 
     section("serve_dir world-readable check")
 

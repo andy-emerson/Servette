@@ -29,7 +29,7 @@ For *what Servette is and whether it fits your site*, see the [README](../README
 - **Your site files** — anything that runs in a browser. Servette serves a `site/` folder by default (you can point it elsewhere with `config`), and ships with a demo page that self-tests in the browser, so a fresh copy runs immediately; replace it when you're ready. It looks for `index.html` at the root and in any subdirectory.
 - **A domain name (recommended).** Required for a trusted certificate. Without one, Servette uses a self-signed certificate and browsers warn visitors first — fine for a private network or local testing.
 
-Servette installs its own dependencies (Hypercorn, cryptography, and two ACME libraries) into a private virtualenv on first run. You never run `pip`.
+Servette installs its own dependencies (cryptography and two ACME libraries) into a private virtualenv on first run. You never run `pip`.
 
 ## Managed hardware (a cloud VPS)
 

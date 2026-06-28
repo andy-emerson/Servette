@@ -8,9 +8,9 @@ Servette is a single file (`servette.py`, ~2,200 lines) with three sections, eac
 
 | Section | Lines | Responsibility |
 | - | - | - |
-| **Server** | ~660 | every incoming request: config, rate limiting, file cache, the two ASGI apps |
-| **System** | ~760 | the environment: bootstrap, server lifecycle, certificates, systemd |
-| **Shell** | ~720 | the interactive terminal interface |
+| **Server** | ~710 | every incoming request: config, rate limiting, file cache, the request handler and the HTTP servers |
+| **System** | ~720 | the environment: bootstrap, server lifecycle, certificates, systemd |
+| **Shell** | ~730 | the interactive terminal interface |
 
 ```mermaid
 graph LR
@@ -21,14 +21,14 @@ graph LR
         LOG[Logging]
         RL[Rate Limiter]
         FC[File Cache]
-        HTTPS[HTTPS App]
-        HTTP[Redirect App]
+        HTTPS[HTTPS Handler]
+        HTTP[Redirect Handler]
     end
 
     subgraph SYSTEM
         BS[Bootstrap]
         SRV[Server Lifecycle]
-        ASG[ASGI Runner]
+        ASG[HTTP Servers]
         CW[Cert Watchdog]
         ACME[ACME]
         SD[systemd]
@@ -72,21 +72,21 @@ graph LR
 
 **Rate limiter.** Two independent in-memory sliding-window dicts per IP — total requests (default 120/min) and failed auth attempts (default 6/min) — under a `threading.Lock`. The auth limiter activates only when credentials are actually submitted, not on unauthenticated requests. IPv6-mapped IPv4 addresses are normalized. `X-Forwarded-For` is trusted only when a `trusted_proxy` IP is configured, and only its rightmost value (one hop). Stale-IP eviction runs in a background `_rate_sweep` thread every 30 seconds, off the request hot path; it starts and stops with the server, not at import.
 
-**File cache.** Files are read once and cached in `_file_cache` keyed by path; compressible (text-like) types are also gzip-stored and the right encoding is sent per `Accept-Encoding`, while already-compressed types (images, fonts, video) are served raw. A file too large to fit the cache is served raw (uncompressed) without being stored, so it can't purge everything else and isn't re-compressed on every request. `mtime` is checked on each request, so the cache refreshes when a file changes — this is the live reload. ETags (SHA-256 of contents) drive 304 responses. Reading and compressing happen in a worker thread (via `asyncio.to_thread`), so a large file never blocks the event loop and starves other connections.
+**File cache.** Files are read once and cached in `_file_cache` keyed by path; compressible (text-like) types are also gzip-stored and the right encoding is sent per `Accept-Encoding`, while already-compressed types (images, fonts, video) are served raw. A file too large to fit the cache is served raw (uncompressed) without being stored, so it can't purge everything else and isn't re-compressed on every request. `mtime` is checked on each request, so the cache refreshes when a file changes — this is the live reload. ETags (SHA-256 of contents) drive 304 responses. Reading and compressing happen on the connection's own worker thread — each connection gets one — so a large file never starves other connections, and there is no shared event loop to block.
 
-**HTTPS app.** The ASGI coroutine for every HTTPS request: rate limiting → auth → path resolution → file serving. `_resolve_request_path()` resolves URLs within `serve_dir`, enforces path-traversal protection (403), and falls directories back to `index.html`. Serves a custom `404.html` if present, infers MIME types from extensions, honors single byte ranges (`206` / `416`) for media seeking, and sends security headers on every response: X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, Permissions-Policy, and HSTS when a domain cert is active.
+**Request handler (`_handle_request`).** The transport-agnostic core for every HTTPS request: rate limiting → auth → path resolution → file serving. It takes the method, path, and headers and returns `(status, headers, body)`, so it is a pure function the transport just feeds and sends — no socket, no framework. `_resolve_request_path()` resolves URLs within `serve_dir`, enforces path-traversal protection (403), and falls directories back to `index.html`. Serves a custom `404.html` if present, infers MIME types from extensions, honors single byte ranges (`206` / `416`) for media seeking, and sends security headers on every response: X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, Permissions-Policy, and HSTS when a domain cert is active.
 
-**Redirect app.** The ASGI coroutine on port 80: serves ACME HTTP-01 challenge tokens from `ACME_WEBROOT` during issuance, preserves the query string, and 301-redirects everything else to HTTPS.
+**Redirect handler (`_RedirectHandler`).** The handler on port 80: serves ACME HTTP-01 challenge tokens from `ACME_WEBROOT` during issuance, preserves the query string, and 301-redirects everything else to HTTPS.
 
-Both apps run under Hypercorn in a background daemon thread with its own asyncio event loop, started by `start_server()`. `start_server()` fails closed: if the listener does not come up, it stops the thread and (under `--serve`) exits nonzero rather than leaving a process that looks healthy but serves nothing. Shutdown is coordinated via a `threading.Event` passed to Hypercorn's `shutdown_trigger`.
+**HTTP servers.** `_handle_request` is wrapped by `_Handler` (a stdlib `BaseHTTPRequestHandler`) and run by `_TLSThreadingHTTPServer` — a `ThreadingHTTPServer` that terminates TLS from an `ssl.SSLContext` (minimum version, optional cipher list, ALPN pinned to HTTP/1.1) and performs the handshake on the connection's worker thread, not the accept loop, so one slow handshake can't stall new connections. A `BoundedSemaphore` caps concurrent connections (`MAX_CONNECTIONS`); past the cap connections are closed immediately rather than queued, and a per-connection socket timeout reaps slow or idle ones — together a slowloris / connection-exhaustion mitigation. The port-80 redirect uses the same server without TLS. Both run under `serve_forever()` in daemon threads, started by `start_server()`, which fails closed: the bind and the certificate load both happen synchronously as the server is constructed, so a port conflict or unreadable cert raises there and (under `--serve`) exits nonzero rather than leaving a process that looks healthy but serves nothing. `stop_server()` calls `shutdown()` on each server.
 
 ### System
 
-**Bootstrap (`_bootstrap`).** Runs before any other code. If `sys.prefix` isn't the managed venv, it creates `.servette-env/`, installs the four dependencies, and `os.execv`s back into itself inside the venv. As a systemd service the venv Python is invoked directly and bootstrap is a no-op.
+**Bootstrap (`_bootstrap`).** Runs before any other code. If `sys.prefix` isn't the managed venv, it creates `.servette-env/`, installs the three dependencies, and `os.execv`s back into itself inside the venv. As a systemd service the venv Python is invoked directly and bootstrap is a no-op.
 
-**Server lifecycle.** `start_server()` / `stop_server()` own the daemon thread, the event loop, and the background threads (rate sweep, cert watchdog). `_production_issues()` returns the conditions blocking production readiness — serve directory missing, cert not configured, self-signed cert, no password — and is printed on startup and on every `status`. This function *is* the claim ladder in code: it refuses to imply production-ready while anything is wrong.
+**Server lifecycle.** `start_server()` / `stop_server()` own the HTTP servers, their `serve_forever` daemon threads, and the background threads (rate sweep, cert watchdog). `_production_issues()` returns the conditions blocking production readiness — serve directory missing, cert not configured, self-signed cert, no password — and is printed on startup and on every `status`. This function *is* the claim ladder in code: it refuses to imply production-ready while anything is wrong.
 
-**Certificates.** Self-signed certs come from the `cryptography` library (`_generate_self_signed_cert`). Let's Encrypt certs use `acme`+`josepy` (`_run_acme`) over HTTP-01, temporarily starting `redirect_app` on port 80 if the main server isn't running. `_run_acme` first attempts a cert covering both `domain` and `www.domain`; if `www.` fails DNS validation only, it falls back to the bare domain and says so. Retries up to 3 times with backoff; skips the spinner when stdout isn't a TTY (auto-renewal).
+**Certificates.** Self-signed certs come from the `cryptography` library (`_generate_self_signed_cert`). Let's Encrypt certs use `acme`+`josepy` (`_run_acme`) over HTTP-01, temporarily starting the redirect handler on port 80 if the main server isn't running. `_run_acme` first attempts a cert covering both `domain` and `www.domain`; if `www.` fails DNS validation only, it falls back to the bare domain and says so. Retries up to 3 times with backoff; skips the spinner when stdout isn't a TTY (auto-renewal).
 
 **Cert watchdog (`_cert_watchdog`).** A daemon thread polling every 60s: for a configured domain, renews when the cert expires in < 30 days (at most once per hour on failure); for self-signed certs, detects external file changes by mtime and reloads. `_wait_for_port_free()` gates restarts on the TCP port actually being free.
 
@@ -109,7 +109,7 @@ The interactive REPL shown when running without `--serve`. Dispatches to `cmd_se
 
 ### Notable design decisions
 
-- **Hypercorn over a hand-rolled server** — HTTP/2, modern TLS defaults, and async concurrency that would take significant code to get right. The cost is a dependency, which bootstrap manages invisibly.
+- **Stdlib `http.server` over an ASGI server** — a static site needs only HTTP/1.1, which every browser speaks; the threaded model (one capped worker thread per connection) is simple to reason about and removes the largest dependency. Servette owns its transport directly: TLS from `ssl.SSLContext`, the handshake off the accept loop, a per-connection timeout, and a connection cap — the hardening an ASGI server would otherwise supply, kept small enough to read in one file.
 - **Managed virtualenv over system packages** — `.servette-env/` is isolated, reproducible, and invisible to the rest of the system.
 - **CSP default blocks what static sites never need** — plugins (`object-src 'none'`), `eval()`, plain-HTTP external resources — while allowing own-origin, HTTPS externals, inline styles/scripts, and data URIs. Tune via `config > csp`; blank disables it.
 - **Permissions-Policy default denies hardware APIs** — camera, microphone, USB, MIDI, serial — that need a backend or specialized hardware. APIs a static site might use (geolocation, fullscreen, payment) are left at browser defaults. Tune via `config > perms`; blank disables it.

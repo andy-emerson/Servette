@@ -14,7 +14,7 @@ Servette's identity is a small set of non-negotiable principles. They are invari
 | **Secure by default** | Trusted TLS, HTTPS-only (HTTP 301s upward), security headers on every response, optional auth, rate limiting, a least-privilege service user. Security is the default state, never an opt-in. |
 | **Production-grade** | Serves real sites on the public internet: automatic certificate renewal, auto-restart, survives reboots. Servette is not a dev tool. |
 | **Zero-friction operation** | Copy one file, run it, follow the wizard. No configuration language, no manual certificate or dependency management. |
-| **Minimal footprint** | Stdlib plus four packages in a managed virtualenv; nothing installed system-wide; light enough for a Raspberry Pi. |
+| **Minimal footprint** | Stdlib plus three packages in a managed virtualenv; nothing installed system-wide; light enough for a Raspberry Pi. |
 
 **Minimalism is the default; the principles above are the only license to add complexity.** General-purpose servers accumulate features — reverse proxying, load balancing, plugins, templating, SPA routing, a live config API. None are needed to satisfy the principles, so each is feature creep: complexity that pulls Servette away from "single file" and "zero-friction" while serving no goal.
 
@@ -28,7 +28,7 @@ The refusals below are not an exhaustive blocklist; they are the common cases, e
 | **SPA deep-link rewriting** | Files are served as-is; `/about` 404s if no such file exists. Client-side routers (React Router, Vue Router) need path→`index.html` rewriting Servette does not do. Use hash routing (`/#/about`) or a platform with rewrite rules. |
 | **Reverse proxy, load balancing, live config API** | The bulk of what general-purpose servers carry, serving no principle for a static site. Servette can sit *behind* a single trusted-proxy hop; it does not *become* one. |
 | **Plugins, configuration language** | Settings are a handful of defaulted fields in `servette.toml`. Nothing to learn, nothing to extend — by design. |
-| **Runtime dependencies beyond the managed venv** | Stdlib (Python 3.11+) plus four packages Servette installs into `.servette-env/` itself. The operator never runs pip. |
+| **Runtime dependencies beyond the managed venv** | Stdlib (Python 3.11+) plus three packages Servette installs into `.servette-env/` itself. The operator never runs pip. |
 
 A request to add any of these is not a feature request; it is a request for a different program. The honest answer is usually to reach for a general-purpose server that does more.
 

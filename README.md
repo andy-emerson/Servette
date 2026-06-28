@@ -49,7 +49,7 @@ All of these are excellent at what they're built for. None of them do what Serve
 
 | Feature | What it does |
 |---|---|
-| HTTPS with HTTP/2 | Your site is encrypted; browsers show the padlock; pages load faster with multiplexed requests |
+| HTTPS by default | Your site is encrypted, browsers show the padlock, and plain-HTTP requests are redirected up to HTTPS |
 | Basic Auth | Optional username and password to restrict access |
 | Rate limiting | Stops bots from hammering the server; makes password guessing impractical |
 | Live reload | Edit any file and changes appear immediately, no restart required |

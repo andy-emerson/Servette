@@ -7,7 +7,7 @@ and essential security headers. Run it:
     sudo python3 servette.py
 
 Architecture:
-    Server              — config, rate limiting, file cache, and the two ASGI apps
+    Server              — config, rate limiting, file cache, the request handler, and the HTTP servers
     System              — bootstrap, server lifecycle, certificate management, and service management
     Shell               — the interactive terminal interface
 """
@@ -49,8 +49,8 @@ ACME_WEBROOT = "/var/lib/letsencrypt/webroot"
 # ─────────────────────────────────────────────────────────────────────────────
 # SERVER
 #
-# Handles all incoming HTTP(S) requests. Contains config, rate limiting, the
-# file cache, and the two ASGI apps (HTTPS + HTTP redirect) that Hypercorn runs.
+# Handles all incoming HTTP(S) requests. Contains config, rate limiting, the file
+# cache, the request handler, and the threaded HTTP servers (HTTPS + port-80 redirect).
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -204,9 +204,9 @@ password_salt = {s(self.password_salt)}
 
 
 # Config is a module-level singleton. Dependency injection (passing config into
-# every function) is the textbook alternative, but ASGI handlers have fixed
-# signatures imposed by Hypercorn and cannot accept extra arguments. In a
-# single-file server that is always run as a process, the global is the right call.
+# every function) is the textbook alternative, but the stdlib request handlers have
+# fixed signatures and cannot accept extra arguments. In a single-file server that is
+# always run as a process, the global is the right call.
 config = Config()
 
 
@@ -468,8 +468,8 @@ def _handle_request(method, url_path, headers, raw_ip):
     """Transport-agnostic request handler. Given the method, URL path, a dict of
     lowercased byte headers, and the raw client IP, returns (status, headers, body)
     — security headers included on every response, body blanked for HEAD. Pure and
-    synchronous, so it can be driven by any server (ASGI or otherwise) and run off
-    the event loop. The decision logic lives here; the transport just sends it."""
+    synchronous, so it can be driven by any transport and needs no event loop. The
+    decision logic lives here; the transport just feeds it and sends the result."""
     ip = _normalize_ip(raw_ip)
     if config.trusted_proxy:
         xff = headers.get(b"x-forwarded-for", b"").decode()

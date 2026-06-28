@@ -974,9 +974,9 @@ def start_server():
             log.warning("SSL certificate expires in %d days", days)
 
     for issue in _production_issues():
-        print(_c(f"  ⚠ {issue}", "yellow"))
+        print(_c(f"  {issue}", "yellow"))
     for warning in _cache_warnings():
-        print(_c(f"  ⚠ {warning}", "yellow"))
+        print(_c(f"  {warning}", "yellow"))
 
 
 def stop_server():
@@ -1972,7 +1972,23 @@ def cmd_update():
 
     print(f"  Updated {__version__} → {new_version}.")
     print(f"  Previous version saved to {bak_path}.")
-    print("  Restart to run the new version ('stop' then 'start', or 'sudo systemctl restart servette').")
+
+    if _service_is_active():
+        if _prompt("Restart the servette service now?"):
+            try:
+                subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
+                print(f"  Service restarted on {new_version}.")
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"  Restart failed — run 'sudo systemctl restart servette' yourself ({e}).")
+        else:
+            print("  Run 'sudo systemctl restart servette' when ready.")
+    elif _server_running():
+        # The server is running inside this shell, which still holds the old code in
+        # memory; stopping and starting it here would only re-run the old version, so
+        # a full relaunch is required to pick up the new file.
+        print("  This shell is still running the old version — exit and rerun Servette to apply.")
+    else:
+        print("  Restart to run the new version: 'start', or 'sudo systemctl restart servette'.")
 
 
 def _format_uptime(seconds):
@@ -2029,6 +2045,54 @@ def _cache_warnings():
     return warnings
 
 
+def _runtime_stats(service_active):
+    """Runtime stats for the running server as (label, value) rows — uptime, memory,
+    PID — omitting any that aren't available. Service mode reads from systemd;
+    session mode reads from /proc and the in-process start time."""
+    rows = []
+    if service_active:
+        try:
+            result = subprocess.run(
+                ["systemctl", "show", "servette",
+                 "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,MainPID"],
+                capture_output=True, text=True
+            )
+            props = dict(
+                line.split("=", 1) for line in result.stdout.strip().splitlines() if "=" in line
+            )
+        except Exception:
+            return rows
+        mono = props.get("ActiveEnterTimestampMonotonic", "")
+        if mono and mono != "0":
+            try:
+                with open("/proc/uptime") as f:
+                    boot_elapsed = float(f.read().split()[0])
+                elapsed = boot_elapsed - int(mono) / 1_000_000
+                if elapsed >= 0:
+                    rows.append(("Uptime", _format_uptime(elapsed)))
+            except Exception:
+                pass
+        mem = props.get("MemoryCurrent", "")
+        if mem and mem.isdigit() and int(mem) > 0:
+            rows.append(("Memory", f"{int(mem) / (1024 * 1024):.1f} MB"))
+        pid = props.get("MainPID", "")
+        if pid and pid != "0":
+            rows.append(("PID", pid))
+    else:
+        if _server_start_time is not None:
+            rows.append(("Uptime", _format_uptime(time.monotonic() - _server_start_time)))
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rows.append(("Memory", f"{int(line.split()[1]) / 1024:.1f} MB"))
+                        break
+        except Exception:
+            pass
+        rows.append(("PID", str(os.getpid())))
+    return rows
+
+
 def cmd_status():
     service_active = _service_is_active()
     running        = service_active or _server_running()
@@ -2062,49 +2126,11 @@ def cmd_status():
     if issues:
         print()
         for issue in issues:
-            print(_c(f"  ⚠ {issue}", "yellow"))
+            print(_c(f"  {issue}", "yellow"))
 
     if running:
-        if service_active:
-            try:
-                result = subprocess.run(
-                    ["systemctl", "show", "servette",
-                     "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,MainPID"],
-                    capture_output=True, text=True
-                )
-                props = dict(
-                    line.split("=", 1) for line in result.stdout.strip().splitlines() if "=" in line
-                )
-                mono = props.get("ActiveEnterTimestampMonotonic", "")
-                if mono and mono != "0":
-                    try:
-                        with open("/proc/uptime") as f:
-                            boot_elapsed = float(f.read().split()[0])
-                        elapsed = boot_elapsed - int(mono) / 1_000_000
-                        if elapsed >= 0:
-                            print(f"  {'Uptime':<{W}} {_format_uptime(elapsed)}")
-                    except Exception:
-                        pass
-                mem = props.get("MemoryCurrent", "")
-                if mem and mem.isdigit() and int(mem) > 0:
-                    print(f"  {'Memory':<{W}} {int(mem) / (1024 * 1024):.1f} MB")
-                pid = props.get("MainPID", "")
-                if pid and pid != "0":
-                    print(f"  {'PID':<{W}} {pid}")
-            except Exception:
-                pass
-        else:
-            if _server_start_time is not None:
-                print(f"  {'Uptime':<{W}} {_format_uptime(time.monotonic() - _server_start_time)}")
-            try:
-                with open("/proc/self/status") as f:
-                    for line in f:
-                        if line.startswith("VmRSS:"):
-                            print(f"  {'Memory':<{W}} {int(line.split()[1]) / 1024:.1f} MB")
-                            break
-            except Exception:
-                pass
-            print(f"  {'PID':<{W}} {os.getpid()}")
+        for label, value in _runtime_stats(service_active):
+            print(f"  {label:<{W}} {value}")
 
     print()
 

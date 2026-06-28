@@ -183,6 +183,18 @@
       line-height: 1.5;
     }
 
+    .cs {
+      display: inline-block;
+      width: 1.1em;
+      text-align: center;
+      font-weight: 500;
+    }
+
+    .cs-pass    { color: var(--green); }
+    .cs-fail    { color: var(--red); }
+    .cs-defer   { color: var(--muted); }
+    .cs-pending { color: var(--muted); }
+
     /* ── Footer ── */
     .note {
       font-size: 0.7rem;
@@ -228,61 +240,148 @@
   </div>
 
   <div class="provides">
-    <div class="provides-title">This server also provides</div>
-    <table class="provides-table">
-      <tr>
-        <td class="ptd-name">Password protection</td>
-        <td class="ptd-desc">Restricts access to authenticated visitors. Prevents unauthorized access.</td>
-      </tr>
-      <tr>
-        <td class="ptd-name">Rate limiting</td>
-        <td class="ptd-desc">Caps requests per IP per minute. Defeats brute-force, credential stuffing, and basic DoS.</td>
-      </tr>
-      <tr>
-        <td class="ptd-name">HTTPS redirect</td>
-        <td class="ptd-desc">Forces all connections to HTTPS. Prevents interception of plaintext HTTP traffic.</td>
-      </tr>
-      <tr>
-        <td class="ptd-name">Browser HTTPS lock</td>
-        <td class="ptd-desc">Instructs browsers to refuse HTTP for one year. Defeats SSL stripping attacks.</td>
-      </tr>
-      <tr>
-        <td class="ptd-name">Security headers</td>
-        <td class="ptd-desc">Blocks framing (clickjacking), prevents MIME type sniffing, and suppresses the Referer header so your URL doesn't leak to third-party sites.</td>
-      </tr>
-      <tr>
-        <td class="ptd-name">Gzip &amp; ETag</td>
-        <td class="ptd-desc">Serves compressed files and fingerprints each response. Repeat visitors receive a 304 Not Modified instead of a full download.</td>
-      </tr>
-    </table>
+    <div class="provides-title">Live verification<span id="checks-summary"></span></div>
+    <table class="provides-table" id="checks-table"></table>
   </div>
 
   <div class="note">
-    This page was served by <a href="https://github.com/andy-emerson/servette">Servette</a> — a simple, secure, static-site server.
+    This page was served by <a href="https://github.com/andy-emerson/servette">Servette</a> — a simple, secure, static-site server. The checks above run live in your browser; greyed items can't be observed client-side and are verified in the <a href="https://github.com/andy-emerson/servette/blob/main/tests/test.py">test suite</a> instead.
   </div>
 
 </div>
 
 <script>
-  const isHttps = window.location.protocol === 'https:';
+  const $ = (id) => document.getElementById(id);
 
-  // Update the live verified connection card
-  document.getElementById('url').textContent = window.location.protocol + '//' + window.location.host;
-
-  const badge  = document.getElementById('badge');
-  const dot    = document.getElementById('dot');
-  const tagline = document.getElementById('tagline-text');
+  // ── Connection card ───────────────────────────────────────────────
+  const isHttps = location.protocol === 'https:';
+  $('url').textContent = location.protocol + '//' + location.host;
 
   if (isHttps) {
-    badge.textContent = '✓ Verified encrypted';
-    badge.className   = 'badge badge-green';
-    tagline.textContent = 'YOUR NANOSERVER IS RUNNING';
+    $('badge').textContent = '✓ Verified encrypted';
+    $('badge').className    = 'badge badge-green';
+    $('tagline-text').textContent = 'YOUR NANOSERVER IS RUNNING';
   } else {
-    badge.textContent = '⚠ Not encrypted';
-    badge.className   = 'badge badge-red';
-    dot.className     = 'dot red';
-    tagline.textContent = 'Connection is not secure';
+    $('badge').textContent = '⚠ Not encrypted';
+    $('badge').className    = 'badge badge-red';
+    $('dot').className      = 'dot red';
+    $('tagline-text').textContent = 'Connection is not secure';
   }
+
+  // ── Live verification ─────────────────────────────────────────────
+  // Each check returns true (pass), false (fail), or null (can't be
+  // determined from the browser — reported honestly, never faked).
+  const here = location.href.split('#')[0];
+
+  let _hdrs = null;
+  const H = async () => (_hdrs ||= (await fetch(here, { cache: 'no-store' })).headers);
+
+  const checks = [
+    { name: 'Clickjacking blocked',
+      desc: 'Refuses to render in a frame (X-Frame-Options: DENY).',
+      run: async () => (await H()).get('X-Frame-Options') === 'DENY' },
+
+    { name: 'MIME-sniffing blocked',
+      desc: 'Browsers honor the declared type (X-Content-Type-Options: nosniff).',
+      run: async () => (await H()).get('X-Content-Type-Options') === 'nosniff' },
+
+    { name: 'Referrer hidden',
+      desc: 'Your URL is not leaked to other sites (Referrer-Policy).',
+      run: async () => !!(await H()).get('Referrer-Policy') },
+
+    { name: 'Content-Security-Policy',
+      desc: 'Restricts what the page is allowed to load and run.',
+      run: async () => !!(await H()).get('Content-Security-Policy') },
+
+    { name: 'Permissions-Policy',
+      desc: 'Disables powerful browser features by default.',
+      run: async () => !!(await H()).get('Permissions-Policy') },
+
+    { name: 'Cached with ETag',
+      desc: 'Sends Cache-Control and a content fingerprint.',
+      run: async () => { const h = await H(); return !!h.get('ETag') && !!h.get('Cache-Control'); } },
+
+    { name: '304 Not Modified',
+      desc: 'A matching ETag returns an empty 304 instead of a re-download.',
+      run: async () => {
+        const etag = (await H()).get('ETag');
+        if (!etag) return null;
+        const r = await fetch(here, { cache: 'no-store', headers: { 'If-None-Match': etag } });
+        return r.status === 304 ? true : null;   // browser cache layers vary
+      } },
+
+    { name: 'Writes rejected (405)',
+      desc: 'A static server has nowhere to put data, so POST returns 405.',
+      run: async () => (await fetch(here, { method: 'POST' })).status === 405 },
+
+    { name: 'Unknown paths (404)',
+      desc: 'Missing files return a clean 404, never a stack trace.',
+      run: async () => (await fetch('/__servette_probe_' + Date.now())).status === 404 },
+
+    { name: 'Path traversal blocked',
+      desc: 'Encoded ../ escapes are refused with 403, never served.',
+      run: async () => (await fetch('/%2e%2e%2f%2e%2e%2fetc%2fpasswd')).status === 403 },
+
+    { name: 'Forces HTTPS (HSTS)',
+      desc: 'Tells browsers to refuse plain HTTP. Active only with a domain certificate.',
+      run: async () => (await H()).get('Strict-Transport-Security') ? true : null },
+
+    // Real, but not observable from inside the browser — verified by the
+    // test suite (tests/test.py) rather than faked here.
+    { name: 'Gzip compression', tested: true,
+      desc: 'The browser decompresses transparently and hides Content-Encoding.' },
+    { name: 'HTTP → HTTPS redirect', tested: true,
+      desc: 'Mixed-content rules block probing port 80 from an HTTPS page.' },
+    { name: 'Rate limiting', tested: true,
+      desc: 'Skipped live — exercising it would throttle your own visit.' },
+    { name: 'Password protection', tested: true,
+      desc: 'Off on this demo; verifying it would need credentials.' },
+  ];
+
+  const ICON  = { pass: '✓', fail: '✗', defer: '–', pending: '·' };
+  const table = $('checks-table');
+
+  function addRow(c) {
+    const status = document.createElement('span');
+    status.className = 'cs cs-pending';
+    status.textContent = ICON.pending;
+
+    const name = document.createElement('td');
+    name.className = 'ptd-name';
+    name.append(status, ' ' + c.name);
+
+    const desc = document.createElement('td');
+    desc.className = 'ptd-desc';
+    desc.textContent = c.desc;
+
+    const tr = document.createElement('tr');
+    tr.append(name, desc);
+    table.appendChild(tr);
+    return status;
+  }
+
+  function paint(el, state, title) {
+    el.textContent = ICON[state];
+    el.className = 'cs cs-' + state;
+    if (title) el.title = title;
+  }
+
+  (async () => {
+    let live = 0;
+    for (const c of checks) {
+      const el = addRow(c);
+      if (c.tested) { paint(el, 'defer', 'Verified in tests/test.py'); continue; }
+      try {
+        const res = await c.run();
+        if (res === true)       { paint(el, 'pass'); live++; }
+        else if (res === false) { paint(el, 'fail', 'Claimed but not observed'); }
+        else                    { paint(el, 'defer', 'Not determinable in this browser'); }
+      } catch (e) {
+        paint(el, 'defer', 'Check could not run');
+      }
+    }
+    $('checks-summary').textContent = ` · ${live} verified live`;
+  })();
 </script>
 
 </body>

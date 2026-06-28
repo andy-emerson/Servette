@@ -90,12 +90,12 @@
 
     .dot.red { background: var(--red); animation: none; }
 
-    /* ── Verified card ── */
+    /* ── Connection card ── */
     .verified {
       border: 1px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
-      margin-bottom: 2rem;
+      margin-bottom: 1.5rem;
       opacity: 0;
       animation: rise 0.5s ease 0.2s forwards;
     }
@@ -117,10 +117,7 @@
       margin-bottom: 0.25rem;
     }
 
-    .verified-value {
-      font-size: 0.9rem;
-      color: var(--text);
-    }
+    .verified-value { font-size: 0.9rem; color: var(--text); }
 
     .badge {
       font-size: 0.7rem;
@@ -135,65 +132,83 @@
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
 
-    /* ── What Servette provides ── */
-    .provides {
+    /* ── Self-test ── */
+    .selftest {
       border: 1px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
-      margin-bottom: 2rem;
+      background: var(--surface);
+      margin-bottom: 1.5rem;
       opacity: 0;
       animation: rise 0.5s ease 0.35s forwards;
     }
 
-    .provides-title {
-      background: var(--surface);
+    .selftest-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
       padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .selftest-title {
       font-size: 0.7rem;
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--muted);
-      border-bottom: 1px solid var(--border);
     }
 
-    .provides-table {
-      width: 100%;
-      border-collapse: collapse;
-      background: var(--surface);
-    }
-
-    .provides-table td {
-      padding: 0.9rem 1.25rem;
-      border-bottom: 1px solid var(--border);
-      vertical-align: top;
-    }
-
-    .provides-table tr:last-child td { border-bottom: none; }
-
-    .ptd-name {
-      width: 1px;
+    .run-again {
+      font-family: inherit;
+      font-size: 0.7rem;
+      color: var(--muted);
+      background: none;
+      border: none;
+      cursor: pointer;
+      letter-spacing: 0.05em;
       white-space: nowrap;
-      padding-right: 1.5rem;
-      font-size: 0.8rem;
-      color: var(--text);
+    }
+    .run-again:hover { color: var(--text); }
+
+    .t-log { padding: 0.6rem 1.25rem; }
+
+    .t-row {
+      display: flex;
+      gap: 0.85rem;
+      padding: 0.32rem 0;
+      font-size: 0.72rem;
+      line-height: 1.45;
     }
 
-    .ptd-desc {
+    .t-st       { flex: 0 0 2.6em; font-weight: 500; }
+    .t-pass     { color: var(--green); }
+    .t-fail     { color: var(--red); }
+    .t-skip     { color: var(--muted); }
+    .t-pending  { color: var(--muted); }
+
+    .t-body { flex: 1; min-width: 0; }
+    .t-req  { color: var(--text); }
+    .t-obs  { color: var(--muted); }
+
+    .t-summary {
+      padding: 0.75rem 1.25rem;
+      border-top: 1px solid var(--border);
       font-size: 0.72rem;
       color: var(--muted);
-      line-height: 1.5;
     }
+    .t-summary b { color: var(--text); font-weight: 500; }
 
-    .cs {
-      display: inline-block;
-      width: 1.1em;
-      text-align: center;
-      font-weight: 500;
+    /* ── Other features (prose) ── */
+    .features {
+      font-size: 0.72rem;
+      color: var(--muted);
+      line-height: 1.7;
+      margin-bottom: 2rem;
+      opacity: 0;
+      animation: rise 0.5s ease 0.45s forwards;
     }
-
-    .cs-pass    { color: var(--green); }
-    .cs-fail    { color: var(--red); }
-    .cs-defer   { color: var(--muted); }
-    .cs-pending { color: var(--muted); }
+    .features b { color: var(--text); font-weight: 500; }
 
     /* ── Footer ── */
     .note {
@@ -201,11 +216,11 @@
       color: var(--muted);
       line-height: 1.7;
       opacity: 0;
-      animation: rise 0.5s ease 0.5s forwards;
+      animation: rise 0.5s ease 0.55s forwards;
     }
-
     .note a { color: #60a5fa; text-decoration: none; }
     .note a:hover { text-decoration: underline; }
+    .note a.brand { color: #5A8466; }
 
     @keyframes rise {
       from { opacity: 0; transform: translateY(10px); }
@@ -239,13 +254,23 @@
     </div>
   </div>
 
-  <div class="provides">
-    <div class="provides-title">Live verification<span id="checks-summary"></span></div>
-    <table class="provides-table" id="checks-table"></table>
+  <div class="selftest">
+    <div class="selftest-head">
+      <span class="selftest-title">Self-test — live from your browser</span>
+      <button class="run-again" id="run-again" type="button">↻ run again</button>
+    </div>
+    <div class="t-log" id="t-log"></div>
+    <div class="t-summary" id="t-summary">running…</div>
   </div>
 
+  <p class="features">
+    <b>Beyond what a browser can probe,</b> Servette gzip-compresses responses,
+    redirects all HTTP traffic to HTTPS, rate-limits abusive clients, can sit behind
+    a password, and renews its Let's Encrypt certificate automatically.
+  </p>
+
   <div class="note">
-    This page was served by <a href="https://github.com/andy-emerson/servette">Servette</a> — a simple, secure, static-site server. The checks above run live in your browser; greyed items can't be observed client-side and are verified in the <a href="https://github.com/andy-emerson/servette/blob/main/tests/test.py">test suite</a> instead.
+    Served by <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> — The Simple, Secure, Static-Site Server.
   </div>
 
 </div>
@@ -268,120 +293,107 @@
     $('tagline-text').textContent = 'Connection is not secure';
   }
 
-  // ── Live verification ─────────────────────────────────────────────
-  // Each check returns true (pass), false (fail), or null (can't be
-  // determined from the browser — reported honestly, never faked).
+  // ── Self-test ─────────────────────────────────────────────────────
+  // Each check makes a real request and reports the value it observed.
+  // ok: true = PASS, false = FAIL, null = SKIP (can't be judged here —
+  // never faked as a pass).
   const here = location.href.split('#')[0];
 
   let _hdrs = null;
   const H = async () => (_hdrs ||= (await fetch(here, { cache: 'no-store' })).headers);
+  const seen = (v) => v || '(absent)';
 
   const checks = [
-    { name: 'Clickjacking blocked',
-      desc: 'Refuses to render in a frame (X-Frame-Options: DENY).',
-      run: async () => (await H()).get('X-Frame-Options') === 'DENY' },
+    { req: 'GET /', run: async () => {
+        const v = (await H()).get('X-Frame-Options');
+        return { ok: v === 'DENY', obs: 'X-Frame-Options: ' + seen(v) }; } },
 
-    { name: 'MIME-sniffing blocked',
-      desc: 'Browsers honor the declared type (X-Content-Type-Options: nosniff).',
-      run: async () => (await H()).get('X-Content-Type-Options') === 'nosniff' },
+    { req: 'GET /', run: async () => {
+        const v = (await H()).get('X-Content-Type-Options');
+        return { ok: v === 'nosniff', obs: 'X-Content-Type-Options: ' + seen(v) }; } },
 
-    { name: 'Referrer hidden',
-      desc: 'Your URL is not leaked to other sites (Referrer-Policy).',
-      run: async () => !!(await H()).get('Referrer-Policy') },
+    { req: 'GET /', run: async () => {
+        const v = (await H()).get('Referrer-Policy');
+        return { ok: !!v, obs: 'Referrer-Policy: ' + seen(v) }; } },
 
-    { name: 'Content-Security-Policy',
-      desc: 'Restricts what the page is allowed to load and run.',
-      run: async () => !!(await H()).get('Content-Security-Policy') },
+    { req: 'GET /', run: async () => {
+        const v = (await H()).get('Content-Security-Policy');
+        return { ok: !!v, obs: 'Content-Security-Policy: ' + (v ? 'present' : '(absent)') }; } },
 
-    { name: 'Permissions-Policy',
-      desc: 'Disables powerful browser features by default.',
-      run: async () => !!(await H()).get('Permissions-Policy') },
+    { req: 'GET /', run: async () => {
+        const v = (await H()).get('Permissions-Policy');
+        return { ok: !!v, obs: 'Permissions-Policy: ' + (v ? 'present' : '(absent)') }; } },
 
-    { name: 'Cached with ETag',
-      desc: 'Sends Cache-Control and a content fingerprint.',
-      run: async () => { const h = await H(); return !!h.get('ETag') && !!h.get('Cache-Control'); } },
+    { req: 'GET /', run: async () => {
+        const h = await H();
+        return { ok: !!h.get('ETag') && !!h.get('Cache-Control'),
+                 obs: 'Cache-Control + ETag: ' + (h.get('ETag') || '(absent)') }; } },
 
-    { name: '304 Not Modified',
-      desc: 'A matching ETag returns an empty 304 instead of a re-download.',
-      run: async () => {
+    { req: 'GET /  (If-None-Match)', run: async () => {
         const etag = (await H()).get('ETag');
-        if (!etag) return null;
+        if (!etag) return { ok: null, obs: 'no ETag to revalidate' };
         const r = await fetch(here, { cache: 'no-store', headers: { 'If-None-Match': etag } });
-        return r.status === 304 ? true : null;   // browser cache layers vary
-      } },
+        return r.status === 304
+          ? { ok: true, obs: '→ 304 Not Modified' }
+          : { ok: null, obs: '→ ' + r.status + ' (browser cache varies)' }; } },
 
-    { name: 'Writes rejected (405)',
-      desc: 'A static server has nowhere to put data, so POST returns 405.',
-      run: async () => (await fetch(here, { method: 'POST' })).status === 405 },
+    { req: 'POST /', run: async () => {
+        const s = (await fetch(here, { method: 'POST' })).status;
+        return { ok: s === 405, obs: '→ ' + s + (s === 405 ? ' Method Not Allowed' : '') }; } },
 
-    { name: 'Unknown paths (404)',
-      desc: 'Missing files return a clean 404, never a stack trace.',
-      run: async () => (await fetch('/__servette_probe_' + Date.now())).status === 404 },
+    { req: 'GET /<random>', run: async () => {
+        const s = (await fetch('/__servette_probe_' + Date.now())).status;
+        return { ok: s === 404, obs: '→ ' + s + (s === 404 ? ' Not Found' : '') }; } },
 
-    { name: 'Path traversal blocked',
-      desc: 'Encoded ../ escapes are refused with 403, never served.',
-      run: async () => (await fetch('/%2e%2e%2f%2e%2e%2fetc%2fpasswd')).status === 403 },
+    { req: 'GET /%2e%2e%2f…', run: async () => {
+        const s = (await fetch('/%2e%2e%2f%2e%2e%2fetc%2fpasswd')).status;
+        return { ok: s === 403, obs: '→ ' + s + (s === 403 ? ' Forbidden' : '') }; } },
 
-    { name: 'Forces HTTPS (HSTS)',
-      desc: 'Tells browsers to refuse plain HTTP. Active only with a domain certificate.',
-      run: async () => (await H()).get('Strict-Transport-Security') ? true : null },
-
-    // Real, but not observable from inside the browser — verified by the
-    // test suite (tests/test.py) rather than faked here.
-    { name: 'Gzip compression', tested: true,
-      desc: 'The browser decompresses transparently and hides Content-Encoding.' },
-    { name: 'HTTP → HTTPS redirect', tested: true,
-      desc: 'Mixed-content rules block probing port 80 from an HTTPS page.' },
-    { name: 'Rate limiting', tested: true,
-      desc: 'Skipped live — exercising it would throttle your own visit.' },
-    { name: 'Password protection', tested: true,
-      desc: 'Off on this demo; verifying it would need credentials.' },
+    { req: 'GET /', run: async () => {
+        const v = (await H()).get('Strict-Transport-Security');
+        return v
+          ? { ok: true, obs: 'Strict-Transport-Security: present' }
+          : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
   ];
 
-  const ICON  = { pass: '✓', fail: '✗', defer: '–', pending: '·' };
-  const table = $('checks-table');
+  const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };
+  const logEl = $('t-log');
 
-  function addRow(c) {
-    const status = document.createElement('span');
-    status.className = 'cs cs-pending';
-    status.textContent = ICON.pending;
-
-    const name = document.createElement('td');
-    name.className = 'ptd-name';
-    name.append(status, ' ' + c.name);
-
-    const desc = document.createElement('td');
-    desc.className = 'ptd-desc';
-    desc.textContent = c.desc;
-
-    const tr = document.createElement('tr');
-    tr.append(name, desc);
-    table.appendChild(tr);
-    return status;
+  function addRow(reqText) {
+    const st  = document.createElement('span'); st.className  = 't-st t-pending'; st.textContent = LABEL.pending;
+    const req = document.createElement('span'); req.className = 't-req';  req.textContent = reqText;
+    const obs = document.createElement('span'); obs.className = 't-obs';  obs.textContent = '';
+    const body = document.createElement('span'); body.className = 't-body';
+    body.append(req, document.createTextNode('  '), obs);
+    const row = document.createElement('div'); row.className = 't-row';
+    row.append(st, body);
+    logEl.appendChild(row);
+    return { st, obs };
   }
 
-  function paint(el, state, title) {
-    el.textContent = ICON[state];
-    el.className = 'cs cs-' + state;
-    if (title) el.title = title;
-  }
+  function paint(st, state) { st.textContent = LABEL[state]; st.className = 't-st t-' + state; }
 
-  (async () => {
-    let live = 0;
+  async function runTests() {
+    _hdrs = null;                 // force fresh requests on each run
+    logEl.innerHTML = '';
+    $('t-summary').textContent = 'running…';
+    let pass = 0, fail = 0, skip = 0;
     for (const c of checks) {
-      const el = addRow(c);
-      if (c.tested) { paint(el, 'defer', 'Verified in tests/test.py'); continue; }
-      try {
-        const res = await c.run();
-        if (res === true)       { paint(el, 'pass'); live++; }
-        else if (res === false) { paint(el, 'fail', 'Claimed but not observed'); }
-        else                    { paint(el, 'defer', 'Not determinable in this browser'); }
-      } catch (e) {
-        paint(el, 'defer', 'Check could not run');
-      }
+      const { st, obs } = addRow(c.req);
+      let r;
+      try { r = await c.run(); }
+      catch (e) { r = { ok: null, obs: 'could not run' }; }
+      obs.textContent = r.obs;
+      if (r.ok === true)       { paint(st, 'pass'); pass++; }
+      else if (r.ok === false) { paint(st, 'fail'); fail++; }
+      else                     { paint(st, 'skip'); skip++; }
     }
-    $('checks-summary').textContent = ` · ${live} verified live`;
-  })();
+    $('t-summary').innerHTML =
+      '<b>' + pass + '</b> passed · <b>' + fail + '</b> failed · <b>' + skip + '</b> skipped';
+  }
+
+  $('run-again').addEventListener('click', runTests);
+  runTests();
 </script>
 
 </body>

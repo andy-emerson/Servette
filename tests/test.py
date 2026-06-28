@@ -415,6 +415,35 @@ def run_dispatch_tests(s):
     check("'start' routed to cmd_start",   "start" in calls)
     check("'quit' stops server and exits", calls[-1] == "stop")
 
+    section("Restore command")
+    # cmd_restore swaps servette.py.bak back into place and consumes it. Drive it
+    # against a throwaway servette.py/.bak by pointing the module's __file__ there
+    # and auto-confirming the prompt; no service, no real file is touched.
+    rdir = tempfile.mkdtemp()
+    sv   = os.path.join(rdir, "servette.py")
+    bak  = sv + ".bak"
+    with open(sv, "w")  as f: f.write('__version__ = "9.9.9"\n')
+    with open(bak, "w") as f: f.write('__version__ = "8.8.8"\n')
+    saved = {n: getattr(s, n) for n in ("__file__", "_prompt", "_service_is_active", "_server_running")}
+    try:
+        s.__file__           = sv
+        s._prompt            = lambda *a, **k: True
+        s._service_is_active = lambda: False
+        s._server_running    = lambda: False
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_restore()
+        check("restore swaps the backup into place", open(sv).read().strip() == '__version__ = "8.8.8"')
+        check("restore consumes the backup",         not os.path.exists(bak))
+
+        # With no backup present, restore is a no-op that leaves the file alone.
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_restore()
+        check("restore with no backup leaves file unchanged", open(sv).read().strip() == '__version__ = "8.8.8"')
+    finally:
+        for n, v in saved.items():
+            setattr(s, n, v)
+        shutil.rmtree(rdir, ignore_errors=True)
+
     section("Request core — _handle_request")
     # The core returns (status, headers, body) directly and reads the request headers
     # straight off http.server's parsed HTTPMessage, so exercise it without a socket.

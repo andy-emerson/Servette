@@ -1653,6 +1653,7 @@ _COMMANDS = [
     ("status",  "show whether the server is running"),
     ("log [n]", "show the last n log entries"),
     ("update",  "download the latest version of servette.py"),
+    ("restore", "roll back to the previous version (undoes the last update)"),
     ("help",    "show this message"),
     ("quit",    "exit"),
 ]
@@ -2126,6 +2127,57 @@ def cmd_update():
         print("  Restart to run the new version: 'start', or 'sudo systemctl restart servette'.")
 
 
+def cmd_restore():
+    """Roll back to the version saved by the last 'update'. The backup is single-shot:
+    only ever one servette.py.bak exists, and a successful restore consumes it."""
+    servette_path = os.path.abspath(__file__)
+    bak_path      = servette_path + ".bak"
+
+    if not os.path.exists(bak_path):
+        print("  Nothing to restore — no servette.py.bak. ('update' saves one each time it runs.)")
+        return
+
+    try:
+        with open(bak_path, "rb") as f:
+            bak_source = f.read()
+    except OSError as e:
+        print(f"  Restore failed: cannot read {bak_path} ({e}).")
+        return
+
+    # Refuse to restore a corrupt backup — better to keep the working file in place.
+    try:
+        compile(bak_source, "servette.py", "exec")
+    except SyntaxError as e:
+        print(f"  Restore failed: the backup has a syntax error ({e}).")
+        return
+
+    bak_version = _parse_version(bak_source) or "unknown"
+    if not _prompt(f"Restore {__version__} → {bak_version} from servette.py.bak? The backup is then removed."):
+        print("  Restore cancelled.")
+        return
+
+    # Atomically move the backup into place (keeping the live file's mode). The rename
+    # consumes the backup, so only ever one is kept and it's spent on use.
+    os.chmod(bak_path, os.stat(servette_path).st_mode)
+    os.replace(bak_path, servette_path)
+
+    print(f"  Restored {__version__} → {bak_version}.")
+
+    if _service_is_active():
+        if _prompt("Restart the servette service now?"):
+            try:
+                subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
+                print(f"  Service restarted on {bak_version}.")
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"  Restart failed — run 'sudo systemctl restart servette' yourself ({e}).")
+        else:
+            print("  Run 'sudo systemctl restart servette' when ready.")
+    elif _server_running():
+        print("  This shell is still running the old version — exit and rerun Servette to apply.")
+    else:
+        print("  Restart to run the restored version: 'start', or 'sudo systemctl restart servette'.")
+
+
 def _format_uptime(seconds):
     s = int(seconds)
     if s < 60:
@@ -2352,6 +2404,8 @@ def shell():
                 print("Usage: log [number]")
         elif cmd == "update":
             cmd_update()
+        elif cmd == "restore":
+            cmd_restore()
         elif cmd in ("help", "?"):
             print(HELP)
         elif cmd in ("quit", "exit"):

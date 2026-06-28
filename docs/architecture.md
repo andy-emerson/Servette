@@ -4,13 +4,13 @@ How `servette.py` is built — the current state of the system, for anyone who w
 
 ## How it works
 
-Servette is a single file (`servette.py`, ~2,200 lines) with three sections, each readable on its own. Settings persist to `servette.toml` beside it.
+Servette is a single file (`servette.py`, ~2,400 lines) with three sections, each readable on its own. Settings persist to `servette.toml` beside it.
 
 | Section | Lines | Responsibility |
 | - | - | - |
-| **Server** | ~710 | every incoming request: config, rate limiting, file cache, the request handler and the HTTP servers |
-| **System** | ~720 | the environment: bootstrap, server lifecycle, certificates, systemd |
-| **Shell** | ~730 | the interactive terminal interface |
+| **Server** | ~730 | every incoming request: config, rate limiting, file cache, the request handler and the HTTP servers |
+| **System** | ~850 | the environment: bootstrap, server lifecycle, certificates (incl. the ACME client), systemd |
+| **Shell** | ~800 | the interactive terminal interface |
 
 ```mermaid
 graph LR
@@ -92,11 +92,11 @@ graph LR
 
 **systemd.** `enable`/`disable` write and manage `/etc/systemd/system/servette.service`. `cmd_install` creates the `servette` system user (no login shell, no home), chowns cert/key/config to it, and the unit runs as that user, sandboxed: `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets it bind 80/443 without root, while `NoNewPrivileges`, `ProtectSystem=strict` (with `ReadWritePaths` limited to the server's own directory and the ACME webroot), `PrivateTmp`, and the kernel/cgroup protections confine it. `sudo` is needed only for the interactive shell, which writes the unit and calls `useradd`.
 
-**Self-update (`cmd_update`).** Updates come from signed GitHub Releases, not raw `main`. `cmd_update` fetches the latest release's `servette.py` and `servette.py.sig`, verifies the signature against the pinned `_SIGNING_PUBLIC_KEY`, validates syntax, and swaps the file in atomically; if the systemd service is active it then offers to restart it. The signature is the trust anchor, and it is why distribution goes through releases at all: a release is verifiable, whereas `main` is whatever is currently there, signed by no one. Settings in `servette.toml` are never touched by an update. The release-publishing procedure (a maintainer task, since it needs the private key) is in [`AGENTS.md`](../AGENTS.md#releasing-maintainer-task).
+**Self-update (`cmd_update` / `cmd_restore`).** Updates come from signed GitHub Releases, not raw `main`. `cmd_update` fetches the latest release's `servette.py` and `servette.py.sig`, verifies the signature against the pinned `_SIGNING_PUBLIC_KEY`, validates syntax, and swaps the file in atomically; if the systemd service is active it then offers to restart it. Before swapping it copies the current file to `servette.py.bak` — a single-shot backup that `cmd_restore` rolls back to and consumes (one backup is ever kept). The signature is the trust anchor, and it is why distribution goes through releases at all: a release is verifiable, whereas `main` is whatever is currently there, signed by no one. Settings in `servette.toml` are never touched by an update. The release-publishing procedure (a maintainer task, since it needs the private key) is in [`AGENTS.md`](../AGENTS.md#releasing-maintainer-task).
 
 ### Shell
 
-The interactive REPL shown when running without `--serve`. Dispatches to `cmd_setup`, `cmd_config`, `cmd_install`/`cmd_uninstall`, `cmd_start`/`cmd_stop`, `cmd_status`, `cmd_log`, `cmd_update`. The `config` sub-shell writes each setting to `servette.toml` immediately. It contains only UI logic and is the only layer that writes to Config interactively.
+The interactive REPL shown when running without `--serve`. Dispatches to `cmd_setup`, `cmd_config`, `cmd_install`/`cmd_uninstall`, `cmd_start`/`cmd_stop`, `cmd_status`, `cmd_log`, `cmd_update`/`cmd_restore`. The `config` sub-shell writes each setting to `servette.toml` immediately. It contains only UI logic and is the only layer that writes to Config interactively.
 
 ### Key constants
 

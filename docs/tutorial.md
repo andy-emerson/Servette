@@ -110,6 +110,7 @@ Servette does more than start and stop. Re-running `sudo python3 servette.py` an
 | `status` | Show whether the server is running |
 | `log` | Show recent activity |
 | `update` | Download the latest signed release of Servette |
+| `restore` | Roll back to the previous version (undoes the last `update`) |
 | `help` | Show the command list |
 | `quit` | Exit the shell |
 

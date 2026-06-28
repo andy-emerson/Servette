@@ -243,7 +243,8 @@ def _c(text, color):
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 #
 # Uses threading.Lock because the critical section is in-memory deque
-# manipulation — not I/O — so it doesn't meaningfully block the event loop.
+# manipulation — not I/O — so it's held only briefly and stays barely contended
+# even when many connection threads hit it at once.
 
 RATE_WINDOW  = 60      # seconds
 _RATE_IP_CAP = 10_000  # max IPs tracked per dict; bounds memory under IP-flood attacks

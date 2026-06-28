@@ -32,6 +32,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -193,10 +194,20 @@ permissions_policy = {s(self.permissions_policy)}
 password_hash = {s(self.password_hash)}
 password_salt = {s(self.password_salt)}
 """
-        fd = os.open(self.CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        os.chmod(self.CONFIG_FILE, 0o600)
+        # Write to a temp file in the same directory (mkstemp creates it 0o600), then
+        # atomically replace, so a crash mid-write can't truncate the live config.
+        d = os.path.dirname(self.CONFIG_FILE) or "."
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".servette.toml.")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+            os.replace(tmp, self.CONFIG_FILE)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
@@ -255,9 +266,17 @@ _rate_lock       = threading.Lock()
 
 
 def _normalize_ip(ip):
-    """Normalize IPv6-mapped IPv4 addresses so both forms bucket together."""
-    if ip.startswith("::ffff:"):
-        return ip[7:]
+    """Normalize IPv6-mapped IPv4 addresses so both forms bucket together.
+
+    Uses ipaddress so every mapped spelling collapses to the same key — the dotted
+    ::ffff:1.2.3.4 and the hex ::ffff:c0a8:0101 are the same address and must share a
+    rate-limit bucket. Non-addresses (e.g. "unknown", junk XFF) pass through as-is."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6 and addr.ipv4_mapped:
+        return str(addr.ipv4_mapped)
     return ip
 
 

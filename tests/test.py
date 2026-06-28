@@ -245,8 +245,12 @@ def run_unit_tests(s):
     section("IPv6 normalization")
 
     check("::ffff: prefix stripped",       s._normalize_ip("::ffff:192.168.1.1") == "192.168.1.1")
+    check("hex-mapped form normalized",    s._normalize_ip("::ffff:c0a8:0101") == "192.168.1.1")
+    check("dotted and hex map to same key",
+          s._normalize_ip("::ffff:c0a8:0101") == s._normalize_ip("::ffff:192.168.1.1"))
     check("Plain IPv4 unchanged",          s._normalize_ip("10.0.0.1") == "10.0.0.1")
     check("Plain IPv6 unchanged",          s._normalize_ip("2001:db8::1") == "2001:db8::1")
+    check("Non-address passes through",    s._normalize_ip("unknown") == "unknown")
 
     section("_resolve_request_path")
 

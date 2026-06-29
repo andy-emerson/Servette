@@ -10,9 +10,10 @@ Or, after first-run bootstrap:
     .servette-env/bin/python3 test.py
 """
 
-import asyncio
 import base64
 import gzip
+import http.client
+import http.server
 import os
 import shutil
 import socket
@@ -42,7 +43,7 @@ SSL_CTX.check_hostname = False
 SSL_CTX.verify_mode    = ssl.CERT_NONE
 SSL_CTX.set_alpn_protocols(["http/1.1"])
 
-# Used only for the ALPN negotiation check — advertises h2 to confirm HTTP/2 support
+# Used only for the ALPN check — advertises h2 to confirm the server does NOT speak it
 SSL_CTX_H2 = ssl.create_default_context()
 SSL_CTX_H2.minimum_version = ssl.TLSVersion.TLSv1_2
 SSL_CTX_H2.check_hostname = False
@@ -244,8 +245,12 @@ def run_unit_tests(s):
     section("IPv6 normalization")
 
     check("::ffff: prefix stripped",       s._normalize_ip("::ffff:192.168.1.1") == "192.168.1.1")
+    check("hex-mapped form normalized",    s._normalize_ip("::ffff:c0a8:0101") == "192.168.1.1")
+    check("dotted and hex map to same key",
+          s._normalize_ip("::ffff:c0a8:0101") == s._normalize_ip("::ffff:192.168.1.1"))
     check("Plain IPv4 unchanged",          s._normalize_ip("10.0.0.1") == "10.0.0.1")
     check("Plain IPv6 unchanged",          s._normalize_ip("2001:db8::1") == "2001:db8::1")
+    check("Non-address passes through",    s._normalize_ip("unknown") == "unknown")
 
     section("_resolve_request_path")
 
@@ -281,57 +286,87 @@ def run_unit_tests(s):
     check("Hours",    s._format_uptime(3700)  == "1h 1m")
     check("Days",     s._format_uptime(90061) == "1d 1h")
 
-    section("Event-loop exception handler")
+    section("Minimal ACME client (JWS)")
+    # Exercise the crypto the hand-rolled ACME client does — base64url, the JWK
+    # thumbprint, and RS256 JWS signing — without touching the network (the client
+    # fetches its directory lazily, so construction makes no requests).
+    import json as _json
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa, padding as _pad
+    from cryptography.hazmat.primitives import hashes as _h
 
-    class _FakeLoop:
-        def __init__(self):          self.delegated = []
-        def default_exception_handler(self, ctx): self.delegated.append(ctx)
+    def unb64(x):
+        return base64.urlsafe_b64decode(x + "=" * (-len(x) % 4))
 
-    lp = _FakeLoop()
-    s._loop_exception_handler(lp, {"message": "Fatal error on transport",
-                                   "exception": TimeoutError("SSL shutdown timed out")})
-    check("Benign SSL-shutdown timeout swallowed (not delegated)", lp.delegated == [])
-    other = {"message": "boom", "exception": ValueError("nope")}
-    s._loop_exception_handler(lp, other)
-    check("Unrelated error delegated to default handler", lp.delegated == [other])
+    check("_b64url strips padding",        s._b64url(b"\x00\x00") == "AAA")
+    check("_b64url_int encodes exponent",  s._b64url_int(65537) == "AQAB")
+
+    akey = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    c    = s._ACMEClient("https://acme.example/directory", akey)
+    tp   = c.thumbprint()
+    check("thumbprint is url-safe + unpadded", not (set(tp) & set("=+/")))
+    check("key_authorization is token.thumbprint", c.key_authorization("tok") == f"tok.{tp}")
+
+    c._nonce = "testnonce"
+    jws  = _json.loads(c._sign("https://acme.example/new-order", {"x": 1}))
+    prot = _json.loads(unb64(jws["protected"]))
+    check("JWS alg is RS256",               prot["alg"] == "RS256")
+    check("JWS carries jwk before account known", "jwk" in prot and "kid" not in prot)
+    check("JWS pins url + nonce",            prot["url"].endswith("/new-order") and prot["nonce"] == "testnonce")
+    try:
+        akey.public_key().verify(unb64(jws["signature"]),
+                                 (jws["protected"] + "." + jws["payload"]).encode(),
+                                 _pad.PKCS1v15(), _h.SHA256())
+        sig_ok = True
+    except Exception:
+        sig_ok = False
+    check("JWS signature verifies (RS256)", sig_ok)
+    check("POST-as-GET payload is empty",   _json.loads(c._sign("https://acme.example/a", None))["payload"] == "")
+
+    c._kid = "https://acme.example/acct/1"
+    prot2  = _json.loads(unb64(_json.loads(c._sign("https://acme.example/a", None))["protected"]))
+    check("kid replaces jwk once account known", "kid" in prot2 and "jwk" not in prot2)
 
 
 def run_dispatch_tests(s):
     # Covers two seams the live-server tests can't reach:
-    #   - redirect_app (the port-80 HTTP->HTTPS redirect + ACME HTTP-01 challenge
-    #     serving), invoked directly as an ASGI app so no port 80 or root is needed;
+    #   - the port-80 _RedirectHandler (HTTP->HTTPS redirect + ACME HTTP-01 challenge
+    #     serving), exercised against a throwaway ThreadingHTTPServer on an ephemeral
+    #     port so neither port 80 nor root is needed;
     #   - the interactive shell's command dispatch, driven with scripted input.
     # Full Let's Encrypt issuance and systemd integration need external
     # infrastructure and remain integration-territory, intentionally uncovered.
     import builtins, io, contextlib
 
-    def call_asgi(app, method, path, headers=None, query_string=b""):
-        scope = {"type": "http", "method": method, "path": path,
-                 "headers": headers or [], "query_string": query_string}
-        sent = []
-        async def send(msg):    sent.append(msg)
-        async def receive():    return {"type": "http.request", "body": b""}
-        asyncio.run(app(scope, receive, send))
-        start = next(m for m in sent if m["type"] == "http.response.start")
-        body  = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
-        return start["status"], dict(start["headers"]), body
+    def redirect_request(method, path, headers=None):
+        """Drive one request through _RedirectHandler on an ephemeral port."""
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), s._RedirectHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
+            conn.request(method, path, headers=headers or {})
+            resp = conn.getresponse()
+            body = resp.read()
+            result = (resp.status, {k.lower(): v for k, v in resp.getheaders()}, body)
+            conn.close()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        return result
 
-    section("Redirect app — HTTPS redirect")
+    section("Redirect handler — HTTPS redirect")
 
-    status, headers, _ = call_asgi(s.redirect_app, "GET", "/some/page",
-                                   headers=[(b"host", b"example.com")])
+    status, headers, _ = redirect_request("GET", "/some/page", headers={"Host": "example.com"})
     port     = s.config.port
     expected = (f"https://example.com/some/page" if port == 443
                 else f"https://example.com:{port}/some/page")
     check("Plain HTTP → 301",            status == 301)
-    check("Location is https host+path", headers.get(b"location") == expected.encode())
+    check("Location is https host+path", headers.get("location") == expected)
 
-    _, qheaders, _ = call_asgi(s.redirect_app, "GET", "/p",
-                               headers=[(b"host", b"example.com")], query_string=b"a=1&b=2")
+    _, qheaders, _ = redirect_request("GET", "/p?a=1&b=2", headers={"Host": "example.com"})
     check("Redirect preserves the query string",
-          qheaders.get(b"location", b"").decode().endswith("/p?a=1&b=2"))
+          qheaders.get("location", "").endswith("/p?a=1&b=2"))
 
-    section("Redirect app — ACME HTTP-01 challenge")
+    section("Redirect handler — ACME HTTP-01 challenge")
 
     orig_webroot = s.ACME_WEBROOT
     acme_dir = tempfile.mkdtemp()
@@ -341,15 +376,15 @@ def run_dispatch_tests(s):
         os.makedirs(chall_dir)
         with open(os.path.join(chall_dir, "token123"), "w") as f:
             f.write("keyauth-value")
-        status, _, body = call_asgi(s.redirect_app, "GET", "/.well-known/acme-challenge/token123")
+        status, _, body = redirect_request("GET", "/.well-known/acme-challenge/token123")
         check("Valid token → 200",        status == 200)
         check("Serves challenge content", body == b"keyauth-value")
-        status, _, _ = call_asgi(s.redirect_app, "GET", "/.well-known/acme-challenge/missing")
+        status, _, _ = redirect_request("GET", "/.well-known/acme-challenge/missing")
         check("Unknown token → 404",      status == 404)
         for bad in ["/.well-known/acme-challenge/",
                     "/.well-known/acme-challenge/a/b",
                     "/.well-known/acme-challenge/..%2f..%2fpasswd"]:
-            st, _, _ = call_asgi(s.redirect_app, "GET", bad)
+            st, _, _ = redirect_request("GET", bad)
             check(f"Rejected token path {bad!r}", st == 404)
     finally:
         s.ACME_WEBROOT = orig_webroot
@@ -380,37 +415,69 @@ def run_dispatch_tests(s):
     check("'start' routed to cmd_start",   "start" in calls)
     check("'quit' stops server and exits", calls[-1] == "stop")
 
-    section("File serving runs off the event loop")
-    # Regression test for the event-loop starvation bug (#16): _get_cached_file does
-    # synchronous read + gzip, so the handler must run it in a worker thread, not on
-    # the loop — otherwise compressing one large file blocks every other connection.
-    import threading
+    section("Restore command")
+    # cmd_restore swaps servette.py.bak back into place and consumes it. Drive it
+    # against a throwaway servette.py/.bak by pointing the module's __file__ there
+    # and auto-confirming the prompt; no service, no real file is touched.
+    rdir = tempfile.mkdtemp()
+    sv   = os.path.join(rdir, "servette.py")
+    bak  = sv + ".bak"
+    with open(sv, "w")  as f: f.write('__version__ = "9.9.9"\n')
+    with open(bak, "w") as f: f.write('__version__ = "8.8.8"\n')
+    saved = {n: getattr(s, n) for n in ("__file__", "_prompt", "_service_is_active", "_server_running")}
+    try:
+        s.__file__           = sv
+        s._prompt            = lambda *a, **k: True
+        s._service_is_active = lambda: False
+        s._server_running    = lambda: False
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_restore()
+        check("restore swaps the backup into place", open(sv).read().strip() == '__version__ = "8.8.8"')
+        check("restore consumes the backup",         not os.path.exists(bak))
+
+        # With no backup present, restore is a no-op that leaves the file alone.
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_restore()
+        check("restore with no backup leaves file unchanged", open(sv).read().strip() == '__version__ = "8.8.8"')
+    finally:
+        for n, v in saved.items():
+            setattr(s, n, v)
+        shutil.rmtree(rdir, ignore_errors=True)
+
+    section("Request core — _handle_request")
+    # The core returns (status, headers, body) directly and reads the request headers
+    # straight off http.server's parsed HTTPMessage, so exercise it without a socket.
+    def msg(pairs=()):
+        m = http.client.HTTPMessage()
+        for k, v in pairs:
+            m[k] = v
+        return m
+
     tmpd = tempfile.mkdtemp()
     with open(os.path.join(tmpd, "index.html"), "w") as f:
         f.write("<h1>hi</h1>")
-    saved_serve, saved_pw, saved_get = s.config.serve_dir, s.config.password_hash, s._get_cached_file
-    ran_on = {}
-    def spy(path):
-        ran_on["thread"] = threading.get_ident()
-        return saved_get(path)
+    saved_serve, saved_pw = s.config.serve_dir, s.config.password_hash
     s.config.serve_dir     = tmpd
     s.config.password_hash = ""
-    s._get_cached_file     = spy
     try:
-        sent = []
-        async def send(m):    sent.append(m)
-        async def receive():  return {"type": "http.request", "body": b""}
-        scope = {"type": "http", "method": "GET", "path": "/",
-                 "headers": [], "client": ("127.0.0.1", 1)}
-        loop_thread = threading.get_ident()   # asyncio.run drives the loop on this thread
-        asyncio.run(s.https_app(scope, receive, send))
+        status, headers, body = s._handle_request("GET", "/", msg(), "127.0.0.1")
+        hdict = dict(headers)
+        check("GET / → 200",                 status == 200)
+        check("Body is the file content",    body == b"<h1>hi</h1>")
+        check("Content-Length matches body", hdict.get(b"content-length") == b"11")
+        _, _, head_body = s._handle_request("HEAD", "/", msg(), "127.0.0.1")
+        check("HEAD drops the body",          head_body == b"")
+        pstatus, _, _ = s._handle_request("POST", "/", msg(), "127.0.0.1")
+        check("POST → 405",                  pstatus == 405)
+        # Reads request headers off the parsed (case-insensitive) HTTPMessage.
+        _, gz_headers, gz_body = s._handle_request("GET", "/", msg([("accept-encoding", "gzip")]), "127.0.0.1")
+        gzd = dict(gz_headers)
+        check("Accept-Encoding honored via parsed headers",
+              gzd.get(b"content-encoding") == b"gzip" and gzip.decompress(gz_body) == b"<h1>hi</h1>")
     finally:
-        s._get_cached_file     = saved_get
         s.config.serve_dir     = saved_serve
         s.config.password_hash = saved_pw
-
-    check("File read/gzip offloaded to a worker thread (not the loop)",
-          ran_on.get("thread") is not None and ran_on["thread"] != loop_thread)
+    shutil.rmtree(tmpd, ignore_errors=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -418,23 +485,49 @@ def run_dispatch_tests(s):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_server_tests(s, serve_dir):
-    # Live integration tests against the real Hypercorn server on TEST_PORT.
+    # Live integration tests against the real server on TEST_PORT.
     # Each section mutates config or server state as needed and restores it afterward.
 
     section("Protocol negotiation")
 
+    # Servette is HTTP/1.1 only; even when the client offers h2, the server must
+    # negotiate http/1.1 (it advertises only that via ALPN).
     conn  = socket.create_connection(("127.0.0.1", TEST_PORT))
     tls   = SSL_CTX_H2.wrap_socket(conn, server_hostname="127.0.0.1")
     proto = tls.selected_alpn_protocol()
     tls.close()
-    check("ALPN negotiates HTTP/2 (h2)", proto == "h2")
+    check("ALPN selects HTTP/1.1, not h2", proto == "http/1.1")
 
-    section("Startup readiness probe (fail-closed)")
+    section("Bind conflict is detected (fail-closed premise)")
 
-    # The fix that makes start_server fail closed relies on _wait_for_server's bool.
-    check("_wait_for_server True for the live port", s._wait_for_server(TEST_PORT, timeout=2.0) is True)
-    _t = socket.socket(); _t.bind(("127.0.0.1", 0)); _closed = _t.getsockname()[1]; _t.close()
-    check("_wait_for_server False for a closed port", s._wait_for_server(_closed, timeout=0.4) is False)
+    # start_server fails closed because binding a busy port raises in the
+    # ThreadingHTTPServer constructor. The live server holds TEST_PORT, so a second
+    # server on it must raise rather than silently succeed.
+    raised = False
+    try:
+        dup = http.server.ThreadingHTTPServer(("0.0.0.0", TEST_PORT), s._Handler)
+        dup.server_close()
+    except OSError:
+        raised = True
+    check("Second bind on the live port raises OSError", raised)
+
+    section("Connection cap (slowloris mitigation)")
+
+    # The live HTTPS server enforces a bounded connection pool.
+    check("Live server exposes a connection cap", hasattr(s._https_server, "_slots"))
+
+    # With every slot taken, process_request must drop the connection immediately
+    # rather than spawn another worker thread. Drive it directly (no sockets) on a
+    # throwaway server capped at one.
+    capped = s._CappedThreadingHTTPServer(("127.0.0.1", 0), s._RedirectHandler, max_connections=1)
+    try:
+        check("Slot pool grants up to the cap", capped._slots.acquire(blocking=False) is True)
+        dropped = {"hit": False}
+        capped.shutdown_request = lambda req: dropped.__setitem__("hit", True)
+        capped.process_request(object(), ("127.0.0.1", 5555))   # at capacity now
+        check("At capacity, new connection is dropped", dropped["hit"] is True)
+    finally:
+        capped.server_close()
 
     section("GET — gzip response")
 

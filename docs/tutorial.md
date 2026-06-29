@@ -29,7 +29,7 @@ For *what Servette is and whether it fits your site*, see the [README](../README
 - **Your site files** — anything that runs in a browser. Servette serves a `site/` folder by default (you can point it elsewhere with `config`), and ships with a demo page that self-tests in the browser, so a fresh copy runs immediately; replace it when you're ready. It looks for `index.html` at the root and in any subdirectory.
 - **A domain name (recommended).** Required for a trusted certificate. Without one, Servette uses a self-signed certificate and browsers warn visitors first — fine for a private network or local testing.
 
-Servette installs its own dependencies (Hypercorn, cryptography, and two ACME libraries) into a private virtualenv on first run. You never run `pip`.
+Servette installs its one dependency (`cryptography`) into a private virtualenv on first run. You never run `pip`.
 
 ## Managed hardware (a cloud VPS)
 
@@ -110,6 +110,7 @@ Servette does more than start and stop. Re-running `sudo python3 servette.py` an
 | `status` | Show whether the server is running |
 | `log` | Show recent activity |
 | `update` | Download the latest signed release of Servette |
+| `restore` | Roll back to the previous version (undoes the last `update`) |
 | `help` | Show the command list |
 | `quit` | Exit the shell |
 

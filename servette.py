@@ -7,14 +7,13 @@ and essential security headers. Run it:
     sudo python3 servette.py
 
 Architecture:
-    Server              — config, rate limiting, file cache, and the two ASGI apps
+    Server              — config, rate limiting, file cache, the request handler, and the HTTP servers
     System              — bootstrap, server lifecycle, certificate management, and service management
     Shell               — the interactive terminal interface
 """
 
 __version__ = "0.26.178"
 
-import asyncio
 import base64
 import collections
 import datetime
@@ -22,6 +21,7 @@ import getpass
 import gzip
 import hashlib
 import hmac
+import http.server
 import ipaddress
 import json
 import logging
@@ -32,8 +32,10 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import unquote
 
@@ -49,8 +51,8 @@ ACME_WEBROOT = "/var/lib/letsencrypt/webroot"
 # ─────────────────────────────────────────────────────────────────────────────
 # SERVER
 #
-# Handles all incoming HTTP(S) requests. Contains config, rate limiting, the
-# file cache, and the two ASGI apps (HTTPS + HTTP redirect) that Hypercorn runs.
+# Handles all incoming HTTP(S) requests. Contains config, rate limiting, the file
+# cache, the request handler, and the threaded HTTP servers (HTTPS + port-80 redirect).
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -193,10 +195,20 @@ permissions_policy = {s(self.permissions_policy)}
 password_hash = {s(self.password_hash)}
 password_salt = {s(self.password_salt)}
 """
-        fd = os.open(self.CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        os.chmod(self.CONFIG_FILE, 0o600)
+        # Write to a temp file in the same directory (mkstemp creates it 0o600), then
+        # atomically replace, so a crash mid-write can't truncate the live config.
+        d = os.path.dirname(self.CONFIG_FILE) or "."
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".servette.toml.")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+            os.replace(tmp, self.CONFIG_FILE)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
@@ -204,9 +216,9 @@ password_salt = {s(self.password_salt)}
 
 
 # Config is a module-level singleton. Dependency injection (passing config into
-# every function) is the textbook alternative, but ASGI handlers have fixed
-# signatures imposed by Hypercorn and cannot accept extra arguments. In a
-# single-file server that is always run as a process, the global is the right call.
+# every function) is the textbook alternative, but the stdlib request handlers have
+# fixed signatures and cannot accept extra arguments. In a single-file server that is
+# always run as a process, the global is the right call.
 config = Config()
 
 
@@ -243,7 +255,8 @@ def _c(text, color):
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 #
 # Uses threading.Lock because the critical section is in-memory deque
-# manipulation — not I/O — so it doesn't meaningfully block the event loop.
+# manipulation — not I/O — so it's held only briefly and stays barely contended
+# even when many connection threads hit it at once.
 
 RATE_WINDOW  = 60      # seconds
 _RATE_IP_CAP = 10_000  # max IPs tracked per dict; bounds memory under IP-flood attacks
@@ -254,9 +267,17 @@ _rate_lock       = threading.Lock()
 
 
 def _normalize_ip(ip):
-    """Normalize IPv6-mapped IPv4 addresses so both forms bucket together."""
-    if ip.startswith("::ffff:"):
-        return ip[7:]
+    """Normalize IPv6-mapped IPv4 addresses so both forms bucket together.
+
+    Uses ipaddress so every mapped spelling collapses to the same key — the dotted
+    ::ffff:1.2.3.4 and the hex ::ffff:c0a8:0101 are the same address and must share a
+    rate-limit bucket. Non-addresses (e.g. "unknown", junk XFF) pass through as-is."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6 and addr.ipv4_mapped:
+        return str(addr.ipv4_mapped)
     return ip
 
 
@@ -391,19 +412,25 @@ def _mime_type(path):
     ext = os.path.splitext(path)[1].lower()
     return MIME_TYPES.get(ext, "application/octet-stream")
 
+def _within(base, target):
+    """True if `target` is `base` or sits inside it. commonpath on already-resolved
+    absolute paths means a traversal or symlink escape lands outside `base` and fails."""
+    try:
+        return os.path.commonpath([base, target]) == base
+    except ValueError:   # different drives / mixed absolute-relative — treat as outside
+        return False
+
+
 def _resolve_request_path(url_path):
     """Resolve a URL path to an absolute file path within serve_dir. Returns (None, 403) on traversal, (None, 404) if not found."""
     serve_dir = os.path.realpath(_resolve(config.serve_dir))
-    clean = unquote(url_path.split("?")[0])
-    rel   = os.path.normpath(clean.lstrip("/"))
-    if rel == ".":
-        rel = ""  # normpath("") returns "." — treat root request as empty relative path
-    abs_path = os.path.realpath(os.path.join(serve_dir, rel) if rel else serve_dir)
-    if not abs_path.startswith(serve_dir + os.sep) and abs_path != serve_dir:
+    clean     = unquote(url_path.split("?")[0]).lstrip("/")   # lstrip: never an absolute path
+    abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
+    if not _within(serve_dir, abs_path):
         return None, 403
     if os.path.isdir(abs_path):
         abs_path = os.path.realpath(os.path.join(abs_path, "index.html"))
-        if not abs_path.startswith(serve_dir + os.sep):
+        if not _within(serve_dir, abs_path):
             return None, 403
     if not os.path.isfile(abs_path):
         return None, 404
@@ -461,75 +488,41 @@ def _security_headers():
     return headers
 
 
-# ── ASGI apps ─────────────────────────────────────────────────────────────────
-
-async def _send_response(send, status, headers_list, body=b""):
-    await send({"type": "http.response.start", "status": status, "headers": headers_list})
-    await send({"type": "http.response.body",  "body": body})
+# ── HTTP server ───────────────────────────────────────────────────────────────
 
 
-async def _handle_lifespan(receive, send):
-    """Handle ASGI lifespan events (server startup/shutdown signals from Hypercorn)."""
-    while True:
-        event = await receive()
-        if event["type"] == "lifespan.startup":
-            await send({"type": "lifespan.startup.complete"})
-        elif event["type"] == "lifespan.shutdown":
-            await send({"type": "lifespan.shutdown.complete"})
-            return
-
-
-async def https_app(scope, receive, send):
-    """ASGI app — HTTPS server."""
-
-    if scope["type"] == "lifespan":
-        await _handle_lifespan(receive, send)
-        return
-
-    if scope["type"] != "http":
-        return
-
-    # Wrap send so the security headers go on every response (errors included), not just 200s.
-    _raw_send = send
-    async def send(event):
-        if event["type"] == "http.response.start":
-            event = {**event, "headers": _security_headers() + list(event["headers"])}
-        await _raw_send(event)
-
-    method  = scope["method"]
-    headers = dict(scope["headers"])
-
-    client = scope.get("client")
-    ip     = _normalize_ip(client[0] if client else "unknown")
+def _handle_request(method, url_path, headers, raw_ip):
+    """The request core. Given the method, URL path, the parsed request headers (a
+    case-insensitive mapping — an http.client.HTTPMessage in production), and the raw
+    client IP, returns (status, headers, body), with security headers on every
+    response and the body blanked for HEAD. All the decision logic lives here; the
+    handler just feeds it what http.server parsed and sends the result back."""
+    ip = _normalize_ip(raw_ip)
     if config.trusted_proxy:
-        xff = headers.get(b"x-forwarded-for", b"").decode()
+        xff = headers.get("X-Forwarded-For", "")
         # Rightmost XFF value is what the single trusted proxy appended.
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
         if xff and ip == config.trusted_proxy:
             ip = _normalize_ip(xff.split(",")[-1].strip())
 
-    send_body = (method != "HEAD")
+    def resp(status, hdrs, body=b""):
+        # Security headers (and HSTS) go on every response; HEAD keeps the headers but drops the body.
+        return status, _security_headers() + hdrs, (b"" if method == "HEAD" else body)
 
     if method not in ("GET", "HEAD"):
-        await _send_response(send, 405,
-            [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
-        return
+        return resp(405, [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
 
     config.reload_if_changed()
 
     # Rate limiting
     if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
-        await _send_response(send, 429, [
-            (b"retry-after", str(RATE_WINDOW).encode()),
-            (b"content-length", b"0"),
-        ])
         log.warning("Rate limited %s", ip)
-        return
+        return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
     # Authentication
     if config.username:
-        auth                  = headers.get(b"authorization", b"").decode()
+        auth                  = headers.get("Authorization", "")
         authed                = False
         credentials_submitted = False
 
@@ -550,82 +543,54 @@ async def https_app(scope, receive, send):
 
         if not authed:
             if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit):
-                await _send_response(send, 429, [
-                    (b"retry-after", str(RATE_WINDOW).encode()),
-                    (b"content-length", b"0"),
-                ])
                 log.warning("Auth rate limited %s", ip)
-                return
-            await _send_response(send, 401, [
+                return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
+            if credentials_submitted:
+                log.warning("Failed auth attempt from %s", ip)
+            return resp(401, [
                 (b"www-authenticate", b'Basic realm="Access Required"'),
                 (b"content-type",     b"text/plain"),
                 (b"content-length",   b"12"),
-            ], body=b"Unauthorized" if send_body else b"")
-            if credentials_submitted:
-                log.warning("Failed auth attempt from %s", ip)
-            return
+            ], b"Unauthorized")
 
     # Resolve request path to a file
-    url_path = scope.get("path", "/")
     try:
         file_path, status = _resolve_request_path(url_path)
     except Exception as e:
         log.error("500 resolving %s: %s", url_path, e)
         body_500 = b"Internal server error."
-        await _send_response(send, 500,
-            [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())],
-            body=body_500 if send_body else b"")
-        return
+        return resp(500, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())], body_500)
 
     if status == 403:
-        body_403 = b"Forbidden."
-        await _send_response(send, 403,
-            [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())],
-            body=body_403 if send_body else b"")
         log.warning("403 Forbidden %s from %s", url_path, ip)
-        return
+        body_403 = b"Forbidden."
+        return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
         # Try custom 404.html in serve_dir root
         custom_404 = os.path.join(_resolve(config.serve_dir), "404.html")
         if os.path.isfile(custom_404):
-            raw_404, _, _ = await asyncio.to_thread(_get_cached_file, custom_404)
+            raw_404, _, _ = _get_cached_file(custom_404)
             body_404 = raw_404 or b"Not found."
             content_type_404 = b"text/html; charset=utf-8"
         else:
             body_404 = b"Not found."
             content_type_404 = b"text/plain"
-        await _send_response(send, 404,
-            [(b"content-type", content_type_404), (b"content-length", str(len(body_404)).encode())],
-            body=body_404 if send_body else b"")
         log.warning("404 Not Found %s from %s", url_path, ip)
-        return
+        return resp(404, [(b"content-type", content_type_404), (b"content-length", str(len(body_404)).encode())], body_404)
 
-    # Reading and gzip-compressing a file is synchronous, CPU-bound work; running it
-    # inline would block the event loop and starve every other connection (including
-    # TLS teardowns, which then time out). Offload to a worker thread — zlib and
-    # hashlib release the GIL, so compression genuinely runs off the loop.
-    raw, compressed, etag = await asyncio.to_thread(_get_cached_file, file_path)
+    raw, compressed, etag = _get_cached_file(file_path)
     if raw is None:
-        body_500 = b"Internal server error."
-        await _send_response(send, 500,
-            [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())],
-            body=body_500 if send_body else b"")
         log.error("500 could not read %s", file_path)
-        return
+        body_500 = b"Internal server error."
+        return resp(500, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())], body_500)
 
     # 304 Not Modified
-    if_none_match = headers.get(b"if-none-match", b"").decode()
-    if if_none_match == etag:
-        await _send_response(send, 304, [
-            (b"etag",          etag.encode()),
-            (b"cache-control", _cache_control_header().encode()),
-        ])
+    if headers.get("If-None-Match", "") == etag:
         log.info("304 Not Modified %s to %s", url_path, ip)
-        return
+        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header().encode())])
 
-    # Serve. Security headers (and HSTS) are added to every response by the send wrapper above.
-    accept_encoding = headers.get(b"accept-encoding", b"").decode()
+    accept_encoding = headers.get("Accept-Encoding", "")
     use_gzip        = compressed is not None and "gzip" in accept_encoding
     mime            = _mime_type(file_path)
     common = [
@@ -638,87 +603,189 @@ async def https_app(scope, receive, send):
     if use_gzip:
         # Byte ranges apply to the identity representation, so they aren't combined
         # with gzip; compressible types are small text anyway.
-        await _send_response(send, 200, common + [
+        log.info("200 %s to %s", url_path, ip)
+        return resp(200, common + [
             (b"content-length",   str(len(compressed)).encode()),
             (b"content-encoding", b"gzip"),
-        ], body=compressed if send_body else b"")
-        log.info("200 %s to %s", url_path, ip)
-        return
+        ], compressed)
 
     # Serving raw: advertise and honor byte ranges (needed for media seeking).
     total = len(raw)
-    rng   = _parse_range(headers.get(b"range", b"").decode(), total)
+    rng   = _parse_range(headers.get("Range", ""), total)
     if rng == "invalid":
-        await _send_response(send, 416, [
+        log.info("416 Range Not Satisfiable %s to %s", url_path, ip)
+        return resp(416, [
             (b"content-range",  f"bytes */{total}".encode()),
             (b"content-length", b"0"),
             (b"accept-ranges",  b"bytes"),
         ])
-        log.info("416 Range Not Satisfiable %s to %s", url_path, ip)
-        return
     if rng is not None:
         start, end = rng
         chunk = raw[start:end + 1]
-        await _send_response(send, 206, common + [
+        log.info("206 %s [%d-%d] to %s", url_path, start, end, ip)
+        return resp(206, common + [
             (b"content-range",  f"bytes {start}-{end}/{total}".encode()),
             (b"content-length", str(len(chunk)).encode()),
             (b"accept-ranges",  b"bytes"),
-        ], body=chunk if send_body else b"")
-        log.info("206 %s [%d-%d] to %s", url_path, start, end, ip)
-        return
+        ], chunk)
 
-    await _send_response(send, 200, common + [
+    log.info("200 %s to %s", url_path, ip)
+    return resp(200, common + [
         (b"content-length", str(total).encode()),
         (b"accept-ranges",  b"bytes"),
-    ], body=raw if send_body else b"")
-    log.info("200 %s to %s", url_path, ip)
+    ], raw)
 
 
-async def redirect_app(scope, receive, send):
-    """ASGI app — HTTP redirect to HTTPS and ACME challenge serving."""
+def _build_ssl_context():
+    """TLS context for the HTTPS server — cert/key loaded, minimum version enforced,
+    optional cipher override, ALPN pinned to HTTP/1.1. Raises if the cert or key is
+    unreadable, so startup can fail closed rather than serve nothing."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
+    if config.ciphers:
+        ctx.set_ciphers(config.ciphers)
+    ctx.load_cert_chain(_resolve(config.cert_file), _resolve(config.key_file))
+    ctx.set_alpn_protocols(["http/1.1"])
+    return ctx
 
-    if scope["type"] == "lifespan":
-        await _handle_lifespan(receive, send)
-        return
 
-    if scope["type"] != "http":
-        return
+class _Handler(http.server.BaseHTTPRequestHandler):
+    """Serves every request through the transport-agnostic _handle_request. Each
+    connection runs in its own thread (ThreadingHTTPServer), so one request's
+    synchronous file read and gzip can't stall any other."""
+    protocol_version = "HTTP/1.1"
+    timeout          = 30          # drop idle/slow connections (slowloris mitigation)
 
-    path      = scope["path"]
-    headers   = dict(scope["headers"])
-    send_body = (scope["method"] != "HEAD")
+    def _serve(self):
+        # self.headers is already a parsed, case-insensitive http.client.HTTPMessage —
+        # hand it straight to the core rather than rebuilding it.
+        raw_ip = self.client_address[0] if self.client_address else "unknown"
+        status, headers, body = _handle_request(self.command, self.path, self.headers, raw_ip)
+        # We never read a request body; on a method that may carry one (all rejected
+        # with 405), close rather than let the unread body poison the next keep-alive
+        # request on this connection.
+        if self.command not in ("GET", "HEAD"):
+            self.close_connection = True
+        self.send_response_only(status)
+        self.send_header("Date", self.date_time_string())
+        for k, v in headers:
+            self.send_header(k.decode(), v.decode())
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
 
-    # ACME HTTP-01 challenges arrive on port 80 during Let's Encrypt verification
-    prefix = "/.well-known/acme-challenge/"
-    if path.startswith(prefix):
-        token = path[len(prefix):]
-        if not token or "/" in token or ".." in token:
-            await _send_response(send, 404, [(b"content-length", b"0")])
+    # Route every method here; _handle_request answers non-GET/HEAD with 405.
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _serve
+
+    def log_message(self, *args):
+        pass  # Servette logs through `log`, not stderr
+
+
+class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+    """Port-80 handler: serves ACME HTTP-01 challenge tokens during issuance, and
+    301-redirects everything else to HTTPS (preserving the query string)."""
+    protocol_version = "HTTP/1.1"
+    timeout          = 30
+
+    def _serve(self):
+        # Body is never read; close on methods that may carry one so it can't poison
+        # the next keep-alive request.
+        if self.command not in ("GET", "HEAD"):
+            self.close_connection = True
+        path   = self.path.split("?", 1)[0]
+        prefix = "/.well-known/acme-challenge/"
+        if path.startswith(prefix):
+            token = os.path.basename(path[len(prefix):])   # strip any path components
+            if token and token not in (".", ".."):
+                try:
+                    with open(os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token), "rb") as f:
+                        data = f.read()
+                    self.send_response_only(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        self.wfile.write(data)
+                    return
+                except OSError:
+                    pass
+            self.send_response_only(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
-        file_path = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
+
+        host = self.headers.get("Host", "localhost").split(":")[0]
+        url  = (f"https://{host}{self.path}" if config.port == 443
+                else f"https://{host}:{config.port}{self.path}")
+        url  = url.replace("\r", "").replace("\n", "")   # never let the header carry CRLF
+        self.send_response_only(301)
+        self.send_header("Location", url)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        log.info("Redirected to %s", url)
+
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _serve
+
+    def log_message(self, *args):
+        pass
+
+
+# Ceiling on concurrent connections. Each connection holds one worker thread for its
+# lifetime (up to the 30s idle timeout on keep-alive), so the cap bounds thread/memory
+# use under a connection flood — light enough for a Raspberry Pi, ample for a static site.
+MAX_CONNECTIONS = 128
+
+
+class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    """ThreadingHTTPServer with a ceiling on concurrent connections. Past the cap,
+    new connections are closed immediately rather than spawning unbounded threads —
+    a connection-exhaustion / slowloris mitigation that pairs with the per-connection
+    socket timeout on the handlers (which reaps slow or idle connections)."""
+    daemon_threads = True
+
+    def __init__(self, address, handler, max_connections=MAX_CONNECTIONS):
+        super().__init__(address, handler)
+        self._slots = threading.BoundedSemaphore(max_connections)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)   # at capacity — shed load, don't queue
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
         try:
-            with open(file_path, "rb") as f:
-                data = f.read()
-            await _send_response(send, 200, [
-                (b"content-type",   b"text/plain"),
-                (b"content-length", str(len(data)).encode()),
-            ], body=data if send_body else b"")
-        except OSError:
-            await _send_response(send, 404, [(b"content-length", b"0")])
-        return
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
-    # Redirect everything else to HTTPS
-    host      = headers.get(b"host", b"localhost").decode().split(":")[0]
-    query     = scope.get("query_string", b"").decode()
-    target    = path + (f"?{query}" if query else "")
-    https_url = (f"https://{host}{target}" if config.port == 443
-                 else f"https://{host}:{config.port}{target}")
+    def handle_error(self, request, client_address):
+        # A public server sees constant aborted handshakes and dropped connections
+        # from scanners and impatient clients. Those are expected noise, not faults —
+        # log at debug instead of dumping a traceback to stderr.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ssl.SSLError, ConnectionError, TimeoutError)):
+            log.debug("Connection error from %s: %s",
+                      client_address[0] if client_address else "?", exc)
+            return
+        super().handle_error(request, client_address)
 
-    await _send_response(send, 301, [
-        (b"location",       https_url.encode()),
-        (b"content-length", b"0"),
-    ])
-    log.info("Redirected to %s", https_url)
+
+class _TLSThreadingHTTPServer(_CappedThreadingHTTPServer):
+    """Adds TLS, with the handshake performed in the per-connection worker thread
+    (not the accept loop) so a slow handshake can't stall every new connection."""
+    def __init__(self, address, handler, ssl_context, max_connections=MAX_CONNECTIONS):
+        super().__init__(address, handler, max_connections)
+        self._ssl_context = ssl_context
+
+    def get_request(self):
+        sock, addr = super().get_request()
+        # Defer the handshake to the worker thread's first read (under the handler's
+        # socket timeout) rather than doing it here on the single accept loop.
+        return self._ssl_context.wrap_socket(sock, server_side=True,
+                                             do_handshake_on_connect=False), addr
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -772,7 +839,7 @@ def _bootstrap():
             print(f"  Error: failed to create virtual environment: {e}")
             sys.exit(1)
 
-        deps = ["hypercorn>=0.17,<1.0", "cryptography>=41.0,<50.0", "acme>=2.0,<6.0", "josepy>=1.10,<3.0"]
+        deps = ["cryptography>=41.0,<50.0"]
         result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
         if result.returncode != 0:
             print(f"  Error: failed to install dependencies")
@@ -784,12 +851,12 @@ def _bootstrap():
 
 # ── Server lifecycle ──────────────────────────────────────────────────────────
 #
-# Hypercorn runs in a background thread with its own asyncio event loop.
-# A threading.Event signals graceful shutdown from the shell thread.
+# Each server is a ThreadingHTTPServer run by serve_forever() in a daemon thread;
+# stop_server() calls shutdown() on it from the shell thread to stop gracefully.
 
-_server_thread        = None
+_https_server         = None  # the running HTTPS ThreadingHTTPServer (None when stopped)
+_http_server          = None  # the port-80 redirect server (None if unavailable)
 _server_start_time    = None
-_shutdown_event       = threading.Event()
 _watchdog_thread      = None
 _sweep_thread         = None
 _sweep_stop           = threading.Event()
@@ -800,92 +867,8 @@ _TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
 ACME_RETRIES  = 3
 
 
-async def _serve_http_redirect(stop_event):
-    """Run only the HTTP redirect server — used as a temporary listener during cert issuance."""
-    from hypercorn.config import Config as HypercornConfig
-    from hypercorn.asyncio import serve as hypercorn_serve
-
-    cfg      = HypercornConfig()
-    cfg.bind = ["0.0.0.0:80"]
-    cfg.loglevel = "warning"
-    cfg.include_server_header = False  # don't advertise the server software
-
-    async def trigger():
-        await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)
-
-    await hypercorn_serve(redirect_app, cfg, shutdown_trigger=trigger)
-
-
-def _loop_exception_handler(loop, context):
-    """Quiet the benign TLS-teardown noise; surface everything else.
-
-    Clients on the public internet routinely drop a TLS connection without a clean
-    close_notify, so asyncio waits, times out, and would otherwise dump a full
-    traceback to the journal. That's expected, not a fault, so log a single debug
-    line for it and delegate every other error to the default handler.
-    """
-    exc = context.get("exception")
-    if isinstance(exc, TimeoutError) and "ssl shutdown timed out" in str(exc).lower():
-        log.debug("TLS connection closed without clean shutdown by peer")
-        return
-    loop.default_exception_handler(context)
-
-
-async def _run_servers(stop_event):
-    from hypercorn.config import Config as HypercornConfig
-    from hypercorn.asyncio import serve as hypercorn_serve
-
-    asyncio.get_running_loop().set_exception_handler(_loop_exception_handler)
-
-    async def trigger():
-        await asyncio.get_event_loop().run_in_executor(None, stop_event.wait)
-
-    class _TLSConfig(HypercornConfig):
-        def create_ssl_context(self):
-            ctx = super().create_ssl_context()
-            if ctx is None:
-                return ctx
-            ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
-            if config.ciphers:
-                ctx.set_ciphers(config.ciphers)
-            return ctx
-
-    cert_file = _resolve(config.cert_file)
-    key_file  = _resolve(config.key_file)
-
-    https_cfg          = _TLSConfig()
-    https_cfg.bind     = [f"0.0.0.0:{config.port}"]
-    https_cfg.certfile = cert_file
-    https_cfg.keyfile  = key_file
-    https_cfg.loglevel = "warning"
-    https_cfg.include_server_header = False  # don't advertise the server software
-    async def run_https():
-        try:
-            await hypercorn_serve(https_app, https_cfg, shutdown_trigger=trigger)
-        except Exception as e:
-            log.error("HTTPS server error: %s", e)
-            raise
-
-    async def run_http_redirect():
-        try:
-            http_cfg          = HypercornConfig()
-            http_cfg.bind     = ["0.0.0.0:80"]
-            http_cfg.loglevel = "warning"
-            http_cfg.include_server_header = False  # don't advertise the server software
-            await hypercorn_serve(redirect_app, http_cfg, shutdown_trigger=trigger)
-        except OSError as e:
-            log.warning("Could not bind to port 80: %s", e)
-            print("Note: could not bind to port 80 (requires root). HTTP redirects unavailable.")
-
-    await asyncio.gather(
-        run_https(),
-        run_http_redirect(),
-        return_exceptions=True,
-    )
-
-
 def _server_running():
-    return _server_thread is not None and _server_thread.is_alive()
+    return _https_server is not None
 
 
 def _cert_watchdog():
@@ -907,7 +890,7 @@ def _cert_watchdog():
                 if now - _last_renewal_attempt >= 3600:
                     _last_renewal_attempt = now
                     log.info("Certificate for %s expires in %d days — renewing", domain, days)
-                    _run_acme(domain)
+                    _obtain_trusted_cert(domain)
                     _cert_domain = domain
         else:
             # Self-signed or externally managed cert: reload if the file changed on disk
@@ -922,7 +905,7 @@ def _cert_watchdog():
 
 
 def start_server():
-    global _server_thread, _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread
+    global _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread, _https_server, _http_server
 
     if _server_running():
         print("Server is already running.")
@@ -941,25 +924,31 @@ def start_server():
                 sys.exit(1)
             return
 
-    _shutdown_event.clear()
-
-    def run():
-        asyncio.run(_run_servers(_shutdown_event))
-
-    _server_thread = threading.Thread(target=run, daemon=True)
-    _server_thread.start()
-
-    if not _wait_for_server(config.port):
-        # The listener never came up (bind conflict, TLS/cert error, bad config).
-        # Fail closed rather than leave a live-but-not-serving process — under
-        # systemd a silent non-serving process looks healthy and never recovers.
-        _shutdown_event.set()
-        _server_thread = None
-        log.error("Server failed to start on port %d (see earlier errors)", config.port)
-        print(f"Server failed to start on port {config.port}.")
+    # Build the HTTPS server, failing closed if the socket can't bind or the cert is
+    # unreadable — better than a live process that serves nothing. Both surface here
+    # synchronously: the bind happens in the constructor, the cert in _build_ssl_context.
+    try:
+        https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_ssl_context())
+    except Exception as e:
+        log.error("Server failed to start on port %d: %s", config.port, e)
+        print(f"Server failed to start on port {config.port}: {e}")
         if "--serve" in sys.argv:
             sys.exit(1)
         return
+
+    # The port-80 redirect is best-effort (needs privilege and a free port).
+    try:
+        redirect = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
+    except OSError as e:
+        log.warning("Could not bind to port 80: %s", e)
+        print("Note: could not bind to port 80. HTTP redirects unavailable.")
+        redirect = None
+
+    _https_server = https
+    _http_server  = redirect
+    threading.Thread(target=https.serve_forever, daemon=True).start()
+    if redirect is not None:
+        threading.Thread(target=redirect.serve_forever, daemon=True).start()
 
     if _watchdog_thread is None or not _watchdog_thread.is_alive():
         _watchdog_thread = threading.Thread(target=_cert_watchdog, daemon=True)
@@ -993,14 +982,17 @@ def start_server():
 
 
 def stop_server():
-    global _server_thread, _server_start_time, _sweep_thread
+    global _server_start_time, _sweep_thread, _https_server, _http_server
 
     if not _server_running():
         return
 
-    _shutdown_event.set()
-    _server_thread.join(timeout=10)
-    _server_thread     = None
+    for srv in (_https_server, _http_server):
+        if srv is not None:
+            srv.shutdown()
+            srv.server_close()
+    _https_server      = None
+    _http_server       = None
     _server_start_time = None
 
     _sweep_stop.set()
@@ -1245,19 +1237,6 @@ def _wait_for_port_free(port, timeout=15):
     return False
 
 
-def _wait_for_server(port, timeout=5.0):
-    """Poll until the server is accepting TCP connections or timeout elapses."""
-    import socket as _socket
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with _socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                return True
-        except OSError:
-            time.sleep(0.05)
-    return False
-
-
 def _reload_server():
     """Reload the server to pick up a new certificate."""
     if _service_is_active():
@@ -1272,35 +1251,211 @@ def _reload_server():
         start_server()
 
 
-def _run_acme(domain):
-    """Get a trusted SSL certificate from Let's Encrypt using the acme library."""
-    from acme import client as _acme_client, challenges as _challenges, messages as _messages, errors as _acme_errors
-    import josepy as _jose
+def _b64url(data):
+    """base64url without padding — the encoding JOSE/ACME uses everywhere."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_int(n):
+    """A non-negative integer as a base64url big-endian byte string (for JWK n/e)."""
+    return _b64url(n.to_bytes((n.bit_length() + 7) // 8 or 1, "big"))
+
+
+class _Resp:
+    """A tiny HTTP response holder so the ACME client can read status/headers/body
+    uniformly whether urllib returned success or raised HTTPError."""
+    __slots__ = ("status", "headers", "body")
+
+    def __init__(self, status, headers, body):
+        self.status, self.headers, self.body = status, headers, body
+
+    def json(self):
+        return json.loads(self.body)
+
+    @property
+    def text(self):
+        return self.body.decode()
+
+
+class _ACMEError(Exception):
+    """An ACME failure. `failed` holds the DNS names whose authorization was rejected,
+    so the caller can decide whether to fall back (e.g. drop a www with no DNS)."""
+
+    def __init__(self, message, failed=None):
+        super().__init__(message)
+        self.failed = failed or set()
+
+
+class _ACMEClient:
+    """A minimal ACME (RFC 8555) client — just enough of the protocol for HTTP-01
+    issuance with a single account key, replacing the certbot `acme` + `josepy`
+    libraries with stdlib urllib + cryptography. Deliberately narrow: HTTP-01 only,
+    no revocation, no key rollover. Requests are RS256-signed JWS; the replay nonce
+    is tracked from each response's Replay-Nonce header. The directory is fetched
+    lazily, so constructing a client touches no network (and stays unit-testable)."""
+
+    def __init__(self, directory_url, account_key):
+        self._url   = directory_url
+        self._key   = account_key   # a cryptography RSA private key
+        self._nonce = None
+        self._kid   = None          # account URL; until set, requests carry the JWK
+        self._dir   = None
+
+    def _directory(self):
+        if self._dir is None:
+            self._dir = self._request(self._url).json()
+        return self._dir
+
+    # ── HTTP + nonce ──
+    def _request(self, url, data=None, method=None):
+        headers = {"User-Agent": "servette"}
+        if data is not None:
+            headers["Content-Type"] = "application/jose+json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            r    = urllib.request.urlopen(req, timeout=30)
+            resp = _Resp(r.status, r.headers, r.read())
+        except urllib.error.HTTPError as e:
+            resp = _Resp(e.code, e.headers, e.read())
+        if resp.headers.get("Replay-Nonce"):
+            self._nonce = resp.headers["Replay-Nonce"]
+        return resp
+
+    # ── JWS ──
+    def _jwk(self):
+        nums = self._key.public_key().public_numbers()
+        return {"e": _b64url_int(nums.e), "kty": "RSA", "n": _b64url_int(nums.n)}
+
+    def thumbprint(self):
+        canon = json.dumps(self._jwk(), sort_keys=True, separators=(",", ":")).encode()
+        return _b64url(hashlib.sha256(canon).digest())
+
+    def key_authorization(self, token):
+        return f"{token}.{self.thumbprint()}"
+
+    def _sign(self, url, payload):
+        from cryptography.hazmat.primitives import hashes as _hashes
+        from cryptography.hazmat.primitives.asymmetric import padding as _padding
+        protected = {"alg": "RS256", "nonce": self._nonce, "url": url}
+        protected["kid" if self._kid else "jwk"] = self._kid or self._jwk()
+        p = _b64url(json.dumps(protected, separators=(",", ":")).encode())
+        # payload=None is ACME "POST-as-GET" (empty string); {} is a real empty object.
+        y = "" if payload is None else _b64url(json.dumps(payload, separators=(",", ":")).encode())
+        sig = self._key.sign(f"{p}.{y}".encode(), _padding.PKCS1v15(), _hashes.SHA256())
+        return json.dumps({"protected": p, "payload": y, "signature": _b64url(sig)}).encode()
+
+    def _post(self, url, payload):
+        # Two attempts: a badNonce is the one error worth retrying, because the failing
+        # response hands back a fresh nonce. Any other error fails immediately.
+        for attempt in range(2):
+            if self._nonce is None:
+                self._request(self._directory()["newNonce"], method="HEAD")
+            resp = self._request(url, data=self._sign(url, payload))
+            if resp.status < 400:
+                return resp
+            problem = {}
+            try:
+                problem = resp.json()
+            except Exception:
+                pass
+            if attempt == 0 and problem.get("type", "").endswith("badNonce"):
+                continue
+            raise _ACMEError(problem.get("detail") or f"ACME error {resp.status} at {url}")
+        raise _ACMEError("ACME request failed after a nonce retry")
+
+    def _post_as_get(self, url):
+        return self._post(url, None)
+
+    # ── protocol steps ──
+    def new_account(self, email):
+        payload = {"termsOfServiceAgreed": True}
+        if email:
+            payload["contact"] = [f"mailto:{email}"]
+        resp = self._post(self._directory()["newAccount"], payload)
+        self._kid = resp.headers.get("Location")
+        if not self._kid:
+            raise _ACMEError("ACME did not return an account URL")
+
+    def _poll(self, url, tries=20, delay=2):
+        """POST-as-GET a resource until it settles (valid/invalid) or we give up."""
+        for _ in range(tries):
+            obj = self._post_as_get(url).json()
+            if obj.get("status") in ("valid", "invalid"):
+                return obj
+            time.sleep(delay)
+        return obj
+
+    def issue(self, names, csr_der, challenge_dir):
+        """Run one HTTP-01 issuance for `names`, writing challenge files under
+        challenge_dir and returning the PEM certificate chain. Raises _ACMEError on
+        failure, with `.failed` set to the names whose validation was rejected."""
+        resp      = self._post(self._directory()["newOrder"],
+                               {"identifiers": [{"type": "dns", "value": n} for n in names]})
+        order     = resp.json()
+        order_url = resp.headers.get("Location")
+
+        written = []
+        try:
+            for authz_url in order["authorizations"]:
+                authz = self._post_as_get(authz_url).json()
+                chall = next(c for c in authz["challenges"] if c["type"] == "http-01")
+                path  = os.path.join(challenge_dir, chall["token"])
+                with open(path, "w") as f:
+                    f.write(self.key_authorization(chall["token"]))
+                written.append(path)
+                self._post(chall["url"], {})   # tell the server the file is in place
+
+            failed = set()
+            for authz_url in order["authorizations"]:
+                authz = self._poll(authz_url)
+                if authz.get("status") != "valid":
+                    failed.add(authz["identifier"]["value"])
+            if failed:
+                raise _ACMEError("domain validation failed", failed=failed)
+
+            self._post(order["finalize"], {"csr": _b64url(csr_der)})
+            final = self._poll(order_url)
+            if final.get("status") != "valid":
+                raise _ACMEError(f"order did not complete (status: {final.get('status')})")
+            return self._post_as_get(final["certificate"]).text
+        finally:
+            for p in written:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
+def _obtain_trusted_cert(domain):
+    """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
+    minimal ACME client (_ACMEClient) on stdlib urllib + cryptography."""
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
     from cryptography.hazmat.primitives import hashes as _hashes, serialization as _serialization
 
-    ACME_URL        = "https://acme-v02.api.letsencrypt.org/directory"
+    ACME_URL         = "https://acme-v02.api.letsencrypt.org/directory"
     ACCOUNT_KEY_FILE = os.path.join(BASE_DIR, ".acme-account.pem")
-    CERTS_DIR       = os.path.join(BASE_DIR, "certs", domain)
+    CERTS_DIR        = os.path.join(BASE_DIR, "certs", domain)
+    challenge_dir    = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
 
     print(f"\nGetting a trusted SSL certificate for {domain}...")
     print("Make sure your domain points to this server's IP first.\n")
 
-    os.makedirs(os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge"), exist_ok=True)
+    os.makedirs(challenge_dir, exist_ok=True)
     os.makedirs(CERTS_DIR, exist_ok=True)
     _chown_servette(ACME_WEBROOT)
     _chown_servette(CERTS_DIR)
 
+    # Load or create the ACME account key — a standard RSA PEM (any existing
+    # .acme-account.pem from the old josepy path loads unchanged).
     if os.path.exists(ACCOUNT_KEY_FILE):
         with open(ACCOUNT_KEY_FILE, "rb") as f:
-            account_key = _jose.JWKRSA.load(f.read())
+            account_key = _serialization.load_pem_private_key(f.read(), password=None)
     else:
-        rsa_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        account_key = _jose.JWKRSA(key=rsa_key)
+        account_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
         with open(ACCOUNT_KEY_FILE, "wb") as f:
-            f.write(rsa_key.private_bytes(
+            f.write(account_key.private_bytes(
                 _serialization.Encoding.PEM,
                 _serialization.PrivateFormat.TraditionalOpenSSL,
                 _serialization.NoEncryption()
@@ -1309,15 +1464,13 @@ def _run_acme(domain):
         _chown_servette(ACCOUNT_KEY_FILE)
 
     # Start a temporary HTTP listener on port 80 if the main server isn't running
-    tmp_stop   = None
-    tmp_thread = None
+    tmp_server = None
     if not _server_running():
-        tmp_stop   = threading.Event()
-        tmp_thread = threading.Thread(
-            target=lambda: asyncio.run(_serve_http_redirect(tmp_stop)), daemon=True
-        )
-        tmp_thread.start()
-        time.sleep(0.5)
+        try:
+            tmp_server = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
+            threading.Thread(target=tmp_server.serve_forever, daemon=True).start()
+        except OSError as e:
+            log.warning("Could not start temporary port-80 listener: %s", e)
 
     www_domain  = f"www.{domain}"
     last_error  = None
@@ -1339,62 +1492,32 @@ def _run_acme(domain):
             else:
                 t = None
 
-            token_paths = []
             try:
-                net       = _acme_client.ClientNetwork(account_key, user_agent="servette/1.0")
-                directory = _messages.Directory.from_json(net.get(ACME_URL).json())
-                ac        = _acme_client.ClientV2(directory, net)
-
-                # Register account; if key is already registered, fetch the account
-                # to load its URL (kid) into the ClientNetwork — without this,
-                # all subsequent signed requests fail with "No Key ID in JWS header".
-                try:
-                    ac.new_account(_messages.NewRegistration.from_data(
-                        email=config.email if config.email else None,
-                        terms_of_service_agreed=True
-                    ))
-                except _acme_errors.ConflictError as e:
-                    ac.query_registration(_messages.RegistrationResource(
-                        body=_messages.Registration(), uri=e.location
-                    ))
-
-                domain_key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
                 domain_key_pem = domain_key.private_bytes(
                     _serialization.Encoding.PEM,
                     _serialization.PrivateFormat.TraditionalOpenSSL,
                     _serialization.NoEncryption()
                 )
-                csr_pem = (
+                csr_der = (
                     _x509.CertificateSigningRequestBuilder()
                     .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
                     .add_extension(_x509.SubjectAlternativeName([
                         _x509.DNSName(n) for n in names
                     ]), critical=False)
                     .sign(domain_key, _hashes.SHA256())
-                    .public_bytes(_serialization.Encoding.PEM)
+                    .public_bytes(_serialization.Encoding.DER)
                 )
 
-                # Order certificate and answer HTTP-01 challenges (one per name)
-                order = ac.new_order(csr_pem)
-                for authz in order.authorizations:
-                    for challenge in authz.body.challenges:
-                        if isinstance(challenge.chall, _challenges.HTTP01):
-                            token    = challenge.chall.encode("token")
-                            key_auth = challenge.chall.key_authorization(account_key)
-                            path     = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token)
-                            with open(path, "w") as f:
-                                f.write(key_auth)
-                            token_paths.append(path)
-                            ac.answer_challenge(challenge, challenge.chall.response(account_key))
-                            break
-
-                finalized = ac.poll_and_finalize(order)
+                client = _ACMEClient(ACME_URL, account_key)
+                client.new_account(config.email if config.email else None)
+                fullchain = client.issue(names, csr_der, challenge_dir)
 
                 cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
                 key_path  = os.path.join(CERTS_DIR, "privkey.pem")
 
                 with open(cert_path, "w") as f:
-                    f.write(finalized.fullchain_pem)
+                    f.write(fullchain)
                 with open(key_path, "wb") as f:
                     f.write(domain_key_pem)
                 os.chmod(key_path, 0o600)
@@ -1420,20 +1543,14 @@ def _run_acme(domain):
                 last_error = None
                 break
 
-            except _acme_errors.ValidationError as e:
+            except _ACMEError as e:
                 last_error = e
                 stop.set()
                 if t:
                     t.join()
-                for path in token_paths:
-                    if os.path.exists(path):
-                        os.remove(path)
-                token_paths = []
-                if include_www:
-                    failed_domains = {a.body.identifier.value for a in e.failed_authzrs}
-                    if failed_domains == {www_domain}:
-                        www_dns_only_failure = True
-                        break  # don't retry; fall back to bare domain
+                if include_www and e.failed == {www_domain}:
+                    www_dns_only_failure = True
+                    break  # don't retry; fall back to bare domain
                 if attempt < ACME_RETRIES:
                     delay = 5 * attempt
                     log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
@@ -1444,18 +1561,10 @@ def _run_acme(domain):
                 stop.set()
                 if t:
                     t.join()
-                for path in token_paths:
-                    if os.path.exists(path):
-                        os.remove(path)
-                token_paths = []
                 if attempt < ACME_RETRIES:
                     delay = 5 * attempt
                     log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
                     time.sleep(delay)
-            finally:
-                for path in token_paths:
-                    if os.path.exists(path):
-                        os.remove(path)
 
         if last_error is None:
             break  # success
@@ -1472,10 +1581,9 @@ def _run_acme(domain):
         print(f"  Error getting certificate: {last_error}")
         log.error("ACME failed for %s after %d attempts: %s", domain, ACME_RETRIES, last_error)
 
-    if tmp_stop:
-        tmp_stop.set()
-        if tmp_thread:
-            tmp_thread.join(timeout=5)
+    if tmp_server is not None:
+        tmp_server.shutdown()
+        tmp_server.server_close()
 
 
 def _load_cert(cert_path):
@@ -1554,6 +1662,7 @@ _COMMANDS = [
     ("status",  "show whether the server is running"),
     ("log [n]", "show the last n log entries"),
     ("update",  "download the latest version of servette.py"),
+    ("restore", "roll back to the previous version (undoes the last update)"),
     ("help",    "show this message"),
     ("quit",    "exit"),
 ]
@@ -1673,7 +1782,7 @@ def _config_cert():
     domain = input("  Domain name (leave blank for self-signed): ").strip()
 
     if domain:
-        _run_acme(domain)
+        _obtain_trusted_cert(domain)
     else:
         cert_path = _resolve(config.cert_file or "cert.pem")
         key_path  = _resolve(config.key_file or "key.pem")
@@ -1913,6 +2022,25 @@ def _parse_version(source_bytes):
     m = _VERSION_RE.search(source_bytes)
     return m.group(1).decode() if m else None
 
+def _offer_restart(version):
+    """Apply a freshly swapped servette.py (from update or restore): restart the
+    service if it's managed, otherwise tell the user how — this shell still holds the
+    old code in memory, so it can't relaunch itself into the new file."""
+    if _service_is_active():
+        if _prompt("Restart the servette service now?"):
+            try:
+                subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
+                print(f"  Service restarted on {version}.")
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"  Restart failed — run 'sudo systemctl restart servette' yourself ({e}).")
+        else:
+            print("  Run 'sudo systemctl restart servette' when ready.")
+    elif _server_running():
+        print("  This shell is still running the old version — exit and rerun Servette to apply.")
+    else:
+        print(f"  Restart to run version {version}: 'start', or 'sudo systemctl restart servette'.")
+
+
 def cmd_update():
     servette_path = os.path.abspath(__file__)
 
@@ -2008,23 +2136,45 @@ def cmd_update():
 
     print(f"  Updated {__version__} → {new_version}.")
     print(f"  Previous version saved to {bak_path}.")
+    _offer_restart(new_version)
 
-    if _service_is_active():
-        if _prompt("Restart the servette service now?"):
-            try:
-                subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
-                print(f"  Service restarted on {new_version}.")
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print(f"  Restart failed — run 'sudo systemctl restart servette' yourself ({e}).")
-        else:
-            print("  Run 'sudo systemctl restart servette' when ready.")
-    elif _server_running():
-        # The server is running inside this shell, which still holds the old code in
-        # memory; stopping and starting it here would only re-run the old version, so
-        # a full relaunch is required to pick up the new file.
-        print("  This shell is still running the old version — exit and rerun Servette to apply.")
-    else:
-        print("  Restart to run the new version: 'start', or 'sudo systemctl restart servette'.")
+
+def cmd_restore():
+    """Roll back to the version saved by the last 'update'. The backup is single-shot:
+    only ever one servette.py.bak exists, and a successful restore consumes it."""
+    servette_path = os.path.abspath(__file__)
+    bak_path      = servette_path + ".bak"
+
+    if not os.path.exists(bak_path):
+        print("  Nothing to restore — no servette.py.bak. ('update' saves one each time it runs.)")
+        return
+
+    try:
+        with open(bak_path, "rb") as f:
+            bak_source = f.read()
+    except OSError as e:
+        print(f"  Restore failed: cannot read {bak_path} ({e}).")
+        return
+
+    # Refuse to restore a corrupt backup — better to keep the working file in place.
+    try:
+        compile(bak_source, "servette.py", "exec")
+    except SyntaxError as e:
+        print(f"  Restore failed: the backup has a syntax error ({e}).")
+        return
+
+    bak_version = _parse_version(bak_source) or "unknown"
+    if not _prompt(f"Restore {__version__} → {bak_version} from servette.py.bak? The backup is then removed."):
+        print("  Restore cancelled.")
+        return
+
+    # Atomically move the backup into place (keeping the live file's mode). The rename
+    # consumes the backup, so only ever one is kept and it's spent on use.
+    os.chmod(bak_path, os.stat(servette_path).st_mode)
+    os.replace(bak_path, servette_path)
+
+    print(f"  Restored {__version__} → {bak_version}.")
+    _offer_restart(bak_version)
 
 
 def _format_uptime(seconds):
@@ -2253,6 +2403,8 @@ def shell():
                 print("Usage: log [number]")
         elif cmd == "update":
             cmd_update()
+        elif cmd == "restore":
+            cmd_restore()
         elif cmd in ("help", "?"):
             print(HELP)
         elif cmd in ("quit", "exit"):

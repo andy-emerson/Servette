@@ -883,7 +883,7 @@ def _cert_watchdog():
                 if now - _last_renewal_attempt >= 3600:
                     _last_renewal_attempt = now
                     log.info("Certificate for %s expires in %d days — renewing", domain, days)
-                    _run_acme(domain)
+                    _obtain_trusted_cert(domain)
                     _cert_domain = domain
         else:
             # Self-signed or externally managed cert: reload if the file changed on disk
@@ -1419,7 +1419,7 @@ class _ACMEClient:
                     pass
 
 
-def _run_acme(domain):
+def _obtain_trusted_cert(domain):
     """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
     minimal ACME client (_ACMEClient) on stdlib urllib + cryptography."""
     from cryptography import x509 as _x509
@@ -1775,7 +1775,7 @@ def _config_cert():
     domain = input("  Domain name (leave blank for self-signed): ").strip()
 
     if domain:
-        _run_acme(domain)
+        _obtain_trusted_cert(domain)
     else:
         cert_path = _resolve(config.cert_file or "cert.pem")
         key_path  = _resolve(config.key_file or "key.pem")

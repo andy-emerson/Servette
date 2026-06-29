@@ -16,7 +16,7 @@ AI-assisted contributions are **first-class** here — nothing to hedge, hide, o
 
 ## Scope comes first
 
-Before proposing a feature, read [Scope & non-goals](principles.md#scope--non-goals). Servette is a minimalist nanoserver held to a small set of non-negotiable principles, and most features common to other servers are *deliberately* absent — they serve no principle and are out of scope. A change earns its complexity only by serving a principle. If your idea is one of the documented non-goals, the honest answer is usually to reach for a general-purpose server that does more — and that's not a brush-off, it's the design working as intended.
+Before proposing a feature, read [Scope & non-goals](principles.md#scope--non-goals). Servette is a production nanoserver — a production-ready layer over Python's standard-library `http.server` — held to a small set of non-negotiable principles, and most features common to other servers are *deliberately* absent — they serve no principle and are out of scope. A change earns its complexity only by serving a principle. If your idea is one of the documented non-goals, the honest answer is usually to reach for a general-purpose server that does more — and that's not a brush-off, it's the design working as intended.
 
 ## Before you push
 

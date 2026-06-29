@@ -6,15 +6,15 @@ How the code is actually built lives in [`architecture.md`](architecture.md); th
 
 ## Scope & non-goals
 
-Servette's identity is a small set of non-negotiable principles. They are invariants, not preferences: every design decision serves them, and a change that serves none of them is out of scope by definition. Treat them as the lens for the question "should this exist in Servette?"
+Servette is a **production nanoserver** — a production-ready layer for Python's standard-library `http.server`, turning the stdlib's development server into one fit for the open internet. Its identity is a small set of non-negotiable principles: invariants, not preferences — every design decision serves them, and a change that serves none of them is out of scope by definition. Treat them as the lens for the question "should this exist in Servette?"
 
 | Principle | What it commits us to |
 | - | - |
 | **Single file** | All of Servette is one `servette.py`, readable and debuggable in an afternoon. No module sprawl, no hidden machinery. |
 | **Secure by default** | Trusted TLS, HTTPS-only (HTTP 301s upward), security headers on every response, optional auth, rate limiting, a least-privilege service user. Security is the default state, never an opt-in. |
-| **Production-grade** | Serves real sites on the public internet: automatic certificate renewal, auto-restart, survives reboots. Servette is not a dev tool. |
+| **Production-grade** | Makes the stdlib's `http.server` — a development server, by its own docs — fit to serve real sites on the public internet: automatic certificate renewal, auto-restart, survives reboots. Servette is the production layer, not a dev tool. |
 | **Zero-friction operation** | Copy one file, run it, follow the wizard. No configuration language, no manual certificate or dependency management. |
-| **Minimal footprint** | Stdlib plus a single package (`cryptography`) in a managed virtualenv; nothing installed system-wide; light enough for a Raspberry Pi. |
+| **Minimal footprint** | The standard library — `http.server`, `ssl`, `urllib` — plus a single package, `cryptography`; the transport, TLS, and ACME client are all stdlib or hand-rolled. Nothing installed system-wide; light enough for a Raspberry Pi. |
 
 **Minimalism is the default; the principles above are the only license to add complexity.** General-purpose servers accumulate features — reverse proxying, load balancing, plugins, templating, SPA routing, a live config API. None are needed to satisfy the principles, so each is feature creep: complexity that pulls Servette away from "single file" and "zero-friction" while serving no goal.
 
@@ -49,7 +49,7 @@ Servette is complete within its scope; "where are we?" is mostly "here is the fi
 
 Servette is built in human–agent collaboration, and says so. The human holds design authority and is the author of record; the agent writes code and surfaces trade-offs. This works because openness is paired with verification and responsibility — credit is *earned by the rigor*, not granted by a trailer. Energy spent hiding how a security tool is built is the wrong kind of energy; it belongs in the evidence instead. (Mechanics of attribution live in [`AGENTS.md`](../AGENTS.md); the contributor's view in [`CONTRIBUTING.md`](CONTRIBUTING.md).)
 
-The methodology is scaled to the project. A ~2,200-line finished server does not need a dependency frontier or a reference oracle; reproducing that machinery would itself be the scope creep this document exists to prevent. What ports is the principle, not the apparatus.
+The methodology is scaled to the project. A ~2,400-line finished server does not need a dependency frontier or a reference oracle; reproducing that machinery would itself be the scope creep this document exists to prevent. What ports is the principle, not the apparatus.
 
 ### The change loop
 

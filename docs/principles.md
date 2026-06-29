@@ -6,7 +6,7 @@ How the code is actually built lives in [`architecture.md`](architecture.md); th
 
 ## Scope & non-goals
 
-Servette is a **production nanoserver** — a production-ready layer for Python's standard-library `http.server`, turning the stdlib's development server into one fit for the open internet. Its identity is a small set of non-negotiable principles: invariants, not preferences — every design decision serves them, and a change that serves none of them is out of scope by definition. Treat them as the lens for the question "should this exist in Servette?"
+Servette is a **production nanoserver**: Python's standard-library `http.server` is a nanoserver — it serves a folder, but stops short of production — and Servette is the production-ready layer over it that makes it fit for the open internet. Its identity is a small set of non-negotiable principles: invariants, not preferences — every design decision serves them, and a change that serves none of them is out of scope by definition. Treat them as the lens for the question "should this exist in Servette?"
 
 | Principle | What it commits us to |
 | - | - |

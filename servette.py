@@ -645,8 +645,8 @@ def _build_ssl_context():
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     """Serves every request through the transport-agnostic _handle_request. Each
-    connection gets its own thread (ThreadingHTTPServer), so the synchronous file
-    read and gzip run off any shared loop — no request can starve another."""
+    connection runs in its own thread (ThreadingHTTPServer), so one request's
+    synchronous file read and gzip can't stall any other."""
     protocol_version = "HTTP/1.1"
     timeout          = 30          # drop idle/slow connections (slowloris mitigation)
 
@@ -1338,7 +1338,9 @@ class _ACMEClient:
         return json.dumps({"protected": p, "payload": y, "signature": _b64url(sig)}).encode()
 
     def _post(self, url, payload):
-        for first in (True, False):
+        # Two attempts: a badNonce is the one error worth retrying, because the failing
+        # response hands back a fresh nonce. Any other error fails immediately.
+        for attempt in range(2):
             if self._nonce is None:
                 self._request(self._directory()["newNonce"], method="HEAD")
             resp = self._request(url, data=self._sign(url, payload))
@@ -1349,8 +1351,8 @@ class _ACMEClient:
                 problem = resp.json()
             except Exception:
                 pass
-            if first and problem.get("type", "").endswith("badNonce"):
-                continue   # nonce refreshed from this response; retry once
+            if attempt == 0 and problem.get("type", "").endswith("badNonce"):
+                continue
             raise _ACMEError(problem.get("detail") or f"ACME error {resp.status} at {url}")
         raise _ACMEError("ACME request failed after a nonce retry")
 
@@ -2013,6 +2015,25 @@ def _parse_version(source_bytes):
     m = _VERSION_RE.search(source_bytes)
     return m.group(1).decode() if m else None
 
+def _offer_restart(version):
+    """Apply a freshly swapped servette.py (from update or restore): restart the
+    service if it's managed, otherwise tell the user how — this shell still holds the
+    old code in memory, so it can't relaunch itself into the new file."""
+    if _service_is_active():
+        if _prompt("Restart the servette service now?"):
+            try:
+                subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
+                print(f"  Service restarted on {version}.")
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"  Restart failed — run 'sudo systemctl restart servette' yourself ({e}).")
+        else:
+            print("  Run 'sudo systemctl restart servette' when ready.")
+    elif _server_running():
+        print("  This shell is still running the old version — exit and rerun Servette to apply.")
+    else:
+        print(f"  Restart to run version {version}: 'start', or 'sudo systemctl restart servette'.")
+
+
 def cmd_update():
     servette_path = os.path.abspath(__file__)
 
@@ -2108,23 +2129,7 @@ def cmd_update():
 
     print(f"  Updated {__version__} → {new_version}.")
     print(f"  Previous version saved to {bak_path}.")
-
-    if _service_is_active():
-        if _prompt("Restart the servette service now?"):
-            try:
-                subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
-                print(f"  Service restarted on {new_version}.")
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print(f"  Restart failed — run 'sudo systemctl restart servette' yourself ({e}).")
-        else:
-            print("  Run 'sudo systemctl restart servette' when ready.")
-    elif _server_running():
-        # The server is running inside this shell, which still holds the old code in
-        # memory; stopping and starting it here would only re-run the old version, so
-        # a full relaunch is required to pick up the new file.
-        print("  This shell is still running the old version — exit and rerun Servette to apply.")
-    else:
-        print("  Restart to run the new version: 'start', or 'sudo systemctl restart servette'.")
+    _offer_restart(new_version)
 
 
 def cmd_restore():
@@ -2162,20 +2167,7 @@ def cmd_restore():
     os.replace(bak_path, servette_path)
 
     print(f"  Restored {__version__} → {bak_version}.")
-
-    if _service_is_active():
-        if _prompt("Restart the servette service now?"):
-            try:
-                subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
-                print(f"  Service restarted on {bak_version}.")
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print(f"  Restart failed — run 'sudo systemctl restart servette' yourself ({e}).")
-        else:
-            print("  Run 'sudo systemctl restart servette' when ready.")
-    elif _server_running():
-        print("  This shell is still running the old version — exit and rerun Servette to apply.")
-    else:
-        print("  Restart to run the restored version: 'start', or 'sudo systemctl restart servette'.")
+    _offer_restart(bak_version)
 
 
 def _format_uptime(seconds):

@@ -412,19 +412,25 @@ def _mime_type(path):
     ext = os.path.splitext(path)[1].lower()
     return MIME_TYPES.get(ext, "application/octet-stream")
 
+def _within(base, target):
+    """True if `target` is `base` or sits inside it. commonpath on already-resolved
+    absolute paths means a traversal or symlink escape lands outside `base` and fails."""
+    try:
+        return os.path.commonpath([base, target]) == base
+    except ValueError:   # different drives / mixed absolute-relative — treat as outside
+        return False
+
+
 def _resolve_request_path(url_path):
     """Resolve a URL path to an absolute file path within serve_dir. Returns (None, 403) on traversal, (None, 404) if not found."""
     serve_dir = os.path.realpath(_resolve(config.serve_dir))
-    clean = unquote(url_path.split("?")[0])
-    rel   = os.path.normpath(clean.lstrip("/"))
-    if rel == ".":
-        rel = ""  # normpath("") returns "." — treat root request as empty relative path
-    abs_path = os.path.realpath(os.path.join(serve_dir, rel) if rel else serve_dir)
-    if not abs_path.startswith(serve_dir + os.sep) and abs_path != serve_dir:
+    clean     = unquote(url_path.split("?")[0]).lstrip("/")   # lstrip: never an absolute path
+    abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
+    if not _within(serve_dir, abs_path):
         return None, 403
     if os.path.isdir(abs_path):
         abs_path = os.path.realpath(os.path.join(abs_path, "index.html"))
-        if not abs_path.startswith(serve_dir + os.sep):
+        if not _within(serve_dir, abs_path):
             return None, 403
     if not os.path.isfile(abs_path):
         return None, 404
@@ -691,8 +697,8 @@ class _RedirectHandler(http.server.BaseHTTPRequestHandler):
         path   = self.path.split("?", 1)[0]
         prefix = "/.well-known/acme-challenge/"
         if path.startswith(prefix):
-            token = path[len(prefix):]
-            if token and "/" not in token and ".." not in token:
+            token = os.path.basename(path[len(prefix):])   # strip any path components
+            if token and token not in (".", ".."):
                 try:
                     with open(os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token), "rb") as f:
                         data = f.read()
@@ -713,6 +719,7 @@ class _RedirectHandler(http.server.BaseHTTPRequestHandler):
         host = self.headers.get("Host", "localhost").split(":")[0]
         url  = (f"https://{host}{self.path}" if config.port == 443
                 else f"https://{host}:{config.port}{self.path}")
+        url  = url.replace("\r", "").replace("\n", "")   # never let the header carry CRLF
         self.send_response_only(301)
         self.send_header("Location", url)
         self.send_header("Content-Length", "0")

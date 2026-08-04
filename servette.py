@@ -855,6 +855,7 @@ def _bootstrap():
 # stop_server() calls shutdown() on it from the shell thread to stop gracefully.
 
 _https_server         = None  # the running HTTPS ThreadingHTTPServer (None when stopped)
+_https_thread         = None  # the thread running its serve_forever loop
 _http_server          = None  # the port-80 redirect server (None if unavailable)
 _server_start_time    = None
 _watchdog_thread      = None
@@ -905,7 +906,8 @@ def _cert_watchdog():
 
 
 def start_server():
-    global _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread, _https_server, _http_server
+    global _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread, \
+        _https_server, _https_thread, _http_server
 
     if _server_running():
         print("Server is already running.")
@@ -946,7 +948,8 @@ def start_server():
 
     _https_server = https
     _http_server  = redirect
-    threading.Thread(target=https.serve_forever, daemon=True).start()
+    _https_thread = threading.Thread(target=https.serve_forever, daemon=True)
+    _https_thread.start()
     if redirect is not None:
         threading.Thread(target=redirect.serve_forever, daemon=True).start()
 
@@ -982,7 +985,7 @@ def start_server():
 
 
 def stop_server():
-    global _server_start_time, _sweep_thread, _https_server, _http_server
+    global _server_start_time, _sweep_thread, _https_server, _https_thread, _http_server
 
     if not _server_running():
         return
@@ -991,7 +994,10 @@ def stop_server():
         if srv is not None:
             srv.shutdown()
             srv.server_close()
+    if _https_thread is not None:
+        _https_thread.join(timeout=10)
     _https_server      = None
+    _https_thread      = None
     _http_server       = None
     _server_start_time = None
 
@@ -1001,6 +1007,29 @@ def stop_server():
         _sweep_thread = None
     log.info("Server stopped")
     print("Session server stopped.")
+
+
+def _watch_server(poll=5, grace=30):
+    """Block until the HTTPS server has been dead for `grace` seconds.
+
+    --serve exits non-zero when this returns, so systemd's Restart=always brings
+    the service back. Without the watch, a dead server thread leaves a living
+    process: systemd reports active while nothing is listening. The grace period
+    spans the stop/start window of an in-process certificate reload, so a reload
+    doesn't read as a death."""
+    deadline = None
+    while True:
+        t = _https_thread
+        if t is not None and t.is_alive():
+            deadline = None
+            t.join(timeout=poll)
+            continue
+        now = time.monotonic()
+        if deadline is None:
+            deadline = now + grace
+        elif now >= deadline:
+            return
+        time.sleep(poll)
 
 
 # ── Service management ────────────────────────────────────────────────────────
@@ -2425,9 +2454,11 @@ if __name__ == "__main__":
     if "--serve" in sys.argv:
         start_server()
         try:
-            while True:
-                time.sleep(3600)
+            _watch_server()
         except KeyboardInterrupt:
             stop_server()
+        else:
+            log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
+            sys.exit(1)
     else:
         shell()

@@ -939,6 +939,42 @@ def run_install_tests(s, tmpdir):
     else:
         print("  (systemd-analyze unavailable — unit syntax check skipped)")
 
+    section("Server watch (--serve supervision)")
+
+    # _watch_server must return once the HTTPS thread has been dead for the grace
+    # period — that return is what lets --serve exit non-zero so systemd restarts
+    # the service instead of supervising a corpse.
+    saved_thread = s._https_thread
+    try:
+        dead = threading.Thread(target=lambda: None)
+        dead.start()
+        dead.join()
+        s._https_thread = dead
+        t0 = time.monotonic()
+        s._watch_server(poll=0.05, grace=0.2)
+        elapsed = time.monotonic() - t0
+        check("Watch returns after grace once thread is dead", 0.15 <= elapsed < 5)
+
+        stop_evt = threading.Event()
+        live = threading.Thread(target=stop_evt.wait)
+        live.start()
+        s._https_thread = live
+        released = threading.Event()
+
+        def _run_watch():
+            s._watch_server(poll=0.05, grace=0.2)
+            released.set()
+
+        watcher = threading.Thread(target=_run_watch)
+        watcher.start()
+        time.sleep(0.5)
+        check("Watch holds while the thread is alive", not released.is_set())
+        stop_evt.set()
+        watcher.join(timeout=5)
+        check("Watch releases after the thread dies",  released.is_set())
+    finally:
+        s._https_thread = saved_thread
+
     section("serve_dir world-readable check")
 
     # World-readable dir: no warning expected (we capture logic by checking the stat)

@@ -939,6 +939,58 @@ def run_install_tests(s, tmpdir):
     else:
         print("  (systemd-analyze unavailable — unit syntax check skipped)")
 
+    section("Network watchdog units")
+
+    watch_service, watch_timer = s._netwatch_units()
+    check("Service checks the default route",        "ip route get" in watch_service)
+    check("Recovery uses try-restart (no-op where networkd absent)",
+          "try-restart systemd-networkd" in watch_service)
+    check("Service is oneshot",                      "Type=oneshot" in watch_service)
+    check("Timer fires every 5 minutes",             "OnUnitActiveSec=5min" in watch_timer)
+    check("Timer starts checking after boot",        "OnBootSec=5min" in watch_timer)
+
+    if shutil.which("systemd-analyze"):
+        # Write both units first — verify resolves the timer's service by sibling file.
+        paths = {}
+        for name, content in (("servette-netwatch.service", watch_service),
+                              ("servette-netwatch.timer",   watch_timer)):
+            paths[name] = os.path.join(tmpdir, name)
+            with open(paths[name], "w") as f:
+                f.write(content)
+        for name, path in paths.items():
+            out  = subprocess.run(["systemd-analyze", "verify", path], capture_output=True, text=True)
+            text = (out.stdout + out.stderr).lower()
+            check(f"systemd-analyze verify {name}: no unknown directives",
+                  "unknown lvalue" not in text and "unknown key name" not in text)
+
+    section("Swap recommendation")
+
+    GB_KB = 1024 * 1024  # 1 GB expressed in kB, matching /proc/meminfo units
+    check("Small host, no swap → 2×RAM",
+          s._swap_recommendation(424 * 1024, 0) == 2 * 424 * 1024 * 1024)
+    check("Existing swap → no recommendation",  s._swap_recommendation(424 * 1024, 1024) is None)
+    check("≥2 GB RAM → no recommendation",      s._swap_recommendation(2 * GB_KB, 0) is None)
+    check("Recommendation capped at 2 GB",      s._swap_recommendation(int(1.5 * GB_KB), 0) == 2 * 1024 ** 3)
+    check("Unreadable meminfo → no recommendation", s._swap_recommendation(None, None) is None)
+
+    mem_kb, swap_kb = s._meminfo()
+    check("_meminfo returns a consistent pair",
+          (mem_kb is None and swap_kb is None)
+          or (isinstance(mem_kb, int) and isinstance(swap_kb, int) and mem_kb > 0))
+
+    section("Host health warning")
+
+    saved_meminfo = s._meminfo
+    try:
+        s._meminfo = lambda: (414 * 1024, 0)
+        check("No-swap small host is flagged",
+              any("no swap" in issue for issue in s._production_issues()))
+        s._meminfo = lambda: (414 * 1024, GB_KB)
+        check("Host with swap is not flagged",
+              not any("no swap" in issue for issue in s._production_issues()))
+    finally:
+        s._meminfo = saved_meminfo
+
     section("Server watch (--serve supervision)")
 
     # _watch_server must return once the HTTPS thread has been dead for the grace

@@ -44,8 +44,9 @@ BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 _VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
 _VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
 
-SERVICE_PATH = "/etc/systemd/system/servette.service"
-ACME_WEBROOT = "/var/lib/letsencrypt/webroot"
+SERVICE_PATH  = "/etc/systemd/system/servette.service"
+NETWATCH_PATH = "/etc/systemd/system/servette-netwatch"  # + ".service" / ".timer"
+ACME_WEBROOT  = "/var/lib/letsencrypt/webroot"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1098,6 +1099,103 @@ WantedBy=multi-user.target
 """
 
 
+def _netwatch_units():
+    """The (service, timer) unit pair for the network watchdog.
+
+    Every 5 minutes: if the host has no route out, ask systemd-networkd to start
+    over. Recovers the observed failure where a netlink timeout leaves the link
+    permanently 'Failed' — networkd never retries on its own, so the host stays
+    dark until reboot. try-restart is a no-op where networkd isn't running
+    (e.g. NetworkManager hosts), and the whole check is a no-op while the route
+    is healthy."""
+    service = """[Unit]
+Description=Servette network watchdog — recover a dropped default route
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'ip route get 1.1.1.1 >/dev/null 2>&1 || systemctl try-restart systemd-networkd.service'
+"""
+    timer = """[Unit]
+Description=Run the Servette network watchdog every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+"""
+    return service, timer
+
+
+_SWAP_PATH = "/swapfile"
+
+
+def _meminfo():
+    """Return (mem_total_kb, swap_total_kb) from /proc/meminfo, or (None, None)
+    where it can't be read (non-Linux)."""
+    try:
+        fields = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                fields[key.strip()] = int(rest.split()[0])  # values are in kB
+        return fields["MemTotal"], fields["SwapTotal"]
+    except (OSError, KeyError, ValueError, IndexError):
+        return None, None
+
+
+def _swap_recommendation(mem_kb, swap_kb):
+    """Swapfile size in bytes for a host that needs one, else None.
+
+    A small-RAM host with no swap is one memory spike away from the OOM killer —
+    observed in production destabilizing systemd-networkd, not just the spiking
+    process. Sized by the standard small-host rule: twice RAM, capped at 2 GB."""
+    if mem_kb is None or swap_kb is None:
+        return None
+    if swap_kb > 0 or mem_kb >= 2 * 1024 * 1024:
+        return None
+    return min(2 * mem_kb * 1024, 2 * 1024 * 1024 * 1024)
+
+
+def _ensure_swap():
+    """Offer to create a persistent swapfile on a small-RAM host that has none."""
+    mem_kb, swap_kb = _meminfo()
+    size = _swap_recommendation(mem_kb, swap_kb)
+    if size is None or os.path.exists(_SWAP_PATH):
+        return
+    try:
+        st = os.statvfs("/")
+        if st.f_bavail * st.f_frsize < size + 1024 ** 3:  # keep 1 GB free after the file
+            return
+    except OSError:
+        return
+    mb = size // (1024 * 1024)
+    print(f"  This system has {mem_kb // 1024} MB RAM and no swap — one memory spike")
+    print("  can invoke the OOM killer and destabilize the host.")
+    if not _prompt(f"Create a {mb} MB swapfile at {_SWAP_PATH} now?"):
+        return
+    try:
+        with open(_SWAP_PATH, "wb") as f:
+            os.chmod(_SWAP_PATH, 0o600)  # before content exists — never world-readable
+            os.posix_fallocate(f.fileno(), 0, size)
+        subprocess.run(["mkswap", _SWAP_PATH], check=True, capture_output=True)
+        subprocess.run(["swapon", _SWAP_PATH], check=True, capture_output=True)
+        with open("/etc/fstab") as f:
+            fstab = f.read()
+        if _SWAP_PATH not in fstab.split():
+            with open("/etc/fstab", "a") as f:
+                f.write(f"{_SWAP_PATH} none swap sw 0 0\n")
+        print(f"  Swapfile active ({mb} MB), persistent across reboots.")
+        log.info("Created %d MB swapfile at %s", mb, _SWAP_PATH)
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"  Could not create swapfile: {e}")
+        try:
+            os.remove(_SWAP_PATH)
+        except OSError:
+            pass
+
+
 def cmd_install():
     updating      = _service_file_exists()
     servette_path = os.path.abspath(__file__)
@@ -1119,8 +1217,16 @@ def cmd_install():
         with open(SERVICE_PATH, "w") as f:
             f.write(service)
 
+        netwatch_service, netwatch_timer = _netwatch_units()
+        with open(NETWATCH_PATH + ".service", "w") as f:
+            f.write(netwatch_service)
+        with open(NETWATCH_PATH + ".timer", "w") as f:
+            f.write(netwatch_timer)
+
         subprocess.run(["systemctl", "daemon-reload"],      check=True)
         subprocess.run(["systemctl", "enable", "servette"], check=True, capture_output=True)
+        subprocess.run(["systemctl", "enable", "--now", "servette-netwatch.timer"],
+                       check=True, capture_output=True)
 
         # Chown files the service process needs to read
         _chown_servette(config.CONFIG_FILE)
@@ -1152,7 +1258,10 @@ def cmd_install():
         else:
             print("Servette enabled as a system service.")
             print("It will start automatically on boot and survive SSH disconnects.")
+        print("Network watchdog timer enabled (recovers a dropped default route).")
         log.info("Enabled as systemd service")
+
+        _ensure_swap()
 
         if _server_running():
             if _prompt("Server is running in session only. Restart as a service now?"):
@@ -1179,7 +1288,14 @@ def cmd_uninstall():
         if _service_is_active():
             subprocess.run(["systemctl", "stop",    "servette"], check=True, capture_output=True)
         subprocess.run(["systemctl", "disable", "servette"], check=True, capture_output=True)
+        subprocess.run(["systemctl", "disable", "--now", "servette-netwatch.timer"],
+                       capture_output=True)  # best-effort: may predate the watchdog
         os.remove(SERVICE_PATH)
+        for suffix in (".service", ".timer"):
+            try:
+                os.remove(NETWATCH_PATH + suffix)
+            except OSError:
+                pass
         subprocess.run(["systemctl", "daemon-reload"], check=True)
         print("Servette service disabled.")
         log.info("Systemd service disabled")
@@ -2229,6 +2345,12 @@ def _production_issues():
         issues.append("self-signed certificate — run 'config cert' to add a domain")
     if not config.username:
         issues.append("no password protection — run 'config' to set credentials")
+    mem_kb, swap_kb = _meminfo()
+    if _swap_recommendation(mem_kb, swap_kb) is not None:
+        issues.append(
+            f"{mem_kb // 1024} MB RAM with no swap — one memory spike away from "
+            "the OOM killer; 'install' can create a swapfile"
+        )
     return issues
 
 

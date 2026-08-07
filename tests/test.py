@@ -1163,6 +1163,17 @@ def run_install_tests(s, tmpdir):
         sock_b.close()
         cap_srv.server_close()
 
+    section("Update downloads pinned to GitHub")
+
+    check("HTTPS github.com asset accepted",
+          s._release_asset_url_ok("https://github.com/a/b/releases/download/v1/servette.py"))
+    check("Other host rejected",
+          not s._release_asset_url_ok("https://evil.example/servette.py"))
+    check("Plain HTTP rejected",
+          not s._release_asset_url_ok("http://github.com/a/b/servette.py"))
+    check("Userinfo spoof rejected",
+          not s._release_asset_url_ok("https://github.com@evil.example/servette.py"))
+
     section("In-service cert reload exits for systemd")
 
     # Under --serve the unit's user cannot systemctl restart itself; _reload_server

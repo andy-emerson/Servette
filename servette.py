@@ -37,7 +37,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -2287,6 +2287,14 @@ def _parse_version(source_bytes):
     m = _VERSION_RE.search(source_bytes)
     return m.group(1).decode() if m else None
 
+
+def _release_asset_url_ok(url):
+    """True when a release-asset URL is HTTPS on github.com. Update downloads are
+    pinned to the release host so a poisoned API response can't redirect the fetch
+    elsewhere — the Ed25519 signature is the real gate; this narrows the fetch."""
+    parts = urlsplit(url)
+    return parts.scheme == "https" and parts.netloc == "github.com"
+
 def _offer_restart(version):
     """Apply a freshly swapped servette.py (from update or restore): restart the
     service if it's managed, otherwise tell the user how — this shell still holds the
@@ -2334,6 +2342,9 @@ def cmd_update():
     assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
     if "servette.py" not in assets or "servette.py.sig" not in assets:
         print("  Update failed: release is missing servette.py or servette.py.sig assets.")
+        return
+    if not all(_release_asset_url_ok(assets[n]) for n in ("servette.py", "servette.py.sig")):
+        print("  Update failed: release asset URL is not on github.com.")
         return
 
     # Gate on major version bump

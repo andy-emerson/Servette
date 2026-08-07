@@ -972,7 +972,7 @@ def run_install_tests(s, tmpdir):
     # The incident box: 414 MB RAM, ~176 MB available, no swap, 50 MB cache.
     # Demand = resident (238) + cache (50) + spike allowance (700) = 988 MB;
     # deficit over RAM = 574 MB; recommendation = 2× deficit.
-    rec = s._swap_recommendation(414 * MB, 176 * MB, 0, 50)
+    rec = s._swap_recommendation(414 * MB, 176 * MB, 50)
     check("Incident-class host gets a recommendation", rec is not None)
     check("Recommendation is twice the demand deficit, rounded to 2 significant digits",
           rec == 1200 * 1024 ** 2)  # 2 × 574 MB deficit = 1148 → 1200
@@ -982,18 +982,31 @@ def run_install_tests(s, tmpdir):
     check("Round-up: 2049 → 2100",  s._round_up_2sig(2049) == 2100)
     check("Round-up: 99 stays 99",  s._round_up_2sig(99) == 99)
     check("Round-up: exact 1200 stays 1200", s._round_up_2sig(1200) == 1200)
-    check("Existing swap → no recommendation",
-          s._swap_recommendation(414 * MB, 176 * MB, 1024, 50) is None)
     check("Idle big host → no recommendation (demand fits)",
-          s._swap_recommendation(4 * GB_KB, int(3.5 * GB_KB), 0, 50) is None)
+          s._swap_recommendation(4 * GB_KB, int(3.5 * GB_KB), 50) is None)
     check("Loaded big host → still recommended (threshold is demand, not a RAM ceiling)",
-          s._swap_recommendation(2 * GB_KB, 100 * MB, 0, 50) is not None)
+          s._swap_recommendation(2 * GB_KB, 100 * MB, 50) is not None)
     check("Small deficit floors at 512 MB",
-          s._swap_recommendation(1024 * MB, 600 * MB, 0, 50) == 512 * 1024 ** 2)
+          s._swap_recommendation(1024 * MB, 600 * MB, 50) == 512 * 1024 ** 2)
     check("Recommendation capped at 2 GB",
-          s._swap_recommendation(414 * MB, 50 * MB, 0, 1024) == 2 * 1024 ** 3)
+          s._swap_recommendation(414 * MB, 50 * MB, 1024) == 2 * 1024 ** 3)
     check("Unreadable meminfo → no recommendation",
-          s._swap_recommendation(None, None, None, 50) is None)
+          s._swap_recommendation(None, None, 50) is None)
+
+    section("Swap offer")
+
+    check("No swap → offer at the recommendation",
+          s._swap_offer(1200, False, 0) == ("no swapfile", 1200))
+    check("Foreign swap (partition, distro-managed) → no offer",
+          s._swap_offer(1200, False, 600) is None)
+    check("Our swapfile, big enough → no offer",
+          s._swap_offer(1200, True, 1200) is None)
+    check("Our swapfile, undersized → offer defaults to current size",
+          s._swap_offer(1200, True, 600) == ("a 600 MB swapfile", 600))
+    check("Our swapfile, inactive → offer at the recommendation",
+          s._swap_offer(1200, True, 0) == ("an inactive swapfile", 1200))
+    check("No recommendation → no offer",
+          s._swap_offer(None, False, 0) is None)
 
     mem_kb, avail_kb, swap_kb = s._meminfo()
     check("_meminfo returns a consistent triple",

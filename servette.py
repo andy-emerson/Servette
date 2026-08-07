@@ -1163,18 +1163,16 @@ def _round_up_2sig(n):
     return -(-int(n) // mag) * mag
 
 
-def _swap_recommendation(mem_kb, avail_kb, swap_kb, cache_mb):
-    """Swapfile size in bytes for a host whose demand can outrun its RAM, else None.
+def _swap_recommendation(mem_kb, avail_kb, cache_mb):
+    """Recommended total swap in bytes for this host, or None when demand fits in RAM.
 
     Supply is measured (MemTotal). Demand is what's resident now (MemTotal −
     MemAvailable), plus Servette's configured cache, plus the spike allowance.
-    When demand exceeds supply, the deficit is doubled for margin, floored at
-    512 MB and capped at 2 GB. A host that already has swap, or whose demand
-    fits in RAM, gets no recommendation — the threshold emerges from the
-    measurement rather than a hardcoded RAM ceiling."""
-    if mem_kb is None or avail_kb is None or swap_kb is None:
-        return None
-    if swap_kb > 0:
+    When demand exceeds supply, the deficit is doubled for margin, rounded up to
+    two significant digits, floored at 512 MB and capped at 2 GB — the threshold
+    emerges from the measurement rather than a hardcoded RAM ceiling. Whether to
+    act on the recommendation is _swap_offer's decision."""
+    if mem_kb is None or avail_kb is None:
         return None
     demand_kb  = (mem_kb - avail_kb) + cache_mb * 1024 + _SPIKE_ALLOWANCE_KB
     deficit_kb = demand_kb - mem_kb
@@ -1182,6 +1180,26 @@ def _swap_recommendation(mem_kb, avail_kb, swap_kb, cache_mb):
         return None
     size_mb = _round_up_2sig(-(-2 * deficit_kb // 1024))
     return min(max(size_mb, _SWAP_MIN_MB), _SWAP_MAX_MB) * 1024 ** 2
+
+
+def _swap_offer(rec_mb, ours, active_mb):
+    """(description, default_mb) for the swap prompt, or None when no offer is due.
+
+    Only Servette's own /swapfile is ever offered a resize; swap Servette didn't
+    create (a partition, a distro-managed file) is left alone — resizing it would
+    fight whatever manages it. The default preserves the operator's prior choice:
+    the recommendation when creating, the current size when ours already exists."""
+    if rec_mb is None:
+        return None
+    if active_mb > 0 and not ours:
+        return None
+    if not ours:
+        return "no swapfile", rec_mb
+    if active_mb == 0:
+        return "an inactive swapfile", rec_mb
+    if active_mb >= rec_mb:
+        return None
+    return f"a {active_mb} MB swapfile", active_mb
 
 
 def _root_on_sd_card():
@@ -1196,34 +1214,47 @@ def _root_on_sd_card():
 
 
 def _ensure_swap():
-    """Offer a persistent swapfile where demand can outrun RAM; operator may resize."""
+    """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
     mem_kb, avail_kb, swap_kb = _meminfo()
-    size = _swap_recommendation(mem_kb, avail_kb, swap_kb, config.cache_size_mb)
-    if size is None or os.path.exists(_SWAP_PATH):
+    rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
+    rec_mb    = rec // (1024 * 1024) if rec else None
+    ours      = os.path.exists(_SWAP_PATH)
+    active_mb = (swap_kb or 0) // 1024  # total active swap; ≈ ours when ours is the only one
+    offer     = _swap_offer(rec_mb, ours, active_mb)
+    if offer is None:
         return
-    print(f"  This system has {mem_kb // 1024} MB of RAM ({avail_kb // 1024} MB free) and no swap.")
-    print("  A spike past free RAM makes Linux kill processes and can knock the host offline.")
-    print("  A swapfile absorbs spikes to disk — slower than RAM, but only used when needed.")
+    swap_desc, default_mb = offer
+    print(f"  This system has {mem_kb // 1024} MB of RAM ({avail_kb // 1024} MB free) and {swap_desc}.")
+    print("  A spike past free RAM can knock the host offline; a swapfile absorbs spikes to disk.")
+    print(f"  Recommended swapfile size for the estimated spike: {rec_mb} MB")
     if _root_on_sd_card():
         print("  Note: root storage is an SD/eMMC card — swap writes add flash wear.")
-    mb   = size // (1024 * 1024)
-    resp = input(f"  Swapfile size in MB [Enter = {mb}, n = skip]: ").strip().lower()
+    resp = input(f"  Swapfile size in MB [Enter = {default_mb}, any size, n = skip]: ").strip().lower()
     if resp in ("n", "no"):
         return
+    mb = default_mb
     if resp:
         try:
-            mb   = max(64, int(resp))
-            size = mb * 1024 * 1024
+            mb = max(64, int(resp))
         except ValueError:
             print("  Not a number — skipping swap setup.")
             return
+    if ours and mb == active_mb:
+        return  # keeping the current size — nothing to do
+    size = mb * 1024 * 1024
     try:
-        st = os.statvfs("/")
-        if st.f_bavail * st.f_frsize < size + 1024 ** 3:  # keep 1 GB free after the file
+        st        = os.statvfs("/")
+        reclaimed = os.path.getsize(_SWAP_PATH) if ours else 0
+        if st.f_bavail * st.f_frsize + reclaimed < size + 1024 ** 3:  # keep 1 GB free
             print(f"  Not enough free disk for a {mb} MB swapfile plus 1 GB margin — skipping.")
             return
     except OSError:
         return
+    if ours and active_mb > 0:
+        r = subprocess.run(["swapoff", _SWAP_PATH], capture_output=True)
+        if r.returncode != 0:
+            print("  Could not deactivate the current swapfile (heavily in use?) — try again later.")
+            return
     try:
         with open(_SWAP_PATH, "wb") as f:
             os.chmod(_SWAP_PATH, 0o600)  # before content exists — never world-readable
@@ -1236,10 +1267,11 @@ def _ensure_swap():
             with open("/etc/fstab", "a") as f:
                 f.write(f"{_SWAP_PATH} none swap sw 0 0\n")
         print(f"  Swapfile active ({mb} MB), persistent across reboots.")
-        log.info("Created %d MB swapfile at %s", mb, _SWAP_PATH)
+        log.info("Swapfile active: %d MB at %s", mb, _SWAP_PATH)
     except (OSError, subprocess.CalledProcessError) as e:
-        print(f"  Could not create swapfile: {e}")
+        print(f"  Could not set up swapfile: {e}")
         try:
+            subprocess.run(["swapoff", _SWAP_PATH], capture_output=True)
             os.remove(_SWAP_PATH)
         except OSError:
             pass
@@ -2395,8 +2427,16 @@ def _production_issues():
     if not config.username:
         issues.append("no password protection — run 'config' to set credentials")
     mem_kb, avail_kb, swap_kb = _meminfo()
-    if _swap_recommendation(mem_kb, avail_kb, swap_kb, config.cache_size_mb) is not None:
-        issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'install' to add a swapfile")
+    rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
+    active_mb = (swap_kb or 0) // 1024
+    offer     = _swap_offer(rec // (1024 * 1024) if rec else None,
+                            os.path.exists(_SWAP_PATH), active_mb)
+    if offer is not None:
+        if active_mb:
+            issues.append(f"swapfile {active_mb} MB but {rec // (1024 * 1024)} MB "
+                          "recommended — run 'install' to resize")
+        else:
+            issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'install' to add a swapfile")
     return issues
 
 

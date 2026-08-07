@@ -1921,13 +1921,37 @@ def _cert_days_remaining(cert_path):
 # (2-space indent + a 22-wide label) as the status and config displays.
 _PAD = 22
 
+
+def _banner(title):
+    """Full-width entry banner — the visual weight reserved for the two moments
+    a user is entering a new mode: the shell launching, the setup wizard."""
+    rule = "─" * 51
+    print(f"\n{rule}\n  {title}\n{rule}")
+
+
+def _section_text(title):
+    """The two-line header used by every command list and settings display: an
+    indented title over a shorter, indented rule. Returned rather than printed
+    so it can be spliced into a precomputed help string as well as printed
+    directly via _section()."""
+    return f"\n  {title}\n  " + "─" * 38 + "\n"
+
+
+def _section(title):
+    print(_section_text(title), end="")
+
+
+# Ordered like systemctl's own manual: runtime control (start/stop) before
+# persistence (enable/disable) — Servette wraps systemd, and its audience
+# already has that convention's intuition. Onboarding, then runtime control,
+# then persistence, then observability, then maintenance, then meta.
 _COMMANDS = [
     ("setup",   "guided walkthrough for getting started"),
     ("config",  "view and edit settings"),
-    ("enable",  "enable Servette as a system service"),
-    ("disable", "remove the system service"),
     ("start",   "start the server"),
     ("stop",    "stop the server"),
+    ("enable",  "enable Servette as a system service"),
+    ("disable", "remove the system service"),
     ("status",  "show whether the server is running"),
     ("log [n]", "show the last n log entries"),
     ("update",  "download the latest version of servette.py"),
@@ -1935,15 +1959,19 @@ _COMMANDS = [
     ("help",    "show this message"),
     ("quit",    "exit"),
 ]
-HELP = "\nCommands:\n" + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
+HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
 
+# Ordered: what to serve and how it's reached (dir/port/cert/email — email is
+# the ACME registration address, grouped with the certificate it belongs to),
+# then access control, then traffic shaping, then advanced/rarely-touched
+# security tuning, then meta.
 _CONFIG_COMMANDS = [
     ("dir",      "directory to serve"),
     ("port",     "HTTPS port"),
     ("cert",     "SSL certificate and key"),
+    ("email",    "email address"),
     ("username", "login username"),
     ("password", "login password"),
-    ("email",    "email address"),
     ("limits",   "rate limits"),
     ("cache",    "browser cache policy"),
     ("proxy",    "trusted proxy IP for X-Forwarded-For"),
@@ -1953,8 +1981,7 @@ _CONFIG_COMMANDS = [
     ("show",     "show current settings"),
     ("back",     "return to main shell"),
 ]
-CONFIG_HELP = ("\n  Commands\n  " + "─" * 38 + "\n"
-               + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS))
+CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
 
 
 def _input(prompt, default=""):
@@ -1987,9 +2014,9 @@ def _config_show():
         ("HTTPS port",         config.port),
         ("Certificate",        val(config.cert_file)),
         ("Key",                val(config.key_file)),
+        ("Email",              val(config.email)),
         ("Username",           val(config.username)),
         ("Password",           "(set)" if config.password_hash else "(not set)"),
-        ("Email",              val(config.email)),
         ("Rate limit",         f"{config.rate_limit} req/min"),
         ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
         ("Cache policy",       cache_display),
@@ -2001,9 +2028,7 @@ def _config_show():
         ("Permissions-Policy", config.permissions_policy or "(disabled)"),
     ]
 
-    print()
-    print("  Current Settings")
-    print("  " + "─" * 38)
+    _section("Current Settings")
     for label, value in rows:
         print(f"  {label:<{_PAD}} {value}")
     print()
@@ -2654,22 +2679,20 @@ def cmd_setup():
         except Exception:
             public_ip = "your.server.ip"
 
-    print("\n───────────────────────────────────────────────────")
-    print("  Getting Started")
-    print("───────────────────────────────────────────────────")
+    _banner("Getting Started")
 
     print()
-    print("  Step 1 — Password protection (optional)")
+    print("  Step 1 — SSL certificate")
+    print(f"  Your public IP is {public_ip}. Point a domain here for a trusted certificate.")
+    print("  Leave blank to use a self-signed certificate (browsers will warn visitors).\n")
+    _config_cert()
+
+    print()
+    print("  Step 2 — Password protection (optional)")
     print("  Leave username blank to disable. Press Enter to keep current value.")
     _config_username()
     if config.username:
         _config_password()
-
-    print()
-    print("  Step 2 — SSL certificate")
-    print(f"  Your public IP is {public_ip}. Point a domain here for a trusted certificate.")
-    print("  Leave blank to use a self-signed certificate (browsers will warn visitors).\n")
-    _config_cert()
 
     print()
     if _prompt("Ready to start?"):
@@ -2682,9 +2705,7 @@ def cmd_setup():
 # ── Main shell loop ───────────────────────────────────────────────────────────
 
 def shell():
-    print("\n───────────────────────────────────────────────────")
-    print("  Servette — The Simple Secure Server")
-    print("───────────────────────────────────────────────────")
+    _banner("Servette — The Simple Secure Server")
     print(HELP)
 
     while True:

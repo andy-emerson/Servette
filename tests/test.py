@@ -1127,8 +1127,11 @@ def run_install_tests(s, tmpdir):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             s.cmd_status()
+        # Exact-match on the URL row's value — a substring check would also pass on
+        # e.g. evil-example.com, and reads to scanners as bypassable sanitization.
+        url_row = next((line for line in buf.getvalue().splitlines() if line.strip().startswith("URL")), "")
         check("Status shows the domain from a relative cert path",
-              "example.com" in buf.getvalue())
+              url_row.split()[-1] == "https://example.com")
     finally:
         s.config.cert_file = saved_cert_file
         os.chdir(saved_cwd)

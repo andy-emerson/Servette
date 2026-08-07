@@ -698,10 +698,16 @@ class _RedirectHandler(http.server.BaseHTTPRequestHandler):
         path   = self.path.split("?", 1)[0]
         prefix = "/.well-known/acme-challenge/"
         if path.startswith(prefix):
-            token = os.path.basename(path[len(prefix):])   # strip any path components
-            if token and token not in (".", ".."):
+            # ACME HTTP-01 tokens are base64url (RFC 8555); anything outside that
+            # charset is not a challenge and gets no filesystem lookup at all. The
+            # realpath-prefix check is belt over those braces, in the guard shape
+            # static analyzers verify.
+            token      = path[len(prefix):]
+            chall_dir  = os.path.realpath(os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge"))
+            chall_path = os.path.realpath(os.path.join(chall_dir, token))
+            if re.fullmatch(r"[A-Za-z0-9_-]+", token) and chall_path.startswith(chall_dir + os.sep):
                 try:
-                    with open(os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge", token), "rb") as f:
+                    with open(chall_path, "rb") as f:
                         data = f.read()
                     self.send_response_only(200)
                     self.send_header("Content-Type", "text/plain")

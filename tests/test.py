@@ -382,11 +382,30 @@ def run_dispatch_tests(s):
         check("Serves challenge content", body == b"keyauth-value")
         status, _, _ = redirect_request("GET", "/.well-known/acme-challenge/missing")
         check("Unknown token → 404",      status == 404)
+
+        # Tokens are base64url per RFC 8555 — anything outside that charset is
+        # rejected before any filesystem lookup happens.
+        for bad_charset in ["tok.en", "tok+en", "tok%2Fen", "..", "caf%C3%A9"]:
+            status, _, _ = redirect_request("GET", f"/.well-known/acme-challenge/{bad_charset}")
+            check(f"Non-base64url token {bad_charset!r} → 404", status == 404)
         for bad in ["/.well-known/acme-challenge/",
                     "/.well-known/acme-challenge/a/b",
                     "/.well-known/acme-challenge/..%2f..%2fpasswd"]:
             st, _, _ = redirect_request("GET", bad)
             check(f"Rejected token path {bad!r}", st == 404)
+
+        # A symlinked webroot must still serve valid tokens: the containment check
+        # realpath's both sides, so the token path and the base agree after the
+        # symlink resolves. (Guards against comparing a resolved path to an
+        # unresolved base, which would 404 every token on such a host.)
+        link_root = tempfile.mkdtemp()
+        link_dir  = os.path.join(link_root, "webroot-link")
+        os.symlink(acme_dir, link_dir)
+        s.ACME_WEBROOT = link_dir
+        status, _, body = redirect_request("GET", "/.well-known/acme-challenge/token123")
+        check("Valid token via symlinked webroot → 200", status == 200 and body == b"keyauth-value")
+        s.ACME_WEBROOT = acme_dir
+        shutil.rmtree(link_root, ignore_errors=True)
     finally:
         s.ACME_WEBROOT = orig_webroot
         shutil.rmtree(acme_dir, ignore_errors=True)

@@ -703,7 +703,7 @@ class _RedirectHandler(http.server.BaseHTTPRequestHandler):
             # realpath-prefix check is belt over those braces, in the guard shape
             # static analyzers verify.
             token      = path[len(prefix):]
-            chall_dir  = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
+            chall_dir  = os.path.realpath(os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge"))
             chall_path = os.path.realpath(os.path.join(chall_dir, token))
             if re.fullmatch(r"[A-Za-z0-9_-]+", token) and chall_path.startswith(chall_dir + os.sep):
                 try:

@@ -974,8 +974,14 @@ def run_install_tests(s, tmpdir):
     # deficit over RAM = 574 MB; recommendation = 2× deficit.
     rec = s._swap_recommendation(414 * MB, 176 * MB, 0, 50)
     check("Incident-class host gets a recommendation", rec is not None)
-    check("Recommendation is twice the demand deficit",
-          rec == 2 * ((414 - 176 + 50 + 700) - 414) * MB * 1024)
+    check("Recommendation is twice the demand deficit, rounded to 2 significant digits",
+          rec == 1200 * 1024 ** 2)  # 2 × 574 MB deficit = 1148 → 1200
+
+    check("Round-up: 1148 → 1200",  s._round_up_2sig(1148) == 1200)
+    check("Round-up: 575 → 580",    s._round_up_2sig(575) == 580)
+    check("Round-up: 2049 → 2100",  s._round_up_2sig(2049) == 2100)
+    check("Round-up: 99 stays 99",  s._round_up_2sig(99) == 99)
+    check("Round-up: exact 1200 stays 1200", s._round_up_2sig(1200) == 1200)
     check("Existing swap → no recommendation",
           s._swap_recommendation(414 * MB, 176 * MB, 1024, 50) is None)
     check("Idle big host → no recommendation (demand fits)",

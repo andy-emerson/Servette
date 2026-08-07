@@ -1150,8 +1150,17 @@ def _meminfo():
 # nobody plans for, sized to the largest one observed in production (fwupd
 # ballooning to ~656 MB virtual on a 414 MB host, hourly, for weeks).
 _SPIKE_ALLOWANCE_KB = 700 * 1024
-_SWAP_MIN           = 512 * 1024 ** 2
-_SWAP_MAX           = 2 * 1024 ** 3
+_SWAP_MIN_MB        = 512
+_SWAP_MAX_MB        = 2048
+
+
+def _round_up_2sig(n):
+    """Round a positive integer up to two significant digits (1148 → 1200).
+
+    The swap default is an estimate; a round number says so, where an
+    exact-looking one would overstate its precision."""
+    mag = 10 ** max(len(str(int(n))) - 2, 0)
+    return -(-int(n) // mag) * mag
 
 
 def _swap_recommendation(mem_kb, avail_kb, swap_kb, cache_mb):
@@ -1171,7 +1180,8 @@ def _swap_recommendation(mem_kb, avail_kb, swap_kb, cache_mb):
     deficit_kb = demand_kb - mem_kb
     if deficit_kb <= 0:
         return None
-    return min(max(2 * deficit_kb * 1024, _SWAP_MIN), _SWAP_MAX)
+    size_mb = _round_up_2sig(-(-2 * deficit_kb // 1024))
+    return min(max(size_mb, _SWAP_MIN_MB), _SWAP_MAX_MB) * 1024 ** 2
 
 
 def _root_on_sd_card():
@@ -1191,8 +1201,9 @@ def _ensure_swap():
     size = _swap_recommendation(mem_kb, avail_kb, swap_kb, config.cache_size_mb)
     if size is None or os.path.exists(_SWAP_PATH):
         return
-    print(f"  This system has {mem_kb // 1024} MB RAM ({avail_kb // 1024} MB available) and no")
-    print("  swap — a memory spike can invoke the OOM killer and destabilize the host.")
+    print(f"  This system has {mem_kb // 1024} MB of RAM ({avail_kb // 1024} MB free) and no swap.")
+    print("  A spike past free RAM makes Linux kill processes and can knock the host offline.")
+    print("  A swapfile absorbs spikes to disk — slower than RAM, but only used when needed.")
     if _root_on_sd_card():
         print("  Note: root storage is an SD/eMMC card — swap writes add flash wear.")
     mb   = size // (1024 * 1024)

@@ -1303,7 +1303,14 @@ def _ensure_swap():
             pass
 
 
-def cmd_install():
+def _write_unit_files():
+    """Write (or refresh) the systemd unit, the network watchdog unit pair, and
+    the file ownership they depend on. Returns True if a service file already
+    existed (a refresh) or False if this is a fresh enable. Contains no prompts,
+    so it is safe to call silently — shared by cmd_enable (interactive) and
+    the post-update path (silent), so an update that changes what the unit
+    should contain (this release added the watchdog timer) reaches an
+    already-enabled host without a separate manual 'enable'."""
     updating      = _service_file_exists()
     servette_path = os.path.abspath(__file__)
     python_path   = _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(
@@ -1312,56 +1319,60 @@ def cmd_install():
 
     service = _systemd_unit(python_path, servette_path)
 
+    # Create system user if needed
+    if not _servette_user_exists():
+        subprocess.run(
+            ["useradd", "--system", "--no-create-home", "--shell", "/sbin/nologin", "servette"],
+            check=True
+        )
+        print("Created system user 'servette'.")
+
+    with open(SERVICE_PATH, "w") as f:
+        f.write(service)
+
+    netwatch_service, netwatch_timer = _netwatch_units()
+    with open(NETWATCH_PATH + ".service", "w") as f:
+        f.write(netwatch_service)
+    with open(NETWATCH_PATH + ".timer", "w") as f:
+        f.write(netwatch_timer)
+
+    subprocess.run(["systemctl", "daemon-reload"],      check=True)
+    subprocess.run(["systemctl", "enable", "servette"], check=True, capture_output=True)
+    subprocess.run(["systemctl", "enable", "--now", "servette-netwatch.timer"],
+                   check=True, capture_output=True)
+
+    # Chown files the service process needs to read
+    _chown_servette(config.CONFIG_FILE)
+    if config.cert_file:
+        _chown_servette(_resolve(config.cert_file))
+    if config.key_file:
+        _chown_servette(_resolve(config.key_file))
+    _chown_servette(_resolve(config.serve_dir))
+    _chown_servette(os.path.join(BASE_DIR, "certs"))
+    _chown_servette(os.path.join(BASE_DIR, ".acme-account.pem"))
+    # Create the ACME webroot now so it exists when systemd applies ReadWritePaths
+    # — a missing ReadWritePaths target makes the unit fail to start.
+    os.makedirs(ACME_WEBROOT, exist_ok=True)
+    _chown_servette(ACME_WEBROOT)
+
+    # Warn if serve_dir isn't world-readable
+    if config.serve_dir:
+        serve_path = _resolve(config.serve_dir)
+        if os.path.isdir(serve_path):
+            mode = os.stat(serve_path).st_mode
+            if not (mode & 0o005 == 0o005):  # world read+execute on directory
+                print(f"  Warning: '{serve_path}' may not be readable by the servette user.")
+                print(f"  Fix with: chmod -R a+rX {serve_path}")
+
+    return updating
+
+
+def cmd_enable():
     try:
-        # Create system user if needed
-        if not _servette_user_exists():
-            subprocess.run(
-                ["useradd", "--system", "--no-create-home", "--shell", "/sbin/nologin", "servette"],
-                check=True
-            )
-            print("Created system user 'servette'.")
-
-        with open(SERVICE_PATH, "w") as f:
-            f.write(service)
-
-        netwatch_service, netwatch_timer = _netwatch_units()
-        with open(NETWATCH_PATH + ".service", "w") as f:
-            f.write(netwatch_service)
-        with open(NETWATCH_PATH + ".timer", "w") as f:
-            f.write(netwatch_timer)
-
-        subprocess.run(["systemctl", "daemon-reload"],      check=True)
-        subprocess.run(["systemctl", "enable", "servette"], check=True, capture_output=True)
-        subprocess.run(["systemctl", "enable", "--now", "servette-netwatch.timer"],
-                       check=True, capture_output=True)
-
-        # Chown files the service process needs to read
-        _chown_servette(config.CONFIG_FILE)
-        if config.cert_file:
-            _chown_servette(_resolve(config.cert_file))
-        if config.key_file:
-            _chown_servette(_resolve(config.key_file))
-        _chown_servette(_resolve(config.serve_dir))
-        _chown_servette(os.path.join(BASE_DIR, "certs"))
-        _chown_servette(os.path.join(BASE_DIR, ".acme-account.pem"))
-        # Create the ACME webroot now so it exists when systemd applies ReadWritePaths
-        # — a missing ReadWritePaths target makes the unit fail to start.
-        os.makedirs(ACME_WEBROOT, exist_ok=True)
-        _chown_servette(ACME_WEBROOT)
-
-        # Warn if serve_dir isn't world-readable
-        if config.serve_dir:
-            serve_path = _resolve(config.serve_dir)
-            if os.path.isdir(serve_path):
-                mode = os.stat(serve_path).st_mode
-                if not (mode & 0o005 == 0o005):  # world read+execute on directory
-                    print(f"  Warning: '{serve_path}' may not be readable by the servette user.")
-                    print(f"  Fix with: chmod -R a+rX {serve_path}")
+        updating = _write_unit_files()
 
         if updating:
             print("Service file updated.")
-            if _service_is_active():
-                print("Run 'stop' then 'start' to apply the changes.")
         else:
             print("Servette enabled as a system service.")
             print("It will start automatically on boot and survive SSH disconnects.")
@@ -1370,7 +1381,9 @@ def cmd_install():
 
         _ensure_swap()
 
-        if _server_running():
+        if updating and _service_is_active():
+            _reload_server()   # apply the refreshed unit — no manual stop/start needed
+        elif _server_running():
             if _prompt("Server is running in session only. Restart as a service now?"):
                 stop_server()
                 subprocess.run(["systemctl", "start", "servette"], check=True, capture_output=True)
@@ -1386,7 +1399,7 @@ def cmd_install():
         print(f"Error during enable: {e}")
 
 
-def cmd_uninstall():
+def cmd_disable():
     if not _service_file_exists():
         cmd_status()
         return
@@ -2245,7 +2258,7 @@ def cmd_start():
         if _server_running():
             print("Running in session only — server will stop when you quit.")
             if _prompt("Install as a permanent service?"):
-                cmd_install()
+                cmd_enable()
 
 
 def cmd_stop():
@@ -2410,7 +2423,33 @@ def cmd_update():
 
     print(f"  Updated {__version__} → {new_version}.")
     print(f"  Previous version saved to {bak_path}.")
-    _offer_restart(new_version)
+
+    if _server_running() and not _service_is_active():
+        # A session-mode server runs in this very process; re-executing would
+        # kill it without warning, so fall back to telling the operator how to
+        # apply the update themselves.
+        print("  This shell is still running the old version — exit and rerun Servette to apply.")
+        return
+
+    print("  Reloading...")
+    os.execv(_VENV_PY, [_VENV_PY, servette_path, "--post-update"])
+
+
+def _apply_post_update():
+    """Runs once, immediately after 'update' re-execs into the freshly swapped
+    file — the first thing this fresh process does. If the service was already
+    enabled, silently refresh its unit (and the network watchdog's) to this
+    version's shape and restart it: an update should never leave an enabled
+    host on a stale unit, and should never need a separate manual 'enable' to
+    pick up host-provisioning changes a release adds."""
+    print(f"  Reloaded as v{__version__}.")
+    if _service_file_exists():
+        try:
+            _write_unit_files()
+            if _service_is_active():
+                _reload_server()
+        except (PermissionError, FileNotFoundError, subprocess.CalledProcessError) as e:
+            print(f"  Could not refresh the service unit: {e}")
 
 
 def cmd_restore():
@@ -2634,7 +2673,7 @@ def cmd_setup():
 
     print()
     if _prompt("Ready to start?"):
-        cmd_install()
+        cmd_enable()
         cmd_start()
     else:
         print("  Run 'start' when you're ready.")
@@ -2667,9 +2706,9 @@ def shell():
         elif cmd == "config":
             cmd_config()
         elif cmd == "enable":
-            cmd_install()
+            cmd_enable()
         elif cmd == "disable":
-            cmd_uninstall()
+            cmd_disable()
         elif cmd == "start":
             cmd_start()
         elif cmd == "stop":
@@ -2711,5 +2750,8 @@ if __name__ == "__main__":
         else:
             log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
             sys.exit(1)
+    elif "--post-update" in sys.argv:
+        _apply_post_update()
+        shell()
     else:
         shell()

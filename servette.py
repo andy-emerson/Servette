@@ -874,7 +874,10 @@ ACME_RETRIES  = 3
 
 
 def _server_running():
-    return _https_server is not None
+    """True when the HTTPS server is actually serving — the thread must be alive,
+    not merely the server object constructed, so a crashed serve loop reads as
+    stopped instead of running."""
+    return _https_thread is not None and _https_thread.is_alive()
 
 
 def _cert_watchdog_tick():
@@ -1001,7 +1004,9 @@ def start_server():
 def stop_server():
     global _server_start_time, _sweep_thread, _https_server, _https_thread, _http_server
 
-    if not _server_running():
+    # Keyed on the server objects, not liveness: a crashed serve loop still needs
+    # its sockets closed, which _server_running() (thread liveness) would skip.
+    if _https_server is None and _http_server is None:
         return
 
     for srv in (_https_server, _http_server):

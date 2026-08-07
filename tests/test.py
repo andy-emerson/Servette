@@ -1066,6 +1066,21 @@ def run_install_tests(s, tmpdir):
     finally:
         s._https_thread = saved_thread
 
+    section("_server_running reflects thread liveness")
+
+    # A crashed serve loop must read as stopped — the old flag check reported
+    # Running as long as the server object existed.
+    saved_live_thread = s._https_thread
+    try:
+        dead_t = threading.Thread(target=lambda: None)
+        dead_t.start()
+        dead_t.join()
+        s._https_thread = dead_t
+        check("Dead serve thread reads as not running", not s._server_running())
+    finally:
+        s._https_thread = saved_live_thread
+    check("Live serve thread reads as running", s._server_running())
+
     section("Status resolves a relative cert path")
 
     # cmd_status must anchor a relative cert_file to BASE_DIR like every other

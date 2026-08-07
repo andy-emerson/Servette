@@ -12,7 +12,7 @@ Architecture:
     Shell               — the interactive terminal interface
 """
 
-__version__ = "0.26.178"
+__version__ = "0.26.219"
 
 import base64
 import collections

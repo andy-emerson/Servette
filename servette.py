@@ -1248,7 +1248,8 @@ def _ensure_swap():
     print(f"  Recommended swapfile size for the estimated spike: {rec_mb} MB")
     if _root_on_sd_card():
         print("  Note: root storage is an SD/eMMC card — swap writes add flash wear.")
-    resp = input(f"  Swapfile size in MB [Enter = {rec_mb}, any size, n = {skip_hint}]: ").strip().lower()
+    resp = _input(f"  Swapfile size in MB [Enter = {rec_mb}, any size, n = {skip_hint}]: ",
+                  default="n").strip().lower()
     if resp in ("n", "no"):
         return
     mb = rec_mb
@@ -1940,8 +1941,19 @@ CONFIG_HELP = ("\n  Commands\n  " + "─" * 38 + "\n"
                + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS))
 
 
+def _input(prompt, default=""):
+    """input() that answers `default` on Ctrl-D / Ctrl-C instead of letting the
+    exception traceback out of a command and kill the shell. The default lets
+    prompts that would modify the host fail safe (e.g. 'n')."""
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+
+
 def _prompt(question):
-    return input(f"  {question} [y/n]: ").strip().lower() == "y"
+    return _input(f"  {question} [y/n]: ").strip().lower() == "y"
 
 
 # ── Config sub-shell ──────────────────────────────────────────────────────────
@@ -1987,7 +1999,7 @@ def _config_dir():
         print()
         for d in dirs:
             print(f"    {d}{' ←' if d == config.serve_dir else ''}")
-    new_value = input(f"\n  serve_dir [{config.serve_dir}]: ").strip()
+    new_value = _input(f"\n  serve_dir [{config.serve_dir}]: ").strip()
     if not new_value:
         print("  → unchanged")
         return
@@ -2004,7 +2016,7 @@ def _config_set(attr, label, cast=str, validate=None, error="invalid value", hin
     current = getattr(config, attr)
     if hint:
         print(f"  {hint}")
-    new_value = input(f"  {label} [{current}]: ").strip()
+    new_value = _input(f"  {label} [{current}]: ").strip()
     if not new_value or new_value == str(current):
         print("  → unchanged")
         return
@@ -2031,7 +2043,7 @@ def _config_cert():
             print(f"  Current: {config.cert_file}")
     print()
 
-    domain = input("  Domain name (leave blank for self-signed): ").strip()
+    domain = _input("  Domain name (leave blank for self-signed): ").strip()
 
     if domain:
         _obtain_trusted_cert(domain)
@@ -2051,7 +2063,7 @@ def _config_cert():
 
 def _config_username():
     current   = config.username
-    new_value = input(f"  username [{current}]: ").strip()
+    new_value = _input(f"  username [{current}]: ").strip()
     if new_value == "" and current != "":
         config.username      = ""
         config.password_hash = ""
@@ -2070,11 +2082,15 @@ def _config_password():
     if not config.username:
         print("  Set a username first.")
         return
-    pwd = getpass.getpass("  password: ")
-    if not pwd:
-        print("  → unchanged")
+    try:
+        pwd = getpass.getpass("  password: ")
+        if not pwd:
+            print("  → unchanged")
+            return
+        confirm = getpass.getpass("  confirm: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\n  → unchanged")
         return
-    confirm = getpass.getpass("  confirm: ")
     if pwd != confirm:
         print("  → passwords do not match, unchanged")
         return
@@ -2094,7 +2110,7 @@ def _config_cache():
     print("    no-store  — never cache, always download fresh")
     print("    no-cache  — cache but always revalidate (ETag makes this a quick check)")
     print("    max-age   — trust cached copy for N seconds without checking\n")
-    choice = input("  cache_policy [no-store / no-cache / max-age]: ").strip().lower()
+    choice = _input("  cache_policy [no-store / no-cache / max-age]: ").strip().lower()
     if not choice:
         print("  → unchanged")
         return
@@ -2103,7 +2119,7 @@ def _config_cache():
         return
     config.cache_policy = choice
     if choice == "max-age":
-        age_str = input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
+        age_str = _input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
         if age_str:
             try:
                 config.cache_max_age = int(age_str)
@@ -2120,7 +2136,7 @@ def _config_trusted_proxy():
     print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
     print("  Set to the IP of your reverse proxy to trust its X-Forwarded-For header.")
     print("  Leave blank to ignore XFF entirely (correct when Servette faces the internet directly).\n")
-    new_value = input("  trusted_proxy IP: ").strip()
+    new_value = _input("  trusted_proxy IP: ").strip()
     if new_value == current:
         print("  → unchanged")
         return
@@ -2133,7 +2149,7 @@ def _config_tls():
     print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
     print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
     print("    1.3 — TLS 1.3 only; drops support for older clients\n")
-    ver = input("  tls_min_version [1.2 / 1.3]: ").strip()
+    ver = _input("  tls_min_version [1.2 / 1.3]: ").strip()
     if ver and ver not in ("1.2", "1.3"):
         print("  → invalid, unchanged")
     elif ver and ver != config.tls_min_version:
@@ -2146,7 +2162,7 @@ def _config_tls():
     print(f"\n  Current cipher suites: {config.ciphers or '(system default)'}")
     print("  OpenSSL cipher string, e.g.: ECDHE+AESGCM:DHE+AESGCM")
     print("  Leave blank to use the system default (recommended unless you have specific requirements).\n")
-    ciphers = input("  ciphers: ").strip()
+    ciphers = _input("  ciphers: ").strip()
     if ciphers == config.ciphers:
         print("  → unchanged")
         return

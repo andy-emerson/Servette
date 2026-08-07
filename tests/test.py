@@ -1066,6 +1066,20 @@ def run_install_tests(s, tmpdir):
     finally:
         s._https_thread = saved_thread
 
+    section("Prompts survive a closed stdin")
+
+    # Ctrl-D mid-prompt must answer the default, never traceback out of a command.
+    import builtins
+    saved_builtin_input = builtins.input
+    try:
+        def _eof(prompt=""):
+            raise EOFError
+        builtins.input = _eof
+        check("_input returns its default on EOF", s._input("size? ", default="n") == "n")
+        check("_prompt answers no on EOF",         s._prompt("proceed?") is False)
+    finally:
+        builtins.input = saved_builtin_input
+
     section("_server_running reflects thread liveness")
 
     # A crashed serve loop must read as stopped — the old flag check reported

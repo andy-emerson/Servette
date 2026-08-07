@@ -1102,18 +1102,19 @@ WantedBy=multi-user.target
 def _netwatch_units():
     """The (service, timer) unit pair for the network watchdog.
 
-    Every 5 minutes: if the host has no route out, ask systemd-networkd to start
-    over. Recovers the observed failure where a netlink timeout leaves the link
-    permanently 'Failed' — networkd never retries on its own, so the host stays
-    dark until reboot. try-restart is a no-op where networkd isn't running
-    (e.g. NetworkManager hosts), and the whole check is a no-op while the route
-    is healthy."""
+    Every 5 minutes: if the host has no route out, ask the network manager to
+    start over. Recovers the observed failure where a netlink timeout leaves the
+    link permanently 'Failed' — networkd never retries on its own, so the host
+    stays dark until reboot. try-restart only touches a unit that is actually
+    running, so of the three known managers (systemd-networkd on Ubuntu,
+    NetworkManager on Raspberry Pi OS, dhcpcd on older Pi OS) exactly one acts;
+    the whole check is a no-op while the route is healthy."""
     service = """[Unit]
 Description=Servette network watchdog — recover a dropped default route
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'ip route get 1.1.1.1 >/dev/null 2>&1 || systemctl try-restart systemd-networkd.service'
+ExecStart=/bin/sh -c 'ip route get 1.1.1.1 >/dev/null 2>&1 && exit 0; for u in systemd-networkd NetworkManager dhcpcd; do systemctl try-restart "$u.service" 2>/dev/null || true; done'
 """
     timer = """[Unit]
 Description=Run the Servette network watchdog every 5 minutes
@@ -2347,10 +2348,7 @@ def _production_issues():
         issues.append("no password protection — run 'config' to set credentials")
     mem_kb, swap_kb = _meminfo()
     if _swap_recommendation(mem_kb, swap_kb) is not None:
-        issues.append(
-            f"{mem_kb // 1024} MB RAM with no swap — one memory spike away from "
-            "the OOM killer; 'install' can create a swapfile"
-        )
+        issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'install' to add a swapfile")
     return issues
 
 

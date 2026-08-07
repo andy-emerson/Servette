@@ -943,8 +943,10 @@ def run_install_tests(s, tmpdir):
 
     watch_service, watch_timer = s._netwatch_units()
     check("Service checks the default route",        "ip route get" in watch_service)
-    check("Recovery uses try-restart (no-op where networkd absent)",
-          "try-restart systemd-networkd" in watch_service)
+    check("Recovery uses try-restart (no-op for managers not running)",
+          "try-restart" in watch_service)
+    check("Covers networkd, NetworkManager, and dhcpcd",
+          all(m in watch_service for m in ("systemd-networkd", "NetworkManager", "dhcpcd")))
     check("Service is oneshot",                      "Type=oneshot" in watch_service)
     check("Timer fires every 5 minutes",             "OnUnitActiveSec=5min" in watch_timer)
     check("Timer starts checking after boot",        "OnBootSec=5min" in watch_timer)

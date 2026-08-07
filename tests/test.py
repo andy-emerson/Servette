@@ -965,20 +965,35 @@ def run_install_tests(s, tmpdir):
             check(f"systemd-analyze verify {name}: no unknown directives",
                   "unknown lvalue" not in text and "unknown key name" not in text)
 
-    section("Swap recommendation")
+    section("Swap recommendation (supply and demand)")
 
-    GB_KB = 1024 * 1024  # 1 GB expressed in kB, matching /proc/meminfo units
-    check("Small host, no swap → 2×RAM",
-          s._swap_recommendation(424 * 1024, 0) == 2 * 424 * 1024 * 1024)
-    check("Existing swap → no recommendation",  s._swap_recommendation(424 * 1024, 1024) is None)
-    check("≥2 GB RAM → no recommendation",      s._swap_recommendation(2 * GB_KB, 0) is None)
-    check("Recommendation capped at 2 GB",      s._swap_recommendation(int(1.5 * GB_KB), 0) == 2 * 1024 ** 3)
-    check("Unreadable meminfo → no recommendation", s._swap_recommendation(None, None) is None)
+    MB    = 1024         # 1 MB expressed in kB, matching /proc/meminfo units
+    GB_KB = 1024 * 1024  # 1 GB in kB
+    # The incident box: 414 MB RAM, ~176 MB available, no swap, 50 MB cache.
+    # Demand = resident (238) + cache (50) + spike allowance (700) = 988 MB;
+    # deficit over RAM = 574 MB; recommendation = 2× deficit.
+    rec = s._swap_recommendation(414 * MB, 176 * MB, 0, 50)
+    check("Incident-class host gets a recommendation", rec is not None)
+    check("Recommendation is twice the demand deficit",
+          rec == 2 * ((414 - 176 + 50 + 700) - 414) * MB * 1024)
+    check("Existing swap → no recommendation",
+          s._swap_recommendation(414 * MB, 176 * MB, 1024, 50) is None)
+    check("Idle big host → no recommendation (demand fits)",
+          s._swap_recommendation(4 * GB_KB, int(3.5 * GB_KB), 0, 50) is None)
+    check("Loaded big host → still recommended (threshold is demand, not a RAM ceiling)",
+          s._swap_recommendation(2 * GB_KB, 100 * MB, 0, 50) is not None)
+    check("Small deficit floors at 512 MB",
+          s._swap_recommendation(1024 * MB, 600 * MB, 0, 50) == 512 * 1024 ** 2)
+    check("Recommendation capped at 2 GB",
+          s._swap_recommendation(414 * MB, 50 * MB, 0, 1024) == 2 * 1024 ** 3)
+    check("Unreadable meminfo → no recommendation",
+          s._swap_recommendation(None, None, None, 50) is None)
 
-    mem_kb, swap_kb = s._meminfo()
-    check("_meminfo returns a consistent pair",
-          (mem_kb is None and swap_kb is None)
-          or (isinstance(mem_kb, int) and isinstance(swap_kb, int) and mem_kb > 0))
+    mem_kb, avail_kb, swap_kb = s._meminfo()
+    check("_meminfo returns a consistent triple",
+          (mem_kb is None and avail_kb is None and swap_kb is None)
+          or (isinstance(mem_kb, int) and isinstance(avail_kb, int)
+              and isinstance(swap_kb, int) and mem_kb > 0))
     check("_root_on_sd_card returns bool (no crash on any host)",
           isinstance(s._root_on_sd_card(), bool))
 
@@ -986,10 +1001,10 @@ def run_install_tests(s, tmpdir):
 
     saved_meminfo = s._meminfo
     try:
-        s._meminfo = lambda: (414 * 1024, 0)
-        check("No-swap small host is flagged",
+        s._meminfo = lambda: (414 * 1024, 176 * 1024, 0)
+        check("No-swap host under demand pressure is flagged",
               any("no swap" in issue for issue in s._production_issues()))
-        s._meminfo = lambda: (414 * 1024, GB_KB)
+        s._meminfo = lambda: (414 * 1024, 176 * 1024, GB_KB)
         check("Host with swap is not flagged",
               not any("no swap" in issue for issue in s._production_issues()))
     finally:

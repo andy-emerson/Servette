@@ -1133,30 +1133,45 @@ _SWAP_PATH = "/swapfile"
 
 
 def _meminfo():
-    """Return (mem_total_kb, swap_total_kb) from /proc/meminfo, or (None, None)
-    where it can't be read (non-Linux)."""
+    """Return (mem_total_kb, mem_available_kb, swap_total_kb) from /proc/meminfo,
+    or (None, None, None) where it can't be read (non-Linux)."""
     try:
         fields = {}
         with open("/proc/meminfo") as f:
             for line in f:
                 key, _, rest = line.partition(":")
                 fields[key.strip()] = int(rest.split()[0])  # values are in kB
-        return fields["MemTotal"], fields["SwapTotal"]
+        return fields["MemTotal"], fields["MemAvailable"], fields["SwapTotal"]
     except (OSError, KeyError, ValueError, IndexError):
-        return None, None
+        return None, None, None
 
 
-def _swap_recommendation(mem_kb, swap_kb):
-    """Swapfile size in bytes for a host that needs one, else None.
+# The unpredictable part of demand: an allowance for the single-process spike
+# nobody plans for, sized to the largest one observed in production (fwupd
+# ballooning to ~656 MB virtual on a 414 MB host, hourly, for weeks).
+_SPIKE_ALLOWANCE_KB = 700 * 1024
+_SWAP_MIN           = 512 * 1024 ** 2
+_SWAP_MAX           = 2 * 1024 ** 3
 
-    A small-RAM host with no swap is one memory spike away from the OOM killer —
-    observed in production destabilizing systemd-networkd, not just the spiking
-    process. Sized by the standard small-host rule: twice RAM, capped at 2 GB."""
-    if mem_kb is None or swap_kb is None:
+
+def _swap_recommendation(mem_kb, avail_kb, swap_kb, cache_mb):
+    """Swapfile size in bytes for a host whose demand can outrun its RAM, else None.
+
+    Supply is measured (MemTotal). Demand is what's resident now (MemTotal −
+    MemAvailable), plus Servette's configured cache, plus the spike allowance.
+    When demand exceeds supply, the deficit is doubled for margin, floored at
+    512 MB and capped at 2 GB. A host that already has swap, or whose demand
+    fits in RAM, gets no recommendation — the threshold emerges from the
+    measurement rather than a hardcoded RAM ceiling."""
+    if mem_kb is None or avail_kb is None or swap_kb is None:
         return None
-    if swap_kb > 0 or mem_kb >= 2 * 1024 * 1024:
+    if swap_kb > 0:
         return None
-    return min(2 * mem_kb * 1024, 2 * 1024 * 1024 * 1024)
+    demand_kb  = (mem_kb - avail_kb) + cache_mb * 1024 + _SPIKE_ALLOWANCE_KB
+    deficit_kb = demand_kb - mem_kb
+    if deficit_kb <= 0:
+        return None
+    return min(max(2 * deficit_kb * 1024, _SWAP_MIN), _SWAP_MAX)
 
 
 def _root_on_sd_card():
@@ -1171,23 +1186,32 @@ def _root_on_sd_card():
 
 
 def _ensure_swap():
-    """Offer to create a persistent swapfile on a small-RAM host that has none."""
-    mem_kb, swap_kb = _meminfo()
-    size = _swap_recommendation(mem_kb, swap_kb)
+    """Offer a persistent swapfile where demand can outrun RAM; operator may resize."""
+    mem_kb, avail_kb, swap_kb = _meminfo()
+    size = _swap_recommendation(mem_kb, avail_kb, swap_kb, config.cache_size_mb)
     if size is None or os.path.exists(_SWAP_PATH):
         return
+    print(f"  This system has {mem_kb // 1024} MB RAM ({avail_kb // 1024} MB available) and no")
+    print("  swap — a memory spike can invoke the OOM killer and destabilize the host.")
+    if _root_on_sd_card():
+        print("  Note: root storage is an SD/eMMC card — swap writes add flash wear.")
+    mb   = size // (1024 * 1024)
+    resp = input(f"  Swapfile size in MB [Enter = {mb}, n = skip]: ").strip().lower()
+    if resp in ("n", "no"):
+        return
+    if resp:
+        try:
+            mb   = max(64, int(resp))
+            size = mb * 1024 * 1024
+        except ValueError:
+            print("  Not a number — skipping swap setup.")
+            return
     try:
         st = os.statvfs("/")
         if st.f_bavail * st.f_frsize < size + 1024 ** 3:  # keep 1 GB free after the file
+            print(f"  Not enough free disk for a {mb} MB swapfile plus 1 GB margin — skipping.")
             return
     except OSError:
-        return
-    mb = size // (1024 * 1024)
-    print(f"  This system has {mem_kb // 1024} MB RAM and no swap — one memory spike")
-    print("  can invoke the OOM killer and destabilize the host.")
-    if _root_on_sd_card():
-        print("  Note: root storage is an SD/eMMC card — swap writes add flash wear.")
-    if not _prompt(f"Create a {mb} MB swapfile at {_SWAP_PATH} now?"):
         return
     try:
         with open(_SWAP_PATH, "wb") as f:
@@ -2359,8 +2383,8 @@ def _production_issues():
         issues.append("self-signed certificate — run 'config cert' to add a domain")
     if not config.username:
         issues.append("no password protection — run 'config' to set credentials")
-    mem_kb, swap_kb = _meminfo()
-    if _swap_recommendation(mem_kb, swap_kb) is not None:
+    mem_kb, avail_kb, swap_kb = _meminfo()
+    if _swap_recommendation(mem_kb, avail_kb, swap_kb, config.cache_size_mb) is not None:
         issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'install' to add a swapfile")
     return issues
 

@@ -99,7 +99,7 @@ Servette serves the `site/` folder next to `servette.py` (it ships with a self-t
 sudo python3 servette.py   # then, at the prompt: setup
 ```
 
-`sudo` is needed because setup writes a systemd unit and creates a restricted `servette` user — the server runs as that user, not root. On first run Servette installs its one dependency (`cryptography`) into a private virtualenv; you never run `pip`. The wizard sets an optional password, sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically.
+`sudo` is needed because setup writes a systemd unit and creates a restricted `servette` user — the server runs as that user, not root. On first run Servette installs its one dependency (`cryptography`) into a private virtualenv; you never run `pip`. The wizard sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), sets an optional password, then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically.
 
 ### Operate it
 
@@ -109,15 +109,15 @@ Re-run `sudo python3 servette.py` any time to return to the shell:
 |---|---|
 | `setup` | Guided first-time walkthrough |
 | `config` | View and edit settings |
-| `enable` / `disable` | Add or remove the background service |
 | `start` / `stop` | Start or stop the server |
+| `enable` / `disable` | Add or remove the background service |
 | `status` | Show whether the server is running |
 | `log [n]` | Show recent activity |
 | `update` | Download the latest signed release of Servette |
 | `restore` | Roll back to the previous version |
 | `help` · `quit` | Command list · exit |
 
-**Update your site** by copying new files over (`scp -r mysite/ user@your.server.ip:~/site`) — changes appear immediately, no restart. **Update Servette** with `update`; it pulls the latest signed release, verifies it, and offers to restart. Your `servette.toml` is never touched by an update.
+**Update your site** by copying new files over (`scp -r mysite/ user@your.server.ip:~/site`) — changes appear immediately, no restart. **Update Servette** with `update`; it pulls the latest signed release, verifies it, and reloads automatically — restarting the background service too, if you're running as one. Your `servette.toml` is never touched by an update.
 
 > If you set a password, `servette.toml` holds its hash — sharing the file gives a recipient material for an offline cracking attempt.
 

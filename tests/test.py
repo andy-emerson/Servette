@@ -435,6 +435,42 @@ def run_dispatch_tests(s):
     check("'start' routed to cmd_start",   "start" in calls)
     check("'quit' stops server and exits", calls[-1] == "stop")
 
+    section("Post-update reload")
+
+    # _apply_post_update runs immediately after 'update' re-execs into the new
+    # file. Drive it with the real file-system checks stubbed out (they need
+    # root/systemd) and verify it refreshes the unit and restarts only when a
+    # service is actually enabled — and that a refresh failure is contained
+    # rather than raised.
+    saved = {n: getattr(s, n) for n in
+             ("_service_file_exists", "_write_unit_files", "_service_is_active", "_reload_server")}
+    try:
+        calls = []
+        s._service_file_exists = lambda: True
+        s._write_unit_files    = lambda: calls.append("write") or True
+        s._service_is_active   = lambda: True
+        s._reload_server       = lambda: calls.append("reload")
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s._apply_post_update()
+        check("Enabled service: unit refreshed and reloaded", calls == ["write", "reload"])
+        check("Prints the version it reloaded to", f"v{s.__version__}" in buf.getvalue())
+
+        calls = []
+        s._service_file_exists = lambda: False
+        with contextlib.redirect_stdout(io.StringIO()):
+            s._apply_post_update()
+        check("No service enabled: unit left untouched", calls == [])
+
+        s._service_file_exists = lambda: True
+        s._write_unit_files    = lambda: (_ for _ in ()).throw(subprocess.CalledProcessError(1, "x"))
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s._apply_post_update()  # must not raise
+        check("A failed unit refresh is contained, not raised",
+              "Could not refresh" in buf.getvalue())
+    finally:
+        for n, fn in saved.items():
+            setattr(s, n, fn)
+
     section("Restore command")
     # cmd_restore swaps servette.py.bak back into place and consumes it. Drive it
     # against a throwaway servette.py/.bak by pointing the module's __file__ there
@@ -904,7 +940,8 @@ def run_cert_tests(s, tmpdir):
 
 def run_install_tests(s, tmpdir):
     # Tests installation helpers and the systemd service file template.
-    # cmd_install itself is not called — it writes to /etc/systemd/system/ and
+    # cmd_enable (and the _write_unit_files helper it shares with the
+    # post-update path) is not called — it writes to /etc/systemd/system/ and
     # creates a system user, both of which require root and would affect the real
     # system. The service file template is reconstructed inline instead.
 

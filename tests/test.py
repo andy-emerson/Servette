@@ -14,6 +14,7 @@ import base64
 import gzip
 import http.client
 import http.server
+import logging
 import os
 import shutil
 import socket
@@ -938,6 +939,274 @@ def run_install_tests(s, tmpdir):
               "unknown lvalue" not in text and "unknown key name" not in text)
     else:
         print("  (systemd-analyze unavailable — unit syntax check skipped)")
+
+    section("Network watchdog units")
+
+    watch_service, watch_timer = s._netwatch_units()
+    check("Service checks the default route",        "ip route get" in watch_service)
+    check("Recovery uses try-restart (no-op for managers not running)",
+          "try-restart" in watch_service)
+    check("Covers networkd, NetworkManager, and dhcpcd",
+          all(m in watch_service for m in ("systemd-networkd", "NetworkManager", "dhcpcd")))
+    check("Service is oneshot",                      "Type=oneshot" in watch_service)
+    check("Timer fires every 5 minutes",             "OnUnitActiveSec=5min" in watch_timer)
+    check("Timer starts checking after boot",        "OnBootSec=5min" in watch_timer)
+
+    if shutil.which("systemd-analyze"):
+        # Write both units first — verify resolves the timer's service by sibling file.
+        paths = {}
+        for name, content in (("servette-netwatch.service", watch_service),
+                              ("servette-netwatch.timer",   watch_timer)):
+            paths[name] = os.path.join(tmpdir, name)
+            with open(paths[name], "w") as f:
+                f.write(content)
+        for name, path in paths.items():
+            out  = subprocess.run(["systemd-analyze", "verify", path], capture_output=True, text=True)
+            text = (out.stdout + out.stderr).lower()
+            check(f"systemd-analyze verify {name}: no unknown directives",
+                  "unknown lvalue" not in text and "unknown key name" not in text)
+
+    section("Swap recommendation (supply and demand)")
+
+    MB    = 1024         # 1 MB expressed in kB, matching /proc/meminfo units
+    GB_KB = 1024 * 1024  # 1 GB in kB
+    # The incident box: 414 MB RAM, ~176 MB available, no swap, 50 MB cache.
+    # Demand = resident (238) + cache (50) + spike allowance (700) = 988 MB;
+    # deficit over RAM = 574 MB; recommendation = 2× deficit.
+    rec = s._swap_recommendation(414 * MB, 176 * MB, 50)
+    check("Incident-class host gets a recommendation", rec is not None)
+    check("Recommendation is twice the demand deficit, rounded to 2 significant digits",
+          rec == 1200 * 1024 ** 2)  # 2 × 574 MB deficit = 1148 → 1200
+
+    check("Round-up: 1148 → 1200",  s._round_up_2sig(1148) == 1200)
+    check("Round-up: 575 → 580",    s._round_up_2sig(575) == 580)
+    check("Round-up: 2049 → 2100",  s._round_up_2sig(2049) == 2100)
+    check("Round-up: 99 stays 99",  s._round_up_2sig(99) == 99)
+    check("Round-up: exact 1200 stays 1200", s._round_up_2sig(1200) == 1200)
+    check("Idle big host → no recommendation (demand fits)",
+          s._swap_recommendation(4 * GB_KB, int(3.5 * GB_KB), 50) is None)
+    check("Loaded big host → still recommended (threshold is demand, not a RAM ceiling)",
+          s._swap_recommendation(2 * GB_KB, 100 * MB, 50) is not None)
+    check("Small deficit floors at 512 MB",
+          s._swap_recommendation(1024 * MB, 600 * MB, 50) == 512 * 1024 ** 2)
+    check("Recommendation capped at 2 GB",
+          s._swap_recommendation(414 * MB, 50 * MB, 1024) == 2 * 1024 ** 3)
+    check("Unreadable meminfo → no recommendation",
+          s._swap_recommendation(None, None, 50) is None)
+
+    section("Swap offer")
+
+    check("No swap → offer, declining skips",
+          s._swap_offer(1200, False, 0) == ("no swapfile", "skip"))
+    check("Foreign swap (partition, distro-managed) → no offer",
+          s._swap_offer(1200, False, 600) is None)
+    check("Our swapfile, big enough → no offer",
+          s._swap_offer(1200, True, 1200) is None)
+    check("Our swapfile, undersized → offer, declining keeps current",
+          s._swap_offer(1200, True, 600) == ("a 600 MB swapfile", "keep 600"))
+    check("Our swapfile, inactive → offer, declining skips",
+          s._swap_offer(1200, True, 0) == ("an inactive swapfile", "skip"))
+    check("No recommendation → no offer",
+          s._swap_offer(None, False, 0) is None)
+
+    mem_kb, avail_kb, swap_kb = s._meminfo()
+    check("_meminfo returns a consistent triple",
+          (mem_kb is None and avail_kb is None and swap_kb is None)
+          or (isinstance(mem_kb, int) and isinstance(avail_kb, int)
+              and isinstance(swap_kb, int) and mem_kb > 0))
+    check("_root_on_sd_card returns bool (no crash on any host)",
+          isinstance(s._root_on_sd_card(), bool))
+
+    section("Host health warning")
+
+    saved_meminfo = s._meminfo
+    try:
+        s._meminfo = lambda: (414 * 1024, 176 * 1024, 0)
+        check("No-swap host under demand pressure is flagged",
+              any("no swap" in issue for issue in s._production_issues()))
+        s._meminfo = lambda: (414 * 1024, 176 * 1024, GB_KB)
+        check("Host with swap is not flagged",
+              not any("no swap" in issue for issue in s._production_issues()))
+    finally:
+        s._meminfo = saved_meminfo
+
+    section("Server watch (--serve supervision)")
+
+    # _watch_server must return once the HTTPS thread has been dead for the grace
+    # period — that return is what lets --serve exit non-zero so systemd restarts
+    # the service instead of supervising a corpse.
+    saved_thread = s._https_thread
+    try:
+        dead = threading.Thread(target=lambda: None)
+        dead.start()
+        dead.join()
+        s._https_thread = dead
+        t0 = time.monotonic()
+        s._watch_server(poll=0.05, grace=0.2)
+        elapsed = time.monotonic() - t0
+        check("Watch returns after grace once thread is dead", 0.15 <= elapsed < 5)
+
+        stop_evt = threading.Event()
+        live = threading.Thread(target=stop_evt.wait)
+        live.start()
+        s._https_thread = live
+        released = threading.Event()
+
+        def _run_watch():
+            s._watch_server(poll=0.05, grace=0.2)
+            released.set()
+
+        watcher = threading.Thread(target=_run_watch)
+        watcher.start()
+        time.sleep(0.5)
+        check("Watch holds while the thread is alive", not released.is_set())
+        stop_evt.set()
+        watcher.join(timeout=5)
+        check("Watch releases after the thread dies",  released.is_set())
+    finally:
+        s._https_thread = saved_thread
+
+    section("Prompts survive a closed stdin")
+
+    # Ctrl-D mid-prompt must answer the default, never traceback out of a command.
+    import builtins
+    saved_builtin_input = builtins.input
+    try:
+        def _eof(prompt=""):
+            raise EOFError
+        builtins.input = _eof
+        check("_input returns its default on EOF", s._input("size? ", default="n") == "n")
+        check("_prompt answers no on EOF",         s._prompt("proceed?") is False)
+    finally:
+        builtins.input = saved_builtin_input
+
+    section("_server_running reflects thread liveness")
+
+    # A crashed serve loop must read as stopped — the old flag check reported
+    # Running as long as the server object existed.
+    saved_live_thread = s._https_thread
+    try:
+        dead_t = threading.Thread(target=lambda: None)
+        dead_t.start()
+        dead_t.join()
+        s._https_thread = dead_t
+        check("Dead serve thread reads as not running", not s._server_running())
+    finally:
+        s._https_thread = saved_live_thread
+    check("Live serve thread reads as running", s._server_running())
+
+    section("Status resolves a relative cert path")
+
+    # cmd_status must anchor a relative cert_file to BASE_DIR like every other
+    # call site — from a foreign CWD it previously lost the domain (and the URL).
+    import contextlib
+    import datetime as _dt
+    import io
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+
+    _key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    _name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "example.com")])
+    _cert = (x509.CertificateBuilder().subject_name(_name).issuer_name(_name)
+             .public_key(_key.public_key()).serial_number(x509.random_serial_number())
+             .not_valid_before(_dt.datetime.now(_dt.timezone.utc))
+             .not_valid_after(_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=30))
+             .add_extension(x509.SubjectAlternativeName([x509.DNSName("example.com")]), critical=False)
+             .sign(_key, _hashes.SHA256()))
+    rel_name = "relcert-test.pem"
+    rel_path = os.path.join(SERVETTE_DIR, rel_name)
+    with open(rel_path, "wb") as f:
+        f.write(_cert.public_bytes(_ser.Encoding.PEM))
+
+    saved_cert_file, saved_cwd = s.config.cert_file, os.getcwd()
+    try:
+        s.config.cert_file = rel_name
+        os.chdir(tmpdir)   # a CWD that does not contain the cert
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            s.cmd_status()
+        # Exact-match on the URL row's value — a substring check would also pass on
+        # e.g. evil-example.com, and reads to scanners as bypassable sanitization.
+        url_row = next((line for line in buf.getvalue().splitlines() if line.strip().startswith("URL")), "")
+        check("Status shows the domain from a relative cert path",
+              url_row.split()[-1] == "https://example.com")
+    finally:
+        s.config.cert_file = saved_cert_file
+        os.chdir(saved_cwd)
+        os.remove(rel_path)
+
+    section("Connection cap survives thread-start failure")
+
+    # If Thread.start() raises after a slot is acquired (memory/thread exhaustion),
+    # the slot must be reclaimed — leaked slots permanently shrink capacity.
+    import socketserver
+    cap_srv  = s._CappedThreadingHTTPServer(("127.0.0.1", 0), s._RedirectHandler, max_connections=2)
+    saved_pr = socketserver.ThreadingMixIn.process_request
+    sock_a, sock_b = socket.socketpair()
+    try:
+        def _fail(self, request, client_address):
+            raise RuntimeError("cannot start thread")
+        socketserver.ThreadingMixIn.process_request = _fail
+        try:
+            cap_srv.process_request(sock_a, ("127.0.0.1", 1))
+        except RuntimeError:
+            pass
+        first  = cap_srv._slots.acquire(blocking=False)
+        second = cap_srv._slots.acquire(blocking=False)
+        check("Both slots free after failed thread start", first and second)
+        if first:
+            cap_srv._slots.release()
+        if second:
+            cap_srv._slots.release()
+    finally:
+        socketserver.ThreadingMixIn.process_request = saved_pr
+        sock_a.close()
+        sock_b.close()
+        cap_srv.server_close()
+
+    section("Update downloads pinned to GitHub")
+
+    check("HTTPS github.com asset accepted",
+          s._release_asset_url_ok("https://github.com/a/b/releases/download/v1/servette.py"))
+    check("Other host rejected",
+          not s._release_asset_url_ok("https://evil.example/servette.py"))
+    check("Plain HTTP rejected",
+          not s._release_asset_url_ok("http://github.com/a/b/servette.py"))
+    check("Userinfo spoof rejected",
+          not s._release_asset_url_ok("https://github.com@evil.example/servette.py"))
+
+    section("In-service cert reload exits for systemd")
+
+    # Under --serve the unit's user cannot systemctl restart itself; _reload_server
+    # must stop the server so _watch_server exits non-zero and systemd relaunches
+    # with the new certificate.
+    sys.argv.append("--serve")
+    try:
+        s._reload_server()
+        check("Reload under --serve stops the server", not s._server_running())
+    finally:
+        sys.argv.remove("--serve")
+    s.start_server()
+    check("Server restarted for the remaining tests", s._server_running())
+
+    section("Cert watchdog survives a failing pass")
+
+    saved_dfc = s._domain_from_cert
+    logging.disable(logging.CRITICAL)   # the contained failure logs a traceback — mute it
+    try:
+        def _boom(path):
+            raise RuntimeError("watchdog test failure")
+        s._domain_from_cert = _boom
+        try:
+            s._cert_watchdog_tick()
+            check("A raising pass is contained by the tick", True)
+        except Exception as e:
+            check(f"A raising pass is contained by the tick (raised {e})", False)
+    finally:
+        s._domain_from_cert = saved_dfc
+        logging.disable(logging.NOTSET)
 
     section("serve_dir world-readable check")
 

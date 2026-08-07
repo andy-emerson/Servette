@@ -25,7 +25,7 @@ The tools closest in spirit are small and focused, like Servette. Here is how a 
 | **Built for** | static sites | dynamic web apps | static sites | static sites |
 | Automatic trusted HTTPS | ✓ | ✗ | ✓ | ✗ |
 | Hardened for production | ✓ | ✗ | ✗ | ~ |
-| Readable source | ~2,400 lines | ~4,600 lines | binary | binary |
+| Readable source | ~2,700 lines | ~4,600 lines | binary | binary |
 | Actively maintained | ✓ | ✓ | ✗ | ✓ |
 | Runs on a Raspberry Pi out of the box | ✓ | ✓ | ✗ | ✗ |
 
@@ -35,7 +35,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 
 ## Who is Servette for?
 
-**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable file (~2,400 lines of Python, no hidden machinery) that you can follow top to bottom in an afternoon.
+**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable file (~2,700 lines of Python, no hidden machinery) that you can follow top to bottom in an afternoon.
 
 **People with a real site that needs a real server.** Development servers (like `http.server`) are perfect while you build, but they are not meant to face the internet (no trusted HTTPS, no auth, gone when you close the terminal). Servette is built to stay up: a trusted certificate that renews itself, and a hardened service that survives reboots.
 
@@ -56,6 +56,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 | Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |
 | Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
+| Automatic recovery | A dead server process is restarted by systemd within seconds; a watchdog timer recovers a dropped network route |
 
 **Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette), and that is by design, not a limitation to work around; see [Scope & non-goals](docs/principles.md#scope--non-goals) for what is out of scope and why.
 

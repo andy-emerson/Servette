@@ -37,15 +37,16 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 _VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
 _VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
 
-SERVICE_PATH = "/etc/systemd/system/servette.service"
-ACME_WEBROOT = "/var/lib/letsencrypt/webroot"
+SERVICE_PATH  = "/etc/systemd/system/servette.service"
+NETWATCH_PATH = "/etc/systemd/system/servette-netwatch"  # + ".service" / ".timer"
+ACME_WEBROOT  = "/var/lib/letsencrypt/webroot"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,7 +113,7 @@ class Config:
                 print(f"Fix or delete {self.CONFIG_FILE} and try again.")
                 sys.exit(1)
 
-        self.serve_dir       = data.get("serve_dir",       data.get("html_file", "site"))
+        self.serve_dir       = data.get("serve_dir",       "site")
         self.port            = data.get("port",            443)
         self.cert_file       = data.get("cert_file",       "cert.pem")
         self.key_file        = data.get("key_file",        "key.pem")
@@ -753,7 +754,11 @@ class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
         if not self._slots.acquire(blocking=False):
             self.shutdown_request(request)   # at capacity — shed load, don't queue
             return
-        super().process_request(request, client_address)
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()   # the worker thread never started — reclaim its slot
+            raise
 
     def process_request_thread(self, request, client_address):
         try:
@@ -855,6 +860,7 @@ def _bootstrap():
 # stop_server() calls shutdown() on it from the shell thread to stop gracefully.
 
 _https_server         = None  # the running HTTPS ThreadingHTTPServer (None when stopped)
+_https_thread         = None  # the thread running its serve_forever loop
 _http_server          = None  # the port-80 redirect server (None if unavailable)
 _server_start_time    = None
 _watchdog_thread      = None
@@ -868,17 +874,18 @@ ACME_RETRIES  = 3
 
 
 def _server_running():
-    return _https_server is not None
+    """True when the HTTPS server is actually serving — the thread must be alive,
+    not merely the server object constructed, so a crashed serve loop reads as
+    stopped instead of running."""
+    return _https_thread is not None and _https_thread.is_alive()
 
 
-def _cert_watchdog():
-    """Auto-renew Let's Encrypt certs before expiry; detect externally-rotated certs."""
+def _cert_watchdog_tick():
+    """One renewal/reload pass. Exceptions are contained here so a failed pass can
+    never kill the watchdog thread — a dead watchdog would silently end renewals
+    for the life of the process; the next pass simply retries."""
     global _last_renewal_attempt, _cert_domain
-    while _server_running():
-        time.sleep(60)
-        if not _server_running():
-            break
-
+    try:
         cert_path = _resolve(config.cert_file)
 
         domain = _domain_from_cert(cert_path)
@@ -902,10 +909,22 @@ def _cert_watchdog():
                     _reload_server()
             except OSError:
                 pass
+    except Exception:
+        log.exception("Cert watchdog pass failed — will retry on the next pass")
+
+
+def _cert_watchdog():
+    """Auto-renew Let's Encrypt certs before expiry; detect externally-rotated certs."""
+    while _server_running():
+        time.sleep(60)
+        if not _server_running():
+            break
+        _cert_watchdog_tick()
 
 
 def start_server():
-    global _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread, _https_server, _http_server
+    global _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread, \
+        _https_server, _https_thread, _http_server
 
     if _server_running():
         print("Server is already running.")
@@ -946,7 +965,8 @@ def start_server():
 
     _https_server = https
     _http_server  = redirect
-    threading.Thread(target=https.serve_forever, daemon=True).start()
+    _https_thread = threading.Thread(target=https.serve_forever, daemon=True)
+    _https_thread.start()
     if redirect is not None:
         threading.Thread(target=redirect.serve_forever, daemon=True).start()
 
@@ -982,16 +1002,21 @@ def start_server():
 
 
 def stop_server():
-    global _server_start_time, _sweep_thread, _https_server, _http_server
+    global _server_start_time, _sweep_thread, _https_server, _https_thread, _http_server
 
-    if not _server_running():
+    # Keyed on the server objects, not liveness: a crashed serve loop still needs
+    # its sockets closed, which _server_running() (thread liveness) would skip.
+    if _https_server is None and _http_server is None:
         return
 
     for srv in (_https_server, _http_server):
         if srv is not None:
             srv.shutdown()
             srv.server_close()
+    if _https_thread is not None:
+        _https_thread.join(timeout=10)
     _https_server      = None
+    _https_thread      = None
     _http_server       = None
     _server_start_time = None
 
@@ -1001,6 +1026,29 @@ def stop_server():
         _sweep_thread = None
     log.info("Server stopped")
     print("Session server stopped.")
+
+
+def _watch_server(poll=5, grace=30):
+    """Block until the HTTPS server has been dead for `grace` seconds.
+
+    --serve exits non-zero when this returns, so systemd's Restart=always brings
+    the service back. Without the watch, a dead server thread leaves a living
+    process: systemd reports active while nothing is listening. The grace period
+    spans the stop/start window of an in-process certificate reload, so a reload
+    doesn't read as a death."""
+    deadline = None
+    while True:
+        t = _https_thread
+        if t is not None and t.is_alive():
+            deadline = None
+            t.join(timeout=poll)
+            continue
+        now = time.monotonic()
+        if deadline is None:
+            deadline = now + grace
+        elif now >= deadline:
+            return
+        time.sleep(poll)
 
 
 # ── Service management ────────────────────────────────────────────────────────
@@ -1069,6 +1117,186 @@ WantedBy=multi-user.target
 """
 
 
+def _netwatch_units():
+    """The (service, timer) unit pair for the network watchdog.
+
+    Every 5 minutes: if the host has no route out, ask the network manager to
+    start over. Recovers the observed failure where a netlink timeout leaves the
+    link permanently 'Failed' — networkd never retries on its own, so the host
+    stays dark until reboot. try-restart only touches a unit that is actually
+    running, so of the three known managers (systemd-networkd on Ubuntu,
+    NetworkManager on Raspberry Pi OS, dhcpcd on older Pi OS) exactly one acts;
+    the whole check is a no-op while the route is healthy."""
+    service = """[Unit]
+Description=Servette network watchdog — recover a dropped default route
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'ip route get 1.1.1.1 >/dev/null 2>&1 && exit 0; for u in systemd-networkd NetworkManager dhcpcd; do systemctl try-restart "$u.service" 2>/dev/null || true; done'
+"""
+    timer = """[Unit]
+Description=Run the Servette network watchdog every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+"""
+    return service, timer
+
+
+_SWAP_PATH = "/swapfile"
+
+
+def _meminfo():
+    """Return (mem_total_kb, mem_available_kb, swap_total_kb) from /proc/meminfo,
+    or (None, None, None) where it can't be read (non-Linux)."""
+    try:
+        fields = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                fields[key.strip()] = int(rest.split()[0])  # values are in kB
+        return fields["MemTotal"], fields["MemAvailable"], fields["SwapTotal"]
+    except (OSError, KeyError, ValueError, IndexError):
+        return None, None, None
+
+
+# The unpredictable part of demand: an allowance for the single-process spike
+# nobody plans for, sized to the largest one observed in production (fwupd
+# ballooning to ~656 MB virtual on a 414 MB host, hourly, for weeks).
+_SPIKE_ALLOWANCE_KB = 700 * 1024
+_SWAP_MIN_MB        = 512
+_SWAP_MAX_MB        = 2048
+
+
+def _round_up_2sig(n):
+    """Round a positive integer up to two significant digits (1148 → 1200).
+
+    The swap default is an estimate; a round number says so, where an
+    exact-looking one would overstate its precision."""
+    mag = 10 ** max(len(str(int(n))) - 2, 0)
+    return -(-int(n) // mag) * mag
+
+
+def _swap_recommendation(mem_kb, avail_kb, cache_mb):
+    """Recommended total swap in bytes for this host, or None when demand fits in RAM.
+
+    Supply is measured (MemTotal). Demand is what's resident now (MemTotal −
+    MemAvailable), plus Servette's configured cache, plus the spike allowance.
+    When demand exceeds supply, the deficit is doubled for margin, rounded up to
+    two significant digits, floored at 512 MB and capped at 2 GB — the threshold
+    emerges from the measurement rather than a hardcoded RAM ceiling. Whether to
+    act on the recommendation is _swap_offer's decision."""
+    if mem_kb is None or avail_kb is None:
+        return None
+    demand_kb  = (mem_kb - avail_kb) + cache_mb * 1024 + _SPIKE_ALLOWANCE_KB
+    deficit_kb = demand_kb - mem_kb
+    if deficit_kb <= 0:
+        return None
+    size_mb = _round_up_2sig(-(-2 * deficit_kb // 1024))
+    return min(max(size_mb, _SWAP_MIN_MB), _SWAP_MAX_MB) * 1024 ** 2
+
+
+def _swap_offer(rec_mb, ours, active_mb):
+    """(description, skip_hint) for the swap prompt, or None when no offer is due.
+
+    Only Servette's own /swapfile is ever offered a resize; swap Servette didn't
+    create (a partition, a distro-managed file) is left alone — resizing it would
+    fight whatever manages it. Enter always takes the recommendation; the skip
+    hint says what declining preserves, so no two options in the prompt are
+    redundant."""
+    if rec_mb is None:
+        return None
+    if active_mb > 0 and not ours:
+        return None
+    if not ours:
+        return "no swapfile", "skip"
+    if active_mb == 0:
+        return "an inactive swapfile", "skip"
+    if active_mb >= rec_mb:
+        return None
+    return f"a {active_mb} MB swapfile", f"keep {active_mb}"
+
+
+def _root_on_sd_card():
+    """True when the root filesystem sits on an SD/eMMC device (/dev/mmcblk*),
+    where swap writes add flash wear worth mentioning before the operator decides."""
+    try:
+        dev = os.stat("/").st_dev
+        with open(f"/sys/dev/block/{os.major(dev)}:{os.minor(dev)}/uevent") as f:
+            return "DEVNAME=mmcblk" in f.read()
+    except OSError:
+        return False
+
+
+def _ensure_swap():
+    """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
+    mem_kb, avail_kb, swap_kb = _meminfo()
+    rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
+    rec_mb    = rec // (1024 * 1024) if rec else None
+    ours      = os.path.exists(_SWAP_PATH)
+    active_mb = (swap_kb or 0) // 1024  # total active swap; ≈ ours when ours is the only one
+    offer     = _swap_offer(rec_mb, ours, active_mb)
+    if offer is None:
+        return
+    swap_desc, skip_hint = offer
+    print(f"  This system has {mem_kb // 1024} MB of RAM ({avail_kb // 1024} MB free) and {swap_desc}.")
+    print("  A spike past free RAM can knock the host offline, but a swapfile absorbs spikes to disk.")
+    print(f"  Recommended swapfile size for the estimated spike: {rec_mb} MB")
+    if _root_on_sd_card():
+        print("  Note: root storage is an SD/eMMC card — swap writes add flash wear.")
+    resp = _input(f"  Swapfile size in MB [Enter = {rec_mb}, any size, n = {skip_hint}]: ",
+                  default="n").strip().lower()
+    if resp in ("n", "no"):
+        return
+    mb = rec_mb
+    if resp:
+        try:
+            mb = max(64, int(resp))
+        except ValueError:
+            print("  Not a number — skipping swap setup.")
+            return
+    if ours and mb == active_mb:
+        return  # keeping the current size — nothing to do
+    size = mb * 1024 * 1024
+    try:
+        st        = os.statvfs("/")
+        reclaimed = os.path.getsize(_SWAP_PATH) if ours else 0
+        if st.f_bavail * st.f_frsize + reclaimed < size + 1024 ** 3:  # keep 1 GB free
+            print(f"  Not enough free disk for a {mb} MB swapfile plus 1 GB margin — skipping.")
+            return
+    except OSError:
+        return
+    if ours and active_mb > 0:
+        r = subprocess.run(["swapoff", _SWAP_PATH], capture_output=True)
+        if r.returncode != 0:
+            print("  Could not deactivate the current swapfile (heavily in use?) — try again later.")
+            return
+    try:
+        with open(_SWAP_PATH, "wb") as f:
+            os.chmod(_SWAP_PATH, 0o600)  # before content exists — never world-readable
+            os.posix_fallocate(f.fileno(), 0, size)
+        subprocess.run(["mkswap", _SWAP_PATH], check=True, capture_output=True)
+        subprocess.run(["swapon", _SWAP_PATH], check=True, capture_output=True)
+        with open("/etc/fstab") as f:
+            fstab = f.read()
+        if _SWAP_PATH not in fstab.split():
+            with open("/etc/fstab", "a") as f:
+                f.write(f"{_SWAP_PATH} none swap sw 0 0\n")
+        print(f"  Swapfile active ({mb} MB), persistent across reboots.")
+        log.info("Swapfile active: %d MB at %s", mb, _SWAP_PATH)
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"  Could not set up swapfile: {e}")
+        try:
+            subprocess.run(["swapoff", _SWAP_PATH], capture_output=True)
+            os.remove(_SWAP_PATH)
+        except OSError:
+            pass
+
+
 def cmd_install():
     updating      = _service_file_exists()
     servette_path = os.path.abspath(__file__)
@@ -1090,8 +1318,16 @@ def cmd_install():
         with open(SERVICE_PATH, "w") as f:
             f.write(service)
 
+        netwatch_service, netwatch_timer = _netwatch_units()
+        with open(NETWATCH_PATH + ".service", "w") as f:
+            f.write(netwatch_service)
+        with open(NETWATCH_PATH + ".timer", "w") as f:
+            f.write(netwatch_timer)
+
         subprocess.run(["systemctl", "daemon-reload"],      check=True)
         subprocess.run(["systemctl", "enable", "servette"], check=True, capture_output=True)
+        subprocess.run(["systemctl", "enable", "--now", "servette-netwatch.timer"],
+                       check=True, capture_output=True)
 
         # Chown files the service process needs to read
         _chown_servette(config.CONFIG_FILE)
@@ -1123,7 +1359,10 @@ def cmd_install():
         else:
             print("Servette enabled as a system service.")
             print("It will start automatically on boot and survive SSH disconnects.")
+        print("Network watchdog timer enabled (recovers a dropped default route).")
         log.info("Enabled as systemd service")
+
+        _ensure_swap()
 
         if _server_running():
             if _prompt("Server is running in session only. Restart as a service now?"):
@@ -1150,7 +1389,14 @@ def cmd_uninstall():
         if _service_is_active():
             subprocess.run(["systemctl", "stop",    "servette"], check=True, capture_output=True)
         subprocess.run(["systemctl", "disable", "servette"], check=True, capture_output=True)
+        subprocess.run(["systemctl", "disable", "--now", "servette-netwatch.timer"],
+                       capture_output=True)  # best-effort: may predate the watchdog
         os.remove(SERVICE_PATH)
+        for suffix in (".service", ".timer"):
+            try:
+                os.remove(NETWATCH_PATH + suffix)
+            except OSError:
+                pass
         subprocess.run(["systemctl", "daemon-reload"], check=True)
         print("Servette service disabled.")
         log.info("Systemd service disabled")
@@ -1174,6 +1420,28 @@ def _spin(message, stop_event):
         i += 1
     sys.stdout.write(f"\r  {' ' * (len(message) + 5)}\r")
     sys.stdout.flush()
+
+
+class _spinner:
+    """Context manager that runs _spin(message) for the duration of the block —
+    TTY only, so non-interactive runs (service renewals, pipes) stay clean."""
+
+    def __init__(self, message):
+        self._message = message
+        self._stop    = threading.Event()
+        self._thread  = None
+
+    def __enter__(self):
+        if sys.stdout.isatty():
+            self._thread = threading.Thread(target=_spin, args=(self._message, self._stop), daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+        return False
 
 
 def _generate_self_signed_cert(cert_path, key_path):
@@ -1239,7 +1507,14 @@ def _wait_for_port_free(port, timeout=15):
 
 def _reload_server():
     """Reload the server to pick up a new certificate."""
-    if _service_is_active():
+    if "--serve" in sys.argv:
+        # Inside the service, the sandboxed unit user can't systemctl restart
+        # (NoNewPrivileges, least privilege). Stop serving instead: _watch_server
+        # sees the dead thread, --serve exits non-zero, and Restart=always
+        # relaunches the service with the new certificate loaded.
+        log.info("Stopping to load the new certificate — systemd restarts the service")
+        stop_server()
+    elif _service_is_active():
         try:
             subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
             print("  Server restarted.")
@@ -1481,51 +1756,39 @@ def _obtain_trusted_cert(domain):
         www_dns_only_failure = False
 
         for attempt in range(1, ACME_RETRIES + 1):
-            stop = threading.Event()
-            if sys.stdout.isatty():
-                if attempt == 1:
-                    label = f"Requesting certificate for {domain}..."
-                else:
-                    label = f"Retry {attempt - 1} of {ACME_RETRIES - 1}..."
-                t = threading.Thread(target=_spin, args=(label, stop), daemon=True)
-                t.start()
-            else:
-                t = None
-
+            label = (f"Requesting certificate for {domain}..." if attempt == 1
+                     else f"Retry {attempt - 1} of {ACME_RETRIES - 1}...")
             try:
-                domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
-                domain_key_pem = domain_key.private_bytes(
-                    _serialization.Encoding.PEM,
-                    _serialization.PrivateFormat.TraditionalOpenSSL,
-                    _serialization.NoEncryption()
-                )
-                csr_der = (
-                    _x509.CertificateSigningRequestBuilder()
-                    .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
-                    .add_extension(_x509.SubjectAlternativeName([
-                        _x509.DNSName(n) for n in names
-                    ]), critical=False)
-                    .sign(domain_key, _hashes.SHA256())
-                    .public_bytes(_serialization.Encoding.DER)
-                )
+                with _spinner(label):
+                    domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                    domain_key_pem = domain_key.private_bytes(
+                        _serialization.Encoding.PEM,
+                        _serialization.PrivateFormat.TraditionalOpenSSL,
+                        _serialization.NoEncryption()
+                    )
+                    csr_der = (
+                        _x509.CertificateSigningRequestBuilder()
+                        .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
+                        .add_extension(_x509.SubjectAlternativeName([
+                            _x509.DNSName(n) for n in names
+                        ]), critical=False)
+                        .sign(domain_key, _hashes.SHA256())
+                        .public_bytes(_serialization.Encoding.DER)
+                    )
 
-                client = _ACMEClient(ACME_URL, account_key)
-                client.new_account(config.email if config.email else None)
-                fullchain = client.issue(names, csr_der, challenge_dir)
+                    client = _ACMEClient(ACME_URL, account_key)
+                    client.new_account(config.email if config.email else None)
+                    fullchain = client.issue(names, csr_der, challenge_dir)
 
-                cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
-                key_path  = os.path.join(CERTS_DIR, "privkey.pem")
+                    cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
+                    key_path  = os.path.join(CERTS_DIR, "privkey.pem")
 
-                with open(cert_path, "w") as f:
-                    f.write(fullchain)
-                with open(key_path, "wb") as f:
-                    f.write(domain_key_pem)
-                os.chmod(key_path, 0o600)
-                _chown_servette(CERTS_DIR)
-
-                stop.set()
-                if t:
-                    t.join()
+                    with open(cert_path, "w") as f:
+                        f.write(fullchain)
+                    with open(key_path, "wb") as f:
+                        f.write(domain_key_pem)
+                    os.chmod(key_path, 0o600)
+                    _chown_servette(CERTS_DIR)
 
                 config.cert_file = cert_path
                 config.key_file  = key_path
@@ -1543,24 +1806,11 @@ def _obtain_trusted_cert(domain):
                 last_error = None
                 break
 
-            except _ACMEError as e:
-                last_error = e
-                stop.set()
-                if t:
-                    t.join()
-                if include_www and e.failed == {www_domain}:
-                    www_dns_only_failure = True
-                    break  # don't retry; fall back to bare domain
-                if attempt < ACME_RETRIES:
-                    delay = 5 * attempt
-                    log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
-                    time.sleep(delay)
-
             except Exception as e:
                 last_error = e
-                stop.set()
-                if t:
-                    t.join()
+                if isinstance(e, _ACMEError) and include_www and e.failed == {www_domain}:
+                    www_dns_only_failure = True
+                    break  # don't retry; fall back to bare domain
                 if attempt < ACME_RETRIES:
                     delay = 5 * attempt
                     log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
@@ -1688,8 +1938,19 @@ CONFIG_HELP = ("\n  Commands\n  " + "─" * 38 + "\n"
                + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS))
 
 
+def _input(prompt, default=""):
+    """input() that answers `default` on Ctrl-D / Ctrl-C instead of letting the
+    exception traceback out of a command and kill the shell. The default lets
+    prompts that would modify the host fail safe (e.g. 'n')."""
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+
+
 def _prompt(question):
-    return input(f"  {question} [y/n]: ").strip().lower() == "y"
+    return _input(f"  {question} [y/n]: ").strip().lower() == "y"
 
 
 # ── Config sub-shell ──────────────────────────────────────────────────────────
@@ -1735,7 +1996,7 @@ def _config_dir():
         print()
         for d in dirs:
             print(f"    {d}{' ←' if d == config.serve_dir else ''}")
-    new_value = input(f"\n  serve_dir [{config.serve_dir}]: ").strip()
+    new_value = _input(f"\n  serve_dir [{config.serve_dir}]: ").strip()
     if not new_value:
         print("  → unchanged")
         return
@@ -1752,7 +2013,7 @@ def _config_set(attr, label, cast=str, validate=None, error="invalid value", hin
     current = getattr(config, attr)
     if hint:
         print(f"  {hint}")
-    new_value = input(f"  {label} [{current}]: ").strip()
+    new_value = _input(f"  {label} [{current}]: ").strip()
     if not new_value or new_value == str(current):
         print("  → unchanged")
         return
@@ -1779,7 +2040,7 @@ def _config_cert():
             print(f"  Current: {config.cert_file}")
     print()
 
-    domain = input("  Domain name (leave blank for self-signed): ").strip()
+    domain = _input("  Domain name (leave blank for self-signed): ").strip()
 
     if domain:
         _obtain_trusted_cert(domain)
@@ -1799,7 +2060,7 @@ def _config_cert():
 
 def _config_username():
     current   = config.username
-    new_value = input(f"  username [{current}]: ").strip()
+    new_value = _input(f"  username [{current}]: ").strip()
     if new_value == "" and current != "":
         config.username      = ""
         config.password_hash = ""
@@ -1818,11 +2079,15 @@ def _config_password():
     if not config.username:
         print("  Set a username first.")
         return
-    pwd = getpass.getpass("  password: ")
-    if not pwd:
-        print("  → unchanged")
+    try:
+        pwd = getpass.getpass("  password: ")
+        if not pwd:
+            print("  → unchanged")
+            return
+        confirm = getpass.getpass("  confirm: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\n  → unchanged")
         return
-    confirm = getpass.getpass("  confirm: ")
     if pwd != confirm:
         print("  → passwords do not match, unchanged")
         return
@@ -1842,7 +2107,7 @@ def _config_cache():
     print("    no-store  — never cache, always download fresh")
     print("    no-cache  — cache but always revalidate (ETag makes this a quick check)")
     print("    max-age   — trust cached copy for N seconds without checking\n")
-    choice = input("  cache_policy [no-store / no-cache / max-age]: ").strip().lower()
+    choice = _input("  cache_policy [no-store / no-cache / max-age]: ").strip().lower()
     if not choice:
         print("  → unchanged")
         return
@@ -1851,7 +2116,7 @@ def _config_cache():
         return
     config.cache_policy = choice
     if choice == "max-age":
-        age_str = input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
+        age_str = _input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
         if age_str:
             try:
                 config.cache_max_age = int(age_str)
@@ -1868,7 +2133,7 @@ def _config_trusted_proxy():
     print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
     print("  Set to the IP of your reverse proxy to trust its X-Forwarded-For header.")
     print("  Leave blank to ignore XFF entirely (correct when Servette faces the internet directly).\n")
-    new_value = input("  trusted_proxy IP: ").strip()
+    new_value = _input("  trusted_proxy IP: ").strip()
     if new_value == current:
         print("  → unchanged")
         return
@@ -1881,7 +2146,7 @@ def _config_tls():
     print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
     print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
     print("    1.3 — TLS 1.3 only; drops support for older clients\n")
-    ver = input("  tls_min_version [1.2 / 1.3]: ").strip()
+    ver = _input("  tls_min_version [1.2 / 1.3]: ").strip()
     if ver and ver not in ("1.2", "1.3"):
         print("  → invalid, unchanged")
     elif ver and ver != config.tls_min_version:
@@ -1894,7 +2159,7 @@ def _config_tls():
     print(f"\n  Current cipher suites: {config.ciphers or '(system default)'}")
     print("  OpenSSL cipher string, e.g.: ECDHE+AESGCM:DHE+AESGCM")
     print("  Leave blank to use the system default (recommended unless you have specific requirements).\n")
-    ciphers = input("  ciphers: ").strip()
+    ciphers = _input("  ciphers: ").strip()
     if ciphers == config.ciphers:
         print("  → unchanged")
         return
@@ -2022,6 +2287,14 @@ def _parse_version(source_bytes):
     m = _VERSION_RE.search(source_bytes)
     return m.group(1).decode() if m else None
 
+
+def _release_asset_url_ok(url):
+    """True when a release-asset URL is HTTPS on github.com. Update downloads are
+    pinned to the release host so a poisoned API response can't redirect the fetch
+    elsewhere — the Ed25519 signature is the real gate; this narrows the fetch."""
+    parts = urlsplit(url)
+    return parts.scheme == "https" and parts.netloc == "github.com"
+
 def _offer_restart(version):
     """Apply a freshly swapped servette.py (from update or restore): restart the
     service if it's managed, otherwise tell the user how — this shell still holds the
@@ -2045,21 +2318,17 @@ def cmd_update():
     servette_path = os.path.abspath(__file__)
 
     # Check latest release via GitHub API
-    stop = threading.Event()
-    t    = threading.Thread(target=_spin, args=("Checking for update...", stop), daemon=True)
-    t.start()
     try:
-        req = urllib.request.Request(
-            RELEASES_API_URL,
-            headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            release = json.loads(resp.read())
+        with _spinner("Checking for update..."):
+            req = urllib.request.Request(
+                RELEASES_API_URL,
+                headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                release = json.loads(resp.read())
     except Exception as e:
-        stop.set(); t.join()
         print(f"  Update failed: {e}")
         return
-    stop.set(); t.join()
 
     new_version = release.get("tag_name", "").lstrip("v")
     if not new_version:
@@ -2073,6 +2342,9 @@ def cmd_update():
     assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
     if "servette.py" not in assets or "servette.py.sig" not in assets:
         print("  Update failed: release is missing servette.py or servette.py.sig assets.")
+        return
+    if not all(_release_asset_url_ok(assets[n]) for n in ("servette.py", "servette.py.sig")):
+        print("  Update failed: release asset URL is not on github.com.")
         return
 
     # Gate on major version bump
@@ -2090,17 +2362,13 @@ def cmd_update():
             return
 
     # Download source and signature
-    stop = threading.Event()
-    t    = threading.Thread(target=_spin, args=(f"Downloading {new_version}...", stop), daemon=True)
-    t.start()
     try:
-        new_source = urllib.request.urlopen(assets["servette.py"],     timeout=30).read()
-        signature  = urllib.request.urlopen(assets["servette.py.sig"], timeout=15).read()
+        with _spinner(f"Downloading {new_version}..."):
+            new_source = urllib.request.urlopen(assets["servette.py"],     timeout=30).read()
+            signature  = urllib.request.urlopen(assets["servette.py.sig"], timeout=15).read()
     except Exception as e:
-        stop.set(); t.join()
         print(f"  Update failed: {e}")
         return
-    stop.set(); t.join()
 
     # Verify Ed25519 signature against pinned public key
     try:
@@ -2200,6 +2468,17 @@ def _production_issues():
         issues.append("self-signed certificate — run 'config cert' to add a domain")
     if not config.username:
         issues.append("no password protection — run 'config' to set credentials")
+    mem_kb, avail_kb, swap_kb = _meminfo()
+    rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
+    active_mb = (swap_kb or 0) // 1024
+    offer     = _swap_offer(rec // (1024 * 1024) if rec else None,
+                            os.path.exists(_SWAP_PATH), active_mb)
+    if offer is not None:
+        if active_mb:
+            issues.append(f"swapfile {active_mb} MB but {rec // (1024 * 1024)} MB "
+                          "recommended — run 'install' to resize")
+        else:
+            issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'install' to add a swapfile")
     return issues
 
 
@@ -2282,9 +2561,9 @@ def _runtime_stats(service_active):
 def cmd_status():
     service_active = _service_is_active()
     running        = service_active or _server_running()
-    domain         = _domain_from_cert(config.cert_file)
-    url            = f"https://{domain}" if domain else f"https://localhost:{config.port}"
     cert_path      = _resolve(config.cert_file)
+    domain         = _domain_from_cert(cert_path)
+    url            = f"https://{domain}" if domain else f"https://localhost:{config.port}"
     W              = _PAD
 
     print()
@@ -2324,16 +2603,11 @@ def cmd_status():
 # ── Setup wizard ──────────────────────────────────────────────────────────────
 
 def cmd_setup():
-    stop = threading.Event()
-    t    = threading.Thread(target=_spin, args=("Detecting public IP...", stop), daemon=True)
-    t.start()
-    try:
-        public_ip = urllib.request.urlopen("https://api.ipify.org", timeout=5).read().decode()
-    except Exception:
-        public_ip = "your.server.ip"
-    finally:
-        stop.set()
-        t.join()
+    with _spinner("Detecting public IP..."):
+        try:
+            public_ip = urllib.request.urlopen("https://api.ipify.org", timeout=5).read().decode()
+        except Exception:
+            public_ip = "your.server.ip"
 
     print("\n───────────────────────────────────────────────────")
     print("  Getting Started")
@@ -2425,9 +2699,11 @@ if __name__ == "__main__":
     if "--serve" in sys.argv:
         start_server()
         try:
-            while True:
-                time.sleep(3600)
+            _watch_server()
         except KeyboardInterrupt:
             stop_server()
+        else:
+            log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
+            sys.exit(1)
     else:
         shell()

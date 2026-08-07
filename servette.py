@@ -1422,6 +1422,28 @@ def _spin(message, stop_event):
     sys.stdout.flush()
 
 
+class _spinner:
+    """Context manager that runs _spin(message) for the duration of the block —
+    TTY only, so non-interactive runs (service renewals, pipes) stay clean."""
+
+    def __init__(self, message):
+        self._message = message
+        self._stop    = threading.Event()
+        self._thread  = None
+
+    def __enter__(self):
+        if sys.stdout.isatty():
+            self._thread = threading.Thread(target=_spin, args=(self._message, self._stop), daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+        return False
+
+
 def _generate_self_signed_cert(cert_path, key_path):
     """Generate a self-signed certificate and write it to cert_path/key_path."""
     from cryptography import x509 as _x509
@@ -1734,51 +1756,39 @@ def _obtain_trusted_cert(domain):
         www_dns_only_failure = False
 
         for attempt in range(1, ACME_RETRIES + 1):
-            stop = threading.Event()
-            if sys.stdout.isatty():
-                if attempt == 1:
-                    label = f"Requesting certificate for {domain}..."
-                else:
-                    label = f"Retry {attempt - 1} of {ACME_RETRIES - 1}..."
-                t = threading.Thread(target=_spin, args=(label, stop), daemon=True)
-                t.start()
-            else:
-                t = None
-
+            label = (f"Requesting certificate for {domain}..." if attempt == 1
+                     else f"Retry {attempt - 1} of {ACME_RETRIES - 1}...")
             try:
-                domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
-                domain_key_pem = domain_key.private_bytes(
-                    _serialization.Encoding.PEM,
-                    _serialization.PrivateFormat.TraditionalOpenSSL,
-                    _serialization.NoEncryption()
-                )
-                csr_der = (
-                    _x509.CertificateSigningRequestBuilder()
-                    .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
-                    .add_extension(_x509.SubjectAlternativeName([
-                        _x509.DNSName(n) for n in names
-                    ]), critical=False)
-                    .sign(domain_key, _hashes.SHA256())
-                    .public_bytes(_serialization.Encoding.DER)
-                )
+                with _spinner(label):
+                    domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                    domain_key_pem = domain_key.private_bytes(
+                        _serialization.Encoding.PEM,
+                        _serialization.PrivateFormat.TraditionalOpenSSL,
+                        _serialization.NoEncryption()
+                    )
+                    csr_der = (
+                        _x509.CertificateSigningRequestBuilder()
+                        .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
+                        .add_extension(_x509.SubjectAlternativeName([
+                            _x509.DNSName(n) for n in names
+                        ]), critical=False)
+                        .sign(domain_key, _hashes.SHA256())
+                        .public_bytes(_serialization.Encoding.DER)
+                    )
 
-                client = _ACMEClient(ACME_URL, account_key)
-                client.new_account(config.email if config.email else None)
-                fullchain = client.issue(names, csr_der, challenge_dir)
+                    client = _ACMEClient(ACME_URL, account_key)
+                    client.new_account(config.email if config.email else None)
+                    fullchain = client.issue(names, csr_der, challenge_dir)
 
-                cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
-                key_path  = os.path.join(CERTS_DIR, "privkey.pem")
+                    cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
+                    key_path  = os.path.join(CERTS_DIR, "privkey.pem")
 
-                with open(cert_path, "w") as f:
-                    f.write(fullchain)
-                with open(key_path, "wb") as f:
-                    f.write(domain_key_pem)
-                os.chmod(key_path, 0o600)
-                _chown_servette(CERTS_DIR)
-
-                stop.set()
-                if t:
-                    t.join()
+                    with open(cert_path, "w") as f:
+                        f.write(fullchain)
+                    with open(key_path, "wb") as f:
+                        f.write(domain_key_pem)
+                    os.chmod(key_path, 0o600)
+                    _chown_servette(CERTS_DIR)
 
                 config.cert_file = cert_path
                 config.key_file  = key_path
@@ -1796,24 +1806,11 @@ def _obtain_trusted_cert(domain):
                 last_error = None
                 break
 
-            except _ACMEError as e:
-                last_error = e
-                stop.set()
-                if t:
-                    t.join()
-                if include_www and e.failed == {www_domain}:
-                    www_dns_only_failure = True
-                    break  # don't retry; fall back to bare domain
-                if attempt < ACME_RETRIES:
-                    delay = 5 * attempt
-                    log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
-                    time.sleep(delay)
-
             except Exception as e:
                 last_error = e
-                stop.set()
-                if t:
-                    t.join()
+                if isinstance(e, _ACMEError) and include_www and e.failed == {www_domain}:
+                    www_dns_only_failure = True
+                    break  # don't retry; fall back to bare domain
                 if attempt < ACME_RETRIES:
                     delay = 5 * attempt
                     log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
@@ -2313,21 +2310,17 @@ def cmd_update():
     servette_path = os.path.abspath(__file__)
 
     # Check latest release via GitHub API
-    stop = threading.Event()
-    t    = threading.Thread(target=_spin, args=("Checking for update...", stop), daemon=True)
-    t.start()
     try:
-        req = urllib.request.Request(
-            RELEASES_API_URL,
-            headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            release = json.loads(resp.read())
+        with _spinner("Checking for update..."):
+            req = urllib.request.Request(
+                RELEASES_API_URL,
+                headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                release = json.loads(resp.read())
     except Exception as e:
-        stop.set(); t.join()
         print(f"  Update failed: {e}")
         return
-    stop.set(); t.join()
 
     new_version = release.get("tag_name", "").lstrip("v")
     if not new_version:
@@ -2358,17 +2351,13 @@ def cmd_update():
             return
 
     # Download source and signature
-    stop = threading.Event()
-    t    = threading.Thread(target=_spin, args=(f"Downloading {new_version}...", stop), daemon=True)
-    t.start()
     try:
-        new_source = urllib.request.urlopen(assets["servette.py"],     timeout=30).read()
-        signature  = urllib.request.urlopen(assets["servette.py.sig"], timeout=15).read()
+        with _spinner(f"Downloading {new_version}..."):
+            new_source = urllib.request.urlopen(assets["servette.py"],     timeout=30).read()
+            signature  = urllib.request.urlopen(assets["servette.py.sig"], timeout=15).read()
     except Exception as e:
-        stop.set(); t.join()
         print(f"  Update failed: {e}")
         return
-    stop.set(); t.join()
 
     # Verify Ed25519 signature against pinned public key
     try:
@@ -2603,16 +2592,11 @@ def cmd_status():
 # ── Setup wizard ──────────────────────────────────────────────────────────────
 
 def cmd_setup():
-    stop = threading.Event()
-    t    = threading.Thread(target=_spin, args=("Detecting public IP...", stop), daemon=True)
-    t.start()
-    try:
-        public_ip = urllib.request.urlopen("https://api.ipify.org", timeout=5).read().decode()
-    except Exception:
-        public_ip = "your.server.ip"
-    finally:
-        stop.set()
-        t.join()
+    with _spinner("Detecting public IP..."):
+        try:
+            public_ip = urllib.request.urlopen("https://api.ipify.org", timeout=5).read().decode()
+        except Exception:
+            public_ip = "your.server.ip"
 
     print("\n───────────────────────────────────────────────────")
     print("  Getting Started")

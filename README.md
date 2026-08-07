@@ -138,7 +138,7 @@ Re-run `sudo python3 servette.py` any time to return to the shell:
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
 | `AGENTS.md` · `CLAUDE.md` | The human–agent working agreement, and the pointer to it |
-| `docs/` | [Contributing](docs/CONTRIBUTING.md) and the [Security policy](docs/SECURITY.md) |
+| `CONTRIBUTING.md` · `SECURITY.md` | How to contribute, and how to report a vulnerability |
 | `LICENSE` | MIT |
 
 A comprehensive tutorial will live at the project site once it exists; until then, the deploy guide above is the complete walkthrough.

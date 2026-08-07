@@ -979,6 +979,8 @@ def run_install_tests(s, tmpdir):
     check("_meminfo returns a consistent pair",
           (mem_kb is None and swap_kb is None)
           or (isinstance(mem_kb, int) and isinstance(swap_kb, int) and mem_kb > 0))
+    check("_root_on_sd_card returns bool (no crash on any host)",
+          isinstance(s._root_on_sd_card(), bool))
 
     section("Host health warning")
 

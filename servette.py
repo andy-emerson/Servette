@@ -1159,6 +1159,17 @@ def _swap_recommendation(mem_kb, swap_kb):
     return min(2 * mem_kb * 1024, 2 * 1024 * 1024 * 1024)
 
 
+def _root_on_sd_card():
+    """True when the root filesystem sits on an SD/eMMC device (/dev/mmcblk*),
+    where swap writes add flash wear worth mentioning before the operator decides."""
+    try:
+        dev = os.stat("/").st_dev
+        with open(f"/sys/dev/block/{os.major(dev)}:{os.minor(dev)}/uevent") as f:
+            return "DEVNAME=mmcblk" in f.read()
+    except OSError:
+        return False
+
+
 def _ensure_swap():
     """Offer to create a persistent swapfile on a small-RAM host that has none."""
     mem_kb, swap_kb = _meminfo()
@@ -1174,6 +1185,8 @@ def _ensure_swap():
     mb = size // (1024 * 1024)
     print(f"  This system has {mem_kb // 1024} MB RAM and no swap — one memory spike")
     print("  can invoke the OOM killer and destabilize the host.")
+    if _root_on_sd_card():
+        print("  Note: root storage is an SD/eMMC card — swap writes add flash wear.")
     if not _prompt(f"Create a {mb} MB swapfile at {_SWAP_PATH} now?"):
         return
     try:

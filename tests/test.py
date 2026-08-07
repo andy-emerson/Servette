@@ -382,6 +382,12 @@ def run_dispatch_tests(s):
         check("Serves challenge content", body == b"keyauth-value")
         status, _, _ = redirect_request("GET", "/.well-known/acme-challenge/missing")
         check("Unknown token → 404",      status == 404)
+
+        # Tokens are base64url per RFC 8555 — anything outside that charset is
+        # rejected before any filesystem lookup happens.
+        for bad_charset in ["tok.en", "tok+en", "tok%2Fen", "..", "caf%C3%A9"]:
+            status, _, _ = redirect_request("GET", f"/.well-known/acme-challenge/{bad_charset}")
+            check(f"Non-base64url token {bad_charset!r} → 404", status == 404)
         for bad in ["/.well-known/acme-challenge/",
                     "/.well-known/acme-challenge/a/b",
                     "/.well-known/acme-challenge/..%2f..%2fpasswd"]:

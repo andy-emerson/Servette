@@ -91,7 +91,7 @@ The wizard walks you through it:
 
 1. Set a password (optional).
 2. Set up an SSL certificate — a trusted Let's Encrypt one if you gave a domain, otherwise self-signed.
-3. Confirm. Servette enables itself as a service and starts.
+3. Confirm. Servette enables itself as a service and starts. Enabling also installs a network-watchdog timer (it recovers the connection if the host drops its network route), and on a small-RAM host with no swap, offers to create a swapfile — press Enter to accept the recommended size.
 
 That's it — your site is live. Close your terminal; Servette keeps running, restarts on reboot, and (with a domain) renews its certificate automatically.
 

@@ -32,7 +32,7 @@ First run creates `.servette-env/` (a managed virtualenv), installs `cryptograph
 
 Requires `openssl` on PATH (used only by test setup to generate a throwaway cert). The suite starts a real server on a test port, runs checks, and tears down. It backs up and restores any existing `servette.toml`.
 
-Three areas are intentionally not covered: the interactive shell and its config commands, systemd integration, and Let's Encrypt cert issuance.
+Intentionally not covered end-to-end: live systemd operations, real Let's Encrypt issuance, and `update`'s network path — each needs external infrastructure. Their seams are covered at the unit level: shell dispatch runs under scripted input, the generated unit files are checked (and verified with `systemd-analyze` where available), and `restore`, the prompts, and the install helpers have direct tests.
 
 ## Git and commits
 

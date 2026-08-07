@@ -49,7 +49,7 @@ Servette is complete within its scope; "where are we?" is mostly "here is the fi
 
 Servette is built in human–agent collaboration, and says so. The human holds design authority and is the author of record; the agent writes code and surfaces trade-offs. This works because openness is paired with verification and responsibility — credit is *earned by the rigor*, not granted by a trailer. Energy spent hiding how a security tool is built is the wrong kind of energy; it belongs in the evidence instead. (Mechanics of attribution live in [`AGENTS.md`](../AGENTS.md); the contributor's view in [`CONTRIBUTING.md`](CONTRIBUTING.md).)
 
-The methodology is scaled to the project. A ~2,400-line finished server does not need a dependency frontier or a reference oracle; reproducing that machinery would itself be the scope creep this document exists to prevent. What ports is the principle, not the apparatus.
+The methodology is scaled to the project. A ~2,700-line finished server does not need a dependency frontier or a reference oracle; reproducing that machinery would itself be the scope creep this document exists to prevent. What ports is the principle, not the apparatus.
 
 ### The change loop
 

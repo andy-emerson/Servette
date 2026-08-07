@@ -4,12 +4,12 @@ How `servette.py` is built — the current state of the system, for anyone who w
 
 ## How it works
 
-Servette is a single file (`servette.py`, ~2,400 lines) with three sections, each readable on its own. Settings persist to `servette.toml` beside it.
+Servette is a single file (`servette.py`, ~2,700 lines) with three sections, each readable on its own. Settings persist to `servette.toml` beside it.
 
 | Section | Lines | Responsibility |
 | - | - | - |
-| **Server** | ~730 | every incoming request: config, rate limiting, file cache, the request handler and the HTTP servers |
-| **System** | ~850 | the environment: bootstrap, server lifecycle, certificates (incl. the ACME client), systemd |
+| **Server** | ~750 | every incoming request: config, rate limiting, file cache, the request handler and the HTTP servers |
+| **System** | ~1,100 | the environment: bootstrap, server lifecycle, certificates (incl. the ACME client), systemd and host provisioning |
 | **Shell** | ~800 | the interactive terminal interface |
 
 ```mermaid
@@ -106,7 +106,9 @@ The interactive REPL shown when running without `--serve`. Dispatches to `cmd_se
 | - | - | - |
 | `_VENV_DIR` | `<BASE_DIR>/.servette-env` | managed virtualenv |
 | `SERVICE_PATH` | `/etc/systemd/system/servette.service` | systemd unit |
+| `NETWATCH_PATH` | `/etc/systemd/system/servette-netwatch` | network watchdog unit pair (`+ .service/.timer`) |
 | `ACME_WEBROOT` | `/var/lib/letsencrypt/webroot` | ACME challenge file root |
+| `_SWAP_PATH` | `/swapfile` | the swapfile install offers to create |
 | `RATE_WINDOW` | `60` seconds | sliding window for both rate limits |
 
 ### Notable design decisions

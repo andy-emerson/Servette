@@ -873,14 +873,12 @@ def _server_running():
     return _https_server is not None
 
 
-def _cert_watchdog():
-    """Auto-renew Let's Encrypt certs before expiry; detect externally-rotated certs."""
+def _cert_watchdog_tick():
+    """One renewal/reload pass. Exceptions are contained here so a failed pass can
+    never kill the watchdog thread — a dead watchdog would silently end renewals
+    for the life of the process; the next pass simply retries."""
     global _last_renewal_attempt, _cert_domain
-    while _server_running():
-        time.sleep(60)
-        if not _server_running():
-            break
-
+    try:
         cert_path = _resolve(config.cert_file)
 
         domain = _domain_from_cert(cert_path)
@@ -904,6 +902,17 @@ def _cert_watchdog():
                     _reload_server()
             except OSError:
                 pass
+    except Exception:
+        log.exception("Cert watchdog pass failed — will retry on the next pass")
+
+
+def _cert_watchdog():
+    """Auto-renew Let's Encrypt certs before expiry; detect externally-rotated certs."""
+    while _server_running():
+        time.sleep(60)
+        if not _server_running():
+            break
+        _cert_watchdog_tick()
 
 
 def start_server():
@@ -1466,7 +1475,14 @@ def _wait_for_port_free(port, timeout=15):
 
 def _reload_server():
     """Reload the server to pick up a new certificate."""
-    if _service_is_active():
+    if "--serve" in sys.argv:
+        # Inside the service, the sandboxed unit user can't systemctl restart
+        # (NoNewPrivileges, least privilege). Stop serving instead: _watch_server
+        # sees the dead thread, --serve exits non-zero, and Restart=always
+        # relaunches the service with the new certificate loaded.
+        log.info("Stopping to load the new certificate — systemd restarts the service")
+        stop_server()
+    elif _service_is_active():
         try:
             subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
             print("  Server restarted.")

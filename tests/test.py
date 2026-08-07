@@ -14,6 +14,7 @@ import base64
 import gzip
 import http.client
 import http.server
+import logging
 import os
 import shutil
 import socket
@@ -1064,6 +1065,37 @@ def run_install_tests(s, tmpdir):
         check("Watch releases after the thread dies",  released.is_set())
     finally:
         s._https_thread = saved_thread
+
+    section("In-service cert reload exits for systemd")
+
+    # Under --serve the unit's user cannot systemctl restart itself; _reload_server
+    # must stop the server so _watch_server exits non-zero and systemd relaunches
+    # with the new certificate.
+    sys.argv.append("--serve")
+    try:
+        s._reload_server()
+        check("Reload under --serve stops the server", not s._server_running())
+    finally:
+        sys.argv.remove("--serve")
+    s.start_server()
+    check("Server restarted for the remaining tests", s._server_running())
+
+    section("Cert watchdog survives a failing pass")
+
+    saved_dfc = s._domain_from_cert
+    logging.disable(logging.CRITICAL)   # the contained failure logs a traceback — mute it
+    try:
+        def _boom(path):
+            raise RuntimeError("watchdog test failure")
+        s._domain_from_cert = _boom
+        try:
+            s._cert_watchdog_tick()
+            check("A raising pass is contained by the tick", True)
+        except Exception as e:
+            check(f"A raising pass is contained by the tick (raised {e})", False)
+    finally:
+        s._domain_from_cert = saved_dfc
+        logging.disable(logging.NOTSET)
 
     section("serve_dir world-readable check")
 

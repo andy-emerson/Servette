@@ -1,7 +1,7 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/servette-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="assets/servette-light.svg">
-  <img alt="Servette" src="assets/servette-light.svg" width="300">
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/servette-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="site/assets/servette-light.svg">
+  <img alt="Servette" src="site/assets/servette-light.svg" width="300">
 </picture>
 
 ### The Simple, Secure Static-Site Server
@@ -58,25 +58,87 @@ All of these are excellent at what they are built for. None of them do what Serv
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 | Automatic recovery | A dead server process is restarted by systemd within seconds; a watchdog timer recovers a dropped network route |
 
-**Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette), and that is by design, not a limitation to work around; see [Scope & non-goals](docs/principles.md#scope--non-goals) for what is out of scope and why.
+**Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette), and that is by design, not a limitation to work around; see [Scope & non-goals](DESIGN.md#scope--non-goals) for what is out of scope and why.
 
 ---
 
 ## Get started
 
-Copy one file to your server, run it, and follow the wizard:
+You need a Linux machine on the internet (Ubuntu 22.04+ or Raspberry Pi OS, Python 3.11+, SSH access) and your site files. Getting the machine is the same as for any site and isn't Servette-specific; two common shapes follow, then setup — which is identical everywhere.
+
+### Deploy on a cloud VPS (e.g. AWS Lightsail)
+
+The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
+
+1. **Create a small Linux instance** — Ubuntu is a safe default. Note the login user (on Lightsail Ubuntu it's `ubuntu`).
+2. **Open ports 80 and 443** in the provider's firewall panel (on Lightsail: the instance's **Networking** tab). This is separate from the OS firewall and is the step people miss — 80 carries the HTTP→HTTPS redirect and Let's Encrypt validation, 443 serves the site.
+3. **Attach a static IP** so the address survives restarts.
+4. **Point your domain at it** — an `A` record to the static IP, before requesting a certificate.
+5. **Copy your files over and SSH in:**
+   ```
+   scp -i your-key.pem servette.py user@YOUR.IP:~
+   scp -i your-key.pem -r mysite/ user@YOUR.IP:~/site
+   ssh -i your-key.pem user@YOUR.IP
+   ```
+
+### Deploy on your own machine (e.g. a Raspberry Pi)
+
+1. **Install a Linux OS and enable SSH** (the Raspberry Pi Imager can set this up before first boot).
+2. **Forward ports 80 and 443** on your router to the machine, and point a domain's `A` record at your public IP (a dynamic-DNS service keeps the record current if your home IP changes). Skip this to run on your LAN only, with a self-signed certificate.
+3. **Copy your files over:**
+   ```
+   scp servette.py user@YOUR.LOCAL.IP:~
+   scp -r mysite/ user@YOUR.LOCAL.IP:~/site
+   ```
+
+### Run setup
+
+Servette serves the `site/` folder next to `servette.py` (it ships with a self-testing demo page, so a fresh copy runs immediately — replace it when ready). From the server:
 
 ```
-scp servette.py user@your.server.ip:~
-ssh user@your.server.ip
-sudo python3 servette.py   # then: setup
+sudo python3 servette.py   # then, at the prompt: setup
 ```
 
-Full step-by-step walkthroughs for **AWS Lightsail** and **Raspberry Pi**, plus day-to-day operation, are in the [tutorial](docs/tutorial.md).
+`sudo` is needed because setup writes a systemd unit and creates a restricted `servette` user — the server runs as that user, not root. On first run Servette installs its one dependency (`cryptography`) into a private virtualenv; you never run `pip`. The wizard sets an optional password, sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically.
 
-## Documentation
+### Operate it
 
-- [**Tutorial**](docs/tutorial.md): deploy on Lightsail or a Raspberry Pi, then operate it.
-- [**Architecture**](docs/architecture.md): how `servette.py` is built, section by section.
-- [**Design principles**](docs/principles.md): scope, non-goals, and how we work.
-- [**Contributing**](docs/CONTRIBUTING.md) · [**Security policy**](docs/SECURITY.md)
+Re-run `sudo python3 servette.py` any time to return to the shell:
+
+| Command | What it does |
+|---|---|
+| `setup` | Guided first-time walkthrough |
+| `config` | View and edit settings |
+| `enable` / `disable` | Add or remove the background service |
+| `start` / `stop` | Start or stop the server |
+| `status` | Show whether the server is running |
+| `log [n]` | Show recent activity |
+| `update` | Download the latest signed release of Servette |
+| `restore` | Roll back to the previous version |
+| `help` · `quit` | Command list · exit |
+
+**Update your site** by copying new files over (`scp -r mysite/ user@your.server.ip:~/site`) — changes appear immediately, no restart. **Update Servette** with `update`; it pulls the latest signed release, verifies it, and offers to restart. Your `servette.toml` is never touched by an update.
+
+> If you set a password, `servette.toml` holds its hash — sharing the file gives a recipient material for an offline cracking attempt.
+
+### If something's wrong
+
+- **Site unreachable** → confirm ports 80 and 443 are open in the provider firewall / router (not just the OS firewall).
+- **Let's Encrypt won't issue** → your domain must already resolve to this server's IP (`dig +short yourdomain.com`); Let's Encrypt validates over port 80. If `www.` has no DNS record, Servette falls back to a bare-domain certificate and tells you.
+- **Browser warns about the certificate** → expected with a self-signed cert; add a domain, then `config` → `cert`.
+- **Anything else** → `log` in the shell (or `journalctl -u servette`).
+
+## Repository map
+
+| Path | What it is |
+|---|---|
+| `servette.py` | The entire product — server, system, and shell in one file |
+| `tests/test.py` | The whole test suite, run by CI on Python 3.11 and 3.14 |
+| `site/` | The folder Servette serves — ships with the demo page; `site/assets/` holds the logos this README displays |
+| `README.md` | This file — the user-facing introduction and deploy guide |
+| `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
+| `AGENTS.md` · `CLAUDE.md` | The human–agent working agreement, and the pointer to it |
+| `docs/` | [Contributing](docs/CONTRIBUTING.md) and the [Security policy](docs/SECURITY.md) |
+| `LICENSE` | MIT |
+
+A comprehensive tutorial will live at the project site once it exists; until then, the deploy guide above is the complete walkthrough.

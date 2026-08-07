@@ -1183,23 +1183,24 @@ def _swap_recommendation(mem_kb, avail_kb, cache_mb):
 
 
 def _swap_offer(rec_mb, ours, active_mb):
-    """(description, default_mb) for the swap prompt, or None when no offer is due.
+    """(description, skip_hint) for the swap prompt, or None when no offer is due.
 
     Only Servette's own /swapfile is ever offered a resize; swap Servette didn't
     create (a partition, a distro-managed file) is left alone — resizing it would
-    fight whatever manages it. The default preserves the operator's prior choice:
-    the recommendation when creating, the current size when ours already exists."""
+    fight whatever manages it. Enter always takes the recommendation; the skip
+    hint says what declining preserves, so no two options in the prompt are
+    redundant."""
     if rec_mb is None:
         return None
     if active_mb > 0 and not ours:
         return None
     if not ours:
-        return "no swapfile", rec_mb
+        return "no swapfile", "skip"
     if active_mb == 0:
-        return "an inactive swapfile", rec_mb
+        return "an inactive swapfile", "skip"
     if active_mb >= rec_mb:
         return None
-    return f"a {active_mb} MB swapfile", active_mb
+    return f"a {active_mb} MB swapfile", f"keep {active_mb}"
 
 
 def _root_on_sd_card():
@@ -1223,16 +1224,16 @@ def _ensure_swap():
     offer     = _swap_offer(rec_mb, ours, active_mb)
     if offer is None:
         return
-    swap_desc, default_mb = offer
+    swap_desc, skip_hint = offer
     print(f"  This system has {mem_kb // 1024} MB of RAM ({avail_kb // 1024} MB free) and {swap_desc}.")
-    print("  A spike past free RAM can knock the host offline; a swapfile absorbs spikes to disk.")
+    print("  A spike past free RAM can knock the host offline, but a swapfile absorbs spikes to disk.")
     print(f"  Recommended swapfile size for the estimated spike: {rec_mb} MB")
     if _root_on_sd_card():
         print("  Note: root storage is an SD/eMMC card — swap writes add flash wear.")
-    resp = input(f"  Swapfile size in MB [Enter = {default_mb}, any size, n = skip]: ").strip().lower()
+    resp = input(f"  Swapfile size in MB [Enter = {rec_mb}, any size, n = {skip_hint}]: ").strip().lower()
     if resp in ("n", "no"):
         return
-    mb = default_mb
+    mb = rec_mb
     if resp:
         try:
             mb = max(64, int(resp))

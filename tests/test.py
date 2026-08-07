@@ -995,16 +995,16 @@ def run_install_tests(s, tmpdir):
 
     section("Swap offer")
 
-    check("No swap → offer at the recommendation",
-          s._swap_offer(1200, False, 0) == ("no swapfile", 1200))
+    check("No swap → offer, declining skips",
+          s._swap_offer(1200, False, 0) == ("no swapfile", "skip"))
     check("Foreign swap (partition, distro-managed) → no offer",
           s._swap_offer(1200, False, 600) is None)
     check("Our swapfile, big enough → no offer",
           s._swap_offer(1200, True, 1200) is None)
-    check("Our swapfile, undersized → offer defaults to current size",
-          s._swap_offer(1200, True, 600) == ("a 600 MB swapfile", 600))
-    check("Our swapfile, inactive → offer at the recommendation",
-          s._swap_offer(1200, True, 0) == ("an inactive swapfile", 1200))
+    check("Our swapfile, undersized → offer, declining keeps current",
+          s._swap_offer(1200, True, 600) == ("a 600 MB swapfile", "keep 600"))
+    check("Our swapfile, inactive → offer, declining skips",
+          s._swap_offer(1200, True, 0) == ("an inactive swapfile", "skip"))
     check("No recommendation → no offer",
           s._swap_offer(None, False, 0) is None)
 

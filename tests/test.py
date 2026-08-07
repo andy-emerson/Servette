@@ -1066,6 +1066,35 @@ def run_install_tests(s, tmpdir):
     finally:
         s._https_thread = saved_thread
 
+    section("Connection cap survives thread-start failure")
+
+    # If Thread.start() raises after a slot is acquired (memory/thread exhaustion),
+    # the slot must be reclaimed — leaked slots permanently shrink capacity.
+    import socketserver
+    cap_srv  = s._CappedThreadingHTTPServer(("127.0.0.1", 0), s._RedirectHandler, max_connections=2)
+    saved_pr = socketserver.ThreadingMixIn.process_request
+    sock_a, sock_b = socket.socketpair()
+    try:
+        def _fail(self, request, client_address):
+            raise RuntimeError("cannot start thread")
+        socketserver.ThreadingMixIn.process_request = _fail
+        try:
+            cap_srv.process_request(sock_a, ("127.0.0.1", 1))
+        except RuntimeError:
+            pass
+        first  = cap_srv._slots.acquire(blocking=False)
+        second = cap_srv._slots.acquire(blocking=False)
+        check("Both slots free after failed thread start", first and second)
+        if first:
+            cap_srv._slots.release()
+        if second:
+            cap_srv._slots.release()
+    finally:
+        socketserver.ThreadingMixIn.process_request = saved_pr
+        sock_a.close()
+        sock_b.close()
+        cap_srv.server_close()
+
     section("In-service cert reload exits for systemd")
 
     # Under --serve the unit's user cannot systemctl restart itself; _reload_server

@@ -113,7 +113,7 @@ class Config:
                 print(f"Fix or delete {self.CONFIG_FILE} and try again.")
                 sys.exit(1)
 
-        self.serve_dir       = data.get("serve_dir",       data.get("html_file", "site"))
+        self.serve_dir       = data.get("serve_dir",       "site")
         self.port            = data.get("port",            443)
         self.cert_file       = data.get("cert_file",       "cert.pem")
         self.key_file        = data.get("key_file",        "key.pem")

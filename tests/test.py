@@ -1066,6 +1066,45 @@ def run_install_tests(s, tmpdir):
     finally:
         s._https_thread = saved_thread
 
+    section("Status resolves a relative cert path")
+
+    # cmd_status must anchor a relative cert_file to BASE_DIR like every other
+    # call site — from a foreign CWD it previously lost the domain (and the URL).
+    import contextlib
+    import datetime as _dt
+    import io
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+
+    _key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    _name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "example.com")])
+    _cert = (x509.CertificateBuilder().subject_name(_name).issuer_name(_name)
+             .public_key(_key.public_key()).serial_number(x509.random_serial_number())
+             .not_valid_before(_dt.datetime.now(_dt.timezone.utc))
+             .not_valid_after(_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=30))
+             .add_extension(x509.SubjectAlternativeName([x509.DNSName("example.com")]), critical=False)
+             .sign(_key, _hashes.SHA256()))
+    rel_name = "relcert-test.pem"
+    rel_path = os.path.join(SERVETTE_DIR, rel_name)
+    with open(rel_path, "wb") as f:
+        f.write(_cert.public_bytes(_ser.Encoding.PEM))
+
+    saved_cert_file, saved_cwd = s.config.cert_file, os.getcwd()
+    try:
+        s.config.cert_file = rel_name
+        os.chdir(tmpdir)   # a CWD that does not contain the cert
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            s.cmd_status()
+        check("Status shows the domain from a relative cert path",
+              "example.com" in buf.getvalue())
+    finally:
+        s.config.cert_file = saved_cert_file
+        os.chdir(saved_cwd)
+        os.remove(rel_path)
+
     section("Connection cap survives thread-start failure")
 
     # If Thread.start() raises after a slot is acquired (memory/thread exhaustion),

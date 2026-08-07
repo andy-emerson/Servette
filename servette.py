@@ -2540,9 +2540,9 @@ def _runtime_stats(service_active):
 def cmd_status():
     service_active = _service_is_active()
     running        = service_active or _server_running()
-    domain         = _domain_from_cert(config.cert_file)
-    url            = f"https://{domain}" if domain else f"https://localhost:{config.port}"
     cert_path      = _resolve(config.cert_file)
+    domain         = _domain_from_cert(cert_path)
+    url            = f"https://{domain}" if domain else f"https://localhost:{config.port}"
     W              = _PAD
 
     print()

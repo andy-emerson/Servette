@@ -30,6 +30,7 @@
   --muted:    #857f76;
   --green:    #4d7358;
   --green-2:  #5A8466;
+  --clay:     #a86a3c;
   --band:     #1c1b1a;
   --band-ink: #f5f2ed;
 }
@@ -45,6 +46,7 @@ html[data-theme="dark"] {
   --muted:    #6f6a63;
   --green:    #7BA888;
   --green-2:  #5A8466;
+  --clay:     #cf9058;
   --band:     #080808;
   --band-ink: #e8e8e8;
 }
@@ -94,11 +96,7 @@ pre { min-width: 0; }
 
 ::selection { background: color-mix(in oklab, var(--green) 30%, transparent); }
 
-:focus-visible {
-  outline: 2px solid var(--green);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
+:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; border-radius: 4px; }
 
 /* ── Shared patterns ───────────────────────────────────────────── */
 
@@ -108,9 +106,12 @@ pre { min-width: 0; }
   padding-inline: clamp(16px, 3vw, 28px);
 }
 
+/* min() clamps the column floor to the container, so a --min wider than a
+   phone's content column collapses to one column instead of overflowing the
+   page. Without it, any --min above ~350px forces a horizontal scrollbar. */
 .autogrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(var(--min, 280px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(var(--min, 280px), 100%), 1fr));
   gap: var(--gap, 20px);
 }
 
@@ -125,12 +126,7 @@ pre { min-width: 0; }
   margin-bottom: 12px;
 }
 
-.sec-head p {
-  margin: 0;
-  font-size: 17px;
-  line-height: 1.62;
-  color: var(--text-2);
-}
+.sec-head p { margin: 0; font-size: 17px; line-height: 1.62; color: var(--text-2); }
 
 .eyebrow {
   margin: 0 0 10px;
@@ -140,10 +136,17 @@ pre { min-width: 0; }
   color: var(--green);
 }
 
+.sub-head { max-width: 66ch; margin-bottom: 22px; }
+.sub-head h3 { font-size: clamp(20px, 2.2vw, 24px); line-height: 1.25; margin-bottom: 10px; }
+.sub-head p { margin: 0; font-size: 16px; line-height: 1.62; color: var(--text-2); }
+
 .prose { margin-top: 22px; max-width: 74ch; display: grid; gap: 15px; }
 .prose p { margin: 0; font-size: 16px; line-height: 1.68; color: var(--text-2); }
 .prose p.aside { color: var(--muted); font-size: 15px; }
 .prose strong { color: var(--text); font-weight: 500; }
+.prose code { font-size: 14.5px; }
+
+.rule { height: 1px; background: var(--border); margin: clamp(38px, 5vw, 56px) 0; }
 
 .card {
   background: var(--surface);
@@ -154,6 +157,9 @@ pre { min-width: 0; }
 
 .card h3 { font-size: 18px; margin-bottom: 9px; }
 .card p { margin: 0; font-size: 15px; line-height: 1.62; color: var(--text-2); }
+.card p + p { margin-top: 10px; }
+.card--ours { border-color: var(--green); }
+.card--ours h3 { color: var(--green); }
 
 .btn {
   display: inline-block;
@@ -166,12 +172,47 @@ pre { min-width: 0; }
 .btn--primary { background: var(--green-2); color: #ffffff; border: 1px solid var(--green-2); }
 .btn--outline { border: 1px solid var(--border); background: var(--surface); color: var(--text); }
 .btn--s { font-size: 13px; padding: 8px 14px; }
-.btn--m { font-size: 13.5px; padding: 9px 16px; }
 .btn--l { font-size: 15px; padding: 13px 22px; }
 
 .cmt { color: var(--muted); }
 .hi  { color: var(--text); }
 .acc { color: var(--green); }
+
+/* Generic bordered table, used by the principles, scope, and peer tables. */
+.tablewrap {
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.dtable { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+.dtable thead tr { background: var(--bg-2); }
+
+.dtable th, .dtable td {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.dtable tbody tr:last-child th, .dtable tbody tr:last-child td { border-bottom: none; }
+
+.dtable thead th {
+  font: 500 11.5px/1.4 "DM Mono", monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.dtable tbody th {
+  font: 500 14.5px/1.5 "DM Mono", monospace;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.dtable td { color: var(--text-2); line-height: 1.6; }
 
 /* ── Logo ──────────────────────────────────────────────────────────
    Set in text rather than shipped as an image so the cursor can blink and
@@ -215,17 +256,12 @@ pre { min-width: 0; }
   gap: 10px 26px;
 }
 
-.brand { display: flex; align-items: center; flex: none; }
+.brand { display: flex; align-items: center; flex: none; background: none; border: none; padding: 0; cursor: pointer; }
 .brand .logo { font-size: 25px; }
 
 /* The tab strip. These are the site's navigation — each one swaps the whole
    main region, so they carry the same weight nav links would. */
-.tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  flex: 1 1 auto;
-}
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto; }
 
 .tab {
   font-family: "DM Mono", monospace;
@@ -248,13 +284,7 @@ pre { min-width: 0; }
   color: var(--text);
 }
 
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-left: auto;
-  flex: none;
-}
+.header-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; flex: none; }
 
 .theme-toggle {
   width: 34px;
@@ -282,7 +312,7 @@ pre { min-width: 0; }
 .hero {
   --min: 330px;
   --gap: 44px;
-  padding-block: clamp(40px, 6vw, 76px) 56px;
+  padding-block: clamp(40px, 6vw, 72px) 48px;
   align-items: center;
 }
 
@@ -301,28 +331,9 @@ pre { min-width: 0; }
   color: var(--muted);
 }
 
-.hero h1 {
-  font-size: clamp(30px, 4.4vw, 46px);
-  line-height: 1.14;
-  margin-bottom: 18px;
-}
-
-.hero-lead {
-  margin: 0 0 14px;
-  font-size: 17.5px;
-  line-height: 1.62;
-  color: var(--text-2);
-  max-width: 54ch;
-}
-
-.hero-sub {
-  margin: 0 0 26px;
-  font-size: 16px;
-  line-height: 1.6;
-  color: var(--muted);
-  max-width: 54ch;
-}
-
+.hero h1 { font-size: clamp(30px, 4.4vw, 46px); line-height: 1.14; margin-bottom: 18px; }
+.hero-lead { margin: 0 0 14px; font-size: 17.5px; line-height: 1.62; color: var(--text-2); max-width: 54ch; }
+.hero-sub { margin: 0 0 26px; font-size: 16px; line-height: 1.6; color: var(--muted); max-width: 54ch; }
 .hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 22px; }
 
 .install-line {
@@ -374,13 +385,7 @@ pre { min-width: 0; }
   color: var(--muted);
 }
 
-.term__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--green);
-  flex: none;
-}
+.term__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: none; }
 
 .term pre {
   margin: 0;
@@ -391,15 +396,18 @@ pre { min-width: 0; }
   overflow-x: auto;
 }
 
-/* ── Stat band ─────────────────────────────────────────────────── */
+/* ── Stat band ─────────────────────────────────────────────────────
+   A card in the content column, not a full-bleed band: the page has one
+   measure, and a stripe running to the viewport edge breaks it. */
 
 .statband {
+  --min: 190px;
+  --gap: 28px;
   background: var(--band);
   color: var(--band-ink);
-  border-block: 1px solid var(--border);
+  border-radius: 14px;
+  padding: clamp(26px, 3.5vw, 38px) clamp(24px, 3.5vw, 40px);
 }
-
-.statband .wrap { --min: 190px; --gap: 28px; padding-block: 40px; }
 
 .stat__n {
   margin: 0 0 6px;
@@ -410,30 +418,27 @@ pre { min-width: 0; }
 
 html[data-theme="dark"] .stat__n { color: var(--green); }
 
-.stat__what {
+.stat__what { margin: 0; font-size: 14px; line-height: 1.55; opacity: 0.72; }
+.stat__what code { font-size: 13px; }
+
+/* ── Positioning matrix ────────────────────────────────────────── */
+
+.matrix {
   margin: 0;
-  font-size: 14px;
-  line-height: 1.55;
-  opacity: 0.7;
-}
-
-/* ── Comparison table ──────────────────────────────────────────── */
-
-.tablewrap {
-  min-width: 0;
-  overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface);
+  padding: 18px;
+  overflow-x: auto;
 }
 
-.ctable {
-  width: 100%;
-  min-width: 660px;
-  border-collapse: collapse;
-  font-size: 14.5px;
-}
+.matrix svg { display: block; width: 100%; height: auto; min-width: 520px; }
 
+figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--text-2); max-width: 78ch; }
+
+/* ── Peer comparison table ─────────────────────────────────────── */
+
+.ctable { width: 100%; min-width: 660px; border-collapse: collapse; font-size: 14.5px; }
 .ctable thead tr { background: var(--bg-2); }
 
 .ctable th, .ctable td {
@@ -442,8 +447,7 @@ html[data-theme="dark"] .stat__n { color: var(--green); }
   text-align: left;
 }
 
-.ctable tbody tr:last-child th,
-.ctable tbody tr:last-child td { border-bottom: none; }
+.ctable tbody tr:last-child th, .ctable tbody tr:last-child td { border-bottom: none; }
 
 .ctable th.ctable__dim {
   font: 500 11.5px/1.4 "DM Mono", monospace;
@@ -452,21 +456,9 @@ html[data-theme="dark"] .stat__n { color: var(--green); }
   color: var(--muted);
 }
 
-.ctable th.ctable__ours {
-  font: 500 16px/1.3 "DM Mono", monospace;
-  color: var(--green);
-}
-
-.ctable th.ctable__peer {
-  font: 500 13.5px/1.3 "DM Sans", sans-serif;
-  color: var(--text-2);
-}
-
-.ctable tbody th {
-  font: 400 14.5px/1.5 "DM Sans", sans-serif;
-  color: var(--text);
-}
-
+.ctable th.ctable__ours { font: 500 16px/1.3 "DM Mono", monospace; color: var(--green); }
+.ctable th.ctable__peer { font: 500 13.5px/1.3 "DM Sans", sans-serif; color: var(--text-2); }
+.ctable tbody th { font: 400 14.5px/1.5 "DM Sans", sans-serif; color: var(--text); }
 .ctable td { color: var(--text-2); }
 .ctable td.ctable__ours { color: var(--text); background: color-mix(in oklab, var(--green) 7%, transparent); }
 
@@ -487,7 +479,6 @@ html[data-theme="dark"] .stat__n { color: var(--green); }
 }
 
 .step__head { padding: 16px 20px; border-bottom: 1px solid var(--border); }
-
 .step__head h3 { font-size: 17px; margin-bottom: 4px; }
 
 .step__head h3::before {
@@ -533,22 +524,39 @@ html[data-theme="dark"] .stat__n { color: var(--green); }
 
 .cmdlist { margin: 0; padding: 8px 18px 14px; font-size: 13.5px; }
 
-.cmdlist div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  padding: 7px 0;
-  line-height: 1.5;
-}
-
-.cmdlist dt {
-  flex: 0 0 auto;
-  min-width: 9.5em;
-  font-family: "DM Mono", monospace;
-  color: var(--green);
-}
-
+.cmdlist div { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 7px 0; line-height: 1.5; }
+.cmdlist dt { flex: 0 0 auto; min-width: 9.5em; font-family: "DM Mono", monospace; color: var(--green); }
 .cmdlist dd { margin: 0; flex: 1 1 12em; color: var(--text-2); }
+
+/* ── Code block ────────────────────────────────────────────────── */
+
+.codeblock {
+  min-width: 0;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-top: 22px;
+}
+
+.codeblock__label {
+  margin: 0;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--border);
+  font: 500 11.5px/1 "DM Mono", monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.codeblock pre {
+  margin: 0;
+  padding: 20px 18px;
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--text);
+  overflow-x: auto;
+}
 
 /* ── Architecture figure ───────────────────────────────────────────
    The diagram draws itself from the data table in the script at the end of
@@ -558,15 +566,15 @@ html[data-theme="dark"] .stat__n { color: var(--green); }
    that can be lifted in and out. */
 
 .arch {
-  --dg-panel:    var(--surface);
-  --dg-ink:      var(--text);
-  --dg-faint:    var(--muted);
-  --dg-system:   var(--muted);
+  --dg-panel:     var(--surface);
+  --dg-ink:       var(--text);
+  --dg-faint:     var(--muted);
+  --dg-system:    var(--muted);
   --dg-system-bg: var(--bg-2);
-  --dg-server:   var(--green);
+  --dg-server:    var(--green);
   --dg-server-bg: color-mix(in oklab, var(--green) 12%, var(--bg));
-  --dg-write:    #a86a3c;
-  --dg-write-bg: color-mix(in oklab, #a86a3c 12%, var(--bg));
+  --dg-write:     var(--clay);
+  --dg-write-bg:  color-mix(in oklab, var(--clay) 12%, var(--bg));
 
   margin: 0;
   border: 1px solid var(--border);
@@ -576,19 +584,7 @@ html[data-theme="dark"] .stat__n { color: var(--green); }
   overflow-x: auto;
 }
 
-html[data-theme="dark"] .arch {
-  --dg-write: #cf9058;
-}
-
 .arch svg { display: block; width: 100%; height: auto; }
-
-figcaption {
-  margin-top: 14px;
-  font-size: 14px;
-  line-height: 1.6;
-  color: var(--text-2);
-  max-width: 78ch;
-}
 
 .legend {
   display: flex;
@@ -605,22 +601,19 @@ figcaption {
 
 .legend-item { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .swatch { width: 22px; height: 3px; border-radius: 2px; flex: none; background: var(--muted); }
-.swatch--write { background: #a86a3c; height: 4px; }
-html[data-theme="dark"] .swatch--write { background: #cf9058; }
+.swatch--write { background: var(--clay); height: 4px; }
 .swatch--boundary { background: var(--green); }
-.swatch--dotted {
-  background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 9px);
-  height: 2px;
-}
+.swatch--dotted { background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 9px); height: 2px; }
 
 /* ── LOC table ─────────────────────────────────────────────────── */
 
-.loc-table {
-  margin-top: 30px;
-  border-collapse: collapse;
-  width: 100%;
-  font-size: 14px;
-}
+/* Six columns do not fit a phone. The table keeps a floor width and scrolls
+   inside this box rather than widening the page — it is the one table here
+   without the bordered .tablewrap around it, so it needs its own. */
+.scrollx { min-width: 0; overflow-x: auto; margin-top: 24px; }
+.scrollx .loc-table { margin-top: 0; min-width: 560px; }
+
+.loc-table { margin-top: 24px; border-collapse: collapse; width: 100%; font-size: 14px; }
 
 .loc-table caption {
   text-align: left;
@@ -631,11 +624,7 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
   margin-bottom: 12px;
 }
 
-.loc-table th, .loc-table td {
-  text-align: left;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-}
+.loc-table th, .loc-table td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 
 .loc-table thead th {
   font: 500 11px/1 "DM Mono", monospace;
@@ -644,17 +633,21 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
   color: var(--muted);
 }
 
+.loc-table tbody th { font-weight: 400; }
+
 .loc-table td.num, .loc-table th.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
   font-family: "DM Mono", monospace;
 }
 
-.loc-table tr.total td, .loc-table tr.total th {
-  font-weight: 600;
-  border-bottom: none;
-  border-top: 2px solid var(--border);
-}
+.loc-table tr.total td, .loc-table tr.total th { font-weight: 600; border-bottom: none; border-top: 2px solid var(--border); }
+
+/* A bar drawn in the row itself, so the share column is read rather than
+   parsed. Width is set inline, from the same number in the cell beside it. */
+.loc-bar { display: block; height: 6px; border-radius: 3px; background: var(--green); opacity: 0.75; }
+.loc-bar--sys { background: var(--muted); }
+.loc-bar--shell { background: var(--clay); }
 
 /* ── Closing call to action ────────────────────────────────────── */
 
@@ -685,7 +678,6 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
 
 .footer-brand { margin-bottom: 12px; }
 .footer-brand .logo { font-size: 23px; }
-
 .footer-tag { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--muted); max-width: 34ch; }
 
 .footer-label {
@@ -733,11 +725,12 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
 
 <header class="site-header">
   <div class="wrap">
-    <span class="brand">
+    <button class="brand" type="button" data-goto="home" aria-label="Servette — home">
       <span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span>
-    </span>
+    </button>
     <nav class="tabs" role="tablist" aria-label="Sections">
-      <button class="tab" type="button" role="tab" aria-selected="true"  aria-controls="page-compares" id="tabbtn-compares">How it Compares</button>
+      <button class="tab" type="button" role="tab" aria-selected="true"  aria-controls="page-home"     id="tabbtn-home">Home</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-compares" id="tabbtn-compares">How it Compares</button>
       <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-use"      id="tabbtn-use">How to Use it</button>
       <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-works"    id="tabbtn-works">How it Works</button>
     </nav>
@@ -750,9 +743,9 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
 
 <main>
 
-<!-- ══ Page 1 — How it Compares ════════════════════════════════════ -->
+<!-- ══ Home ════════════════════════════════════════════════════════ -->
 
-<div class="panel" id="page-compares" role="tabpanel" aria-labelledby="tabbtn-compares" tabindex="-1">
+<div class="panel" id="page-home" role="tabpanel" aria-labelledby="tabbtn-home" tabindex="-1">
 
   <section class="wrap autogrid hero">
     <div>
@@ -769,7 +762,7 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
       </div>
       <div class="install-line">
         <span class="install-line__prompt">$</span>
-        <code id="install-cmd">python3 servette.py</code>
+        <code id="install-cmd">sudo python3 servette.py</code>
         <button class="copy-btn" type="button" aria-controls="install-cmd">Copy</button>
       </div>
     </div>
@@ -794,8 +787,8 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
     </div>
   </section>
 
-  <section class="statband">
-    <div class="wrap autogrid">
+  <section class="wrap">
+    <div class="statband autogrid">
       <div>
         <p class="stat__n">1</p>
         <p class="stat__what">file to copy — <code>servette.py</code>, and nothing else</p>
@@ -817,36 +810,189 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
 
   <section class="wrap section">
     <div class="sec-head">
-      <p class="eyebrow">The space between</p>
-      <h2>Most ways to serve a site sit at an extreme.</h2>
-      <p>General-purpose servers do everything, once you have configured them. Development servers do one thing and stop there. Managed platforms do it for you, on terms that are theirs. Servette aims at the space between.</p>
+      <p class="eyebrow">What it is</p>
+      <h2>A production layer over the smallest possible server.</h2>
+      <p>Python's standard library ships <code>http.server</code>: the canonical nanoserver. It serves a folder in one command, and — by its own documentation — stops well short of production. Servette is the layer that closes that gap, and nothing beyond it.</p>
     </div>
+
+    <!-- Four cards, so a wider floor: three-per-row would leave one stranded
+         on a second line. This lands 2×2 on a desktop and 1-up on a phone. -->
+    <div class="autogrid" style="--min: 420px; --gap: 20px;">
+      <div class="card">
+        <h3>It gets a real certificate</h3>
+        <p>A trusted Let's Encrypt certificate, issued by Servette's own ACME client during setup and renewed by a watchdog well before it expires. Plain HTTP is redirected up to HTTPS.</p>
+      </div>
+      <div class="card">
+        <h3>It is hard to abuse</h3>
+        <p>Security headers on every response, a sliding-window rate limiter, optional password protection, path-traversal refusal, and a connection cap that closes rather than queues.</p>
+      </div>
+      <div class="card">
+        <h3>It stays up</h3>
+        <p>Installed as a sandboxed systemd service running as its own unprivileged user, restarted within seconds if it dies, and back after a reboot.</p>
+      </div>
+      <div class="card">
+        <h3>It stays legible</h3>
+        <p>One file you can read in an afternoon. No plugin system, no configuration language, no hidden machinery to take on trust.</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p>Everything in that list exists because it is <strong>necessary</strong> to serve a site on the open internet honestly. Nothing is there because another server has it.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">What it is not</p>
+      <h2>The honest limits.</h2>
+      <p>Servette serves files. Anything that runs in a browser is fair game — a portfolio, a documentation site, a serious client-side app. Anything that needs the server to think is not.</p>
+    </div>
+
+    <div class="autogrid" style="--min: 260px; --gap: 20px;">
+      <div class="card">
+        <h3>No dynamic content</h3>
+        <p>A <code>POST</code> gets a <code>405</code>. A POST needs a destination — a database, an email, a file — and Servette has none. A form's backend lives elsewhere.</p>
+      </div>
+      <div class="card">
+        <h3>No SPA deep links</h3>
+        <p>Files are served as they are, so <code>/about</code> 404s unless that file exists. Use hash routing, or a platform with rewrite rules.</p>
+      </div>
+      <div class="card">
+        <h3>No proxying or plugins</h3>
+        <p>No reverse proxy, load balancer, or live config API. Servette can sit <em>behind</em> one trusted proxy hop; it does not become one.</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p class="aside">A request to add any of these is not a feature request; it is a request for a different program. The honest answer is usually to reach for a general-purpose server that does more.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">This site</p>
+      <h2>Where to go from here</h2>
+      <p>Three pages, in the order most people want them.</p>
+    </div>
+
+    <div class="autogrid" style="--min: 260px; --gap: 20px;">
+      <div class="card">
+        <h3>How it Compares</h3>
+        <p>Where Servette sits against general-purpose servers, development servers, managed platforms, and its closest small peers — and why simplicity and security usually trade against each other.</p>
+        <p><button class="btn btn--outline btn--s" type="button" data-goto="how-it-compares">Compare it →</button></p>
+      </div>
+      <div class="card">
+        <h3>How to Use it</h3>
+        <p>Getting a site live: copying the file, running the wizard, leaving it running, and the full command reference for the interactive shell.</p>
+        <p><button class="btn btn--outline btn--s" type="button" data-goto="how-to-use-it">Get started →</button></p>
+      </div>
+      <div class="card">
+        <h3>How it Works</h3>
+        <p>The developer's view: the design principles, the architecture map, what each region of the file does, and how to work on Servette itself.</p>
+        <p><button class="btn btn--outline btn--s" type="button" data-goto="how-it-works">Read the design →</button></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap section--last">
+    <div class="autogrid cta">
+      <div>
+        <h2>Serve your site in under ten minutes.</h2>
+        <p>Copy one file to a server, run it, and answer a few questions.</p>
+      </div>
+      <div class="cta__actions">
+        <a class="btn btn--primary btn--l" href="#how-to-use-it">Read the walkthrough</a>
+        <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette">View on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<!-- ══ How it Compares ═════════════════════════════════════════════ -->
+
+<div class="panel" id="page-compares" role="tabpanel" aria-labelledby="tabbtn-compares" tabindex="-1" hidden>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">The trade-off</p>
+      <h2>Simple, or secure. Usually not both.</h2>
+      <p>Serving a static site safely on the public internet is a solved problem twice over — and both solutions cost you something. The simple tools skip the security. The secure tools make you configure it. Servette's whole reason to exist is that this trade is not actually necessary at this size.</p>
+    </div>
+
     <div class="autogrid" style="--min: 290px; --gap: 20px;">
       <div class="card">
-        <h3>General-purpose servers</h3>
-        <p>nginx, Apache, Caddy. Any site, at any scale — after you have learned a configuration language and taken a large system on trust.</p>
+        <h3>Simple, but not secure</h3>
+        <p><code>http.server</code>, <code>bottle.py</code>, and most one-command file servers. Running in seconds, and with no TLS, no security headers, no rate limiting, and nothing that survives you closing the terminal.</p>
       </div>
       <div class="card">
-        <h3>Development servers</h3>
-        <p><code>http.server</code> and friends. Perfect while you build; by their own documentation, not built to face the internet.</p>
+        <h3>Secure, but not simple</h3>
+        <p>nginx, Apache, Caddy. Everything you need is available — after a configuration language, a certificate tool to wire in, and a large system you take on trust.</p>
       </div>
-      <div class="card">
-        <h3>Managed platforms</h3>
-        <p>GitHub Pages, Netlify, Vercel. They host it for you, on their infrastructure, under their terms and their limits.</p>
+      <div class="card card--ours">
+        <h3>Servette</h3>
+        <p>Secure defaults with nothing to configure, because the job is narrow enough that every secure choice can simply be made for you.</p>
+        <p>The cost is real and worth naming: it will never do more than serve files.</p>
       </div>
-      <div class="card" style="border-color: var(--green);">
-        <h3 style="color: var(--green);">Servette</h3>
-        <p>Do everything <strong>necessary</strong> to do one thing <strong>well</strong>: host a static site you own, securely, on a server you control.</p>
-      </div>
+    </div>
+
+    <figure class="matrix" style="margin-top: 28px;">
+      <div id="matrix" role="img" aria-label="A positioning chart with simplicity on the horizontal axis and security-by-default on the vertical axis. In the lower right, simple but not secure: Python's http.server, and bottle.py. In the upper left, secure but not simple: nginx with certbot, and Apache with certbot. Caddy sits high on security and mid on simplicity. Static Web Server and srv sit mid-to-high on both. Servette sits in the upper right, high on both simplicity and security by default."></div>
+    </figure>
+    <figcaption>A positioning sketch, not a benchmark: placements are editorial judgement about what each tool does <em>by default, out of the box</em>, not measured numbers. Every tool here can be made secure with enough configuration — that axis is exactly the point.</figcaption>
+  </section>
+
+  <div class="wrap"><div class="rule"></div></div>
+
+  <section class="wrap">
+    <div class="sec-head">
+      <p class="eyebrow">By category</p>
+      <h2>The three ways people serve a static site</h2>
+      <p>Most tooling sits at one of three extremes. Each is a reasonable answer to a different question.</p>
+    </div>
+
+    <div class="tablewrap">
+      <table class="dtable">
+        <thead>
+          <tr>
+            <th scope="col">Category</th>
+            <th scope="col">What it gives you</th>
+            <th scope="col">What it costs</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">General-purpose</th>
+            <td>nginx, Apache, Caddy. Any site, at any scale, with every feature you could need.</td>
+            <td>A configuration language to learn, a certificate tool to wire in, and a large system you take on trust rather than read.</td>
+          </tr>
+          <tr>
+            <th scope="row">Development</th>
+            <td><code>http.server</code> and friends. A folder served in one command, right now.</td>
+            <td>By its own documentation, not built to face the internet: no trusted TLS, no auth, no hardening, gone when the terminal closes.</td>
+          </tr>
+          <tr>
+            <th scope="row">Managed</th>
+            <td>GitHub Pages, Netlify, Vercel. They run it for you, and run it well.</td>
+            <td>Their infrastructure, their terms, their limits. You do not own the thing serving your site.</td>
+          </tr>
+          <tr>
+            <th scope="row" style="color: var(--green);">Servette</th>
+            <td>A static site you own, served securely from your own machine, set up by a wizard.</td>
+            <td>It will never do more than serve files. That is the deal.</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </section>
 
   <section class="wrap section">
     <div class="sec-head">
       <p class="eyebrow">Peer comparison</p>
-      <h2>How it compares</h2>
-      <p>The tools closest in spirit are small and focused. Here is how a few of them compare on the one job Servette is built for.</p>
+      <h2>Against its closest neighbours</h2>
+      <p>The tools nearest in spirit are small and focused, like Servette. Here is how a few of them compare on the one job it is built for.</p>
     </div>
+
     <div class="tablewrap">
       <table class="ctable">
         <thead>
@@ -868,17 +1014,11 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
           </tr>
           <tr>
             <th scope="row">Automatic trusted HTTPS</th>
-            <td class="ctable__ours">✓</td>
-            <td>✗</td>
-            <td>✓</td>
-            <td>✗</td>
+            <td class="ctable__ours">✓</td><td>✗</td><td>✓</td><td>✗</td>
           </tr>
           <tr>
             <th scope="row">Hardened for production</th>
-            <td class="ctable__ours">✓</td>
-            <td>✗</td>
-            <td>✗</td>
-            <td>~</td>
+            <td class="ctable__ours">✓</td><td>✗</td><td>✗</td><td>~</td>
           </tr>
           <tr>
             <th scope="row">Readable source</th>
@@ -889,21 +1029,16 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
           </tr>
           <tr>
             <th scope="row">Actively maintained</th>
-            <td class="ctable__ours">✓</td>
-            <td>✓</td>
-            <td>✗</td>
-            <td>✓</td>
+            <td class="ctable__ours">✓</td><td>✓</td><td>✗</td><td>✓</td>
           </tr>
           <tr>
             <th scope="row">Runs on a Raspberry Pi out of the box</th>
-            <td class="ctable__ours">✓</td>
-            <td>✓</td>
-            <td>✗</td>
-            <td>✗</td>
+            <td class="ctable__ours">✓</td><td>✓</td><td>✗</td><td>✗</td>
           </tr>
         </tbody>
       </table>
     </div>
+
     <div class="prose">
       <p>All of these are excellent at what they are built for. None of them do quite what Servette does: serve a static site you own, securely, on the public internet, from a single file you can read.</p>
     </div>
@@ -911,48 +1046,106 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
 
   <section class="wrap section">
     <div class="sec-head">
-      <p class="eyebrow">Fit</p>
-      <h2>Who it is for</h2>
+      <p class="eyebrow">Secure by default</p>
+      <h2>What you get without asking</h2>
+      <p>Every item below is on from the first run. None of it is an opt-in, a plugin, or a setting you have to discover.</p>
     </div>
-    <div class="autogrid" style="--min: 290px; --gap: 20px;">
-      <div class="card">
-        <h3>You want to understand your server</h3>
-        <p>One readable file with no hidden machinery, rather than a large system you configure and take on trust.</p>
-      </div>
-      <div class="card">
-        <h3>You have a real site that needs a real server</h3>
-        <p>Trusted HTTPS that renews itself, and a hardened service that survives reboots — not a terminal you cannot close.</p>
-      </div>
-      <div class="card">
-        <h3>You want to own what you serve</h3>
-        <p>Your own server, your own certificate, behind a password if you want one. No platform terms in between.</p>
-      </div>
-      <div class="card">
-        <h3>You are on a Raspberry Pi</h3>
-        <p>Designed with the Pi in mind. If you can SSH in and run a Python script, you can have a real HTTPS site live in minutes.</p>
-      </div>
+
+    <div class="tablewrap">
+      <table class="dtable">
+        <thead>
+          <tr><th scope="col">Default</th><th scope="col">What it does</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Trusted HTTPS</th><td>A Let's Encrypt certificate, issued at setup and renewed automatically; plain HTTP is 301'd upward.</td></tr>
+          <tr><th scope="row">Security headers</th><td>HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy on every response.</td></tr>
+          <tr><th scope="row">Rate limiting</th><td>Two independent sliding windows per IP — total requests, and failed logins — making password guessing impractical.</td></tr>
+          <tr><th scope="row">Path traversal refused</th><td>Every request path is resolved and checked against the served directory; anything outside it gets a <code>403</code>.</td></tr>
+          <tr><th scope="row">Connection cap</th><td>Concurrent connections are capped and closed rather than queued, with a per-connection timeout — a slowloris mitigation.</td></tr>
+          <tr><th scope="row">Least-privilege service</th><td>Runs as its own login-less user under a systemd sandbox: no new privileges, a read-only system, and write access to its own directory only.</td></tr>
+          <tr><th scope="row">Nothing writes on request</th><td>Serving a request is read-and-send. No HTTP request can cause Servette to write to disk — see <a href="#how-it-works">How it Works</a>.</td></tr>
+          <tr><th scope="row">Optional password</th><td>Basic Auth per site when you want it, stored as a memory-hard scrypt hash, never in plaintext.</td></tr>
+        </tbody>
+      </table>
     </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Simplicity, measured</p>
+      <h2>The whole server, counted</h2>
+      <p>"Readable in an afternoon" is a claim, and this is the number behind it. Servette is 3,468 lines of Python, of which 2,405 are code and the rest comments and blanks. There is no second file, no framework underneath, and nothing generated.</p>
+    </div>
+
+    <div class="scrollx">
+    <table class="loc-table">
+      <caption>Lines per top-level section</caption>
+      <thead>
+        <tr>
+          <th scope="col">Section</th>
+          <th scope="col">Responsibility</th>
+          <th class="num" scope="col">Total</th>
+          <th class="num" scope="col">Code</th>
+          <th class="num" scope="col">Share</th>
+          <th scope="col" style="width: 22%;">&nbsp;</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Init</th>
+          <td>Entry dispatch and imports</td>
+          <td class="num">91</td><td class="num">53</td><td class="num">3%</td>
+          <td><span class="loc-bar" style="width: 3%;"></span></td>
+        </tr>
+        <tr>
+          <th scope="row">System</th>
+          <td>Bootstrap, lifecycle, certificates, systemd</td>
+          <td class="num">1,120</td><td class="num">780</td><td class="num">32%</td>
+          <td><span class="loc-bar loc-bar--sys" style="width: 32%;"></span></td>
+        </tr>
+        <tr>
+          <th scope="row">Shell</th>
+          <td>The interactive terminal interface</td>
+          <td class="num">1,254</td><td class="num">948</td><td class="num">36%</td>
+          <td><span class="loc-bar loc-bar--shell" style="width: 36%;"></span></td>
+        </tr>
+        <tr>
+          <th scope="row">Server</th>
+          <td>Everything on the request path</td>
+          <td class="num">1,003</td><td class="num">624</td><td class="num">29%</td>
+          <td><span class="loc-bar" style="width: 29%;"></span></td>
+        </tr>
+        <tr class="total">
+          <th scope="row">Total</th>
+          <td>&nbsp;</td>
+          <td class="num">3,468</td><td class="num">2,405</td><td class="num">100%</td>
+          <td>&nbsp;</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
     <div class="prose">
-      <p class="aside">Servette is not for dynamic applications, server-side rendering, or anything that needs to run code per request. It serves files — anything that runs in a browser, from a portfolio to a serious client-side app — and deliberately stops there.</p>
+      <p>The shape is worth a second look: the part that faces the internet is the <em>smallest</em> of the three. Well over half the file is setup, operation, and the interactive shell — work that happens before or between requests, where a mistake cannot be reached by a visitor.</p>
     </div>
   </section>
 
   <section class="wrap section--last">
     <div class="autogrid cta">
       <div>
-        <h2>Serve your site in under ten minutes.</h2>
-        <p>Copy one file to a server, run it, and answer a few questions.</p>
+        <h2>Read it before you trust it.</h2>
+        <p>That is the whole argument. The file is right there, and it is short enough to finish.</p>
       </div>
       <div class="cta__actions">
-        <a class="btn btn--primary btn--l" href="#how-to-use-it">Read the walkthrough</a>
-        <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette">View on GitHub</a>
+        <a class="btn btn--primary btn--l" href="https://github.com/andy-emerson/servette/blob/main/servette.py">Open servette.py</a>
+        <a class="btn btn--outline btn--l" href="#how-it-works">See how it works</a>
       </div>
     </div>
   </section>
 
 </div>
 
-<!-- ══ Page 2 — How to Use it ══════════════════════════════════════ -->
+<!-- ══ How to Use it ═══════════════════════════════════════════════ -->
 
 <div class="panel" id="page-use" role="tabpanel" aria-labelledby="tabbtn-use" tabindex="-1" hidden>
 
@@ -960,7 +1153,7 @@ html[data-theme="dark"] .swatch--write { background: #cf9058; }
     <div class="sec-head">
       <p class="eyebrow">Getting started</p>
       <h2>How to use it</h2>
-      <p>Servette needs Python 3.11 or newer and a server you can SSH into. There is nothing for you to install beyond the file itself: it pulls its one dependency, <code>cryptography</code>, on first run. No configuration language, and nothing to build.</p>
+      <p>Servette needs Python 3.11 or newer and a server you can SSH into. There is nothing for you to install beyond the file itself: it creates its own virtual environment and pulls its one dependency, <code>cryptography</code>, on first run. No configuration language, and nothing to build.</p>
     </div>
 
     <div class="autogrid steps">
@@ -983,7 +1176,7 @@ mkdir site
           <h3>Run the wizard</h3>
           <p>It asks for a domain, a folder, and an email.</p>
         </div>
-        <pre>python3 servette.py
+        <pre>sudo python3 servette.py
 
 servette&gt; <span class="hi">setup</span>
 </pre>
@@ -1002,7 +1195,8 @@ servette&gt; <span class="hi">status</span>
     </div>
 
     <div class="prose">
-      <p>The wizard issues a Let's Encrypt certificate, redirects plain HTTP up to HTTPS, and installs a systemd service so the server comes back after a reboot. Renewal happens on its own — a watchdog checks the certificate on a timer and renews it well before it expires.</p>
+      <p>The wizard issues a Let's Encrypt certificate, redirects plain HTTP up to HTTPS, and installs a systemd service so the server comes back after a reboot. Renewal happens on its own — a watchdog checks the certificate every minute and renews it once it is within thirty days of expiring.</p>
+      <p><code>sudo</code> is needed only for the interactive shell, which writes the systemd unit and creates the service user. The server itself runs as an unprivileged <code>servette</code> user with no login shell.</p>
       <p class="aside">Serving over a self-signed certificate works too, for a local network or a machine without a public domain. The browser will warn once; everything else behaves the same.</p>
     </div>
   </section>
@@ -1011,7 +1205,7 @@ servette&gt; <span class="hi">status</span>
     <div class="sec-head">
       <p class="eyebrow">Reference</p>
       <h2>The shell</h2>
-      <p>Running <code>servette.py</code> drops you into an interactive shell. Everything is a command — there is no config file to hand-edit, and nothing that requires restarting the server to take effect.</p>
+      <p>Running <code>servette.py</code> without arguments drops you into an interactive shell. Everything is a command — there is no config file to hand-edit, and nothing that requires restarting the server to take effect.</p>
     </div>
 
     <div class="autogrid cmds">
@@ -1028,23 +1222,33 @@ servette&gt; <span class="hi">status</span>
           <div><dt>restore</dt><dd>roll back to the previous version</dd></div>
           <div><dt>pull [n]</dt><dd>pull a site's new content now</dd></div>
           <div><dt>restore-site [n]</dt><dd>roll back a site's content</dd></div>
+          <div><dt>help / quit</dt><dd>show commands, or exit</dd></div>
         </dl>
       </div>
       <div class="cmdbox">
-        <p class="cmdbox__label">config</p>
+        <p class="cmdbox__label">config sub-shell</p>
         <dl class="cmdlist">
           <div><dt>sites</dt><dd>list configured sites</dd></div>
           <div><dt>add-site</dt><dd>add a site (folder, domain, password, channel)</dd></div>
+          <div><dt>remove-site &lt;n&gt;</dt><dd>remove a site</dd></div>
           <div><dt>dir [n]</dt><dd>directory to serve</dd></div>
+          <div><dt>port</dt><dd>HTTPS port</dd></div>
           <div><dt>cert [n]</dt><dd>SSL certificate and key</dd></div>
-          <div><dt>publish [n]</dt><dd>site publish channel and signing key</dd></div>
+          <div><dt>email</dt><dd>ACME registration address</dd></div>
+          <div><dt>publish [n]</dt><dd>publish channel and signing key</dd></div>
           <div><dt>username / password</dt><dd>optional login for a site</dd></div>
           <div><dt>limits</dt><dd>rate limits</dd></div>
           <div><dt>cache</dt><dd>browser cache policy</dd></div>
+          <div><dt>proxy</dt><dd>trusted proxy IP for X-Forwarded-For</dd></div>
           <div><dt>tls</dt><dd>minimum TLS version and cipher suites</dd></div>
           <div><dt>csp / perms</dt><dd>Content-Security-Policy, Permissions-Policy</dd></div>
+          <div><dt>show / back</dt><dd>print settings, or return to the main shell</dd></div>
         </dl>
       </div>
+    </div>
+
+    <div class="prose">
+      <p>Settings live in <code>servette.toml</code> beside the script, written <code>0600</code>. Every field has a default, and the file is re-read whenever it changes — so a setting takes effect on the next request, not the next restart.</p>
     </div>
   </section>
 
@@ -1052,24 +1256,27 @@ servette&gt; <span class="hi">status</span>
     <div class="sec-head">
       <p class="eyebrow">Publishing</p>
       <h2>Updating your site</h2>
-      <p>Edit files in the served folder and the change is live on the next request — there is no build step and no restart. For a site you publish from somewhere else, Servette can fetch a signed bundle on request.</p>
+      <p>Edit files in the served folder and the change is live on the next request — there is no build step and no restart. For a site you publish from somewhere else, Servette can fetch a signed bundle when you ask it to.</p>
     </div>
+
     <div class="autogrid" style="--min: 290px; --gap: 20px;">
       <div class="card">
         <h3>Edit in place</h3>
-        <p>Change a file in the served folder. The next request sees it. Nothing to reload, nothing to invalidate.</p>
+        <p>Change a file in the served folder. The next request sees it — Servette checks each file's modification time as it serves. Nothing to reload, nothing to invalidate.</p>
       </div>
       <div class="card">
         <h3>Pull a signed bundle</h3>
-        <p>Point a site at a publish channel, then run <code>pull</code>. Servette fetches the bundle, verifies its signature, and swaps it in atomically.</p>
+        <p>Point a site at a publish channel, then run <code>pull</code>. Servette fetches the bundle, verifies its Ed25519 signature, extracts it to a staging directory, and swaps it in atomically.</p>
       </div>
       <div class="card">
         <h3>Roll it back</h3>
-        <p><code>restore-site</code> undoes the last pull. <code>restore</code> undoes the last <code>update</code> to Servette itself.</p>
+        <p><code>restore-site</code> undoes the last pull; <code>restore</code> undoes the last <code>update</code> to Servette itself. One backup of each is kept, and restoring consumes it.</p>
       </div>
     </div>
+
     <div class="prose">
-      <p class="aside">Publishing is always operator-triggered — from the shell, over SSH. No HTTP request can cause Servette to write anything. See <a href="#how-it-works">How it Works</a> for why that line is drawn where it is.</p>
+      <p>The content signing key is deliberately separate from the one Servette verifies its own updates with, so a compromised content key can never forge a code update, or the reverse.</p>
+      <p class="aside">Publishing is always operator-triggered — from the shell, over SSH. No network-reachable trigger exists, and no HTTP request can cause Servette to write anything. See <a href="#how-it-works">How it Works</a> for why that line is drawn where it is.</p>
     </div>
   </section>
 
@@ -1081,22 +1288,63 @@ servette&gt; <span class="hi">status</span>
       </div>
       <div class="cta__actions">
         <a class="btn btn--primary btn--l" href="demo.html">Open the self-test page</a>
-        <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette">Read the source</a>
+        <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette/blob/main/README.md">Read the README</a>
       </div>
     </div>
   </section>
 
 </div>
 
-<!-- ══ Page 3 — How it Works ═══════════════════════════════════════ -->
+<!-- ══ How it Works ════════════════════════════════════════════════ -->
 
 <div class="panel" id="page-works" role="tabpanel" aria-labelledby="tabbtn-works" tabindex="-1" hidden>
 
   <section class="wrap section">
     <div class="sec-head">
-      <p class="eyebrow">Architecture</p>
-      <h2>Four regions, one boundary, nothing that writes on request</h2>
-      <p>Servette is one file, but not one undifferentiated mass. It divides into four regions, and the line between two of them is the property the whole design rests on: no HTTP request ever reaches code that writes.</p>
+      <p class="eyebrow">Design philosophy</p>
+      <h2>Five principles, and one rule for using them</h2>
+      <p>Servette's identity is a small set of non-negotiable principles — invariants, not preferences. Every design decision serves one of them, and a change that serves none is out of scope by definition. They are the lens for the only question that matters: <em>should this exist in Servette?</em></p>
+    </div>
+
+    <div class="tablewrap">
+      <table class="dtable">
+        <thead>
+          <tr><th scope="col">Principle</th><th scope="col">What it commits us to</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Single file</th><td>All of Servette is one <code>servette.py</code>, readable and debuggable in an afternoon. No module sprawl, no hidden machinery.</td></tr>
+          <tr><th scope="row">Secure by default</th><td>Trusted TLS, HTTPS-only, security headers on every response, optional auth, rate limiting, a least-privilege service user. Security is the default state, never an opt-in.</td></tr>
+          <tr><th scope="row">Production-grade</th><td>Makes the stdlib's <code>http.server</code> fit to serve real sites on the public internet: automatic renewal, auto-restart, survives reboots. The production layer, not a dev tool.</td></tr>
+          <tr><th scope="row">Zero-friction</th><td>Copy one file, run it, follow the wizard. No configuration language, no manual certificate or dependency management.</td></tr>
+          <tr><th scope="row">Minimal footprint</th><td>The standard library plus a single package, <code>cryptography</code>; transport, TLS, and the ACME client are stdlib or hand-rolled. Light enough for a Raspberry Pi.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <p><strong>Minimalism is the default; those principles are the only licence to add complexity.</strong> The decision rule for any proposed change: complexity is earned only by serving a non-negotiable principle. Complexity justified solely by capability — <em>other servers do it</em> — is rejected.</p>
+      <p>When principles pull against each other, the principle wins over raw line count. HSTS, CSP, the ACME client, and the rate limiter all cost complexity and all earn it under "secure by default." That is the only permitted compromise to minimalism: another principle, never mere feature completeness.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sub-head">
+      <p class="eyebrow">The invariant</p>
+      <h3>At request time, Servette never writes to disk and never evaluates user input.</h3>
+      <p>One property underwrites the whole security story, and it is worth naming on its own — because it, not the file types served, is what makes the guarantees hold.</p>
+    </div>
+
+    <div class="prose">
+      <p>Serving a request is read-and-send, nothing more. Several security properties are not features anyone coded; they are what you get for free by never doing certain things — a read-only served tree, a closed threat model, a systemd sandbox that never has to widen.</p>
+      <p>Every write Servette does perform — config, certificate issuance, the ACME challenge file, published site content — happens in the shell or a background thread, never on the serving path. A proposed change is measured against this invariant first: if it adds a request-time write, or evaluates request input, it breaks guarantees the static design gets for free. That is a different program, not a feature.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">The map</p>
+      <h2>Four regions, one boundary</h2>
+      <p>One file, but not one undifferentiated mass. Servette divides into four regions, and the line between two of them is the invariant above, drawn in code: nothing a visitor can reach has a path to a write.</p>
     </div>
 
     <figure class="arch">
@@ -1110,47 +1358,128 @@ servette&gt; <span class="hi">status</span>
       <div class="legend-item"><span class="swatch swatch--dotted"></span> dependency / delegation (dotted)</div>
     </div>
 
-    <figcaption>Every node sits on one of two rings — the module ring, or the outer ring carrying the three ways in. Edges between modules curve toward the centre; the three entry points reach their module in a straight line. Nothing here is placed by hand: the layout is computed from the module list and call graph at the bottom of this page's source.</figcaption>
+    <figcaption>Every node sits on one of two rings — the module ring, or the outer ring carrying the three ways in. Edges between modules curve toward the centre; the three entry points reach their module in a straight line. Nothing here is placed by hand: the layout is computed from the module list and call graph at the bottom of this page's source, so the map changes when that description does.</figcaption>
+
+    <div class="prose">
+      <p>Read the diagram for the consequence: there is no arrow from anything a visitor touches into anything that writes. That is not an access-control rule that could be misconfigured — it is the shape of the code.</p>
+    </div>
+  </section>
+
+  <div class="wrap"><div class="rule"></div></div>
+
+  <section class="wrap">
+    <div class="sub-head">
+      <p class="eyebrow">Region 1 of 4 · read-only</p>
+      <h3>Server — everything on the request path</h3>
+      <p>1,003 lines. The only region a network request can reach, and the only one whose correctness a stranger can probe.</p>
+    </div>
+
+    <div class="prose">
+      <p><strong>Config.</strong> A <code>Config</code> object reads and writes <code>servette.toml</code>; every field has a default. <code>reload_if_changed()</code> runs on every incoming request, so edits take effect without a restart. Passwords are hashed with scrypt (memory-hard; N=2¹⁴, r=8, p=1) and never stored in plaintext; the file is written <code>0600</code>.</p>
+      <p><strong>Rate limiter.</strong> Two independent in-memory sliding-window dicts per IP — total requests (default 120/min) and failed auth attempts (default 6/min) — under a lock. The auth limiter activates only when credentials are actually submitted. <code>X-Forwarded-For</code> is trusted only when a <code>trusted_proxy</code> is configured, and only its rightmost value: one hop. Stale-IP eviction runs in a background thread every 30 seconds, off the request hot path.</p>
+      <p><strong>File cache.</strong> Files are read once and cached by path; compressible types are also gzip-stored, and the right encoding is sent per <code>Accept-Encoding</code>. A file too large to fit is served raw without being stored, so it cannot purge everything else. <code>mtime</code> is checked on each request — this is the live reload. ETags (SHA-256 of contents) drive <code>304</code> responses.</p>
+      <p><strong>Request handler.</strong> <code>_handle_request</code> is the transport-agnostic core: rate limiting → auth → path resolution → file serving. It takes a method, path, and headers and returns <code>(status, headers, body)</code> — a pure function the transport just feeds and sends, with no socket and no framework. Path resolution enforces traversal protection (<code>403</code>), falls directories back to <code>index.html</code>, serves a custom <code>404.html</code> if present, and honours single byte ranges for media seeking.</p>
+      <p><strong>HTTP servers.</strong> A threading server terminates TLS from an <code>ssl.SSLContext</code> and performs the handshake on the connection's own worker thread, not the accept loop, so one slow handshake cannot stall new connections. A bounded semaphore caps concurrent connections — past the cap they are closed rather than queued — and a per-connection timeout reaps slow or idle ones. Startup fails closed: the bind and the certificate load both happen synchronously, so a port conflict or unreadable cert raises immediately rather than leaving a process that looks healthy and serves nothing.</p>
+    </div>
   </section>
 
   <section class="wrap section">
-    <div class="sec-head">
-      <p class="eyebrow">The invariant</p>
-      <h2>Requests read. Only the operator writes.</h2>
-    </div>
-    <div class="prose">
-      <p><strong>SERVER</strong> is the only region a network request can reach, and it is read-only. It selects a site, applies rate limits, checks a password if one is set, and serves a file. It has no path to a write — not to disk, not to configuration, not to the site's contents.</p>
-      <p><strong>SHELL</strong> is the only region that writes, and it is reachable only by an operator over SSH. Adding a site, pulling new content, updating Servette itself, rolling any of it back — all of it lives here, behind an interactive prompt.</p>
-      <p><strong>SYSTEM</strong> is what runs on its own schedule rather than on anyone's request: the bootstrap sequence, the service lifecycle, and the certificate watchdog that renews on a timer and hands the fresh certificate to the running server.</p>
-      <p><strong>INIT</strong> is the entry dispatch and the module preamble — the ninety lines that decide which of the other three you get.</p>
-      <p class="aside">Read the diagram for the consequence: there is no arrow from anything a visitor touches into anything that writes. That is not an access-control rule that could be misconfigured; it is the shape of the code.</p>
+    <div class="sub-head">
+      <p class="eyebrow">Region 2 of 4 · writes, off the request path</p>
+      <h3>System — the environment around the server</h3>
+      <p>1,120 lines. Everything that runs on its own schedule rather than on anyone's request.</p>
     </div>
 
-    <table class="loc-table">
-      <caption>Lines per top-level section</caption>
-      <thead>
-        <tr>
-          <th scope="col">Section</th>
-          <th class="num" scope="col">Total</th>
-          <th class="num" scope="col">Code</th>
-          <th class="num" scope="col">Share</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr><th scope="row">Init</th><td class="num">91</td><td class="num">53</td><td class="num">3%</td></tr>
-        <tr><th scope="row">System</th><td class="num">1,120</td><td class="num">780</td><td class="num">32%</td></tr>
-        <tr><th scope="row">Shell</th><td class="num">1,254</td><td class="num">948</td><td class="num">36%</td></tr>
-        <tr><th scope="row">Server</th><td class="num">1,003</td><td class="num">624</td><td class="num">29%</td></tr>
-        <tr class="total"><th scope="row">Total</th><td class="num">3,468</td><td class="num">2,405</td><td class="num">100%</td></tr>
-      </tbody>
-    </table>
+    <div class="prose">
+      <p><strong>Bootstrap.</strong> Runs before any other code. If the interpreter is not the managed venv, it creates <code>.servette-env/</code>, installs <code>cryptography</code>, and re-executes itself inside it. As a systemd service the venv Python is invoked directly and bootstrap is a no-op.</p>
+      <p><strong>Server lifecycle.</strong> <code>start_server()</code> and <code>stop_server()</code> own the HTTP servers, their daemon threads, and the background workers. Under <code>--serve</code> the main thread then blocks watching the HTTPS thread's liveness, and exits nonzero once it has been dead past a grace period — so systemd's <code>Restart=always</code> brings the service back. Without that watch, a dead server thread would leave a living process systemd reports as healthy.</p>
+      <p><strong>Production honesty.</strong> <code>_production_issues()</code> returns the conditions blocking production readiness — serve directory missing, cert not configured, self-signed cert, no password, a small-RAM host with no swap — printed on startup and on every <code>status</code>. It refuses to imply production-ready while anything is wrong.</p>
+      <p><strong>Certificates.</strong> Let's Encrypt certificates come from Servette's own minimal ACME client: RFC 8555 HTTP-01 over stdlib <code>urllib</code>, with <code>cryptography</code> for JWS signing and the CSR. It is deliberately narrow — HTTP-01 only, no revocation or key rollover — which is why it fits in one file instead of pulling in the certbot stack. It first attempts a certificate covering both the domain and its <code>www.</code> form, falling back to the bare domain if only that fails DNS validation, and saying so.</p>
+      <p><strong>Cert watchdog.</strong> A daemon thread polling every 60 seconds: for a configured domain it renews when the certificate expires in under 30 days; for self-signed certs it detects external file changes by mtime and reloads. Each pass contains its own exceptions — a failed pass logs and retries rather than killing the thread, since a dead watchdog would silently end renewals.</p>
+      <p><strong>systemd and host provisioning.</strong> <code>enable</code> creates the login-less <code>servette</code> user and writes a sandboxed unit: <code>CAP_NET_BIND_SERVICE</code> to bind 80 and 443 without root, with <code>NoNewPrivileges</code>, <code>ProtectSystem=strict</code>, <code>PrivateTmp</code>, and write access limited to the server's own directory and the ACME webroot. Install also provisions two host-level defenses born of a production post-mortem: a network watchdog that restarts the host's network manager if the default route disappears, and a swapfile offer sized from measured RAM and demand rather than a hardcoded ceiling.</p>
+      <p><strong>Self-update.</strong> Updates come from signed GitHub Releases, not from <code>main</code> — the signature is the trust anchor, because a release is verifiable whereas <code>main</code> is whatever is currently there, signed by no one. <code>update</code> fetches the release's <code>servette.py</code> and its signature, verifies against a pinned public key, validates syntax, backs up the current file, and swaps atomically. Settings are never touched.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sub-head">
+      <p class="eyebrow">Region 3 of 4 · read+write</p>
+      <h3>Shell — the interactive terminal interface</h3>
+      <p>1,254 lines, and the largest region of the file. The only layer that writes to configuration interactively, and reachable only by an operator over SSH.</p>
+    </div>
+
+    <div class="prose">
+      <p>The REPL shown when running without <code>--serve</code>, dispatching to setup, config, enable and disable, start and stop, status, log, update and restore, pull and restore-site. The <code>config</code> sub-shell writes each setting to <code>servette.toml</code> immediately. It contains only UI logic — the work itself lives in the other regions.</p>
+      <p>That it is the biggest region is the point rather than an accident. The interface a human uses is where care is cheapest to spend and mistakes are least dangerous: nothing here is reachable by a request.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sub-head">
+      <p class="eyebrow">Region 4 of 4</p>
+      <h3>Init — the entry dispatch</h3>
+      <p>91 lines: the module preamble, and the decision about which of the other three regions you get.</p>
+    </div>
+
+    <div class="prose">
+      <p>Run with <code>--serve</code> and it is the server; run without and it is the shell. Everything else follows from that fork.</p>
+    </div>
+  </section>
+
+  <div class="wrap"><div class="rule"></div></div>
+
+  <section class="wrap">
+    <div class="sec-head">
+      <p class="eyebrow">Working on it</p>
+      <h2>Developing Servette itself</h2>
+      <p>Two entry points, one test command, and a verification bar that stands between any change and <code>main</code>.</p>
+    </div>
+
+    <div class="codeblock">
+      <p class="codeblock__label">Running</p>
+      <pre>sudo python3 servette.py          <span class="cmt"># interactive shell (re-execs into the venv)</span>
+python3 servette.py --serve       <span class="cmt"># non-interactive service mode (used by systemd)</span></pre>
+    </div>
+
+    <div class="codeblock">
+      <p class="codeblock__label">Tests</p>
+      <pre>.servette-env/bin/python3 tests/test.py</pre>
+    </div>
+
+    <div class="prose">
+      <p>The suite starts a real server on a test port, runs its checks, and tears down; it backs up and restores any existing <code>servette.toml</code>. It requires <code>openssl</code> on PATH, used only to generate a throwaway certificate during setup.</p>
+      <p>Intentionally not covered end to end: live systemd operations, real Let's Encrypt issuance, and <code>update</code>'s network path — each needs external infrastructure. Their seams are covered at the unit level instead: shell dispatch runs under scripted input, generated unit files are checked against <code>systemd-analyze</code> where available, and restore, the prompts, and the install helpers have direct tests.</p>
+    </div>
+
+    <div class="sub-head" style="margin-top: 38px;">
+      <h3>The verification bar</h3>
+      <p>Servette is a security tool, so a claim about it may never sit above its evidence. Three gates stand between a change and <code>main</code>, enforced by branch protection.</p>
+    </div>
+
+    <div class="tablewrap">
+      <table class="dtable">
+        <thead>
+          <tr><th scope="col">Gate</th><th scope="col">What it means</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Tests green</th><td><code>tests/test.py</code> passes on the supported Python versions — CI runs 3.11 and 3.14. A behaviour change ships with the test that would have caught its absence.</td></tr>
+          <tr><th scope="row">CodeQL clean</th><td>No <em>new</em> alerts. Standing alerts are either fixed or dismissed with a recorded reason, so "clean" means clean, not "no new noise."</td></tr>
+          <tr><th scope="row">Human read</th><td>Any change touching auth, TLS, rate limiting, or path resolution is read by a person for what it claims, not only for what the tests assert.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <p>Prefer understatement. <code>_production_issues()</code> is the model: it lists what is wrong rather than implying everything is fine. The failure mode to guard against is never fabrication — it is a claim quietly stronger than its evidence.</p>
+      <p class="aside">Development happens on one short-lived branch per merge, via pull request; <code>main</code> is protected against direct and force pushes. <code>__version__</code> never moves during ordinary development — it changes only when cutting a release, which is a maintainer task because publishing needs the private signing key.</p>
+    </div>
   </section>
 
   <section class="wrap section--last">
     <div class="autogrid cta">
       <div>
-        <h2>Read it yourself.</h2>
-        <p>The whole server is one file. The diagram above is a map of it — the territory is 3,468 lines away.</p>
+        <h2>The map is not the territory.</h2>
+        <p>Everything above describes 3,468 lines of Python. They are one click away, and short enough to finish.</p>
       </div>
       <div class="cta__actions">
         <a class="btn btn--primary btn--l" href="https://github.com/andy-emerson/servette/blob/main/servette.py">Open servette.py</a>
@@ -1174,6 +1503,7 @@ servette&gt; <span class="hi">status</span>
     <div>
       <p class="footer-label">This site</p>
       <div class="footer-links">
+        <button type="button" data-goto="home">Home</button>
         <button type="button" data-goto="how-it-compares">How it Compares</button>
         <button type="button" data-goto="how-to-use-it">How to Use it</button>
         <button type="button" data-goto="how-it-works">How it Works</button>
@@ -1203,14 +1533,22 @@ servette&gt; <span class="hi">status</span>
 </footer>
 
 <script>
-/* Three pieces: the light/dark toggle, the copy button on the install line,
-   and the tab router that swaps whole pages in and out. The theme itself is
-   applied by the script in <head>, before first paint. */
+/* Four pieces: the light/dark toggle, the copy button on the run command, the
+   tab router that swaps whole pages in and out, and the two diagrams. The
+   theme itself is applied by the script in <head>, before first paint. */
 
 (function () {
   "use strict";
 
+  var NS = "http://www.w3.org/2000/svg";
   var root = document.documentElement;
+
+  function el(tag, attrs, parent) {
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
 
   /* ── Theme toggle ───────────────────────────────────────────── */
 
@@ -1256,6 +1594,7 @@ servette&gt; <span class="hi">status</span>
   var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
 
   var SLUGS = {
+    "home": "tabbtn-home",
     "how-it-compares": "tabbtn-compares",
     "how-to-use-it": "tabbtn-use",
     "how-it-works": "tabbtn-works",
@@ -1270,7 +1609,8 @@ servette&gt; <span class="hi">status</span>
       other.setAttribute("aria-selected", selected ? "true" : "false");
       document.getElementById(other.getAttribute("aria-controls")).hidden = !selected;
     });
-    if (tab.id === "tabbtn-works") drawDiagram();
+    if (tab.id === "tabbtn-works") draw("chord", renderChord);
+    if (tab.id === "tabbtn-compares") draw("matrix", renderMatrix);
     if (focusPanel) {
       /* Moving focus into the new page is what makes this behave like a
          navigation for a keyboard or screen-reader user, rather than a
@@ -1287,15 +1627,13 @@ servette&gt; <span class="hi">status</span>
   }
 
   tabs.forEach(function (tab) {
-    tab.addEventListener("click", function () {
-      location.hash = slugOf[tab.id];
-    });
+    tab.addEventListener("click", function () { location.hash = slugOf[tab.id]; });
   });
 
-  /* In-page links and footer buttons route through the same hash. */
-  document.querySelectorAll("[data-goto]").forEach(function (el) {
-    el.addEventListener("click", function () {
-      location.hash = el.getAttribute("data-goto");
+  /* In-page buttons route through the same hash. */
+  document.querySelectorAll("[data-goto]").forEach(function (node) {
+    node.addEventListener("click", function () {
+      location.hash = node.getAttribute("data-goto");
     });
   });
 
@@ -1304,22 +1642,118 @@ servette&gt; <span class="hi">status</span>
     window.scrollTo(0, 0);
   });
 
-  /* ── Architecture diagram ────────────────────────────────────────
-     Drawn from the data below, not from a checked-in image, so the map
-     changes when the description of the code does. It is drawn lazily:
-     the panel it lives in starts hidden, and an element with no layout
-     box measures as zero, which would collapse the layout. */
+  /* ── Lazy drawing ────────────────────────────────────────────────
+     Both diagrams measure text to lay themselves out, and an element with
+     no layout box measures as zero — so neither can be drawn while the
+     panel it lives in is still hidden. Each draws once, on first reveal. */
 
-  var drawn = false;
+  var drawn = {};
 
-  function drawDiagram() {
-    if (drawn) return;
-    drawn = true;
-    renderChord(document.getElementById("chord"));
+  function draw(id, fn) {
+    if (drawn[id]) return;
+    drawn[id] = true;
+    fn(document.getElementById(id));
   }
 
-  /* Data — the only part to edit when servette.py's structure changes.
-     range is [startDeg, endDeg], counter-clockwise from due east. */
+  /* ══ Positioning matrix ═══════════════════════════════════════════
+     Editorial placements, not measurements — x is how little setup the
+     tool needs, y is how much is secure before you configure anything. */
+
+  var PEERS = [
+    { name: "Servette",           x: 0.86, y: 0.89, ours: true },
+    { name: "http.server",        x: 0.96, y: 0.05 },
+    { name: "bottle.py",          x: 0.74, y: 0.14 },
+    { name: "Static Web Server",  x: 0.66, y: 0.50 },
+    { name: "srv",                x: 0.72, y: 0.70 },
+    { name: "Caddy",              x: 0.44, y: 0.86 },
+    { name: "nginx + certbot",    x: 0.14, y: 0.90 },
+    { name: "Apache + certbot",   x: 0.10, y: 0.78 },
+  ];
+
+  /* Quadrant captions are kept off the diagonal each quadrant's points run
+     along, so they never land on a peer's label. */
+  var QUADRANTS = [
+    { label: "Secure, but not simple", x: 0.30, y: 0.99, anchor: "middle" },
+    { label: "Simple, and secure",     x: 0.80, y: 0.99, anchor: "middle" },
+    { label: "Simple, but not secure", x: 0.97, y: 0.30, anchor: "end" },
+  ];
+
+  function renderMatrix(container) {
+    var W = 900, H = 520, PAD_L = 74, PAD_R = 40, PAD_T = 34, PAD_B = 62;
+    var svg = el("svg", { xmlns: NS, viewBox: "0 0 " + W + " " + H }, null);
+    container.appendChild(svg);
+
+    var x0 = PAD_L, x1 = W - PAD_R, y0 = H - PAD_B, y1 = PAD_T;
+    var px = function (v) { return x0 + v * (x1 - x0); };
+    var py = function (v) { return y0 + v * (y1 - y0); };
+
+    /* Quadrant tint behind the corner Servette occupies. */
+    el("rect", {
+      x: px(0.5), y: py(1), width: px(1) - px(0.5), height: py(0.5) - py(1),
+      fill: "var(--green)", opacity: 0.07,
+    }, svg);
+
+    /* Midlines, then the two axes over them. */
+    [0.5].forEach(function (v) {
+      el("line", { x1: px(v), y1: py(0), x2: px(v), y2: py(1),
+                   stroke: "var(--border)", "stroke-dasharray": "4,4" }, svg);
+      el("line", { x1: px(0), y1: py(v), x2: px(1), y2: py(v),
+                   stroke: "var(--border)", "stroke-dasharray": "4,4" }, svg);
+    });
+
+    el("line", { x1: x0, y1: y0, x2: x1, y2: y0, stroke: "var(--muted)" }, svg);
+    el("line", { x1: x0, y1: y0, x2: x0, y2: y1, stroke: "var(--muted)" }, svg);
+
+    /* Axis titles, each with the direction that means "more". */
+    var axisFont = {
+      "font-family": "'DM Mono', ui-monospace, monospace", "font-size": 12,
+      "letter-spacing": "0.08em", fill: "var(--muted)",
+    };
+    var t = el("text", Object.assign({ x: (x0 + x1) / 2, y: H - 18, "text-anchor": "middle" }, axisFont), svg);
+    t.textContent = "SIMPLER TO STAND UP  →";
+    var t2 = el("text", Object.assign({
+      x: 0, y: 0, "text-anchor": "middle",
+      transform: "translate(22," + (y0 + y1) / 2 + ") rotate(-90)",
+    }, axisFont), svg);
+    t2.textContent = "MORE SECURE BY DEFAULT  →";
+
+    QUADRANTS.forEach(function (q) {
+      var qt = el("text", {
+        x: px(q.x), y: py(q.y), "text-anchor": q.anchor,
+        "font-family": "'DM Sans', system-ui, sans-serif", "font-size": 13,
+        "font-style": "italic", fill: "var(--muted)",
+      }, svg);
+      qt.textContent = q.label;
+    });
+
+    PEERS.forEach(function (p) {
+      var cx = px(p.x), cy = py(p.y);
+      var color = p.ours ? "var(--green)" : "var(--muted)";
+      el("circle", {
+        cx: cx, cy: cy, r: p.ours ? 9 : 6,
+        fill: p.ours ? "var(--green)" : "var(--surface)",
+        stroke: color, "stroke-width": 2,
+      }, svg);
+      /* Labels sit outboard of the dot, flipping side near the right edge so
+         they never run off the plot. */
+      var right = p.x <= 0.78;
+      var label = el("text", {
+        x: cx + (right ? 15 : -15), y: cy + 4,
+        "text-anchor": right ? "start" : "end",
+        "font-family": p.ours ? "'DM Mono', ui-monospace, monospace" : "'DM Sans', system-ui, sans-serif",
+        "font-size": p.ours ? 15 : 13.5,
+        "font-weight": p.ours ? 500 : 400,
+        fill: p.ours ? "var(--green)" : "var(--text-2)",
+      }, svg);
+      label.textContent = p.name;
+    });
+  }
+
+  /* ══ Architecture chord diagram ═══════════════════════════════════
+     Drawn from the data below, not from a checked-in image, so the map
+     changes when the description of the code does. */
+
+  /* range is [startDeg, endDeg], counter-clockwise from due east. */
   var GROUPS = [
     { title: "SYSTEM", subtitle: "", range: [95, 175],
       color: "var(--dg-system)", bg: "var(--dg-system-bg)",
@@ -1364,7 +1798,6 @@ servette&gt; <span class="hi">status</span>
   /* Tunables. The node ring's radius is not among them: it is grown until
      no two labels collide, so a longer label or an added node pushes the
      ring outward on its own rather than needing a number bumped here. */
-  var NS = "http://www.w3.org/2000/svg";
   var BAND = 46;        // wedge half-thickness around the node ring
   var WEDGE_PAD = 6;    // degrees a wedge extends past its outermost nodes
   var LABEL_GAP = 22;   // px from the wedge's outer edge to its title
@@ -1379,13 +1812,6 @@ servette&gt; <span class="hi">status</span>
 
   function polar(cx, cy, r, deg) {
     return [cx + r * Math.cos(toRad(deg)), cy - r * Math.sin(toRad(deg))];
-  }
-
-  function el(tag, attrs, parent) {
-    var e = document.createElementNS(NS, tag);
-    for (var k in attrs) e.setAttribute(k, attrs[k]);
-    if (parent) parent.appendChild(e);
-    return e;
   }
 
   function clipToShape(shape, dx, dy) {

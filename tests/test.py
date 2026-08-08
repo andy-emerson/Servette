@@ -14,6 +14,8 @@ import base64
 import gzip
 import http.client
 import http.server
+import io
+import json
 import logging
 import os
 import shutil
@@ -21,6 +23,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -535,6 +538,311 @@ def run_dispatch_tests(s):
         s.config.password_hash = saved_pw
     shutil.rmtree(tmpd, ignore_errors=True)
 
+    section("Bundle extraction safety")
+
+    def make_tar_gz(entries):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for name, content in entries:
+                data = content.encode() if isinstance(content, str) else content
+                info = tarfile.TarInfo(name=name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    extract_root = tempfile.mkdtemp()
+    try:
+        good = make_tar_gz([("index.html", "<h1>hi</h1>"), ("sub/page.html", "sub")])
+        dest = os.path.join(extract_root, "good")
+        s._extract_bundle(good, dest)
+        check("Valid bundle extracts top-level files",
+              os.path.isfile(os.path.join(dest, "index.html")))
+        check("Valid bundle extracts nested files",
+              os.path.isfile(os.path.join(dest, "sub", "page.html")))
+
+        traversal = make_tar_gz([("../evil.txt", "pwned")])
+        dest2 = os.path.join(extract_root, "traversal")
+        raised = False
+        try:
+            s._extract_bundle(traversal, dest2)
+        except ValueError:
+            raised = True
+        check("Path-traversal entry rejected", raised)
+        check("Nothing escaped the destination",
+              not os.path.exists(os.path.join(extract_root, "evil.txt")))
+
+        symlink_bytes = io.BytesIO()
+        with tarfile.open(fileobj=symlink_bytes, mode="w:gz") as tf:
+            info = tarfile.TarInfo(name="evil-link")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tf.addfile(info)
+        dest3 = os.path.join(extract_root, "symlink")
+        raised = False
+        try:
+            s._extract_bundle(symlink_bytes.getvalue(), dest3)
+        except ValueError:
+            raised = True
+        check("Symlink entry rejected", raised)
+
+        saved_max = s._MAX_BUNDLE_BYTES
+        try:
+            s._MAX_BUNDLE_BYTES = 10  # tiny, so an ordinary small file trips the cap
+            oversized = make_tar_gz([("big.txt", "x" * 1000)])
+            dest4 = os.path.join(extract_root, "oversized")
+            raised = False
+            try:
+                s._extract_bundle(oversized, dest4)
+            except ValueError:
+                raised = True
+            check("Oversized bundle rejected", raised)
+        finally:
+            s._MAX_BUNDLE_BYTES = saved_max
+    finally:
+        shutil.rmtree(extract_root, ignore_errors=True)
+
+    section("Atomic site-content swap and restore")
+
+    saved_serve_dir = s.config.serve_dir
+    swap_root = tempfile.mkdtemp()
+    try:
+        s.config.serve_dir = os.path.join(swap_root, "site")  # does not exist yet
+
+        new1 = os.path.join(swap_root, "new1")
+        os.makedirs(new1)
+        with open(os.path.join(new1, "marker.txt"), "w") as f:
+            f.write("v1")
+        s._swap_site_content(new1)
+        check("First swap: content is live",
+              open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v1")
+        check("First swap: no backup (nothing existed to back up)",
+              not os.path.isdir(s.config.serve_dir + ".bak"))
+
+        new2 = os.path.join(swap_root, "new2")
+        os.makedirs(new2)
+        with open(os.path.join(new2, "marker.txt"), "w") as f:
+            f.write("v2")
+        s._swap_site_content(new2)
+        check("Second swap: new content is live",
+              open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v2")
+        check("Second swap: previous content became the backup",
+              open(os.path.join(s.config.serve_dir + ".bak", "marker.txt")).read() == "v1")
+
+        new3 = os.path.join(swap_root, "new3")
+        os.makedirs(new3)
+        with open(os.path.join(new3, "marker.txt"), "w") as f:
+            f.write("v3")
+        s._swap_site_content(new3)
+        check("Third swap: backup now holds v2, not v1 — single-shot, not a history",
+              open(os.path.join(s.config.serve_dir + ".bak", "marker.txt")).read() == "v2")
+
+        saved_input = builtins.input
+        try:
+            builtins.input = lambda prompt="": "y"
+            with contextlib.redirect_stdout(io.StringIO()):
+                s.cmd_restore_site()
+        finally:
+            builtins.input = saved_input
+        check("Restore: live content reverts to the backup (v2)",
+              open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v2")
+        check("Restore: backup is consumed",
+              not os.path.isdir(s.config.serve_dir + ".bak"))
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_restore_site()
+        check("Restoring again with nothing to restore reports cleanly, does not raise",
+              "Nothing to restore" in buf.getvalue())
+    finally:
+        s.config.serve_dir = saved_serve_dir
+        shutil.rmtree(swap_root, ignore_errors=True)
+
+    section("Content update pipeline")
+
+    saved_url, saved_key = s.config.publish_url, s.config.publish_key
+    try:
+        s.config.publish_url = s.config.publish_key = ""
+        try:
+            s._check_for_content_update()
+            check("Neither publish_url nor publish_key set: no-ops cleanly", True)
+        except Exception as e:
+            check(f"Neither set: no-ops cleanly (raised {e})", False)
+
+        s.config.publish_url = "https://example.com/site.tar.gz"
+        s.config.publish_key = "not-valid-hex"
+        logging.disable(logging.CRITICAL)
+        try:
+            s._check_for_content_update()
+            check("Invalid publish_key rejected before any network call", True)
+        except Exception as e:
+            check(f"Invalid publish_key rejected cleanly (raised {e})", False)
+        finally:
+            logging.disable(logging.NOTSET)
+    finally:
+        s.config.publish_url, s.config.publish_key = saved_url, saved_key
+
+    section("Content update pipeline: full pull/verify/swap (network mocked)")
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization as _ser2
+
+    priv_key = Ed25519PrivateKey.generate()
+    pub_hex  = priv_key.public_key().public_bytes(
+        _ser2.Encoding.Raw, _ser2.PublicFormat.Raw).hex()
+    bundle_bytes = make_tar_gz([("index.html", "published content")])
+    signature    = priv_key.sign(bundle_bytes)
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._data = data
+        def read(self, size=None):
+            return self._data if size is None else self._data[:size]
+
+    saved_urlopen    = urllib.request.urlopen
+    saved_serve_dir2 = s.config.serve_dir
+    saved_url2, saved_key2 = s.config.publish_url, s.config.publish_key
+    swap_root2 = tempfile.mkdtemp()
+    try:
+        s.config.serve_dir   = os.path.join(swap_root2, "site")
+        s.config.publish_url = "https://example.com/site.tar.gz"
+        s.config.publish_key = pub_hex
+
+        urllib.request.urlopen = lambda url, timeout=None: (
+            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+        result = s._check_for_content_update()
+        check("Correctly signed bundle is published",
+              open(os.path.join(s.config.serve_dir, "index.html")).read() == "published content")
+        check("Returns 'published'", result == "published")
+
+        other_key = Ed25519PrivateKey.generate()
+        bad_sig   = other_key.sign(bundle_bytes)
+        urllib.request.urlopen = lambda url, timeout=None: (
+            _FakeResp(bad_sig) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+        with open(os.path.join(s.config.serve_dir, "index.html"), "w") as f:
+            f.write("unchanged")
+        logging.disable(logging.CRITICAL)
+        result = s._check_for_content_update()
+        logging.disable(logging.NOTSET)
+        check("Bundle signed by the wrong key is rejected, content unchanged",
+              open(os.path.join(s.config.serve_dir, "index.html")).read() == "unchanged")
+        check("Returns 'bad-signature'", result == "bad-signature")
+
+        section("Publish pipeline: size cap and sig-URL query handling")
+
+        saved_max2 = s._MAX_BUNDLE_BYTES
+        try:
+            s._MAX_BUNDLE_BYTES = 10  # smaller than bundle_bytes
+            urllib.request.urlopen = lambda url, timeout=None: (
+                _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+            logging.disable(logging.CRITICAL)
+            result = s._check_for_content_update()
+            logging.disable(logging.NOTSET)
+            check("Oversized bundle rejected as 'too-large' before signature check",
+                  result == "too-large")
+        finally:
+            s._MAX_BUNDLE_BYTES = saved_max2
+
+        seen_urls = []
+        def _record(url, timeout=None):
+            seen_urls.append(url)
+            return _FakeResp(signature) if ".sig" in url else _FakeResp(bundle_bytes)
+        s.config.publish_url = "https://example.com/site.tar.gz?token=abc123"
+        urllib.request.urlopen = _record
+        s._check_for_content_update()
+        sig_url = next(u for u in seen_urls if u != s.config.publish_url)
+        check("'.sig' is appended to the path, not after the query string",
+              sig_url == "https://example.com/site.tar.gz.sig?token=abc123")
+        s.config.publish_url = "https://example.com/site.tar.gz"
+
+        section("Publish pipeline serialization")
+
+        urllib.request.urlopen = lambda url, timeout=None: (
+            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+        saved_swap = s._swap_site_content
+        in_critical, max_concurrent = [], []
+        def _slow_swap(new_dir):
+            in_critical.append(1)
+            max_concurrent.append(len(in_critical))
+            time.sleep(0.1)
+            saved_swap(new_dir)
+            in_critical.pop()
+        s._swap_site_content = _slow_swap
+        try:
+            threads = [threading.Thread(target=s._check_for_content_update) for _ in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            check("Concurrent triggers never overlap inside the swap (max concurrent == 1)",
+                  max(max_concurrent) == 1)
+        finally:
+            s._swap_site_content = saved_swap
+
+        section("Manual pull command (cmd_pull)")
+
+        s.config.publish_url = s.config.publish_key = ""
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_pull()
+        check("No publish channel configured: reports cleanly, doesn't touch the network",
+              "No publish channel configured" in buf.getvalue())
+
+        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", pub_hex
+        urllib.request.urlopen = lambda url, timeout=None: (
+            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_pull()
+        check("Successful pull prints a confirmation",
+              "New site content published" in buf.getvalue())
+        check("Successful pull actually swapped in the content",
+              open(os.path.join(s.config.serve_dir, "index.html")).read() == "published content")
+    finally:
+        urllib.request.urlopen = saved_urlopen
+        s.config.serve_dir = saved_serve_dir2
+        s.config.publish_url, s.config.publish_key = saved_url2, saved_key2
+        shutil.rmtree(swap_root2, ignore_errors=True)
+
+    section("Publish poke cooldown")
+
+    calls = []
+    saved_check      = s._check_for_content_update
+    saved_last_poke  = s._last_poke_attempt
+    try:
+        s._check_for_content_update = lambda: calls.append(1)
+        # time.monotonic()'s epoch is unspecified (often time-since-boot on
+        # Linux) — 0.0 only reads as "long ago" if the host has been up longer
+        # than _PUBLISH_POKE_COOLDOWN, which a freshly booted CI runner isn't.
+        # Compute "elapsed" relative to now throughout instead.
+        long_ago = lambda: time.monotonic() - s._PUBLISH_POKE_COOLDOWN - 1
+        s._last_poke_attempt = long_ago()
+
+        s._poke_content_update()
+        time.sleep(0.05)  # let the daemon thread run
+        check("First poke triggers a background check", len(calls) == 1)
+
+        s._poke_content_update()
+        time.sleep(0.05)
+        check("Second poke within the cooldown window is a no-op", len(calls) == 1)
+
+        s._last_poke_attempt = long_ago()  # simulate the cooldown having elapsed
+        s._poke_content_update()
+        time.sleep(0.05)
+        check("Poke after the cooldown elapses triggers again", len(calls) == 2)
+
+        # Concurrent pokes racing the cooldown's check-then-set: without the
+        # lock around it, both could read the stale timestamp and both spawn.
+        s._last_poke_attempt = long_ago()
+        calls.clear()
+        threads = [threading.Thread(target=s._poke_content_update) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        time.sleep(0.1)
+        check("Ten concurrent pokes still trigger exactly one background check",
+              len(calls) == 1)
+    finally:
+        s._check_for_content_update = saved_check
+        s._last_poke_attempt = saved_last_poke
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INTEGRATION TESTS
@@ -837,6 +1145,60 @@ def run_server_tests(s, serve_dir):
     s.config.password_salt = ""
     s._auth_fail_times.clear()
 
+    section("Version discovery endpoint")
+
+    resp = req("GET", "/.well-known/servette")
+    check("200 with JSON content-type",
+          resp.status == 200 and "application/json" in resp.headers.get("Content-Type", ""))
+    data = json.loads(resp.body)
+    check("Reports the running version", data["running"] == s.__version__)
+    check("No backup present → backup is null", data["backup"] is None)
+
+    bak_path = os.path.abspath(s.__file__) + ".bak"
+    with open(bak_path, "w") as f:
+        f.write('__version__ = "1.2.3"\n')
+    try:
+        data = json.loads(req("GET", "/.well-known/servette").body)
+        check("Existing .bak's version is reported", data["backup"] == "1.2.3")
+    finally:
+        os.remove(bak_path)
+
+    check("HEAD returns 200 with an empty body",
+          req("HEAD", "/.well-known/servette").status == 200
+          and req("HEAD", "/.well-known/servette").body == b"")
+
+    s.config.username = "testuser"
+    s.config.password_hash, s.config.password_salt = s._hash_password("testpass")
+    check("Respects auth like any other path: no credentials → 401",
+          req("GET", "/.well-known/servette").status == 401)
+    check("Respects auth like any other path: correct credentials → 200",
+          req("GET", "/.well-known/servette", auth=("testuser", "testpass")).status == 200)
+    s.config.username      = ""
+    s.config.password_hash = ""
+    s.config.password_salt = ""
+    s._auth_fail_times.clear()
+
+    section("Publish poke endpoint")
+
+    s._last_poke_attempt = 0.0
+    resp = req("GET", "/.well-known/servette/poke")
+    check("202 Accepted with an empty body",
+          resp.status == 202 and resp.body == b"")
+
+    s.config.username = "testuser"
+    s.config.password_hash, s.config.password_salt = s._hash_password("testpass")
+    check("Not gated behind auth (unlike version discovery): no credentials → still 202",
+          req("GET", "/.well-known/servette/poke").status == 202)
+    s.config.username      = ""
+    s.config.password_hash = ""
+    s.config.password_salt = ""
+    s._auth_fail_times.clear()
+
+    check("HEAD returns 202 with an empty body",
+          req("HEAD", "/.well-known/servette/poke").status == 202
+          and req("HEAD", "/.well-known/servette/poke").body == b"")
+    s._last_poke_attempt = 0.0
+
     section("Cache-Control policies")
 
     s.config.cache_policy = "no-cache"
@@ -1086,6 +1448,25 @@ def run_install_tests(s, tmpdir):
     finally:
         s._meminfo = saved_meminfo
 
+    section("Publish channel config")
+
+    saved_url, saved_key = s.config.publish_url, s.config.publish_key
+    try:
+        s.config.publish_url = s.config.publish_key = ""
+        check("Neither set → not flagged",
+              not any("publish channel" in issue for issue in s._production_issues()))
+        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", "a" * 64
+        check("Both set → not flagged",
+              not any("publish channel" in issue for issue in s._production_issues()))
+        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", ""
+        check("URL only → flagged as partial",
+              any("publish channel" in issue for issue in s._production_issues()))
+        s.config.publish_url, s.config.publish_key = "", "a" * 64
+        check("Key only → flagged as partial",
+              any("publish channel" in issue for issue in s._production_issues()))
+    finally:
+        s.config.publish_url, s.config.publish_key = saved_url, saved_key
+
     section("Server watch (--serve supervision)")
 
     # _watch_server must return once the HTTPS thread has been dead for the grace
@@ -1263,6 +1644,40 @@ def run_install_tests(s, tmpdir):
     finally:
         s._domain_from_cert = saved_dfc
         logging.disable(logging.NOTSET)
+
+    section("Publish poll tick")
+
+    calls = []
+    saved_check    = s._check_for_content_update
+    saved_last     = s._last_publish_poll
+    saved_url, saved_key = s.config.publish_url, s.config.publish_key
+    try:
+        s._check_for_content_update = lambda: calls.append(1)
+
+        s.config.publish_url = s.config.publish_key = ""
+        s._last_publish_poll = 0.0
+        s._publish_poll_tick()
+        check("No publish channel configured: tick is a no-op", calls == [])
+
+        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", "a" * 64
+        # time.monotonic()'s epoch is unspecified (often time-since-boot on
+        # Linux) — 0.0 only reads as "long ago" if the host has been up longer
+        # than _PUBLISH_POLL_INTERVAL, which a freshly booted CI runner isn't.
+        # Compute "elapsed" relative to now instead, as the later cases do.
+        s._last_publish_poll = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
+        s._publish_poll_tick()
+        check("Channel configured, interval elapsed: tick fires", calls == [1])
+
+        s._publish_poll_tick()
+        check("Within the poll interval: second tick is a no-op", calls == [1])
+
+        s._last_publish_poll = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
+        s._publish_poll_tick()
+        check("After the poll interval elapses: tick fires again", calls == [1, 1])
+    finally:
+        s._check_for_content_update = saved_check
+        s._last_publish_poll = saved_last
+        s.config.publish_url, s.config.publish_key = saved_url, saved_key
 
     section("serve_dir world-readable check")
 

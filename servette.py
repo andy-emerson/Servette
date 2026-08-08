@@ -22,9 +22,11 @@ import gzip
 import hashlib
 import hmac
 import http.server
+import io
 import ipaddress
 import json
 import logging
+import tarfile
 import tomllib
 import os
 import re
@@ -37,7 +39,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -131,6 +133,8 @@ class Config:
         self.ciphers            = data.get("ciphers",            "")
         self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
         self.permissions_policy = data.get("permissions_policy", "camera=(), microphone=(), usb=(), midi=(), serial=()")
+        self.publish_url        = data.get("publish_url",        "")
+        self.publish_key        = data.get("publish_key",        "")
 
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
@@ -191,6 +195,12 @@ ciphers = {s(self.ciphers)}
 # Security headers — use config shell to adjust
 csp = {s(self.csp)}
 permissions_policy = {s(self.permissions_policy)}
+
+# Site publish channel: where signed content bundles are pulled from, and the
+# public key (distinct from Servette's own release-signing key) that verifies
+# them. Leave blank to disable — no polling happens without both set.
+publish_url = {s(self.publish_url)}
+publish_key = {s(self.publish_key)}
 
 # Machine-generated — do not edit by hand
 password_hash = {s(self.password_hash)}
@@ -491,6 +501,43 @@ def _security_headers():
 
 # ── HTTP server ───────────────────────────────────────────────────────────────
 
+_WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
+
+
+def _backup_version():
+    """The version string inside servette.py.bak (left by the last 'update' or
+    'restore'), or None if no backup exists or it can't be read/parsed."""
+    bak_path = os.path.abspath(__file__) + ".bak"
+    try:
+        with open(bak_path, "rb") as f:
+            return _parse_version(f.read())
+    except OSError:
+        return None
+
+
+_WELL_KNOWN_POKE_PATH  = _WELL_KNOWN_VERSION_PATH + "/poke"
+_last_poke_attempt     = 0.0
+_poke_cooldown_lock    = threading.Lock()
+_PUBLISH_POKE_COOLDOWN = 30  # seconds; bounds how often a poke actually triggers a
+                             # fetch, regardless of how often (or from how many
+                             # sources) pokes themselves arrive
+
+
+def _poke_content_update():
+    """Trigger a content-update check off the request thread, at most once per
+    cooldown window. The poke response returns immediately either way; the
+    actual fetch/verify/swap runs in the background, same as the periodic
+    fallback poll. The check-then-set on the cooldown clock is itself locked —
+    concurrent pokes (poke needs no auth, so any number of requests can race
+    here) would otherwise both read a stale _last_poke_attempt and both spawn."""
+    global _last_poke_attempt
+    with _poke_cooldown_lock:
+        now = time.monotonic()
+        if now - _last_poke_attempt < _PUBLISH_POKE_COOLDOWN:
+            return
+        _last_poke_attempt = now
+    threading.Thread(target=_check_for_content_update, daemon=True).start()
+
 
 def _handle_request(method, url_path, headers, raw_ip):
     """The request core. Given the method, URL path, the parsed request headers (a
@@ -520,6 +567,16 @@ def _handle_request(method, url_path, headers, raw_ip):
     if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
+
+    # Publish poke: ask Servette to check for new site content now, instead of
+    # waiting for the next fallback poll. Deliberately NOT gated behind the
+    # site's Basic Auth (unlike version discovery below) — poking reveals no
+    # information and can install nothing on its own; the fetched bundle still
+    # has to pass Ed25519 verification in _check_for_content_update(). Still
+    # subject to the general rate limiter above.
+    if url_path.split("?", 1)[0] == _WELL_KNOWN_POKE_PATH:
+        _poke_content_update()
+        return resp(202, [(b"content-length", b"0")])
 
     # Authentication
     if config.username:
@@ -553,6 +610,15 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-type",     b"text/plain"),
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
+
+    # Version discovery: what this box is running, and its update backup (if
+    # any) — the publish tool's "current vs. latest / current vs. backup"
+    # prompts read this. Deliberately reports only what THIS box knows;
+    # "latest available" comes from GitHub, which the tool queries directly.
+    if url_path.split("?", 1)[0] == _WELL_KNOWN_VERSION_PATH:
+        body = json.dumps({"running": __version__, "backup": _backup_version()}).encode()
+        return resp(200, [(b"content-type", b"application/json"),
+                          (b"content-length", str(len(body)).encode())], body)
 
     # Resolve request path to a file
     try:
@@ -873,6 +939,7 @@ _watchdog_thread      = None
 _sweep_thread         = None
 _sweep_stop           = threading.Event()
 _last_renewal_attempt = 0.0
+_publish_poll_thread  = None
 _cert_domain          = None  # cached domain from active cert; None means self-signed
 
 _TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
@@ -928,9 +995,41 @@ def _cert_watchdog():
         _cert_watchdog_tick()
 
 
+_last_publish_poll     = 0.0
+_PUBLISH_POLL_INTERVAL = 300  # seconds; mirrors the network watchdog's 5-minute
+                              # cadence — the floor under the poke mechanism, for
+                              # boxes that never receive one (just rebooted, tool
+                              # never opened)
+
+
+def _publish_poll_tick():
+    """One publish-check pass, gated to at most once per _PUBLISH_POLL_INTERVAL —
+    same shape as _cert_watchdog_tick's renewal gate."""
+    global _last_publish_poll
+    if not (config.publish_url and config.publish_key):
+        return
+    now = time.monotonic()
+    if now - _last_publish_poll < _PUBLISH_POLL_INTERVAL:
+        return
+    _last_publish_poll = now
+    _check_for_content_update()
+
+
+def _publish_poll():
+    """Fallback poll for the publish channel — the floor under the poke
+    mechanism, not the primary path. A poke still gets new content live
+    within seconds; this just guarantees convergence even if one never
+    arrives."""
+    while _server_running():
+        time.sleep(60)
+        if not _server_running():
+            break
+        _publish_poll_tick()
+
+
 def start_server():
     global _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread, \
-        _https_server, _https_thread, _http_server
+        _publish_poll_thread, _https_server, _https_thread, _http_server
 
     if _server_running():
         print("Server is already running.")
@@ -984,6 +1083,10 @@ def start_server():
         _sweep_stop.clear()
         _sweep_thread = threading.Thread(target=_rate_sweep, args=(_sweep_stop,), daemon=True)
         _sweep_thread.start()
+
+    if _publish_poll_thread is None or not _publish_poll_thread.is_alive():
+        _publish_poll_thread = threading.Thread(target=_publish_poll, daemon=True)
+        _publish_poll_thread.start()
     _server_start_time = time.monotonic()
     _cert_domain = _domain_from_cert(_resolve(config.cert_file))
     log.info("Server started on port %d", config.port)
@@ -1946,18 +2049,20 @@ def _section(title):
 # already has that convention's intuition. Onboarding, then runtime control,
 # then persistence, then observability, then maintenance, then meta.
 _COMMANDS = [
-    ("setup",   "guided walkthrough for getting started"),
-    ("config",  "view and edit settings"),
-    ("start",   "start the server"),
-    ("stop",    "stop the server"),
-    ("enable",  "enable Servette as a system service"),
-    ("disable", "remove the system service"),
-    ("status",  "show whether the server is running"),
-    ("log [n]", "show the last n log entries"),
-    ("update",  "download the latest version of servette.py"),
-    ("restore", "roll back to the previous version (undoes the last update)"),
-    ("help",    "show this message"),
-    ("quit",    "exit"),
+    ("setup",        "guided walkthrough for getting started"),
+    ("config",       "view and edit settings"),
+    ("start",        "start the server"),
+    ("stop",         "stop the server"),
+    ("enable",       "enable Servette as a system service"),
+    ("disable",      "remove the system service"),
+    ("status",       "show whether the server is running"),
+    ("log [n]",      "show the last n log entries"),
+    ("update",       "download the latest version of servette.py"),
+    ("restore",      "roll back to the previous version (undoes the last update)"),
+    ("pull",         "check the publish channel and pull new site content now"),
+    ("restore-site", "roll back site content to the previous version (undoes the last pull)"),
+    ("help",         "show this message"),
+    ("quit",         "exit"),
 ]
 HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
 
@@ -1970,6 +2075,7 @@ _CONFIG_COMMANDS = [
     ("port",     "HTTPS port"),
     ("cert",     "SSL certificate and key"),
     ("email",    "email address"),
+    ("publish",  "site publish channel (watch URL and signing key)"),
     ("username", "login username"),
     ("password", "login password"),
     ("limits",   "rate limits"),
@@ -2015,6 +2121,8 @@ def _config_show():
         ("Certificate",        val(config.cert_file)),
         ("Key",                val(config.key_file)),
         ("Email",              val(config.email)),
+        ("Publish URL",        val(config.publish_url)),
+        ("Publish key",        val(config.publish_key)),
         ("Username",           val(config.username)),
         ("Password",           "(set)" if config.password_hash else "(not set)"),
         ("Rate limit",         f"{config.rate_limit} req/min"),
@@ -2186,6 +2294,34 @@ def _config_trusted_proxy():
     print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
 
 
+def _config_publish():
+    print(f"\n  Current watch URL: {config.publish_url or '(not set)'}")
+    print("  Where signed content bundles (a .tar.gz plus its .sig) are pulled from —")
+    print("  typically a GitHub release. Leave blank to disable publishing.\n")
+    url = _input("  publish_url: ").strip()
+    if url and not url.startswith("https://"):
+        print("  → must be an https:// URL, unchanged")
+    elif url != config.publish_url:
+        config.publish_url = url
+        config.save()
+        print("  → saved" if url else "  → cleared, publishing disabled")
+    else:
+        print("  → unchanged")
+
+    print(f"\n  Current signing key: {config.publish_key or '(not set)'}")
+    print("  The public half of the content-signing keypair generated by the publish")
+    print("  tool — 64 hex characters (a 32-byte Ed25519 public key). Leave blank to clear.\n")
+    key = _input("  publish_key: ").strip().lower()
+    if key and not re.fullmatch(r"[0-9a-f]{64}", key):
+        print("  → not a 64-character hex string, unchanged")
+    elif key != config.publish_key:
+        config.publish_key = key
+        config.save()
+        print("  → saved" if key else "  → cleared")
+    else:
+        print("  → unchanged")
+
+
 def _config_tls():
     print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
     print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
@@ -2242,6 +2378,8 @@ def cmd_config():
             _config_password()
         elif cmd == "email":
             _config_set("email", "email")
+        elif cmd == "publish":
+            _config_publish()
         elif cmd == "limits":
             _config_limits()
         elif cmd == "cache":
@@ -2515,6 +2653,176 @@ def cmd_restore():
     _offer_restart(bak_version)
 
 
+# ── Site content publishing ─────────────────────────────────────────────────
+#
+# The content-side sibling of self-update: a signed tar.gz bundle, pulled from
+# publish_url, verified against publish_key (a keypair distinct from
+# Servette's own release-signing key), and swapped into serve_dir with the
+# same single-shot .bak/restore pattern 'update'/'restore' already give the
+# code. Pull-only — this box never accepts an inbound push of content, only
+# fetches from a URL it already trusts.
+
+_MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
+
+
+def _extract_bundle(data, dest_dir):
+    """Extract a tar.gz byte string into dest_dir (must not yet exist).
+
+    Every entry's resolved path is checked against dest_dir, every entry must
+    be a plain file or directory (no symlinks/devices), and the total
+    uncompressed size is capped — all validated before anything is written,
+    so a bad bundle leaves no partial extraction behind. filter='data' is
+    passed to extractall() too: defense in depth, not the only guard — it
+    independently enforces the same containment and rejects the same entry
+    types at the library level."""
+    os.makedirs(dest_dir)
+    dest_real = os.path.realpath(dest_dir)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        members = tf.getmembers()
+        total = 0
+        for m in members:
+            if not (m.isfile() or m.isdir()):
+                raise ValueError(f"unsupported entry type in bundle: {m.name}")
+            target = os.path.realpath(os.path.join(dest_dir, m.name))
+            if not (target == dest_real or target.startswith(dest_real + os.sep)):
+                raise ValueError(f"entry escapes the target directory: {m.name}")
+            total += m.size
+            if total > _MAX_BUNDLE_BYTES:
+                raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
+        tf.extractall(dest_dir, members=members, filter="data")
+
+
+def _swap_site_content(new_dir):
+    """Atomically replace the live serve_dir with new_dir's contents, keeping
+    a single-shot backup — the same one-step-back pattern as servette.py.bak.
+    new_dir must be on the same filesystem as serve_dir (both under BASE_DIR)
+    so the renames are atomic; the only unavoidable risk window is the two
+    renames themselves, each a single fast syscall back to back — proportionate
+    to Servette's scale, not a high-QPS system where that window would matter."""
+    live_dir = _resolve(config.serve_dir).rstrip(os.sep)
+    bak_dir  = live_dir + ".bak"
+    shutil.rmtree(bak_dir, ignore_errors=True)
+    if os.path.isdir(live_dir):
+        os.rename(live_dir, bak_dir)
+    os.rename(new_dir, live_dir)
+
+
+_publish_lock = threading.Lock()  # serializes every site-content mutation — poke's
+                                   # background thread, the periodic poll, the
+                                   # interactive 'pull', and cmd_restore_site can
+                                   # all fire independently, and the swap below is
+                                   # multiple unguarded filesystem ops, not one
+
+
+def _publish_sig_url(url):
+    """url's own '.sig' companion, with '.sig' appended to the path rather than
+    the whole URL — naive string concatenation breaks for a publish_url that
+    carries a query string (e.g. a pre-signed download link), landing '.sig'
+    after the query instead of after the file extension."""
+    parts = urlsplit(url)
+    return urlunsplit(parts._replace(path=parts.path + ".sig"))
+
+
+def _check_for_content_update():
+    """Pull, verify, and swap in a new site bundle if the publish channel is
+    configured. No-ops silently (not an error) if publish_url/publish_key
+    aren't both set — publishing is opt-in. Runs off the request path: called
+    from the poke handler's background thread and the periodic fallback poll —
+    neither is watching stdout, so every outcome is logged here. Also called
+    synchronously by the interactive 'pull' command, which turns the returned
+    status into a printed line rather than duplicating this logic.
+
+    Returns a short status string: "not-configured", "invalid-key",
+    "fetch-failed", "too-large", "bad-signature", "rejected", or "published"."""
+    if not (config.publish_url and config.publish_key):
+        return "not-configured"
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+
+    try:
+        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(config.publish_key))
+    except ValueError:
+        log.error("publish_key is not a valid Ed25519 public key — publishing disabled")
+        return "invalid-key"
+
+    with _publish_lock:
+        try:
+            # Capped read: bounds memory to _MAX_BUNDLE_BYTES regardless of what
+            # the response claims or how much data is actually sent — poke makes
+            # this fetch reachable by any unauthenticated visitor, repeatedly.
+            bundle = urllib.request.urlopen(config.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
+            if len(bundle) > _MAX_BUNDLE_BYTES:
+                log.error("Publish bundle exceeds %d bytes — rejecting before signature check", _MAX_BUNDLE_BYTES)
+                return "too-large"
+            signature = urllib.request.urlopen(_publish_sig_url(config.publish_url), timeout=15).read(4096)
+        except Exception as e:
+            log.warning("Could not fetch publish bundle: %s", e)
+            return "fetch-failed"
+
+        try:
+            pub_key.verify(signature, bundle)
+        except InvalidSignature:
+            log.error("Publish bundle signature verification failed — rejecting")
+            return "bad-signature"
+
+        staging = _resolve(config.serve_dir).rstrip(os.sep) + ".new"
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            _extract_bundle(bundle, staging)
+            _swap_site_content(staging)
+        except Exception as e:
+            log.error("Publish bundle rejected: %s", e)
+            shutil.rmtree(staging, ignore_errors=True)
+            return "rejected"
+
+    log.info("Published new site content from %s", config.publish_url)
+    return "published"
+
+
+def cmd_pull():
+    """Manually check the publish channel for new site content and pull it in
+    now, rather than waiting for the next poke or fallback poll."""
+    if not (config.publish_url and config.publish_key):
+        print("  No publish channel configured — run 'config publish' first.")
+        return
+    with _spinner("Checking for new site content..."):
+        result = _check_for_content_update()
+    messages = {
+        "invalid-key":   "Pull failed: publish_key is not a valid Ed25519 public key.",
+        "fetch-failed":  "Pull failed: could not fetch the publish bundle. See 'log' for details.",
+        "too-large":     f"Pull failed: bundle exceeds {_MAX_BUNDLE_BYTES} bytes.",
+        "bad-signature": "Pull failed: bundle signature verification failed — rejecting.",
+        "rejected":      "Pull failed: bundle was rejected. See 'log' for details.",
+        "published":     "New site content published.",
+    }
+    print(f"  {messages[result]}")
+
+
+def cmd_restore_site():
+    """Roll back to the content saved by the last successful publish. Mirrors
+    cmd_restore exactly: single-shot, consumed on use."""
+    live_dir = _resolve(config.serve_dir).rstrip(os.sep)
+    bak_dir  = live_dir + ".bak"
+
+    if not os.path.isdir(bak_dir):
+        print("  Nothing to restore — no site backup. (Publishing saves one each time it swaps in new content.)")
+        return
+
+    if not _prompt("Restore site content from backup? The backup is then removed."):
+        print("  Restore cancelled.")
+        return
+
+    with _publish_lock:
+        if not os.path.isdir(bak_dir):
+            print("  Nothing to restore — a publish ran while you were deciding and consumed the backup.")
+            return
+        if os.path.isdir(live_dir):
+            shutil.rmtree(live_dir)
+        os.rename(bak_dir, live_dir)
+    print("  Site content restored from backup.")
+
+
 def _format_uptime(seconds):
     s = int(seconds)
     if s < 60:
@@ -2538,6 +2846,8 @@ def _production_issues():
         issues.append("self-signed certificate — run 'config cert' to add a domain")
     if not config.username:
         issues.append("no password protection — run 'config' to set credentials")
+    if bool(config.publish_url) != bool(config.publish_key):
+        issues.append("publish channel partially configured — run 'config publish' to finish setup")
     mem_kb, avail_kb, swap_kb = _meminfo()
     rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
     active_mb = (swap_kb or 0) // 1024
@@ -2745,6 +3055,10 @@ def shell():
             cmd_update()
         elif cmd == "restore":
             cmd_restore()
+        elif cmd == "pull":
+            cmd_pull()
+        elif cmd == "restore-site":
+            cmd_restore_site()
         elif cmd in ("help", "?"):
             print(HELP)
         elif cmd in ("quit", "exit"):

@@ -702,12 +702,6 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 }
 .footer-links a:hover, .footer-links button:hover { color: var(--text); }
 
-/* Facts rather than navigation — the things worth knowing before deciding
-   to try it, which otherwise only appear mid-prose on How to Use it. */
-.footer-facts { display: grid; gap: 9px; font-size: 14px; color: var(--text-2); }
-.footer-facts span { display: block; }
-.footer-facts code { font-size: 13px; color: var(--muted); }
-
 .legal { border-top: 1px solid var(--border); }
 .legal .wrap { padding-block: 17px; font-size: 13px; color: var(--muted); }
 
@@ -1259,7 +1253,7 @@ servette&gt; <span class="hi">status</span>
     </div>
 
     <div class="prose">
-      <p>The wizard issues a Let's Encrypt certificate, redirects plain HTTP up to HTTPS, and installs a systemd service so the server comes back after a reboot. Renewal happens on its own — a watchdog checks the certificate every minute and renews it once it is within thirty days of expiring.</p>
+      <p>The wizard issues a Let's Encrypt certificate, redirects plain HTTP up to HTTPS, and installs a systemd service so the server comes back after a reboot. Renewal happens on its own: a background watchdog renews the certificate once it is inside thirty days of expiring, so it never lapses and you never touch it.</p>
       <p><code>sudo</code> is needed only for the interactive shell, which writes the systemd unit and creates the service user. The server itself runs as an unprivileged <code>servette</code> user with no login shell.</p>
       <p class="aside">Serving over a self-signed certificate works too, for a local network or a machine without a public domain. The browser will warn once; everything else behaves the same.</p>
     </div>
@@ -1344,15 +1338,42 @@ servette&gt; <span class="hi">status</span>
     </div>
   </section>
 
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Before your own HTML</p>
+      <h2>The folder you copy already has a page in it</h2>
+      <p>The <code>site/</code> folder that comes with Servette is not empty. Alongside this page it carries a self-test: a page that checks the live connection from the visitor's own browser and reports what it actually observed, rather than asserting that everything is fine.</p>
+    </div>
+
+    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+      <div class="card">
+        <h3>It answers on the first request</h3>
+        <p>Copy the folder across, finish <code>setup</code>, and load the site. A green <strong>Verified encrypted</strong> badge means the server, the certificate, and the HTTP-to-HTTPS redirect are all working end to end. Over plain HTTP it says so in red instead.</p>
+      </div>
+      <div class="card">
+        <h3>It probes, then reports</h3>
+        <p>It makes real requests from the browser and prints what came back: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped, never passed.</p>
+      </div>
+      <div class="card">
+        <h3>Then you replace it</h3>
+        <p>It is a starting point, not a fixture. Once you have seen it pass, drop your own <code>index.html</code> and assets into the same folder — Servette serves whatever is there, with no build step and no restart.</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p class="aside">Servette does not generate this page or push it to you — it simply ships in the folder, so a fresh copy has something real to serve the moment it starts. If you point Servette at a folder of your own instead, that is what it serves, and there is nothing to remove.</p>
+    </div>
+  </section>
+
   <section class="wrap section--last">
     <div class="autogrid cta">
       <div>
-        <h2>See it working first.</h2>
-        <p>Every copy of Servette ships with a page that tests the live connection from your own browser and reports what it observed.</p>
+        <h2>See what it looks like, live.</h2>
+        <p>A real Servette instance, serving the self-test page it ships with. Every check on it is running against that server, in your browser, right now.</p>
       </div>
       <div class="cta__actions">
-        <a class="btn btn--primary btn--l" href="demo.html">Open the self-test page</a>
-        <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette/blob/main/README.md">Read the README</a>
+        <a class="btn btn--primary btn--l" href="https://demo.servette.org">Open the live demo</a>
+        <a class="btn btn--outline btn--l" href="demo.html">See the page on this site</a>
       </div>
     </div>
   </section>
@@ -1459,7 +1480,7 @@ servette&gt; <span class="hi">status</span>
       <p><strong>Server lifecycle.</strong> <code>start_server()</code> and <code>stop_server()</code> own the HTTP servers, their daemon threads, and the background workers. Under <code>--serve</code> the main thread then blocks watching the HTTPS thread's liveness, and exits nonzero once it has been dead past a grace period — so systemd's <code>Restart=always</code> brings the service back. Without that watch, a dead server thread would leave a living process systemd reports as healthy.</p>
       <p><strong>Production honesty.</strong> <code>_production_issues()</code> returns the conditions blocking production readiness — serve directory missing, cert not configured, self-signed cert, no password, a small-RAM host with no swap — printed on startup and on every <code>status</code>. It refuses to imply production-ready while anything is wrong.</p>
       <p><strong>Certificates.</strong> Let's Encrypt certificates come from Servette's own minimal ACME client: RFC 8555 HTTP-01 over stdlib <code>urllib</code>, with <code>cryptography</code> for JWS signing and the CSR. It is deliberately narrow — HTTP-01 only, no revocation or key rollover — which is why it fits in one file instead of pulling in the certbot stack. It first attempts a certificate covering both the domain and its <code>www.</code> form, falling back to the bare domain if only that fails DNS validation, and saying so.</p>
-      <p><strong>Cert watchdog.</strong> A daemon thread polling every 60 seconds: for a configured domain it renews when the certificate expires in under 30 days; for self-signed certs it detects external file changes by mtime and reloads. Each pass contains its own exceptions — a failed pass logs and retries rather than killing the thread, since a dead watchdog would silently end renewals.</p>
+      <p><strong>Cert watchdog.</strong> A daemon thread polling every 60 seconds. The renewal check itself does not need that cadence — it reads an expiry date and acts only inside the last 30 days — but the same pass also detects a certificate rotated on disk by an outside tool, by mtime, and reloads the server for it. That is the case worth catching quickly, and an expiry check is cheap enough to ride along on the same tick. Renewal failures back off to at most one attempt an hour. Each pass contains its own exceptions: a failed pass logs and retries rather than killing the thread, since a dead watchdog would silently end renewals.</p>
       <p><strong>systemd and host provisioning.</strong> <code>enable</code> creates the login-less <code>servette</code> user and writes a sandboxed unit: <code>CAP_NET_BIND_SERVICE</code> to bind 80 and 443 without root, with <code>NoNewPrivileges</code>, <code>ProtectSystem=strict</code>, <code>PrivateTmp</code>, and write access limited to the server's own directory and the ACME webroot. Install also provisions two host-level defenses born of a production post-mortem: a network watchdog that restarts the host's network manager if the default route disappears, and a swapfile offer sized from measured RAM and demand rather than a hardcoded ceiling.</p>
       <p><strong>Self-update.</strong> Updates come from signed GitHub Releases, not from <code>main</code> — the signature is the trust anchor, because a release is verifiable whereas <code>main</code> is whatever is currently there, signed by no one. <code>update</code> fetches the release's <code>servette.py</code> and its signature, verifies against a pinned public key, validates syntax, backs up the current file, and swaps atomically. Settings are never touched.</p>
     </div>
@@ -1562,7 +1583,7 @@ python3 servette.py --serve       <span class="cmt"># non-interactive service mo
       <div class="footer-brand">
         <span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span>
       </div>
-      <p class="footer-tag">The simple, secure, static-site server. One file, one dependency, MIT licensed.</p>
+      <p class="footer-tag">The simple, secure, static-site server. One file, one dependency, no configuration language.</p>
     </div>
     <div>
       <p class="footer-label">This site</p>
@@ -1571,7 +1592,6 @@ python3 servette.py --serve       <span class="cmt"># non-interactive service mo
         <button type="button" data-goto="how-it-compares">How it Compares</button>
         <button type="button" data-goto="how-to-use-it">How to Use it</button>
         <button type="button" data-goto="how-it-works">How it Works</button>
-        <a href="demo.html">Self-test this connection</a>
       </div>
     </div>
     <div>
@@ -1579,17 +1599,8 @@ python3 servette.py --serve       <span class="cmt"># non-interactive service mo
       <div class="footer-links">
         <a href="https://github.com/andy-emerson/servette">GitHub</a>
         <a href="https://github.com/andy-emerson/servette/issues">Report a bug</a>
-        <a href="https://github.com/andy-emerson/servette/blob/main/SECURITY.md">Report a vulnerability</a>
+        <a href="https://github.com/andy-emerson/servette/security/advisories/new">Report a vulnerability</a>
         <button type="button" id="license-open">License (MIT)</button>
-      </div>
-    </div>
-    <div>
-      <p class="footer-label">At a glance</p>
-      <div class="footer-facts">
-        <span>Python 3.11+</span>
-        <span>Linux with systemd</span>
-        <span>One file, one dependency</span>
-        <span>MIT licensed</span>
       </div>
     </div>
   </div>

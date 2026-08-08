@@ -72,7 +72,6 @@ graph LR
         SRV[Server Lifecycle]
         ASG[HTTP Servers]
         CW[Cert Watchdog]
-        PP[Publish Poll]
         ACME[ACME]
         SD[systemd]
     end
@@ -93,7 +92,6 @@ graph LR
 
     SRV --> ASG
     SRV --> CW
-    SRV --> PP
     ASG --> HTTPS
     ASG --> HTTP
 
@@ -144,17 +142,13 @@ Unless a session-mode server is running in this very process (re-executing would
 
 The release-publishing procedure (a maintainer task, since it needs the private key) is in the release procedure below.
 
-**Publish channel (`cmd_pull` / `cmd_restore_site`).** A second, independent update channel — for the site's *content*, not Servette's own code — configured by two settings: `publish_url` (an `https://` URL for a signed bundle) and `publish_key` (a public Ed25519 key distinct from `_SIGNING_PUBLIC_KEY`, so a compromised content key can never forge a code update or vice versa). Disabled by default; `_production_issues()` flags a half-configured channel (one setting present, not both).
+**Publish channel (`cmd_pull` / `cmd_restore_site`).** A second, independent update channel — for the site's *content*, not Servette's own code — configured by two settings: `publish_url` (an `https://` URL for a signed bundle) and `publish_key` (a public Ed25519 key distinct from `_SIGNING_PUBLIC_KEY`, so a compromised content key can never forge a code update or vice versa). Disabled by default; `_production_issues()` flags a half-configured channel (one setting present, not both). Triggered only by the interactive `pull` command — no network-reachable trigger exists.
 
-`_check_for_content_update()` is the whole pipeline, and returns a short status string ("not-configured", "invalid-key", "fetch-failed", "too-large", "bad-signature", "rejected", "published") its callers act on: fetch `publish_url` and its `.sig` companion (`_publish_sig_url()` appends `.sig` to the path, not the raw URL, so a `publish_url` carrying a query string still resolves correctly), verify the signature, extract the tar.gz bundle into a staging directory, and atomically swap it in. The bundle fetch is capped to `_MAX_BUNDLE_BYTES` at the socket read itself (`.read(_MAX_BUNDLE_BYTES + 1)`, rejected as `"too-large"` if it comes back over) — poke makes this fetch reachable by any unauthenticated visitor, repeatedly, so memory has to be bounded before the signature is even checked, not just after `_extract_bundle()` sees the whole thing. `_extract_bundle()` is further defense in depth against a compromised or buggy publisher: entries must be plain files or directories (no symlinks/devices), every path is realpath-checked against the destination to reject traversal, uncompressed size is capped again post-extraction, and `filter="data"` (PEP 706) is passed to `extractall()` too — an independent, library-level enforcement of the same containment and entry-type rules. `_swap_site_content()` mirrors `servette.py.bak` exactly: the live `serve_dir` is renamed to `serve_dir.bak` (single-shot, overwritten on each successful publish) before the staged directory is renamed into its place — two renames back to back, atomic on the same filesystem. `cmd_restore_site()` is `cmd_restore`'s content counterpart: renames the backup back over the live directory and consumes it.
+`_check_for_content_update()` is the whole pipeline, called by `cmd_pull` and returning a status string it prints: fetch `publish_url` and its `.sig` companion (`_publish_sig_url()` appends `.sig` to the path, not the raw URL, so a query string doesn't break it), verify the signature, extract the tar.gz bundle into a staging directory, and atomically swap it in. The fetch is capped to `_MAX_BUNDLE_BYTES` before the signature check. `_extract_bundle()` is further defense in depth: entries must be plain files or directories, every path is realpath-checked against the destination, and `filter="data"` (PEP 706) independently enforces the same rules at the library level. `_swap_site_content()` mirrors `servette.py.bak`: the live `serve_dir` is renamed to `serve_dir.bak` before the staged directory is renamed into its place. `cmd_restore_site()` is `cmd_restore`'s content counterpart.
 
-`_check_for_content_update()` has three independent triggers, plus `cmd_restore_site()` touching the same `serve_dir`/`serve_dir.bak` paths — `_publish_lock` (held for fetch through swap) serializes all of them, so overlapping publishes can never interleave their renames; `cmd_restore_site()` takes the same lock only around its own rename, re-checking the backup still exists first, since a concurrent publish can consume it while an operator is sitting at the confirmation prompt.
+`_publish_lock` (held for fetch through swap) serializes `pull` and `restore-site`, since both can run from separate shell sessions against the same `serve_dir`/`serve_dir.bak` paths.
 
-- **Poke** (`GET /.well-known/servette/poke`) — deliberately *not* gated behind the site's Basic Auth, unlike version discovery below: poking reveals no information and installs nothing without still passing signature verification. Starts the check in a background thread and returns `202` immediately; a monotonic cooldown (`_PUBLISH_POKE_COOLDOWN`, 30s) bounds how often a poke actually triggers a fetch, and the request still passes through the general per-IP rate limiter above it — no separate tracker. The cooldown's own check-then-set is separately locked (`_poke_cooldown_lock`): poke needs no auth, so concurrent requests racing an unlocked check could each read a stale timestamp and each spawn, defeating the cooldown.
-- **Fallback poll** (`_publish_poll`) — a daemon thread the same shape as `_cert_watchdog`, ticking every 60s and gated by `_PUBLISH_POLL_INTERVAL` (300s, matching the network watchdog's cadence) so a box that never receives a poke (just rebooted, publisher tool never opened) still converges.
-- **Pull** (`cmd_pull`, the interactive command) — calls it synchronously and prints whatever status it returns.
-
-**Version discovery** (`GET /.well-known/servette`) reports `{"running": __version__, "backup": <servette.py.bak's version, or null>}` as JSON — what a publish tool needs to show "your server is running vX, backup is vY" without any further disclosure. Unlike poke, it respects the site's Basic Auth: this endpoint reveals information, poke only triggers an action.
+**Version discovery** (`GET /.well-known/servette`) reports `{"running": __version__, "backup": <servette.py.bak's version, or null>}` as JSON — what a publish tool needs to show "your server is running vX, backup is vY." Respects the site's Basic Auth.
 
 ### Shell
 

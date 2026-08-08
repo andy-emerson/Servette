@@ -649,43 +649,6 @@ def _backup_version():
         return None
 
 
-def _cooldown_key(site):
-    """A key for the per-site poke/poll cooldown dicts (_last_poke_attempt,
-    _last_publish_poll) that survives a config reload, which replaces every
-    Site object wholesale. domain when set, else the always-present
-    serve_dir — never id(site), which a reload could hand straight back out
-    to an unrelated site and silently mix up two sites' cooldowns."""
-    return site.domain or site.serve_dir
-
-
-_WELL_KNOWN_POKE_PATH  = _WELL_KNOWN_VERSION_PATH + "/poke"
-_last_poke_attempt     = {}  # _cooldown_key(site) -> monotonic timestamp of the last
-                             # poke that actually triggered a fetch — per-site, so
-                             # hammering one site's poke endpoint can't throttle another's
-_poke_cooldown_lock    = threading.Lock()
-_PUBLISH_POKE_COOLDOWN = 30  # seconds; bounds how often a poke actually triggers a
-                             # fetch, regardless of how often (or from how many
-                             # sources) pokes themselves arrive
-
-
-def _poke_content_update(site):
-    """Trigger a content-update check for `site` off the request thread, at most
-    once per cooldown window for that site. The poke response returns
-    immediately either way; the actual fetch/verify/swap runs in the
-    background, same as the periodic fallback poll. The check-then-set on the
-    cooldown clock is itself locked — concurrent pokes (poke needs no auth, so
-    any number of requests can race here) would otherwise both read a stale
-    timestamp and both spawn."""
-    with _poke_cooldown_lock:
-        now  = time.monotonic()
-        key  = _cooldown_key(site)
-        last = _last_poke_attempt.get(key, 0.0)
-        if now - last < _PUBLISH_POKE_COOLDOWN:
-            return
-        _last_poke_attempt[key] = now
-    threading.Thread(target=_check_for_content_update, args=(site,), daemon=True).start()
-
-
 def _handle_request(method, url_path, headers, raw_ip):
     """The request core. Given the method, URL path, the parsed request headers (a
     case-insensitive mapping — an http.client.HTTPMessage in production), and the raw
@@ -738,17 +701,6 @@ def _handle_request(method, url_path, headers, raw_ip):
 
     if method not in ("GET", "HEAD"):
         return resp(405, [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
-
-    # Publish poke: ask Servette to check the matched site for new content now,
-    # instead of waiting for the next fallback poll. Deliberately NOT gated
-    # behind the site's Basic Auth (unlike version discovery below) — poking
-    # reveals no information and can install nothing on its own; the fetched
-    # bundle still has to pass Ed25519 verification in
-    # _check_for_content_update(). Still subject to the general rate limiter
-    # above, and separately cooldown-gated per site.
-    if url_path.split("?", 1)[0] == _WELL_KNOWN_POKE_PATH:
-        _poke_content_update(site)
-        return resp(202, [(b"content-length", b"0")])
 
     # Authentication — the matched site's own username/password; per the closed
     # decision, purely per-site, no fallback to any other level.
@@ -1192,7 +1144,6 @@ _sweep_stop           = threading.Event()
 _last_renewal_attempt = {}  # domain -> monotonic timestamp of the last renewal attempt;
                             # per-domain so one site's failure-triggered backoff
                             # can't delay another's renewal
-_publish_poll_thread  = None
 
 _TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
 ACME_RETRIES  = 3
@@ -1249,53 +1200,9 @@ def _cert_watchdog():
         _cert_watchdog_tick()
 
 
-_last_publish_poll     = {}  # _cooldown_key(site) -> monotonic timestamp of the last
-                             # full poll pass for that site
-_PUBLISH_POLL_INTERVAL = 300  # seconds; mirrors the network watchdog's 5-minute
-                              # cadence — the floor under the poke mechanism, for
-                              # boxes that never receive one (just rebooted, tool
-                              # never opened)
-
-
-def _publish_poll_tick():
-    """One publish-check pass over every configured site, each gated to at most
-    once per _PUBLISH_POLL_INTERVAL — same shape as _cert_watchdog_tick's
-    per-site renewal gate, including per-site exception containment (one
-    site's failure can't skip, or silently stop polling, another's). Unlike
-    poke, this iterates config.sites directly rather than going through
-    _select_site's catch-all rule, so it must not assume only one domainless
-    site is ever "live" — _cooldown_key() accounts for that."""
-    for site in config.sites:
-        if not (site.publish_url and site.publish_key):
-            continue
-        try:
-            now  = time.monotonic()
-            key  = _cooldown_key(site)
-            last = _last_publish_poll.get(key, 0.0)
-            if now - last < _PUBLISH_POLL_INTERVAL:
-                continue
-            _last_publish_poll[key] = now
-            _check_for_content_update(site)
-        except Exception:
-            log.exception("Publish poll pass failed for %s — will retry on the next pass",
-                          site.domain or "a site")
-
-
-def _publish_poll():
-    """Fallback poll for the publish channel — the floor under the poke
-    mechanism, not the primary path. A poke still gets new content live
-    within seconds; this just guarantees convergence even if one never
-    arrives."""
-    while _server_running():
-        time.sleep(60)
-        if not _server_running():
-            break
-        _publish_poll_tick()
-
-
 def start_server():
     global _server_start_time, _watchdog_thread, _sweep_thread, \
-        _publish_poll_thread, _https_server, _https_thread, _http_server
+        _https_server, _https_thread, _http_server
 
     if _server_running():
         print("Server is already running.")
@@ -1351,9 +1258,6 @@ def start_server():
         _sweep_thread = threading.Thread(target=_rate_sweep, args=(_sweep_stop,), daemon=True)
         _sweep_thread.start()
 
-    if _publish_poll_thread is None or not _publish_poll_thread.is_alive():
-        _publish_poll_thread = threading.Thread(target=_publish_poll, daemon=True)
-        _publish_poll_thread.start()
     _server_start_time = time.monotonic()
     log.info("Server started on port %d", config.port)
     for site in config.sites:
@@ -3161,15 +3065,10 @@ def _swap_site_content(new_dir, serve_dir):
     os.rename(new_dir, live_dir)
 
 
-_publish_lock = threading.Lock()  # serializes every site-content mutation, across
-                                   # every site — poke's background thread, the
-                                   # periodic poll, the interactive 'pull', and
-                                   # cmd_restore_site can all fire independently,
-                                   # for any site, and the swap below is multiple
-                                   # unguarded filesystem ops, not one. Shared
-                                   # rather than per-site: simpler, and cross-site
-                                   # serialization costs nothing worth optimizing
-                                   # away at Servette's scale.
+_publish_lock = threading.Lock()  # serializes site-content mutation across every
+                                   # site: 'pull' and 'restore-site' can run from
+                                   # two shell sessions at once, and the swap is
+                                   # multiple unguarded filesystem ops, not one.
 
 
 def _publish_sig_url(url):
@@ -3184,12 +3083,9 @@ def _publish_sig_url(url):
 def _check_for_content_update(site):
     """Pull, verify, and swap in a new site bundle for `site` if its publish
     channel is configured. No-ops silently (not an error) if publish_url/
-    publish_key aren't both set on it — publishing is opt-in, per site. Runs
-    off the request path: called from the poke handler's background thread and
-    the periodic fallback poll — neither is watching stdout, so every outcome
-    is logged here. Also called synchronously by the interactive 'pull'
-    command, which turns the returned status into a printed line rather than
-    duplicating this logic.
+    publish_key aren't both set on it — publishing is opt-in, per site. Called
+    by the interactive 'pull' command, which turns the returned status into a
+    printed line.
 
     Returns a short status string: "not-configured", "invalid-key",
     "fetch-failed", "too-large", "bad-signature", "rejected", or "published"."""
@@ -3208,8 +3104,7 @@ def _check_for_content_update(site):
     with _publish_lock:
         try:
             # Capped read: bounds memory to _MAX_BUNDLE_BYTES regardless of what
-            # the response claims or how much data is actually sent — poke makes
-            # this fetch reachable by any unauthenticated visitor, repeatedly.
+            # the response claims or how much data is actually sent.
             bundle = urllib.request.urlopen(site.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
             if len(bundle) > _MAX_BUNDLE_BYTES:
                 log.error("Publish bundle exceeds %d bytes — rejecting before signature check", _MAX_BUNDLE_BYTES)
@@ -3240,8 +3135,7 @@ def _check_for_content_update(site):
 
 
 def cmd_pull(site):
-    """Manually check the publish channel for new site content and pull it in
-    now, rather than waiting for the next poke or fallback poll."""
+    """Manually check the publish channel for new site content and pull it in."""
     if not (site.publish_url and site.publish_key):
         print("  No publish channel configured — run 'config publish' first.")
         return

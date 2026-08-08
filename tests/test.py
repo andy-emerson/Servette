@@ -1303,94 +1303,6 @@ def run_dispatch_tests(s):
         s.config.publish_url, s.config.publish_key = saved_url2, saved_key2
         shutil.rmtree(swap_root2, ignore_errors=True)
 
-    section("Publish poke cooldown")
-
-    calls = []
-    saved_check      = s._check_for_content_update
-    saved_last_poke  = dict(s._last_poke_attempt)
-    site = s.config.sites[0]
-    try:
-        s._check_for_content_update = lambda site: calls.append(1)
-        # time.monotonic()'s epoch is unspecified (often time-since-boot on
-        # Linux) — 0.0 only reads as "long ago" if the host has been up longer
-        # than _PUBLISH_POKE_COOLDOWN, which a freshly booted CI runner isn't.
-        # Compute "elapsed" relative to now throughout instead.
-        long_ago = lambda: time.monotonic() - s._PUBLISH_POKE_COOLDOWN - 1
-        s._last_poke_attempt[s._cooldown_key(site)] = long_ago()
-
-        s._poke_content_update(site)
-        time.sleep(0.05)  # let the daemon thread run
-        check("First poke triggers a background check", len(calls) == 1)
-
-        s._poke_content_update(site)
-        time.sleep(0.05)
-        check("Second poke within the cooldown window is a no-op", len(calls) == 1)
-
-        s._last_poke_attempt[s._cooldown_key(site)] = long_ago()  # simulate the cooldown having elapsed
-        s._poke_content_update(site)
-        time.sleep(0.05)
-        check("Poke after the cooldown elapses triggers again", len(calls) == 2)
-
-        # Concurrent pokes racing the cooldown's check-then-set: without the
-        # lock around it, both could read the stale timestamp and both spawn.
-        s._last_poke_attempt[s._cooldown_key(site)] = long_ago()
-        calls.clear()
-        threads = [threading.Thread(target=s._poke_content_update, args=(site,)) for _ in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        time.sleep(0.1)
-        check("Ten concurrent pokes still trigger exactly one background check",
-              len(calls) == 1)
-
-        # Per-site independence: another site's active cooldown doesn't block
-        # this one's — hammering one site's poke endpoint can't throttle another's.
-        site2 = s.Site({"domain": "poke-other.example.com"})
-        s._last_poke_attempt[s._cooldown_key(site)]  = time.monotonic()  # site just fired, in cooldown
-        s._last_poke_attempt.pop(s._cooldown_key(site2), None)           # site2 has never fired
-        calls.clear()
-        s._poke_content_update(site2)
-        time.sleep(0.05)
-        check("A different site's poke fires independently of another site's active cooldown",
-              len(calls) == 1)
-
-        # Config reload (e.g. a config edit from a separate `sudo python3
-        # servette.py` shell session against an already-running --serve
-        # process) replaces every Site object wholesale via Config._load().
-        # Keying by id(site) used to silently reset every site's cooldown the
-        # moment that happened; keyed by domain, a fresh Site object for the
-        # same domain still respects the timestamp from before the reload.
-        saved_domain = site.domain
-        site.domain  = "reload-test.example.com"
-        s._last_poke_attempt[s._cooldown_key(site)] = time.monotonic()
-        reloaded_site = s.Site({"domain": site.domain})  # simulates what reload produces
-        calls.clear()
-        s._poke_content_update(reloaded_site)
-        time.sleep(0.05)
-        check("A fresh Site object for the same domain (as a config reload produces) "
-              "still respects the pre-reload cooldown",
-              len(calls) == 0)
-        site.domain = saved_domain
-
-        # Same guarantee for a domainless site, keyed by serve_dir instead —
-        # this is the case id(site) used to handle correctly only by luck of
-        # CPython's id-reuse timing, and could just as easily hand a fresh
-        # site's id back to a *different* stale site's entry instead.
-        site.domain = ""
-        s._last_poke_attempt[s._cooldown_key(site)] = time.monotonic()
-        reloaded_site2 = s.Site({"domain": "", "serve_dir": site.serve_dir})
-        calls.clear()
-        s._poke_content_update(reloaded_site2)
-        time.sleep(0.05)
-        check("A fresh domainless Site object for the same serve_dir "
-              "still respects the pre-reload cooldown",
-              len(calls) == 0)
-        site.domain = saved_domain
-    finally:
-        s._check_for_content_update = saved_check
-        s._last_poke_attempt = saved_last_poke
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INTEGRATION TESTS
@@ -1782,27 +1694,6 @@ def run_server_tests(s, serve_dir):
     s.config.password_hash = ""
     s.config.password_salt = ""
     s._auth_fail_times.clear()
-
-    section("Publish poke endpoint")
-
-    s._last_poke_attempt.clear()
-    resp = req("GET", "/.well-known/servette/poke")
-    check("202 Accepted with an empty body",
-          resp.status == 202 and resp.body == b"")
-
-    s.config.username = "testuser"
-    s.config.password_hash, s.config.password_salt = s._hash_password("testpass")
-    check("Not gated behind auth (unlike version discovery): no credentials → still 202",
-          req("GET", "/.well-known/servette/poke").status == 202)
-    s.config.username      = ""
-    s.config.password_hash = ""
-    s.config.password_salt = ""
-    s._auth_fail_times.clear()
-
-    check("HEAD returns 202 with an empty body",
-          req("HEAD", "/.well-known/servette/poke").status == 202
-          and req("HEAD", "/.well-known/servette/poke").body == b"")
-    s._last_poke_attempt.clear()
 
     section("Cache-Control policies")
 
@@ -2322,80 +2213,6 @@ def run_install_tests(s, tmpdir):
               any("serve directory not configured (y) —" in i for i in issues2))
     finally:
         s.config.sites = saved_sites5
-
-    section("Publish poll tick")
-
-    calls = []
-    saved_check    = s._check_for_content_update
-    saved_last     = dict(s._last_publish_poll)
-    saved_url, saved_key = s.config.publish_url, s.config.publish_key
-    saved_sites6   = s.config.sites
-    site = s.config.sites[0]
-    try:
-        s._check_for_content_update = lambda site: calls.append(1)
-
-        s.config.publish_url = s.config.publish_key = ""
-        s._last_publish_poll[s._cooldown_key(site)] = 0.0
-        s._publish_poll_tick()
-        check("No publish channel configured: tick is a no-op", calls == [])
-
-        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", "a" * 64
-        # time.monotonic()'s epoch is unspecified (often time-since-boot on
-        # Linux) — 0.0 only reads as "long ago" if the host has been up longer
-        # than _PUBLISH_POLL_INTERVAL, which a freshly booted CI runner isn't.
-        # Compute "elapsed" relative to now instead, as the later cases do.
-        s._last_publish_poll[s._cooldown_key(site)] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
-        s._publish_poll_tick()
-        check("Channel configured, interval elapsed: tick fires", calls == [1])
-
-        s._publish_poll_tick()
-        check("Within the poll interval: second tick is a no-op", calls == [1])
-
-        s._last_publish_poll[s._cooldown_key(site)] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
-        s._publish_poll_tick()
-        check("After the poll interval elapses: tick fires again", calls == [1, 1])
-
-        # Per-site independence and per-site failure containment, same shape as
-        # the cert watchdog's: one site's exception can't skip or stop another's.
-        site2 = s.Site({
-            "domain": "poll-other.example.com", "publish_url": "https://example.com/other.tar.gz",
-            "publish_key": "b" * 64,
-        })
-        s._last_publish_poll.pop(s._cooldown_key(site2), None)
-        s._check_for_content_update = lambda site: (_ for _ in ()).throw(RuntimeError("boom")) \
-            if site is s.config.sites[0] else calls.append("site2")
-        calls.clear()
-        s.config.sites = [s.config.sites[0], site2]
-        logging.disable(logging.CRITICAL)
-        try:
-            s._publish_poll_tick()
-        finally:
-            logging.disable(logging.NOTSET)
-        check("A failure checking one site doesn't stop the poll pass for another",
-              calls == ["site2"])
-
-        # Regression: two domainless sites (necessarily on distinct serve_dirs —
-        # that's what makes them different sites) must not share a cooldown
-        # key — they'd otherwise starve each other, since whichever is
-        # processed first each tick resets the shared key just before the
-        # second's own check runs, permanently skipping it.
-        site3 = s.Site({"domain": "", "serve_dir": "third", "publish_url": "https://example.com/third.tar.gz",
-                         "publish_key": "c" * 64})
-        site4 = s.Site({"domain": "", "serve_dir": "fourth", "publish_url": "https://example.com/fourth.tar.gz",
-                         "publish_key": "d" * 64})
-        s._last_publish_poll.pop(s._cooldown_key(site3), None)
-        s._last_publish_poll.pop(s._cooldown_key(site4), None)
-        s._check_for_content_update = lambda site: calls.append(site)
-        calls.clear()
-        s.config.sites = [site3, site4]
-        s._publish_poll_tick()
-        check("Two domainless sites are both polled in the same tick, not just the first",
-              calls == [site3, site4])
-    finally:
-        s._check_for_content_update = saved_check
-        s._last_publish_poll = saved_last
-        s.config.sites = saved_sites6
-        s.config.publish_url, s.config.publish_key = saved_url, saved_key
 
     section("serve_dir world-readable check")
 

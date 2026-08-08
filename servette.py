@@ -499,6 +499,20 @@ def _security_headers():
 
 # ── HTTP server ───────────────────────────────────────────────────────────────
 
+_WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
+
+
+def _backup_version():
+    """The version string inside servette.py.bak (left by the last 'update' or
+    'restore'), or None if no backup exists or it can't be read/parsed."""
+    bak_path = os.path.abspath(__file__) + ".bak"
+    try:
+        with open(bak_path, "rb") as f:
+            return _parse_version(f.read())
+    except OSError:
+        return None
+
+
 
 def _handle_request(method, url_path, headers, raw_ip):
     """The request core. Given the method, URL path, the parsed request headers (a
@@ -561,6 +575,15 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-type",     b"text/plain"),
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
+
+    # Version discovery: what this box is running, and its update backup (if
+    # any) — the publish tool's "current vs. latest / current vs. backup"
+    # prompts read this. Deliberately reports only what THIS box knows;
+    # "latest available" comes from GitHub, which the tool queries directly.
+    if url_path.split("?", 1)[0] == _WELL_KNOWN_VERSION_PATH:
+        body = json.dumps({"running": __version__, "backup": _backup_version()}).encode()
+        return resp(200, [(b"content-type", b"application/json"),
+                          (b"content-length", str(len(body)).encode())], body)
 
     # Resolve request path to a file
     try:

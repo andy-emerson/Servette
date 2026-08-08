@@ -14,6 +14,7 @@ import base64
 import gzip
 import http.client
 import http.server
+import json
 import logging
 import os
 import shutil
@@ -832,6 +833,39 @@ def run_server_tests(s, serve_dir):
     check("Auth rate limit → 429",
           req("GET", auth=("testuser", "wrong")).status == 429)
 
+    s.config.username      = ""
+    s.config.password_hash = ""
+    s.config.password_salt = ""
+    s._auth_fail_times.clear()
+
+    section("Version discovery endpoint")
+
+    resp = req("GET", "/.well-known/servette")
+    check("200 with JSON content-type",
+          resp.status == 200 and "application/json" in resp.headers.get("Content-Type", ""))
+    data = json.loads(resp.body)
+    check("Reports the running version", data["running"] == s.__version__)
+    check("No backup present → backup is null", data["backup"] is None)
+
+    bak_path = os.path.abspath(s.__file__) + ".bak"
+    with open(bak_path, "w") as f:
+        f.write('__version__ = "1.2.3"\n')
+    try:
+        data = json.loads(req("GET", "/.well-known/servette").body)
+        check("Existing .bak's version is reported", data["backup"] == "1.2.3")
+    finally:
+        os.remove(bak_path)
+
+    check("HEAD returns 200 with an empty body",
+          req("HEAD", "/.well-known/servette").status == 200
+          and req("HEAD", "/.well-known/servette").body == b"")
+
+    s.config.username = "testuser"
+    s.config.password_hash, s.config.password_salt = s._hash_password("testpass")
+    check("Respects auth like any other path: no credentials → 401",
+          req("GET", "/.well-known/servette").status == 401)
+    check("Respects auth like any other path: correct credentials → 200",
+          req("GET", "/.well-known/servette", auth=("testuser", "testpass")).status == 200)
     s.config.username      = ""
     s.config.password_hash = ""
     s.config.password_salt = ""

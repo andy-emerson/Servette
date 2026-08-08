@@ -679,9 +679,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # site selection so a flood of requests carrying random/unmatched Host
     # headers still gets throttled rather than dodging the limiter under the
     # closed-system 404 below; the cost is that a rate-limited response never
-    # carries HSTS even for a real site's domain, same trade-off the original
-    # single-site code made (this check was already the first content-adjacent
-    # thing evaluated, ahead of anything else request-shaped).
+    # carries HSTS even for a real site's domain.
     if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
@@ -832,11 +830,9 @@ def _handle_request(method, url_path, headers, raw_ip):
 
 def _select_site(host):
     """Match a Host/SNI value (bare hostname, port stripped if present) against
-    configured sites — uniform regardless of site count, so a single-site box
-    exercises the same logic a multi-site one does. Exact domain match first;
-    else the first domainless site, which acts as the catch-all (this is what
-    lets a single self-signed/LAN site keep working with no domain configured,
-    exactly as before multi-site support existed — any Host reaches it). No
+    configured sites — uniform regardless of site count. Exact domain match
+    first; else the first domainless site, which acts as the catch-all (any
+    Host reaches a self-signed/LAN site with no domain configured). No
     domainless site and no domain match: None, the closed-system miss."""
     host = (host or "").split(":")[0].strip().lower()
     for site in config.sites:
@@ -890,12 +886,9 @@ def _build_site_ssl_contexts():
     listening socket is constructed with and that's presented whenever SNI doesn't
     match any site (absent, unrecognized, or direct-IP access) — the closed
     system. A domainless site's own context serves as that default when one
-    exists, so a single self-signed/LAN site needs no generic cert and behaves
-    exactly as it always has; otherwise _ensure_default_cert() supplies one tied
-    to no site's identity.
-
-    Returns the default context, already carrying sni_callback and ready for
-    wrap_socket — the per-site contexts live only inside its closure."""
+    exists; otherwise _ensure_default_cert() supplies one tied to no site's
+    identity. Returns the default context, already carrying sni_callback —
+    the per-site contexts live only inside its closure."""
     domain_ctx  = {}
     default_ctx = None
     for site in config.sites:
@@ -1583,9 +1576,9 @@ def _write_unit_files():
     the file ownership they depend on. Returns True if a service file already
     existed (a refresh) or False if this is a fresh enable. Contains no prompts,
     so it is safe to call silently — shared by cmd_enable (interactive) and
-    the post-update path (silent), so an update that changes what the unit
-    should contain (this release added the watchdog timer) reaches an
-    already-enabled host without a separate manual 'enable'."""
+    the post-update path (silent), so a release that changes what the unit
+    should contain reaches an already-enabled host without a separate manual
+    'enable'."""
     updating      = _service_file_exists()
     servette_path = os.path.abspath(__file__)
     python_path   = _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(

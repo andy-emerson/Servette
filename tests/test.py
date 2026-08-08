@@ -402,22 +402,22 @@ serve_dir = "b"
 
     section("Cache-Control header")
 
-    s.config.username     = ""
+    s.config.sites[0].username     = ""
     s.config.cache_policy = "no-store"
-    check("no-store",                          s._cache_control_header() == "no-store")
+    check("no-store",                          s._cache_control_header(s.config.sites[0].username) == "no-store")
 
     s.config.cache_policy = "no-cache"
-    check("no-cache, no auth → public",        s._cache_control_header() == "public, no-cache")
+    check("no-cache, no auth → public",        s._cache_control_header(s.config.sites[0].username) == "public, no-cache")
 
-    s.config.username = "alice"
-    check("no-cache, with auth → private",     s._cache_control_header() == "private, no-cache")
+    s.config.sites[0].username = "alice"
+    check("no-cache, with auth → private",     s._cache_control_header(s.config.sites[0].username) == "private, no-cache")
 
     s.config.cache_policy  = "max-age"
     s.config.cache_max_age = 3600
     check("max-age with auth → private, max-age=3600",
-          s._cache_control_header() == "private, max-age=3600")
+          s._cache_control_header(s.config.sites[0].username) == "private, max-age=3600")
 
-    s.config.username     = ""
+    s.config.sites[0].username     = ""
     s.config.cache_policy = "no-cache"
 
     section("IPv6 normalization")
@@ -432,29 +432,29 @@ serve_dir = "b"
 
     section("_resolve_request_path")
 
-    path, status = s._resolve_request_path("/")
+    path, status = s._resolve_request_path("/", s.config.sites[0].serve_dir)
     check("/ resolves to index.html (200)",
           path is not None and path.endswith("index.html") and status == 200)
 
-    path, status = s._resolve_request_path("/style.css")
+    path, status = s._resolve_request_path("/style.css", s.config.sites[0].serve_dir)
     check("/style.css resolves (200)",
           path is not None and path.endswith("style.css") and status == 200)
 
-    path, status = s._resolve_request_path("/sub/")
+    path, status = s._resolve_request_path("/sub/", s.config.sites[0].serve_dir)
     check("/sub/ resolves to sub/index.html (200)",
           path is not None and "sub" in path and path.endswith("index.html") and status == 200)
 
-    path, status = s._resolve_request_path("/sub/page.html")
+    path, status = s._resolve_request_path("/sub/page.html", s.config.sites[0].serve_dir)
     check("/sub/page.html resolves (200)",
           path is not None and path.endswith("page.html") and status == 200)
 
-    path, status = s._resolve_request_path("/nonexistent.html")
+    path, status = s._resolve_request_path("/nonexistent.html", s.config.sites[0].serve_dir)
     check("/nonexistent.html → 404",     path is None and status == 404)
 
-    path, status = s._resolve_request_path("/../etc/passwd")
+    path, status = s._resolve_request_path("/../etc/passwd", s.config.sites[0].serve_dir)
     check("Path traversal .. → 403",     path is None and status == 403)
 
-    path, status = s._resolve_request_path("/%2e%2e/etc/passwd")
+    path, status = s._resolve_request_path("/%2e%2e/etc/passwd", s.config.sites[0].serve_dir)
     check("Encoded traversal %2e%2e → 403", path is None and status == 403)
 
     section("_format_uptime")
@@ -1017,9 +1017,9 @@ def run_dispatch_tests(s):
     tmpd = tempfile.mkdtemp()
     with open(os.path.join(tmpd, "index.html"), "w") as f:
         f.write("<h1>hi</h1>")
-    saved_serve, saved_pw = s.config.serve_dir, s.config.password_hash
-    s.config.serve_dir     = tmpd
-    s.config.password_hash = ""
+    saved_serve, saved_pw = s.config.sites[0].serve_dir, s.config.sites[0].password_hash
+    s.config.sites[0].serve_dir     = tmpd
+    s.config.sites[0].password_hash = ""
     try:
         status, headers, body = s._handle_request("GET", "/", msg(), "127.0.0.1")
         hdict = dict(headers)
@@ -1036,8 +1036,8 @@ def run_dispatch_tests(s):
         check("Accept-Encoding honored via parsed headers",
               gzd.get(b"content-encoding") == b"gzip" and gzip.decompress(gz_body) == b"<h1>hi</h1>")
     finally:
-        s.config.serve_dir     = saved_serve
-        s.config.password_hash = saved_pw
+        s.config.sites[0].serve_dir     = saved_serve
+        s.config.sites[0].password_hash = saved_pw
     shutil.rmtree(tmpd, ignore_errors=True)
 
     section("Bundle extraction safety")
@@ -1105,38 +1105,38 @@ def run_dispatch_tests(s):
 
     section("Atomic site-content swap and restore")
 
-    saved_serve_dir = s.config.serve_dir
+    saved_serve_dir = s.config.sites[0].serve_dir
     swap_root = tempfile.mkdtemp()
     try:
-        s.config.serve_dir = os.path.join(swap_root, "site")  # does not exist yet
+        s.config.sites[0].serve_dir = os.path.join(swap_root, "site")  # does not exist yet
 
         new1 = os.path.join(swap_root, "new1")
         os.makedirs(new1)
         with open(os.path.join(new1, "marker.txt"), "w") as f:
             f.write("v1")
-        s._swap_site_content(new1, s.config.serve_dir)
+        s._swap_site_content(new1, s.config.sites[0].serve_dir)
         check("First swap: content is live",
-              open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v1")
+              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v1")
         check("First swap: no backup (nothing existed to back up)",
-              not os.path.isdir(s.config.serve_dir + ".bak"))
+              not os.path.isdir(s.config.sites[0].serve_dir + ".bak"))
 
         new2 = os.path.join(swap_root, "new2")
         os.makedirs(new2)
         with open(os.path.join(new2, "marker.txt"), "w") as f:
             f.write("v2")
-        s._swap_site_content(new2, s.config.serve_dir)
+        s._swap_site_content(new2, s.config.sites[0].serve_dir)
         check("Second swap: new content is live",
-              open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v2")
+              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
         check("Second swap: previous content became the backup",
-              open(os.path.join(s.config.serve_dir + ".bak", "marker.txt")).read() == "v1")
+              open(os.path.join(s.config.sites[0].serve_dir + ".bak", "marker.txt")).read() == "v1")
 
         new3 = os.path.join(swap_root, "new3")
         os.makedirs(new3)
         with open(os.path.join(new3, "marker.txt"), "w") as f:
             f.write("v3")
-        s._swap_site_content(new3, s.config.serve_dir)
+        s._swap_site_content(new3, s.config.sites[0].serve_dir)
         check("Third swap: backup now holds v2, not v1 — single-shot, not a history",
-              open(os.path.join(s.config.serve_dir + ".bak", "marker.txt")).read() == "v2")
+              open(os.path.join(s.config.sites[0].serve_dir + ".bak", "marker.txt")).read() == "v2")
 
         saved_input = builtins.input
         try:
@@ -1146,31 +1146,31 @@ def run_dispatch_tests(s):
         finally:
             builtins.input = saved_input
         check("Restore: live content reverts to the backup (v2)",
-              open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v2")
+              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
         check("Restore: backup is consumed",
-              not os.path.isdir(s.config.serve_dir + ".bak"))
+              not os.path.isdir(s.config.sites[0].serve_dir + ".bak"))
 
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_restore_site(s.config.sites[0])
         check("Restoring again with nothing to restore reports cleanly, does not raise",
               "Nothing to restore" in buf.getvalue())
     finally:
-        s.config.serve_dir = saved_serve_dir
+        s.config.sites[0].serve_dir = saved_serve_dir
         shutil.rmtree(swap_root, ignore_errors=True)
 
     section("Content update pipeline")
 
-    saved_url, saved_key = s.config.publish_url, s.config.publish_key
+    saved_url, saved_key = s.config.sites[0].publish_url, s.config.sites[0].publish_key
     try:
-        s.config.publish_url = s.config.publish_key = ""
+        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
         try:
             s._check_for_content_update(s.config.sites[0])
             check("Neither publish_url nor publish_key set: no-ops cleanly", True)
         except Exception as e:
             check(f"Neither set: no-ops cleanly (raised {e})", False)
 
-        s.config.publish_url = "https://example.com/site.tar.gz"
-        s.config.publish_key = "not-valid-hex"
+        s.config.sites[0].publish_url = "https://example.com/site.tar.gz"
+        s.config.sites[0].publish_key = "not-valid-hex"
         logging.disable(logging.CRITICAL)
         try:
             s._check_for_content_update(s.config.sites[0])
@@ -1180,7 +1180,7 @@ def run_dispatch_tests(s):
         finally:
             logging.disable(logging.NOTSET)
     finally:
-        s.config.publish_url, s.config.publish_key = saved_url, saved_key
+        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_url, saved_key
 
     section("Content update pipeline: full pull/verify/swap (network mocked)")
 
@@ -1200,32 +1200,32 @@ def run_dispatch_tests(s):
             return self._data if size is None else self._data[:size]
 
     saved_urlopen    = urllib.request.urlopen
-    saved_serve_dir2 = s.config.serve_dir
-    saved_url2, saved_key2 = s.config.publish_url, s.config.publish_key
+    saved_serve_dir2 = s.config.sites[0].serve_dir
+    saved_url2, saved_key2 = s.config.sites[0].publish_url, s.config.sites[0].publish_key
     swap_root2 = tempfile.mkdtemp()
     try:
-        s.config.serve_dir   = os.path.join(swap_root2, "site")
-        s.config.publish_url = "https://example.com/site.tar.gz"
-        s.config.publish_key = pub_hex
+        s.config.sites[0].serve_dir   = os.path.join(swap_root2, "site")
+        s.config.sites[0].publish_url = "https://example.com/site.tar.gz"
+        s.config.sites[0].publish_key = pub_hex
 
         urllib.request.urlopen = lambda url, timeout=None: (
             _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
         result = s._check_for_content_update(s.config.sites[0])
         check("Correctly signed bundle is published",
-              open(os.path.join(s.config.serve_dir, "index.html")).read() == "published content")
+              open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
         check("Returns 'published'", result == "published")
 
         other_key = Ed25519PrivateKey.generate()
         bad_sig   = other_key.sign(bundle_bytes)
         urllib.request.urlopen = lambda url, timeout=None: (
             _FakeResp(bad_sig) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        with open(os.path.join(s.config.serve_dir, "index.html"), "w") as f:
+        with open(os.path.join(s.config.sites[0].serve_dir, "index.html"), "w") as f:
             f.write("unchanged")
         logging.disable(logging.CRITICAL)
         result = s._check_for_content_update(s.config.sites[0])
         logging.disable(logging.NOTSET)
         check("Bundle signed by the wrong key is rejected, content unchanged",
-              open(os.path.join(s.config.serve_dir, "index.html")).read() == "unchanged")
+              open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "unchanged")
         check("Returns 'bad-signature'", result == "bad-signature")
 
         section("Publish pipeline: size cap and sig-URL query handling")
@@ -1247,13 +1247,13 @@ def run_dispatch_tests(s):
         def _record(url, timeout=None):
             seen_urls.append(url)
             return _FakeResp(signature) if ".sig" in url else _FakeResp(bundle_bytes)
-        s.config.publish_url = "https://example.com/site.tar.gz?token=abc123"
+        s.config.sites[0].publish_url = "https://example.com/site.tar.gz?token=abc123"
         urllib.request.urlopen = _record
         s._check_for_content_update(s.config.sites[0])
-        sig_url = next(u for u in seen_urls if u != s.config.publish_url)
+        sig_url = next(u for u in seen_urls if u != s.config.sites[0].publish_url)
         check("'.sig' is appended to the path, not after the query string",
               sig_url == "https://example.com/site.tar.gz.sig?token=abc123")
-        s.config.publish_url = "https://example.com/site.tar.gz"
+        s.config.sites[0].publish_url = "https://example.com/site.tar.gz"
 
         section("Publish pipeline serialization")
 
@@ -1282,13 +1282,13 @@ def run_dispatch_tests(s):
 
         section("Manual pull command (cmd_pull)")
 
-        s.config.publish_url = s.config.publish_key = ""
+        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_pull(s.config.sites[0])
         check("No publish channel configured: reports cleanly, doesn't touch the network",
               "No publish channel configured" in buf.getvalue())
 
-        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", pub_hex
+        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "https://example.com/site.tar.gz", pub_hex
         urllib.request.urlopen = lambda url, timeout=None: (
             _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
         with contextlib.redirect_stdout(io.StringIO()) as buf:
@@ -1296,11 +1296,11 @@ def run_dispatch_tests(s):
         check("Successful pull prints a confirmation",
               "New site content published" in buf.getvalue())
         check("Successful pull actually swapped in the content",
-              open(os.path.join(s.config.serve_dir, "index.html")).read() == "published content")
+              open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
     finally:
         urllib.request.urlopen = saved_urlopen
-        s.config.serve_dir = saved_serve_dir2
-        s.config.publish_url, s.config.publish_key = saved_url2, saved_key2
+        s.config.sites[0].serve_dir = saved_serve_dir2
+        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_url2, saved_key2
         shutil.rmtree(swap_root2, ignore_errors=True)
 
 
@@ -1580,8 +1580,8 @@ def run_server_tests(s, serve_dir):
 
     section("Basic Auth")
 
-    s.config.username = "testuser"
-    s.config.password_hash, s.config.password_salt = s._hash_password("testpass")
+    s.config.sites[0].username = "testuser"
+    s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")
 
     check("No credentials → 401",
           req("GET").status == 401)
@@ -1600,9 +1600,9 @@ def run_server_tests(s, serve_dir):
     check("Auth rate limit → 429",
           req("GET", auth=("testuser", "wrong")).status == 429)
 
-    s.config.username      = ""
-    s.config.password_hash = ""
-    s.config.password_salt = ""
+    s.config.sites[0].username      = ""
+    s.config.sites[0].password_hash = ""
+    s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
     section("Multi-site Host routing")
@@ -1684,15 +1684,15 @@ def run_server_tests(s, serve_dir):
           req("HEAD", "/.well-known/servette").status == 200
           and req("HEAD", "/.well-known/servette").body == b"")
 
-    s.config.username = "testuser"
-    s.config.password_hash, s.config.password_salt = s._hash_password("testpass")
+    s.config.sites[0].username = "testuser"
+    s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")
     check("Respects auth like any other path: no credentials → 401",
           req("GET", "/.well-known/servette").status == 401)
     check("Respects auth like any other path: correct credentials → 200",
           req("GET", "/.well-known/servette", auth=("testuser", "testpass")).status == 200)
-    s.config.username      = ""
-    s.config.password_hash = ""
-    s.config.password_salt = ""
+    s.config.sites[0].username      = ""
+    s.config.sites[0].password_hash = ""
+    s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
     section("Cache-Control policies")
@@ -1745,8 +1745,8 @@ def run_server_tests(s, serve_dir):
 
     section("Auth rate limit — credential-absent requests don't count")
 
-    s.config.username = "testuser"
-    s.config.password_hash, s.config.password_salt = s._hash_password("testpass")
+    s.config.sites[0].username = "testuser"
+    s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")
     s._auth_fail_times.clear()
 
     for _ in range(7):
@@ -1757,9 +1757,9 @@ def run_server_tests(s, serve_dir):
     check("auth_fail_times tracker is empty (no attempts recorded)",
           len(s._auth_fail_times) == 0)
 
-    s.config.username      = ""
-    s.config.password_hash = ""
-    s.config.password_salt = ""
+    s.config.sites[0].username      = ""
+    s.config.sites[0].password_hash = ""
+    s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
 
@@ -1946,22 +1946,22 @@ def run_install_tests(s, tmpdir):
 
     section("Publish channel config")
 
-    saved_url, saved_key = s.config.publish_url, s.config.publish_key
+    saved_url, saved_key = s.config.sites[0].publish_url, s.config.sites[0].publish_key
     try:
-        s.config.publish_url = s.config.publish_key = ""
+        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
         check("Neither set → not flagged",
               not any("publish channel" in issue for issue in s._production_issues()))
-        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", "a" * 64
+        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "https://example.com/site.tar.gz", "a" * 64
         check("Both set → not flagged",
               not any("publish channel" in issue for issue in s._production_issues()))
-        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", ""
+        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "https://example.com/site.tar.gz", ""
         check("URL only → flagged as partial",
               any("publish channel" in issue for issue in s._production_issues()))
-        s.config.publish_url, s.config.publish_key = "", "a" * 64
+        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "", "a" * 64
         check("Key only → flagged as partial",
               any("publish channel" in issue for issue in s._production_issues()))
     finally:
-        s.config.publish_url, s.config.publish_key = saved_url, saved_key
+        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_url, saved_key
 
     section("Server watch (--serve supervision)")
 
@@ -2031,7 +2031,13 @@ def run_install_tests(s, tmpdir):
     section("Status resolves a relative cert path")
 
     # cmd_status must anchor a relative cert_file to BASE_DIR like every other
-    # call site — from a foreign CWD it previously lost the domain (and the URL).
+    # call site — from a foreign CWD it previously lost the certificate entirely.
+    # Asserted on the Cert row, which is what still reads the file: the URL row
+    # is now built from site.domain, since routing, TLS selection and HSTS all
+    # key off the configured domain rather than the certificate's subject, and a
+    # URL derived from the subject could name a host that does not reach here.
+    # An unanchored path makes _cert_days_remaining return None and the row
+    # vanish, so its presence is what proves the anchoring.
     import contextlib
     import datetime as _dt
     import io
@@ -2053,20 +2059,24 @@ def run_install_tests(s, tmpdir):
     with open(rel_path, "wb") as f:
         f.write(_cert.public_bytes(_ser.Encoding.PEM))
 
-    saved_cert_file, saved_cwd = s.config.cert_file, os.getcwd()
+    saved_cert_file, saved_cwd = s.config.sites[0].cert_file, os.getcwd()
     try:
-        s.config.cert_file = rel_name
+        s.config.sites[0].cert_file = rel_name
         os.chdir(tmpdir)   # a CWD that does not contain the cert
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             s.cmd_status()
-        # Exact-match on the URL row's value — a substring check would also pass on
-        # e.g. evil-example.com, and reads to scanners as bypassable sanitization.
+        cert_row = next((line for line in buf.getvalue().splitlines() if line.strip().startswith("Cert")), "")
+        check("Status reads a relative cert path from a foreign CWD",
+              "days remaining" in cert_row)
+        # The URL row reports the configured domain, not the certificate's — this
+        # site has a domain-bearing cert but no domain set, which is exactly the
+        # state where trusting the subject would advertise an unreachable host.
         url_row = next((line for line in buf.getvalue().splitlines() if line.strip().startswith("URL")), "")
-        check("Status shows the domain from a relative cert path",
-              url_row.split()[-1] == "https://example.com")
+        check("Status reports the configured domain, not the certificate subject",
+              url_row.split()[-1] == f"https://localhost:{s.config.port}")
     finally:
-        s.config.cert_file = saved_cert_file
+        s.config.sites[0].cert_file = saved_cert_file
         os.chdir(saved_cwd)
         os.remove(rel_path)
 

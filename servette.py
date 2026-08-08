@@ -202,74 +202,6 @@ class Config:
         if migrating:
             self.save()
 
-    # Back-compat proxies onto sites[0] — every existing single-site call site
-    # (request handling, the shell, cert management) still reads/writes these
-    # unchanged; multi-site-aware call sites use config.sites directly. Removed
-    # once every call site is cut over to genuine multi-site routing.
-    @property
-    def serve_dir(self):
-        return self.sites[0].serve_dir
-
-    @serve_dir.setter
-    def serve_dir(self, v):
-        self.sites[0].serve_dir = v
-
-    @property
-    def cert_file(self):
-        return self.sites[0].cert_file
-
-    @cert_file.setter
-    def cert_file(self, v):
-        self.sites[0].cert_file = v
-
-    @property
-    def key_file(self):
-        return self.sites[0].key_file
-
-    @key_file.setter
-    def key_file(self, v):
-        self.sites[0].key_file = v
-
-    @property
-    def username(self):
-        return self.sites[0].username
-
-    @username.setter
-    def username(self, v):
-        self.sites[0].username = v
-
-    @property
-    def password_hash(self):
-        return self.sites[0].password_hash
-
-    @password_hash.setter
-    def password_hash(self, v):
-        self.sites[0].password_hash = v
-
-    @property
-    def password_salt(self):
-        return self.sites[0].password_salt
-
-    @password_salt.setter
-    def password_salt(self, v):
-        self.sites[0].password_salt = v
-
-    @property
-    def publish_url(self):
-        return self.sites[0].publish_url
-
-    @publish_url.setter
-    def publish_url(self, v):
-        self.sites[0].publish_url = v
-
-    @property
-    def publish_key(self):
-        return self.sites[0].publish_key
-
-    @publish_key.setter
-    def publish_key(self, v):
-        self.sites[0].publish_key = v
-
     def reload_if_changed(self):
         try:
             mtime = os.path.getmtime(self.CONFIG_FILE)
@@ -556,11 +488,10 @@ def _within(base, target):
         return False
 
 
-def _resolve_request_path(url_path, serve_dir=None):
-    """Resolve a URL path to an absolute file path within serve_dir (the matched
-    site's, or config.serve_dir — sites[0]'s, via the back-compat property — when
-    not given explicitly). Returns (None, 403) on traversal, (None, 404) if not found."""
-    serve_dir = os.path.realpath(_resolve(serve_dir if serve_dir is not None else config.serve_dir))
+def _resolve_request_path(url_path, serve_dir):
+    """Resolve a URL path to an absolute file path within the matched site's
+    serve_dir. Returns (None, 403) on traversal, (None, 404) if not found."""
+    serve_dir = os.path.realpath(_resolve(serve_dir))
     clean     = unquote(url_path.split("?")[0]).lstrip("/")   # lstrip: never an absolute path
     abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
     if not _within(serve_dir, abs_path):
@@ -574,12 +505,10 @@ def _resolve_request_path(url_path, serve_dir=None):
     return abs_path, 200
 
 
-def _cache_control_header(username=None):
-    """username=None means "not given, use config.username" (sites[0]'s, via the
-    back-compat property) — a real site's username is never None, only "" or a
-    real string, so the sentinel is unambiguous."""
-    if username is None:
-        username = config.username
+def _cache_control_header(username):
+    """Cache-Control for the matched site. A site behind Basic Auth gets
+    `private`, so a shared cache never holds a response only some visitors
+    are entitled to."""
     scope = "private" if username else "public"
     if config.cache_policy == "no-store":
         return "no-store"
@@ -3194,7 +3123,11 @@ def _production_issues():
             issues.append(f"serve directory not configured{tag} — run 'config'")
         if not site.cert_file or not os.path.exists(_resolve(site.cert_file)):
             issues.append(f"certificate not configured{tag} — run 'config cert'")
-        elif _domain_from_cert(_resolve(site.cert_file)) is None:
+        elif not site.domain:
+            # Keyed on the configured domain rather than the certificate's
+            # subject: a site with no domain is the catch-all whatever its cert
+            # contains, gets no HSTS, and is not reachable by name — so 'add a
+            # domain' is the advice that actually changes any of that.
             issues.append(f"self-signed certificate{tag} — run 'config cert' to add a domain")
         if not site.username:
             issues.append(f"no password protection{tag} — run 'config' to set credentials")
@@ -3310,8 +3243,10 @@ def cmd_status():
 
     for i, site in enumerate(config.sites):
         cert_path = _resolve(site.cert_file)
-        domain    = _domain_from_cert(cert_path)
-        url       = f"https://{domain}" if domain else f"https://localhost:{config.port}"
+        # site.domain, not the certificate's subject: routing, TLS selection and
+        # HSTS all key off the configured domain, so reporting anything else can
+        # print a URL that does not actually reach this site.
+        url       = f"https://{site.domain}" if site.domain else f"https://localhost:{config.port}"
         if len(config.sites) > 1:
             print(f"\n  Site {i}")
         print(f"  {'URL':<{W}} {url}")

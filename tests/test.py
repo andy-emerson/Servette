@@ -303,6 +303,97 @@ serve_dir = "b"
         s.Config.CONFIG_FILE = saved_config_file
         shutil.rmtree(migrate_dir, ignore_errors=True)
 
+    section("Site selection by Host/SNI")
+
+    saved_sites = s.config.sites
+    try:
+        site_a    = s.Site({"domain": "a.example.com", "serve_dir": "x"})
+        site_b    = s.Site({"domain": "b.example.com", "serve_dir": "y"})
+        catch_all = s.Site({"domain": "", "serve_dir": "z"})
+
+        s.config.sites = [site_a, site_b]
+        check("Exact domain match", s._select_site("a.example.com") is site_a)
+        check("Matching is case-insensitive", s._select_site("A.Example.COM") is site_a)
+        check("Port suffix is stripped before matching", s._select_site("b.example.com:443") is site_b)
+        check("No domainless catch-all, no match → None", s._select_site("nope.example.com") is None)
+        check("Empty Host, no catch-all → None", s._select_site("") is None)
+
+        s.config.sites = [site_a, catch_all]
+        check("Domainless site is the catch-all for an unmatched Host",
+              s._select_site("nope.example.com") is catch_all)
+        check("A real domain match still wins over the catch-all",
+              s._select_site("a.example.com") is site_a)
+    finally:
+        s.config.sites = saved_sites
+
+    section("Multi-site TLS contexts")
+
+    saved_sites2         = s.config.sites
+    default_cert_existed = os.path.exists(s._DEFAULT_CERT_FILE)
+    tls_dir = tempfile.mkdtemp()
+    try:
+        def gen_cert(cn):
+            cert_path = os.path.join(tls_dir, f"{cn}-cert.pem")
+            key_path  = os.path.join(tls_dir, f"{cn}-key.pem")
+            subprocess.run([
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_path,
+                "-out", cert_path, "-days", "1", "-nodes", "-subj", f"/CN={cn}"
+            ], capture_output=True, check=True)
+            return cert_path, key_path
+
+        # A single domainless site: its own cert becomes the default context, and
+        # no generic cert is generated for the role — matches today's behavior
+        # for a self-signed/LAN single-site box exactly, with no new machinery.
+        if default_cert_existed:
+            os.remove(s._DEFAULT_CERT_FILE)
+        solo_cert, solo_key = gen_cert("localhost")
+        s.config.sites = [s.Site({"domain": "", "cert_file": solo_cert, "key_file": solo_key, "serve_dir": tls_dir})]
+        default_ctx = s._build_site_ssl_contexts()
+        check("Domainless single site: no generic default cert generated",
+              not os.path.exists(s._DEFAULT_CERT_FILE))
+        check("Default context carries an sni_callback", default_ctx.sni_callback is not None)
+
+        # Two domain-bearing sites, no catch-all: a generic default cert IS needed.
+        cert_a, key_a = gen_cert("a.example.com")
+        cert_b, key_b = gen_cert("b.example.com")
+        site_a2 = s.Site({"domain": "a.example.com", "cert_file": cert_a, "key_file": key_a, "serve_dir": tls_dir})
+        site_b2 = s.Site({"domain": "b.example.com", "cert_file": cert_b, "key_file": key_b, "serve_dir": tls_dir})
+        s.config.sites = [site_a2, site_b2]
+        default_ctx2 = s._build_site_ssl_contexts()
+        check("All-domain multi-site: a generic default cert is generated",
+              os.path.exists(s._DEFAULT_CERT_FILE))
+
+        class _FakeSSLSocket:
+            def __init__(self, ctx):
+                self.context = ctx
+
+        sni_cb = default_ctx2.sni_callback
+
+        fake_a = _FakeSSLSocket(default_ctx2)
+        sni_cb(fake_a, "a.example.com", default_ctx2)
+        check("SNI match switches the socket's context away from default",
+              fake_a.context is not default_ctx2)
+
+        fake_b = _FakeSSLSocket(default_ctx2)
+        sni_cb(fake_b, "b.example.com", default_ctx2)
+        check("A different domain switches to a different context",
+              fake_b.context is not fake_a.context)
+
+        fake_miss = _FakeSSLSocket(default_ctx2)
+        sni_cb(fake_miss, "unrecognized.example.com", default_ctx2)
+        check("Unrecognized SNI leaves the default (closed-system) context",
+              fake_miss.context is default_ctx2)
+
+        fake_none = _FakeSSLSocket(default_ctx2)
+        sni_cb(fake_none, None, default_ctx2)
+        check("Absent SNI leaves the default context",
+              fake_none.context is default_ctx2)
+    finally:
+        s.config.sites = saved_sites2
+        shutil.rmtree(tls_dir, ignore_errors=True)
+        if not default_cert_existed and os.path.exists(s._DEFAULT_CERT_FILE):
+            shutil.rmtree(s._DEFAULT_CERT_DIR, ignore_errors=True)
+
     section("Versioning")
 
     check("__version__ is set",              bool(s.__version__))

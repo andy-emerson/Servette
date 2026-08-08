@@ -50,6 +50,13 @@ SERVICE_PATH  = "/etc/systemd/system/servette.service"
 NETWATCH_PATH = "/etc/systemd/system/servette-netwatch"  # + ".service" / ".timer"
 ACME_WEBROOT  = "/var/lib/letsencrypt/webroot"
 
+# The closed-system TLS fallback: presented for connections whose SNI matches no
+# configured site (absent, unrecognized, or direct-IP access) when no site is
+# itself domainless. Tied to no site's identity, generated once and reused.
+_DEFAULT_CERT_DIR  = os.path.join(BASE_DIR, "certs", "_default")
+_DEFAULT_CERT_FILE = os.path.join(_DEFAULT_CERT_DIR, "cert.pem")
+_DEFAULT_KEY_FILE  = os.path.join(_DEFAULT_CERT_DIR, "key.pem")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SERVER
@@ -818,17 +825,81 @@ def _handle_request(method, url_path, headers, raw_ip):
     ], raw)
 
 
-def _build_ssl_context():
-    """TLS context for the HTTPS server — cert/key loaded, minimum version enforced,
-    optional cipher override, ALPN pinned to HTTP/1.1. Raises if the cert or key is
-    unreadable, so startup can fail closed rather than serve nothing."""
+def _select_site(host):
+    """Match a Host/SNI value (bare hostname, port stripped if present) against
+    configured sites — uniform regardless of site count, so a single-site box
+    exercises the same logic a multi-site one does. Exact domain match first;
+    else the first domainless site, which acts as the catch-all (this is what
+    lets a single self-signed/LAN site keep working with no domain configured,
+    exactly as before multi-site support existed — any Host reaches it). No
+    domainless site and no domain match: None, the closed-system miss."""
+    host = (host or "").split(":")[0].strip().lower()
+    for site in config.sites:
+        if site.domain and site.domain.lower() == host:
+            return site
+    for site in config.sites:
+        if not site.domain:
+            return site
+    return None
+
+
+def _build_ssl_context(cert_path, key_path):
+    """TLS context for one certificate — minimum version enforced, optional cipher
+    override, ALPN pinned to HTTP/1.1. Raises if the cert or key is unreadable, so
+    startup can fail closed rather than serve nothing."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
     if config.ciphers:
         ctx.set_ciphers(config.ciphers)
-    ctx.load_cert_chain(_resolve(config.cert_file), _resolve(config.key_file))
+    ctx.load_cert_chain(cert_path, key_path)
     ctx.set_alpn_protocols(["http/1.1"])
     return ctx
+
+
+def _ensure_default_cert():
+    """The generic, no-domain cert behind the closed-system TLS fallback — used
+    only when no configured site is itself domainless (which would otherwise
+    serve as the natural default). Generated once, lazily, the same way a
+    self-signed site cert is."""
+    if not os.path.exists(_DEFAULT_CERT_FILE):
+        os.makedirs(_DEFAULT_CERT_DIR, exist_ok=True)
+        _generate_self_signed_cert(_DEFAULT_CERT_FILE, _DEFAULT_KEY_FILE)
+        _chown_servette(_DEFAULT_CERT_DIR)
+    return _DEFAULT_CERT_FILE, _DEFAULT_KEY_FILE
+
+
+def _build_site_ssl_contexts():
+    """Build one SSLContext per configured site, plus the default/base context the
+    listening socket is constructed with and that's presented whenever SNI doesn't
+    match any site (absent, unrecognized, or direct-IP access) — the closed
+    system. A domainless site's own context serves as that default when one
+    exists, so a single self-signed/LAN site needs no generic cert and behaves
+    exactly as it always has; otherwise _ensure_default_cert() supplies one tied
+    to no site's identity.
+
+    Returns the default context, already carrying sni_callback and ready for
+    wrap_socket — the per-site contexts live only inside its closure."""
+    domain_ctx  = {}
+    default_ctx = None
+    for site in config.sites:
+        ctx = _build_ssl_context(_resolve(site.cert_file), _resolve(site.key_file))
+        if site.domain:
+            domain_ctx[site.domain.lower()] = ctx
+        elif default_ctx is None:
+            default_ctx = ctx  # first domainless site is the catch-all/default
+
+    if default_ctx is None:
+        cert_path, key_path = _ensure_default_cert()
+        default_ctx = _build_ssl_context(cert_path, key_path)
+
+    def _sni_callback(ssl_socket, server_name, ssl_context):
+        ctx = domain_ctx.get((server_name or "").lower())
+        if ctx is not None:
+            ssl_socket.context = ctx
+        # else: leave the default context in place — closed system
+
+    default_ctx.sni_callback = _sni_callback
+    return default_ctx
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -1150,24 +1221,25 @@ def start_server():
         print("Server is already running.")
         return
 
-    for fname in [config.serve_dir, config.cert_file, config.key_file]:
-        if not fname:
-            print("Not fully configured. Run 'config' to set up the server.")
-            if "--serve" in sys.argv:
-                sys.exit(1)
-            return
-        full_path = _resolve(fname)
-        if not os.path.exists(full_path):
-            print(f"File not found: {full_path}")
-            if "--serve" in sys.argv:
-                sys.exit(1)
-            return
+    for site in config.sites:
+        for fname in [site.serve_dir, site.cert_file, site.key_file]:
+            if not fname:
+                print("Not fully configured. Run 'config' to set up the server.")
+                if "--serve" in sys.argv:
+                    sys.exit(1)
+                return
+            full_path = _resolve(fname)
+            if not os.path.exists(full_path):
+                print(f"File not found: {full_path}")
+                if "--serve" in sys.argv:
+                    sys.exit(1)
+                return
 
-    # Build the HTTPS server, failing closed if the socket can't bind or the cert is
+    # Build the HTTPS server, failing closed if the socket can't bind or a cert is
     # unreadable — better than a live process that serves nothing. Both surface here
-    # synchronously: the bind happens in the constructor, the cert in _build_ssl_context.
+    # synchronously: the bind happens in the constructor, the certs in _build_site_ssl_contexts.
     try:
-        https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_ssl_context())
+        https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_site_ssl_contexts())
     except Exception as e:
         log.error("Server failed to start on port %d: %s", config.port, e)
         print(f"Server failed to start on port {config.port}: {e}")

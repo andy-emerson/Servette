@@ -935,6 +935,7 @@ _watchdog_thread      = None
 _sweep_thread         = None
 _sweep_stop           = threading.Event()
 _last_renewal_attempt = 0.0
+_publish_poll_thread  = None
 _cert_domain          = None  # cached domain from active cert; None means self-signed
 
 _TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
@@ -990,9 +991,41 @@ def _cert_watchdog():
         _cert_watchdog_tick()
 
 
+_last_publish_poll     = 0.0
+_PUBLISH_POLL_INTERVAL = 300  # seconds; mirrors the network watchdog's 5-minute
+                              # cadence — the floor under the poke mechanism, for
+                              # boxes that never receive one (just rebooted, tool
+                              # never opened)
+
+
+def _publish_poll_tick():
+    """One publish-check pass, gated to at most once per _PUBLISH_POLL_INTERVAL —
+    same shape as _cert_watchdog_tick's renewal gate."""
+    global _last_publish_poll
+    if not (config.publish_url and config.publish_key):
+        return
+    now = time.monotonic()
+    if now - _last_publish_poll < _PUBLISH_POLL_INTERVAL:
+        return
+    _last_publish_poll = now
+    _check_for_content_update()
+
+
+def _publish_poll():
+    """Fallback poll for the publish channel — the floor under the poke
+    mechanism, not the primary path. A poke still gets new content live
+    within seconds; this just guarantees convergence even if one never
+    arrives."""
+    while _server_running():
+        time.sleep(60)
+        if not _server_running():
+            break
+        _publish_poll_tick()
+
+
 def start_server():
     global _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread, \
-        _https_server, _https_thread, _http_server
+        _publish_poll_thread, _https_server, _https_thread, _http_server
 
     if _server_running():
         print("Server is already running.")
@@ -1046,6 +1079,10 @@ def start_server():
         _sweep_stop.clear()
         _sweep_thread = threading.Thread(target=_rate_sweep, args=(_sweep_stop,), daemon=True)
         _sweep_thread.start()
+
+    if _publish_poll_thread is None or not _publish_poll_thread.is_alive():
+        _publish_poll_thread = threading.Thread(target=_publish_poll, daemon=True)
+        _publish_poll_thread.start()
     _server_start_time = time.monotonic()
     _cert_domain = _domain_from_cert(_resolve(config.cert_file))
     log.info("Server started on port %d", config.port)

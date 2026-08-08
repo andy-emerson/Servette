@@ -1576,6 +1576,36 @@ def run_install_tests(s, tmpdir):
         s._domain_from_cert = saved_dfc
         logging.disable(logging.NOTSET)
 
+    section("Publish poll tick")
+
+    calls = []
+    saved_check    = s._check_for_content_update
+    saved_last     = s._last_publish_poll
+    saved_url, saved_key = s.config.publish_url, s.config.publish_key
+    try:
+        s._check_for_content_update = lambda: calls.append(1)
+
+        s.config.publish_url = s.config.publish_key = ""
+        s._last_publish_poll = 0.0
+        s._publish_poll_tick()
+        check("No publish channel configured: tick is a no-op", calls == [])
+
+        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", "a" * 64
+        s._last_publish_poll = 0.0
+        s._publish_poll_tick()
+        check("Channel configured, interval elapsed: tick fires", calls == [1])
+
+        s._publish_poll_tick()
+        check("Within the poll interval: second tick is a no-op", calls == [1])
+
+        s._last_publish_poll = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
+        s._publish_poll_tick()
+        check("After the poll interval elapses: tick fires again", calls == [1, 1])
+    finally:
+        s._check_for_content_update = saved_check
+        s._last_publish_poll = saved_last
+        s.config.publish_url, s.config.publish_key = saved_url, saved_key
+
     section("serve_dir world-readable check")
 
     # World-readable dir: no warning expected (we capture logic by checking the stat)

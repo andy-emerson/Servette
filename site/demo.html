@@ -1,10 +1,13 @@
 <!DOCTYPE html>
+<!-- servette:demo — Servette's placeholder page. This marker is how `update`
+     tells its own page from yours: with it present the page is refreshed on
+     update, without it the file is left alone. Delete this line to adopt the
+     page as your own and Servette will never touch it again. -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Servette — It's working.</title>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg:      #0e0e0e;
@@ -14,6 +17,10 @@
       --muted:   #555;
       --green:   #4ade80;
       --red:     #f87171;
+      /* No web fonts: a page that demonstrates a self-hosted server has no
+         business fetching anything from a third party. */
+      --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+              'Liberation Mono', 'Courier New', monospace;
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -21,7 +28,7 @@
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'DM Mono', monospace;
+      font-family: var(--mono);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
@@ -54,7 +61,7 @@
     }
 
     .servette-logo {
-      font-family: 'DM Mono', monospace;
+      font-family: var(--mono);
       font-weight: 500;
       font-size: 3rem;
       letter-spacing: 0;
@@ -199,7 +206,7 @@
     }
     .t-summary b { color: var(--text); font-weight: 500; }
 
-    /* ── Other features (prose) ── */
+    /* ── What this page cannot reach ── */
     .features {
       font-size: 0.72rem;
       color: var(--muted);
@@ -209,6 +216,8 @@
       animation: rise 0.5s ease 0.45s forwards;
     }
     .features b { color: var(--text); font-weight: 500; }
+    .features a { color: #60a5fa; text-decoration: none; }
+    .features a:hover { text-decoration: underline; }
 
     /* ── Footer ── */
     .note {
@@ -230,6 +239,10 @@
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50%       { opacity: 0.3; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; opacity: 1 !important; }
     }
   </style>
 </head>
@@ -264,9 +277,17 @@
   </div>
 
   <p class="features">
-    Beyond what a browser can probe, Servette gzip-compresses responses,
-    redirects all HTTP traffic to HTTPS, rate-limits abusive clients, can sit behind
-    a password, and renews its Let's Encrypt certificate automatically.
+    These checks only reach what a browser can see. The rest of Servette runs
+    where this page cannot look. On the request path it <b>redirects HTTP to
+    HTTPS</b>, <b>gzip-compresses</b> what it sends, <b>rate-limits</b> abusive
+    clients, can sit behind a <b>password</b>, and routes <b>each domain to its
+    own site</b> — these results describe only the one you reached. Off the
+    request path it runs as a <b>supervised service</b> that restarts on boot,
+    <b>drops privileges</b> once the ports are bound, <b>renews its certificate</b>
+    automatically, verifies <b>signed updates</b> against a pinned key, and takes
+    a <b>backup</b> before every change it makes to itself. And nothing above
+    happens while it is answering you: by design, <b>no request ever reaches a
+    write</b>. <a href="https://servette.org">servette.org</a> describes the whole of it.
   </p>
 
   <div class="note">
@@ -285,7 +306,9 @@
   if (isHttps) {
     $('badge').textContent = '✓ Verified encrypted';
     $('badge').className    = 'badge badge-green';
-    $('tagline-text').textContent = 'YOUR NANOSERVER IS RUNNING';
+    // Deliberately not "your server": this same page is served from
+    // demo.servette.org, where it is emphatically not the reader's.
+    $('tagline-text').textContent = 'THIS SERVER IS RUNNING';
   } else {
     $('badge').textContent = '⚠ Not encrypted';
     $('badge').className    = 'badge badge-red';
@@ -295,8 +318,13 @@
 
   // ── Self-test ─────────────────────────────────────────────────────
   // Each check makes a real request and reports the value it observed.
-  // ok: true = PASS, false = FAIL, null = SKIP (can't be judged here —
-  // never faked as a pass).
+  // ok: true = PASS, false = FAIL, null = SKIP.
+  //
+  // A SKIP is never faked as a pass — and, just as importantly, never
+  // faked as a fail. Several of these headers are optional and can be
+  // switched off in config; an operator who turned one off made a
+  // choice, and reporting that choice as a defect would be a lie in the
+  // other direction.
   const here = location.href.split('#')[0];
 
   let _hdrs = null;
@@ -316,13 +344,19 @@
         const v = (await H()).get('Referrer-Policy');
         return { ok: !!v, obs: 'Referrer-Policy: ' + seen(v) }; } },
 
+    // Optional (config: csp). Absent means disabled, not broken.
     { req: 'GET /', run: async () => {
         const v = (await H()).get('Content-Security-Policy');
-        return { ok: !!v, obs: 'Content-Security-Policy: ' + (v ? 'present' : '(absent)') }; } },
+        return v
+          ? { ok: true, obs: 'Content-Security-Policy: present' }
+          : { ok: null, obs: 'CSP: disabled in config' }; } },
 
+    // Optional (config: permissions_policy). Absent means disabled.
     { req: 'GET /', run: async () => {
         const v = (await H()).get('Permissions-Policy');
-        return { ok: !!v, obs: 'Permissions-Policy: ' + (v ? 'present' : '(absent)') }; } },
+        return v
+          ? { ok: true, obs: 'Permissions-Policy: present' }
+          : { ok: null, obs: 'Permissions-Policy: disabled in config' }; } },
 
     { req: 'GET /', run: async () => {
         const h = await H();
@@ -349,6 +383,8 @@
         const s = (await fetch('/%2e%2e%2f%2e%2e%2fetc%2fpasswd')).status;
         return { ok: s === 403, obs: '→ ' + s + (s === 403 ? ' Forbidden' : '') }; } },
 
+    // HSTS is only sent for a site with a real domain certificate, so on a
+    // self-signed or LAN server its absence is correct.
     { req: 'GET /', run: async () => {
         const v = (await H()).get('Strict-Transport-Security');
         return v

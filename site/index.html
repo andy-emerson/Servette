@@ -702,8 +702,72 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 }
 .footer-links a:hover, .footer-links button:hover { color: var(--text); }
 
+/* Facts rather than navigation — the things worth knowing before deciding
+   to try it, which otherwise only appear mid-prose on How to Use it. */
+.footer-facts { display: grid; gap: 9px; font-size: 14px; color: var(--text-2); }
+.footer-facts span { display: block; }
+.footer-facts code { font-size: 13px; color: var(--muted); }
+
 .legal { border-top: 1px solid var(--border); }
 .legal .wrap { padding-block: 17px; font-size: 13px; color: var(--muted); }
+
+/* ── License dialog ────────────────────────────────────────────────
+   A native <dialog>, so focus trapping, Esc to close, and the backdrop
+   come from the browser rather than from JS that would have to get all
+   three right. The licence is 1 KB — small enough that the page can
+   carry it instead of sending people to GitHub to read twenty lines. */
+
+.license-dialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(78vh, 700px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  overflow: hidden;
+  /* Flex column so the licence body scrolls and the header stays put. */
+  flex-direction: column;
+}
+
+.license-dialog[open] { display: flex; }
+.license-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+
+.license-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 20px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.license-dialog__head h2 { font-size: 16px; }
+
+.license-dialog__close {
+  font: 500 12px/1 "DM Mono", monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 11px;
+  cursor: pointer;
+}
+
+.license-dialog__close:hover { color: var(--text); border-color: var(--muted); }
+
+.license-dialog pre {
+  margin: 0;
+  padding: 20px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-y: auto;
+}
 </style>
 
 <script>
@@ -1507,23 +1571,25 @@ python3 servette.py --serve       <span class="cmt"># non-interactive service mo
         <button type="button" data-goto="how-it-compares">How it Compares</button>
         <button type="button" data-goto="how-to-use-it">How to Use it</button>
         <button type="button" data-goto="how-it-works">How it Works</button>
+        <a href="demo.html">Self-test this connection</a>
       </div>
     </div>
     <div>
       <p class="footer-label">Project</p>
       <div class="footer-links">
         <a href="https://github.com/andy-emerson/servette">GitHub</a>
-        <a href="https://github.com/andy-emerson/servette/blob/main/README.md">README</a>
-        <a href="https://github.com/andy-emerson/servette/blob/main/DESIGN.md">DESIGN.md</a>
-        <a href="https://github.com/andy-emerson/servette/blob/main/SECURITY.md">Security</a>
+        <a href="https://github.com/andy-emerson/servette/issues">Report a bug</a>
+        <a href="https://github.com/andy-emerson/servette/blob/main/SECURITY.md">Report a vulnerability</a>
+        <button type="button" id="license-open">License (MIT)</button>
       </div>
     </div>
     <div>
-      <p class="footer-label">Community</p>
-      <div class="footer-links">
-        <a href="https://github.com/andy-emerson/servette/issues">Issues</a>
-        <a href="https://github.com/andy-emerson/servette/blob/main/CONTRIBUTING.md">Contributing</a>
-        <a href="https://github.com/andy-emerson/servette/blob/main/LICENSE">License</a>
+      <p class="footer-label">At a glance</p>
+      <div class="footer-facts">
+        <span>Python 3.11+</span>
+        <span>Linux with systemd</span>
+        <span>One file, one dependency</span>
+        <span>MIT licensed</span>
       </div>
     </div>
   </div>
@@ -1531,6 +1597,36 @@ python3 servette.py --serve       <span class="cmt"># non-interactive service mo
     <div class="wrap">© 2026 Andy Emerson · Served by Servette.</div>
   </div>
 </footer>
+
+<dialog class="license-dialog" id="license-dialog" aria-labelledby="license-title">
+  <div class="license-dialog__head">
+    <!-- Titled "License", not "MIT License": the text below is the LICENSE
+         file verbatim, and it opens with that heading itself. -->
+    <h2 id="license-title">License</h2>
+    <button class="license-dialog__close" type="button" id="license-close">Close</button>
+  </div>
+  <pre>MIT License
+
+Copyright (c) 2026 Andy Emerson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.</pre>
+</dialog>
 
 <script>
 /* Four pieces: the light/dark toggle, the copy button on the run command, the
@@ -1583,6 +1679,27 @@ python3 servette.py --serve       <span class="cmt"># non-interactive service mo
     }
     copy.textContent = "Copied";
     setTimeout(function () { copy.textContent = "Copy"; }, 1600);
+  });
+
+  /* ── License dialog ─────────────────────────────────────────────
+     showModal() supplies the focus trap, Esc, and the backdrop; the only
+     thing left to add is dismissal by clicking outside, which the element
+     does not do on its own. The dialog fills its own top-layer box, so a
+     click landing on the dialog itself — rather than on any child — is a
+     click on the backdrop. */
+
+  var licenseDialog = document.getElementById("license-dialog");
+
+  document.getElementById("license-open").addEventListener("click", function () {
+    licenseDialog.showModal();
+  });
+
+  document.getElementById("license-close").addEventListener("click", function () {
+    licenseDialog.close();
+  });
+
+  licenseDialog.addEventListener("click", function (event) {
+    if (event.target === licenseDialog) licenseDialog.close();
   });
 
   /* ── Tab router ──────────────────────────────────────────────────

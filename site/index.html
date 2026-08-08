@@ -284,22 +284,64 @@ pre { min-width: 0; }
   color: var(--text);
 }
 
-.header-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; flex: none; }
+/* ── Theme picker ──────────────────────────────────────────────────
+   A segmented control built from radios, styled to match the tab strip
+   so the header reads as one row of pills rather than two idioms. */
 
-.theme-toggle {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text-2);
-  cursor: pointer;
-  font: 500 13px/1 "DM Mono", monospace;
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
 }
 
-.theme-toggle:hover { color: var(--text); border-color: var(--muted); }
+.theme-picker {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0 0 0 auto;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-2);
+  flex: none;
+}
+
+.theme-picker input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.theme-picker label {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 26px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: 400 13px/1 "DM Mono", monospace;
+  user-select: none;
+}
+
+.theme-picker label:hover { color: var(--text); }
+
+.theme-picker input:checked + label {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+/* The radios are visually hidden, so the focus ring has to be drawn on
+   the label they control or keyboard users get nothing. */
+.theme-picker input:focus-visible + label {
+  outline: 2px solid var(--green);
+  outline-offset: 1px;
+}
 
 /* ── Tab panels ────────────────────────────────────────────────── */
 
@@ -766,16 +808,19 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 
 <script>
   /* Set the palette before first paint so the page never flashes the wrong
-     one. The toggle at the end of the body takes over from here. */
+     one. The picker at the end of the body takes over from here.
+
+     Two different things are stored and applied: the *preference* is
+     "light", "dark", or "system", and only the resolved result of it ever
+     reaches data-theme. Storing "system" rather than the colour it happens
+     to mean today is what lets the page keep following the OS afterwards. */
   (function () {
-    var theme;
-    try { theme = localStorage.getItem("servette-theme"); } catch (e) {}
-    if (!theme) {
-      theme = window.matchMedia
-        && window.matchMedia("(prefers-color-scheme: dark)").matches
-        ? "dark" : "light";
-    }
-    document.documentElement.setAttribute("data-theme", theme);
+    var pref;
+    try { pref = localStorage.getItem("servette-theme"); } catch (e) {}
+    if (pref !== "light" && pref !== "dark") pref = "system";
+    var dark = pref === "dark" || (pref === "system" && window.matchMedia
+      && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
   })();
 </script>
 </head>
@@ -792,10 +837,18 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-use"      id="tabbtn-use">How to Use it</button>
       <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-works"    id="tabbtn-works">How it Works</button>
     </nav>
-    <div class="header-actions">
-      <button class="theme-toggle" type="button" title="Toggle light / dark" aria-label="Toggle light or dark theme">☾</button>
-      <a class="btn btn--outline btn--s" href="https://github.com/andy-emerson/servette">GitHub</a>
-    </div>
+    <!-- Radio inputs rather than buttons: the browser supplies the grouping,
+         the roving focus, and arrow-key selection, none of which would be
+         free with three <button>s and aria-checked. -->
+    <fieldset class="theme-picker">
+      <legend class="visually-hidden">Theme</legend>
+      <input type="radio" name="theme" id="theme-light"  value="light">
+      <label for="theme-light"  title="Light theme"><span aria-hidden="true">☀</span><span class="visually-hidden">Light</span></label>
+      <input type="radio" name="theme" id="theme-system" value="system">
+      <label for="theme-system" title="Match system"><span aria-hidden="true">◐</span><span class="visually-hidden">Match system</span></label>
+      <input type="radio" name="theme" id="theme-dark"   value="dark">
+      <label for="theme-dark"   title="Dark theme"><span aria-hidden="true">☾</span><span class="visually-hidden">Dark</span></label>
+    </fieldset>
   </div>
 </header>
 
@@ -1583,7 +1636,7 @@ python3 servette.py --serve       <span class="cmt"># non-interactive service mo
       <div class="footer-brand">
         <span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span>
       </div>
-      <p class="footer-tag">The simple, secure, static-site server. One file, one dependency, no configuration language.</p>
+      <p class="footer-tag">The simple, secure, static-site server.</p>
     </div>
     <div>
       <p class="footer-label">This site</p>
@@ -1657,25 +1710,50 @@ SOFTWARE.</pre>
     return e;
   }
 
-  /* ── Theme toggle ───────────────────────────────────────────── */
+  /* ── Theme picker ───────────────────────────────────────────────
+     Preference is one of light / dark / system; data-theme only ever gets
+     the resolved colour. Under "system" the page keeps listening, so a
+     laptop flipping to dark at sunset moves this page with it. */
 
-  var toggle = document.querySelector(".theme-toggle");
+  var media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
 
-  function applyTheme(theme) {
-    root.setAttribute("data-theme", theme);
-    toggle.textContent = theme === "dark" ? "☀" : "☾";
-    try {
-      localStorage.setItem("servette-theme", theme);
-    } catch (e) {
-      /* Private browsing, or storage disabled: the toggle still works. */
-    }
+  function readPref() {
+    var pref;
+    try { pref = localStorage.getItem("servette-theme"); } catch (e) {}
+    return pref === "light" || pref === "dark" ? pref : "system";
   }
 
-  applyTheme(root.getAttribute("data-theme") === "dark" ? "dark" : "light");
+  function paint(pref) {
+    var dark = pref === "dark" || (pref === "system" && media && media.matches);
+    root.setAttribute("data-theme", dark ? "dark" : "light");
+  }
 
-  toggle.addEventListener("click", function () {
-    applyTheme(root.getAttribute("data-theme") === "dark" ? "light" : "dark");
+  function setPref(pref) {
+    try {
+      localStorage.setItem("servette-theme", pref);
+    } catch (e) {
+      /* Private browsing, or storage disabled: the picker still works,
+         it just will not be remembered on the next visit. */
+    }
+    paint(pref);
+  }
+
+  var themeInputs = Array.prototype.slice.call(document.querySelectorAll(".theme-picker input"));
+  var initial = readPref();
+
+  themeInputs.forEach(function (input) {
+    input.checked = input.value === initial;
+    input.addEventListener("change", function () {
+      if (input.checked) setPref(input.value);
+    });
   });
+
+  if (media) {
+    /* addListener is the pre-2021 spelling; Safari 13 and older need it. */
+    var onSystemChange = function () { if (readPref() === "system") paint("system"); };
+    if (media.addEventListener) media.addEventListener("change", onSystemChange);
+    else if (media.addListener) media.addListener(onSystemChange);
+  }
 
   /* ── Copy the run command ───────────────────────────────────── */
 

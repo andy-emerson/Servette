@@ -95,6 +95,26 @@ def _check_password(submitted, stored_hash, stored_salt):
         return False
 
 
+class Site:
+    """One `[[site]]` block: everything that varies per hosted domain — the domain
+    itself, its folder, its own certificate, its visitor auth, its publish channel.
+    Host-level settings (port, TLS, rate limits, cache, ACME email, security headers,
+    ...) live once on Config, not here: every field lives at exactly one level, no
+    fallback lookup between them."""
+
+    def __init__(self, data=None):
+        data = data or {}
+        self.domain        = data.get("domain",        "")
+        self.serve_dir      = data.get("serve_dir",      "site")
+        self.cert_file      = data.get("cert_file",      "cert.pem")
+        self.key_file       = data.get("key_file",       "key.pem")
+        self.username       = data.get("username",       "")
+        self.password_hash  = data.get("password_hash",  "")
+        self.password_salt  = data.get("password_salt",  "")
+        self.publish_url    = data.get("publish_url",    "")
+        self.publish_key    = data.get("publish_key",    "")
+
+
 class Config:
     """Holds all Servette settings and handles reading/writing servette.toml."""
 
@@ -106,7 +126,8 @@ class Config:
 
     def _load(self):
         data = {}
-        if os.path.exists(self.CONFIG_FILE):
+        existed = os.path.exists(self.CONFIG_FILE)
+        if existed:
             try:
                 with open(self.CONFIG_FILE, "rb") as f:
                     data = tomllib.load(f)
@@ -115,13 +136,38 @@ class Config:
                 print(f"Fix or delete {self.CONFIG_FILE} and try again.")
                 sys.exit(1)
 
-        self.serve_dir       = data.get("serve_dir",       "site")
+        site_tables = data.get("site", [])
+        migrating   = existed and not site_tables
+        if site_tables:
+            self.sites = [Site(t) for t in site_tables]
+        else:
+            # No [[site]] tables: either a fresh install (data is empty, defaults
+            # apply) or a pre-multi-site flat config being migrated in place —
+            # both produce the same single default/legacy-derived Site.
+            legacy = Site({
+                "serve_dir":     data.get("serve_dir",     "site"),
+                "cert_file":     data.get("cert_file",     "cert.pem"),
+                "key_file":      data.get("key_file",      "key.pem"),
+                "username":      data.get("username",      ""),
+                "password_hash": data.get("password_hash", ""),
+                "password_salt": data.get("password_salt", ""),
+                "publish_url":   data.get("publish_url",   ""),
+                "publish_key":   data.get("publish_key",   ""),
+            })
+            if data.get("password") and not legacy.password_hash:
+                legacy.password_hash, legacy.password_salt = _hash_password(data["password"])
+            if migrating:
+                # Domain was never a stored field pre-migration — it lived only in
+                # the certificate. _domain_from_cert is defined later in the file
+                # (Certificate management); by the time _load() actually runs
+                # (module-level `config = Config()` sits at the bottom of the
+                # file, after every function is defined) it's available.
+                cert_path = _resolve(legacy.cert_file)
+                if os.path.exists(cert_path):
+                    legacy.domain = _domain_from_cert(cert_path) or ""
+            self.sites = [legacy]
+
         self.port            = data.get("port",            443)
-        self.cert_file       = data.get("cert_file",       "cert.pem")
-        self.key_file        = data.get("key_file",        "key.pem")
-        self.username        = data.get("username",        "")
-        self.password_hash   = data.get("password_hash",   "")
-        self.password_salt   = data.get("password_salt",   "")
         self.rate_limit      = data.get("rate_limit",      120)
         self.auth_rate_limit = data.get("auth_rate_limit", 6)
         self.cache_policy       = data.get("cache_policy",       "no-cache")
@@ -133,8 +179,6 @@ class Config:
         self.ciphers            = data.get("ciphers",            "")
         self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
         self.permissions_policy = data.get("permissions_policy", "camera=(), microphone=(), usb=(), midi=(), serial=()")
-        self.publish_url        = data.get("publish_url",        "")
-        self.publish_key        = data.get("publish_key",        "")
 
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
@@ -142,13 +186,80 @@ class Config:
             pass
 
         try:
-            self._cert_mtime = os.path.getmtime(_resolve(self.cert_file))
+            self._cert_mtime = os.path.getmtime(_resolve(self.sites[0].cert_file))
         except OSError:
             self._cert_mtime = None
 
-        if data.get("password") and not self.password_hash:
-            self.password_hash, self.password_salt = _hash_password(data["password"])
+        if migrating:
             self.save()
+
+    # Back-compat proxies onto sites[0] — every existing single-site call site
+    # (request handling, the shell, cert management) still reads/writes these
+    # unchanged; multi-site-aware call sites use config.sites directly. Removed
+    # once every call site is cut over to genuine multi-site routing.
+    @property
+    def serve_dir(self):
+        return self.sites[0].serve_dir
+
+    @serve_dir.setter
+    def serve_dir(self, v):
+        self.sites[0].serve_dir = v
+
+    @property
+    def cert_file(self):
+        return self.sites[0].cert_file
+
+    @cert_file.setter
+    def cert_file(self, v):
+        self.sites[0].cert_file = v
+
+    @property
+    def key_file(self):
+        return self.sites[0].key_file
+
+    @key_file.setter
+    def key_file(self, v):
+        self.sites[0].key_file = v
+
+    @property
+    def username(self):
+        return self.sites[0].username
+
+    @username.setter
+    def username(self, v):
+        self.sites[0].username = v
+
+    @property
+    def password_hash(self):
+        return self.sites[0].password_hash
+
+    @password_hash.setter
+    def password_hash(self, v):
+        self.sites[0].password_hash = v
+
+    @property
+    def password_salt(self):
+        return self.sites[0].password_salt
+
+    @password_salt.setter
+    def password_salt(self, v):
+        self.sites[0].password_salt = v
+
+    @property
+    def publish_url(self):
+        return self.sites[0].publish_url
+
+    @publish_url.setter
+    def publish_url(self, v):
+        self.sites[0].publish_url = v
+
+    @property
+    def publish_key(self):
+        return self.sites[0].publish_key
+
+    @publish_key.setter
+    def publish_key(self, v):
+        self.sites[0].publish_key = v
 
     def reload_if_changed(self):
         try:
@@ -163,18 +274,38 @@ class Config:
         def s(v):
             return '"' + str(v).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace('"', '\\"') + '"'
 
-        content = f"""\
-# Servette configuration — https://github.com/andy-emerson/servette
-
-serve_dir = {s(self.serve_dir)}
-port = {self.port}
-cert_file = {s(self.cert_file)}
-key_file = {s(self.key_file)}
+        sites_content = "\n".join(f"""\
+[[site]]
+# Leave domain blank for a self-signed certificate (browsers will warn visitors)
+domain = {s(site.domain)}
+serve_dir = {s(site.serve_dir)}
+cert_file = {s(site.cert_file)}
+key_file = {s(site.key_file)}
 
 # Leave username blank to disable password protection
-username = {s(self.username)}
+username = {s(site.username)}
 
-# Rate limiting (requests per minute per IP)
+# Site publish channel: where signed content bundles are pulled from, and the
+# public key (distinct from Servette's own release-signing key) that verifies
+# them. Leave blank to disable — no polling happens without both set.
+publish_url = {s(site.publish_url)}
+publish_key = {s(site.publish_key)}
+
+# Machine-generated — do not edit by hand
+password_hash = {s(site.password_hash)}
+password_salt = {s(site.password_salt)}
+""" for site in self.sites)
+
+        content = f"""\
+# Servette configuration — https://github.com/andy-emerson/servette
+#
+# Host-level settings below apply to every site on this box. Each [[site]]
+# block below is one hosted domain — its own folder, certificate, auth, and
+# publish channel.
+
+port = {self.port}
+
+# Rate limiting (requests per minute per IP, shared across all sites)
 rate_limit = {self.rate_limit}
 auth_rate_limit = {self.auth_rate_limit}
 
@@ -196,16 +327,7 @@ ciphers = {s(self.ciphers)}
 csp = {s(self.csp)}
 permissions_policy = {s(self.permissions_policy)}
 
-# Site publish channel: where signed content bundles are pulled from, and the
-# public key (distinct from Servette's own release-signing key) that verifies
-# them. Leave blank to disable — no polling happens without both set.
-publish_url = {s(self.publish_url)}
-publish_key = {s(self.publish_key)}
-
-# Machine-generated — do not edit by hand
-password_hash = {s(self.password_hash)}
-password_salt = {s(self.password_salt)}
-"""
+{sites_content}"""
         # Write to a temp file in the same directory (mkstemp creates it 0o600), then
         # atomically replace, so a crash mid-write can't truncate the live config.
         d = os.path.dirname(self.CONFIG_FILE) or "."
@@ -224,13 +346,6 @@ password_salt = {s(self.password_salt)}
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
             pass
-
-
-# Config is a module-level singleton. Dependency injection (passing config into
-# every function) is the textbook alternative, but the stdlib request handlers have
-# fixed signatures and cannot accept extra arguments. In a single-file server that is
-# always run as a process, the global is the right call.
-config = Config()
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -3072,6 +3187,16 @@ def shell():
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Config is a module-level singleton, instantiated here (not at its class
+# definition, near the top) because migrating a pre-multi-site flat config
+# calls _domain_from_cert() to backfill the migrated site's domain, and that
+# function is defined much later, in Certificate management. Dependency
+# injection (passing config into every function) is the textbook alternative,
+# but the stdlib request handlers have fixed signatures and cannot accept
+# extra arguments. In a single-file server that is always run as a process,
+# the global is the right call.
+config = Config()
 
 if __name__ == "__main__":
     _bootstrap()  # no-op if already in venv; otherwise re-execs into venv

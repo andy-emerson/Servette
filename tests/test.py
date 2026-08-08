@@ -220,6 +220,89 @@ def run_unit_tests(s):
     check("Empty salt returns False",     not s._check_password("hello", h1, ""))
     check("Hash does not contain plaintext", "hello" not in h1)
 
+    section("Config schema migration ([[site]] tables)")
+
+    saved_config_file = s.Config.CONFIG_FILE
+    migrate_dir = tempfile.mkdtemp()
+    try:
+        s.Config.CONFIG_FILE = os.path.join(migrate_dir, "servette.toml")
+
+        # Fresh install: no file at all → one default Site, nothing written yet.
+        c = s.Config()
+        check("Fresh install produces exactly one site", len(c.sites) == 1)
+        check("Fresh install's site has no domain", c.sites[0].domain == "")
+        check("Fresh install's site uses the default serve_dir", c.sites[0].serve_dir == "site")
+        check("Fresh install does not write a config file", not os.path.exists(s.Config.CONFIG_FILE))
+
+        # Legacy flat config with a plaintext password and publish channel: migrates
+        # into a single [[site]] block, hashes the password, and is saved immediately.
+        cert_path = os.path.join(migrate_dir, "cert.pem")
+        key_path  = os.path.join(migrate_dir, "key.pem")
+        subprocess.run([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048",
+            "-keyout", key_path, "-out", cert_path,
+            "-days", "1", "-nodes", "-subj", "/CN=legacy.example.com"
+        ], capture_output=True, check=True)
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write(f"""\
+serve_dir = "myserve"
+port = 443
+cert_file = "{cert_path}"
+key_file = "{key_path}"
+username = "bob"
+password = "hunter2"
+rate_limit = 120
+auth_rate_limit = 6
+cache_policy = "no-cache"
+cache_max_age = 3600
+cache_size_mb = 128
+email = ""
+publish_url = "https://example.com/site.tar.gz"
+publish_key = "aa"
+""")
+        c = s.Config()
+        check("Legacy flat config migrates to exactly one site", len(c.sites) == 1)
+        check("Migrated site's domain is backfilled from its existing cert",
+              c.sites[0].domain == "legacy.example.com")
+        check("Migrated site keeps its serve_dir", c.sites[0].serve_dir == "myserve")
+        check("Migrated site keeps its publish channel", c.sites[0].publish_url == "https://example.com/site.tar.gz")
+        check("Plaintext password is hashed on migration", c.sites[0].password_hash != "")
+        check("Hashed password verifies", s._check_password("hunter2", c.sites[0].password_hash, c.sites[0].password_salt))
+        check("Migration rewrites the file in [[site]] form", "[[site]]" in open(s.Config.CONFIG_FILE).read())
+
+        # Reloading the now-migrated file must not re-migrate or re-derive anything —
+        # it should load the [[site]] table(s) as-is.
+        c2 = s.Config()
+        check("Reloading an already-migrated config still has one site", len(c2.sites) == 1)
+        check("Reloading preserves the migrated domain", c2.sites[0].domain == "legacy.example.com")
+
+        # A genuine multi-site config loads every [[site]] block.
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write("""\
+port = 443
+rate_limit = 120
+auth_rate_limit = 6
+cache_policy = "no-cache"
+cache_max_age = 3600
+cache_size_mb = 128
+email = ""
+
+[[site]]
+domain = "a.example.com"
+serve_dir = "a"
+
+[[site]]
+domain = "b.example.com"
+serve_dir = "b"
+""")
+        c3 = s.Config()
+        check("Multi-site config loads all [[site]] blocks", len(c3.sites) == 2)
+        check("Sites load in file order",
+              [site.domain for site in c3.sites] == ["a.example.com", "b.example.com"])
+    finally:
+        s.Config.CONFIG_FILE = saved_config_file
+        shutil.rmtree(migrate_dir, ignore_errors=True)
+
     section("Versioning")
 
     check("__version__ is set",              bool(s.__version__))

@@ -677,6 +677,116 @@ def run_dispatch_tests(s):
             setattr(s, n, v)
         shutil.rmtree(rdir, ignore_errors=True)
 
+    section("Site management (add/remove/select)")
+
+    saved_sites7  = s.config.sites
+    saved_reload  = s._reload_server
+    saved_ssrv    = s._server_running
+    saved_sact    = s._service_is_active
+    site_test_dir = tempfile.mkdtemp()
+    try:
+        s._server_running    = lambda: False
+        s._service_is_active = lambda: False
+        s._reload_server     = lambda: None
+
+        check("_config_site_arg([]) resolves to site 0",
+              s._config_site_arg([]) is s.config.sites[0])
+        check("_config_site_arg(['0']) resolves to site 0",
+              s._config_site_arg(["0"]) is s.config.sites[0])
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            result = s._config_site_arg(["99"])
+        check("Out-of-range site index returns None", result is None)
+        check("Out-of-range site index reports cleanly", "No site 99" in buf.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = s._config_site_arg(["nope"])
+        check("Non-numeric site index returns None", result is None)
+
+        saved_input = builtins.input
+        try:
+            # add-site: folder, domain (blank → self-signed), username (blank).
+            script = iter([site_test_dir, "", ""])
+            builtins.input = lambda prompt="": next(script, "")
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                s._config_add_site()
+            check("add-site appends exactly one site", len(s.config.sites) == 2)
+            check("add-site's new site uses the given folder",
+                  s.config.sites[1].serve_dir == site_test_dir)
+            check("add-site's new site gets a unique cert/key (no collision with site 0)",
+                  s.config.sites[1].cert_file != s.config.sites[0].cert_file)
+            check("add-site generates a real self-signed cert",
+                  os.path.isfile(s._resolve(s.config.sites[1].cert_file)))
+            check("add-site reports the new site's index", "Site 1 added" in buf.getvalue())
+        finally:
+            builtins.input = saved_input
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s._config_sites()
+        out = buf.getvalue()
+        check("'sites' lists site 0", "0:" in out)
+        check("'sites' lists site 1", "1:" in out)
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s._config_remove_site([])
+        check("remove-site with no argument reports usage", "Usage" in buf.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s._config_remove_site(["99"])
+        check("remove-site with an out-of-range index reports cleanly", "No site 99" in buf.getvalue())
+
+        saved_prompt = s._prompt
+        try:
+            s._prompt = lambda *a, **k: True
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._config_remove_site(["1"])
+            check("remove-site removes the confirmed site", len(s.config.sites) == 1)
+
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                s._config_remove_site(["0"])
+            check("remove-site refuses to remove the only site", len(s.config.sites) == 1)
+            check("Refusing to remove the only site reports why", "only site" in buf.getvalue())
+        finally:
+            s._prompt = saved_prompt
+    finally:
+        for fname in ("cert-1.pem", "key-1.pem"):
+            p = os.path.join(s.BASE_DIR, fname)
+            if os.path.exists(p):
+                os.remove(p)
+        s._reload_server     = saved_reload
+        s._server_running    = saved_ssrv
+        s._service_is_active = saved_sact
+        s.config.sites       = saved_sites7
+        shutil.rmtree(site_test_dir, ignore_errors=True)
+
+    section("Setup wizard smoke test")
+
+    # cmd_setup calls _config_cert/_config_username/_config_password, which
+    # take a site argument now — this exact call caught a real bug (they were
+    # still being called with none) that no other test happened to exercise.
+    saved2 = {n: getattr(s, n) for n in
+              ("_prompt", "cmd_enable", "cmd_start", "_server_running", "_service_is_active")}
+    saved_input2   = builtins.input
+    saved_urlopen2 = urllib.request.urlopen
+    try:
+        urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(Exception("no network in tests"))
+        s._prompt             = lambda *a, **k: False   # "Ready to start?" -> no
+        s.cmd_enable           = lambda: None
+        s.cmd_start            = lambda: None
+        s._server_running      = lambda: False
+        s._service_is_active   = lambda: False
+        script = iter(["", ""])  # domain blank (self-signed), username blank
+        builtins.input = lambda prompt="": next(script, "")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                s.cmd_setup()
+            check("cmd_setup runs end to end without raising", True)
+        except Exception as e:
+            check(f"cmd_setup runs end to end without raising (raised {e})", False)
+    finally:
+        urllib.request.urlopen = saved_urlopen2
+        builtins.input = saved_input2
+        for n, fn in saved2.items():
+            setattr(s, n, fn)
+
     section("Request core — _handle_request")
     # The core returns (status, headers, body) directly and reads the request headers
     # straight off http.server's parsed HTTPMessage, so exercise it without a socket.

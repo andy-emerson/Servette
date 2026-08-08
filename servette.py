@@ -2302,26 +2302,31 @@ _COMMANDS = [
 ]
 HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
 
-# Ordered: what to serve and how it's reached (dir/port/cert/email — email is
-# the ACME registration address, grouped with the certificate it belongs to),
-# then access control, then traffic shaping, then advanced/rarely-touched
-# security tuning, then meta.
+# Ordered: sites first (list/add/remove — the multi-site entry points), then
+# what a site serves and how it's reached (dir/port/cert/email — email is the
+# ACME registration address, grouped with the certificate it belongs to), then
+# access control, then traffic shaping, then advanced/rarely-touched security
+# tuning, then meta. dir/cert/publish/username/password take an optional site
+# index (default 0) — same [n] convention as the top-level 'log [n]'.
 _CONFIG_COMMANDS = [
-    ("dir",      "directory to serve"),
-    ("port",     "HTTPS port"),
-    ("cert",     "SSL certificate and key"),
-    ("email",    "email address"),
-    ("publish",  "site publish channel (watch URL and signing key)"),
-    ("username", "login username"),
-    ("password", "login password"),
-    ("limits",   "rate limits"),
-    ("cache",    "browser cache policy"),
-    ("proxy",    "trusted proxy IP for X-Forwarded-For"),
-    ("tls",      "minimum TLS version and cipher suites"),
-    ("csp",      "Content-Security-Policy header"),
-    ("perms",    "Permissions-Policy header"),
-    ("show",     "show current settings"),
-    ("back",     "return to main shell"),
+    ("sites",           "list configured sites"),
+    ("add-site",        "add a new site (folder, domain, password, publish channel)"),
+    ("remove-site <n>", "remove a site"),
+    ("dir [n]",         "directory to serve"),
+    ("port",            "HTTPS port"),
+    ("cert [n]",        "SSL certificate and key"),
+    ("email",           "email address"),
+    ("publish [n]",     "site publish channel (watch URL and signing key)"),
+    ("username [n]",    "login username"),
+    ("password [n]",    "login password"),
+    ("limits",          "rate limits"),
+    ("cache",           "browser cache policy"),
+    ("proxy",           "trusted proxy IP for X-Forwarded-For"),
+    ("tls",             "minimum TLS version and cipher suites"),
+    ("csp",             "Content-Security-Policy header"),
+    ("perms",           "Permissions-Policy header"),
+    ("show",            "show current settings"),
+    ("back",            "return to main shell"),
 ]
 CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
 
@@ -2351,16 +2356,9 @@ def _config_show():
     if config.cache_policy == "max-age":
         cache_display += f" ({config.cache_max_age}s)"
 
-    rows = [
-        ("Directory",          val(config.serve_dir)),
+    host_rows = [
         ("HTTPS port",         config.port),
-        ("Certificate",        val(config.cert_file)),
-        ("Key",                val(config.key_file)),
         ("Email",              val(config.email)),
-        ("Publish URL",        val(config.publish_url)),
-        ("Publish key",        val(config.publish_key)),
-        ("Username",           val(config.username)),
-        ("Password",           "(set)" if config.password_hash else "(not set)"),
         ("Rate limit",         f"{config.rate_limit} req/min"),
         ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
         ("Cache policy",       cache_display),
@@ -2373,18 +2371,118 @@ def _config_show():
     ]
 
     _section("Current Settings")
-    for label, value in rows:
+    for label, value in host_rows:
         print(f"  {label:<{_PAD}} {value}")
+
+    for i, site in enumerate(config.sites):
+        print(f"\n  Site {i}: {site.domain or '(self-signed)'}")
+        site_rows = [
+            ("Directory",   val(site.serve_dir)),
+            ("Certificate", val(site.cert_file)),
+            ("Key",         val(site.key_file)),
+            ("Publish URL", val(site.publish_url)),
+            ("Publish key", val(site.publish_key)),
+            ("Username",    val(site.username)),
+            ("Password",    "(set)" if site.password_hash else "(not set)"),
+        ]
+        for label, value in site_rows:
+            print(f"    {label:<{_PAD - 2}} {value}")
     print()
 
 
-def _config_dir():
+def _config_sites():
+    _section("Sites")
+    for i, site in enumerate(config.sites):
+        auth = "password-protected" if site.username else "no password"
+        print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}")
+    print()
+    print("  Edit one with e.g. 'dir 1', 'cert 1', 'publish 1' (index defaults to 0).")
+    print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
+
+
+def _config_add_site():
+    """Add a site — the same questions cmd_setup asks for the very first one
+    (domain, password), plus the folder question the first site gets for free
+    (its default, 'site', is baked in and can't also serve a second site)."""
+    print("\n  Adding a new site.\n")
+    dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
+    if dirs:
+        print("  Existing folders:")
+        for d in dirs:
+            print(f"    {d}")
+        print()
+    folder = _input("  serve_dir: ").strip()
+    if not folder or not os.path.isdir(_resolve(folder)):
+        print(f"  → directory not found: {_resolve(folder or '(blank)')}. Create it first, then try again.")
+        return
+
+    site = Site({"serve_dir": folder})
+    config.sites.append(site)
+    idx = len(config.sites) - 1
+    # A unique self-signed cert/key pair, so a second self-signed site doesn't
+    # collide with the first's cert.pem/key.pem — overwritten if a domain is
+    # obtained below, which uses the domain-scoped certs/<domain>/ path instead.
+    site.cert_file = f"cert-{idx}.pem"
+    site.key_file  = f"key-{idx}.pem"
+    config.save()
+    print(f"  → site {idx} added.\n")
+
+    domain = _input("  Domain name (leave blank for self-signed): ").strip()
+    if domain:
+        _obtain_trusted_cert(domain, site)
+    else:
+        print("  Generating self-signed certificate...")
+        _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
+        config.save()
+        print("  → self-signed certificate generated.")
+        print("  Note: browsers will show a security warning until you add a domain.\n")
+
+    print("  Password protection (optional). Leave username blank to disable.")
+    _config_username(site)
+    if site.username:
+        _config_password(site)
+
+    print(f"\n  Site {idx} added. Run 'publish {idx}' to set up its publish channel.")
+    if _server_running() or _service_is_active():
+        _reload_server()
+
+
+def _config_remove_site(args):
+    if not args:
+        print("  Usage: remove-site <site index>")
+        return
+    try:
+        idx = int(args[0])
+    except ValueError:
+        print("  Usage: remove-site <site index>")
+        return
+    if not (0 <= idx < len(config.sites)):
+        print(f"  No site {idx} — run 'sites' to list them.")
+        return
+    if len(config.sites) == 1:
+        print("  Can't remove the only site — a box needs at least one.")
+        return
+
+    site  = config.sites[idx]
+    label = site.domain or site.serve_dir
+    if not _prompt(f"Remove site {idx} ({label})? Its config is discarded; its files on disk are not touched."):
+        print("  Cancelled.")
+        return
+
+    del config.sites[idx]
+    config.save()
+    print(f"  → site {idx} removed.")
+    if _server_running() or _service_is_active():
+        _reload_server()
+
+
+def _config_dir(site):
     dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
     if dirs:
         print()
         for d in dirs:
-            print(f"    {d}{' ←' if d == config.serve_dir else ''}")
-    new_value = _input(f"\n  serve_dir [{config.serve_dir}]: ").strip()
+            print(f"    {d}{' ←' if d == site.serve_dir else ''}")
+    new_value = _input(f"\n  serve_dir [{site.serve_dir}]: ").strip()
     if not new_value:
         print("  → unchanged")
         return
@@ -2392,7 +2490,7 @@ def _config_dir():
     if not os.path.isdir(path):
         print(f"  → directory not found: {path}")
         return
-    config.serve_dir = new_value
+    site.serve_dir = new_value
     config.save()
     print("  → saved")
 
@@ -2416,9 +2514,7 @@ def _config_set(attr, label, cast=str, validate=None, error="invalid value", hin
         print(f"  → {error}, unchanged")
 
 
-def _config_cert():
-    # Single-site editing until 'add site' lands — always the first configured site.
-    site      = config.sites[0]
+def _config_cert(site):
     cert_path = _resolve(site.cert_file)
     if os.path.exists(cert_path):
         days = _cert_days_remaining(cert_path)
@@ -2449,25 +2545,25 @@ def _config_cert():
             _reload_server()
 
 
-def _config_username():
-    current   = config.username
+def _config_username(site):
+    current   = site.username
     new_value = _input(f"  username [{current}]: ").strip()
     if new_value == "" and current != "":
-        config.username      = ""
-        config.password_hash = ""
-        config.password_salt = ""
+        site.username      = ""
+        site.password_hash = ""
+        site.password_salt = ""
         config.save()
         print("  → auth disabled, password cleared")
     elif new_value and new_value != current:
-        config.username = new_value
+        site.username = new_value
         config.save()
         print("  → saved")
     else:
         print("  → unchanged")
 
 
-def _config_password():
-    if not config.username:
+def _config_password(site):
+    if not site.username:
         print("  Set a username first.")
         return
     try:
@@ -2482,7 +2578,7 @@ def _config_password():
     if pwd != confirm:
         print("  → passwords do not match, unchanged")
         return
-    config.password_hash, config.password_salt = _hash_password(pwd)
+    site.password_hash, site.password_salt = _hash_password(pwd)
     config.save()
     print("  → saved")
 
@@ -2533,28 +2629,28 @@ def _config_trusted_proxy():
     print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
 
 
-def _config_publish():
-    print(f"\n  Current watch URL: {config.publish_url or '(not set)'}")
+def _config_publish(site):
+    print(f"\n  Current watch URL: {site.publish_url or '(not set)'}")
     print("  Where signed content bundles (a .tar.gz plus its .sig) are pulled from —")
     print("  typically a GitHub release. Leave blank to disable publishing.\n")
     url = _input("  publish_url: ").strip()
     if url and not url.startswith("https://"):
         print("  → must be an https:// URL, unchanged")
-    elif url != config.publish_url:
-        config.publish_url = url
+    elif url != site.publish_url:
+        site.publish_url = url
         config.save()
         print("  → saved" if url else "  → cleared, publishing disabled")
     else:
         print("  → unchanged")
 
-    print(f"\n  Current signing key: {config.publish_key or '(not set)'}")
+    print(f"\n  Current signing key: {site.publish_key or '(not set)'}")
     print("  The public half of the content-signing keypair generated by the publish")
     print("  tool — 64 hex characters (a 32-byte Ed25519 public key). Leave blank to clear.\n")
     key = _input("  publish_key: ").strip().lower()
     if key and not re.fullmatch(r"[0-9a-f]{64}", key):
         print("  → not a 64-character hex string, unchanged")
-    elif key != config.publish_key:
-        config.publish_key = key
+    elif key != site.publish_key:
+        site.publish_key = key
         config.save()
         print("  → saved" if key else "  → cleared")
     else:
@@ -2587,6 +2683,24 @@ def _config_tls():
     print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
 
 
+def _config_site_arg(args):
+    """Resolve dir/cert/username/password/publish's optional site-index
+    argument to a Site, defaulting to site 0 — same [n] convention as the
+    top-level 'log [n]'. Prints its own error and returns None if given but
+    invalid, so callers can just no-op on None."""
+    if not args:
+        return config.sites[0]
+    try:
+        idx = int(args[0])
+    except ValueError:
+        print(f"  Not a site index: {args[0]!r}")
+        return None
+    if not (0 <= idx < len(config.sites)):
+        print(f"  No site {idx} — run 'sites' to list them.")
+        return None
+    return config.sites[idx]
+
+
 def cmd_config():
     _config_show()
     print(CONFIG_HELP)
@@ -2601,24 +2715,42 @@ def cmd_config():
         if not raw:
             continue
 
-        cmd = raw.split()[0].lower()
+        parts = raw.split()
+        cmd   = parts[0].lower()
+        args  = parts[1:]
 
         if cmd == "show":
             _config_show()
+        elif cmd == "sites":
+            _config_sites()
+        elif cmd == "add-site":
+            _config_add_site()
+        elif cmd == "remove-site":
+            _config_remove_site(args)
         elif cmd in ("dir", "directory"):
-            _config_dir()
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_dir(site)
         elif cmd == "port":
             _config_set("port", "port", int, lambda v: 1 <= v <= 65535, "invalid port number")
         elif cmd == "cert":
-            _config_cert()
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_cert(site)
         elif cmd == "username":
-            _config_username()
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_username(site)
         elif cmd == "password":
-            _config_password()
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_password(site)
         elif cmd == "email":
             _config_set("email", "email")
         elif cmd == "publish":
-            _config_publish()
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_publish(site)
         elif cmd == "limits":
             _config_limits()
         elif cmd == "cache":
@@ -3198,9 +3330,6 @@ def _runtime_stats(service_active):
 def cmd_status():
     service_active = _service_is_active()
     running        = service_active or _server_running()
-    cert_path      = _resolve(config.cert_file)
-    domain         = _domain_from_cert(cert_path)
-    url            = f"https://{domain}" if domain else f"https://localhost:{config.port}"
     W              = _PAD
 
     print()
@@ -3211,18 +3340,24 @@ def cmd_status():
         mode = "System service" if service_active else "Session only"
         print(f"  {'Mode':<{W}} {mode}")
 
-    print(f"  {'URL':<{W}} {url}")
-    print(f"  {'Directory':<{W}} {config.serve_dir or '(not configured)'}")
-    auth_str = _c("enabled", "green") if config.username else _c("disabled", "yellow")
-    print(f"  {'Auth':<{W}} {auth_str}")
+    for i, site in enumerate(config.sites):
+        cert_path = _resolve(site.cert_file)
+        domain    = _domain_from_cert(cert_path)
+        url       = f"https://{domain}" if domain else f"https://localhost:{config.port}"
+        if len(config.sites) > 1:
+            print(f"\n  Site {i}")
+        print(f"  {'URL':<{W}} {url}")
+        print(f"  {'Directory':<{W}} {site.serve_dir or '(not configured)'}")
+        auth_str = _c("enabled", "green") if site.username else _c("disabled", "yellow")
+        print(f"  {'Auth':<{W}} {auth_str}")
 
-    days = _cert_days_remaining(cert_path)
-    if days is not None:
-        if days <= 0:
-            cert_str = _c("expired", "red")
-        else:
-            cert_str = _c(f"{days} days remaining", "yellow" if days < 30 else "green")
-        print(f"  {'Cert':<{W}} {cert_str}")
+        days = _cert_days_remaining(cert_path)
+        if days is not None:
+            if days <= 0:
+                cert_str = _c("expired", "red")
+            else:
+                cert_str = _c(f"{days} days remaining", "yellow" if days < 30 else "green")
+            print(f"  {'Cert':<{W}} {cert_str}")
 
     issues = _production_issues() + _cache_warnings()
     if issues:
@@ -3248,18 +3383,20 @@ def cmd_setup():
 
     _banner("Getting Started")
 
+    site = config.sites[0]  # the site setup provisions; 'add-site' handles the rest
+
     print()
     print("  Step 1 — SSL certificate")
     print(f"  Your public IP is {public_ip}. Point a domain here for a trusted certificate.")
     print("  Leave blank to use a self-signed certificate (browsers will warn visitors).\n")
-    _config_cert()
+    _config_cert(site)
 
     print()
     print("  Step 2 — Password protection (optional)")
     print("  Leave username blank to disable. Press Enter to keep current value.")
-    _config_username()
-    if config.username:
-        _config_password()
+    _config_username(site)
+    if site.username:
+        _config_password(site)
 
     print()
     if _prompt("Ready to start?"):

@@ -2435,6 +2435,18 @@ def _config_sites():
     print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
 
 
+def _is_within_base_dir(path):
+    """True if path (already resolved) is BASE_DIR itself or somewhere under
+    it. serve_dir must satisfy this: the publish pipeline's atomic swap
+    renames within the same filesystem, and the systemd unit's
+    ReadWritePaths only grants write access under BASE_DIR — a serve_dir
+    outside it breaks the swap silently under the sandboxed service even
+    though a manual, unsandboxed run would never show the problem."""
+    real = os.path.realpath(path)
+    base = os.path.realpath(BASE_DIR)
+    return real == base or real.startswith(base + os.sep)
+
+
 def _config_add_site():
     """Add a site — the same questions cmd_setup asks for the very first one
     (domain, password), plus the folder question the first site gets for free
@@ -2449,6 +2461,9 @@ def _config_add_site():
     folder = _input("  serve_dir: ").strip()
     if not folder or not os.path.isdir(_resolve(folder)):
         print(f"  → directory not found: {_resolve(folder or '(blank)')}. Create it first, then try again.")
+        return
+    if not _is_within_base_dir(_resolve(folder)):
+        print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
         return
 
     site = Site({"serve_dir": folder})
@@ -2548,6 +2563,9 @@ def _config_dir(site):
     path = _resolve(new_value)
     if not os.path.isdir(path):
         print(f"  → directory not found: {path}")
+        return
+    if not _is_within_base_dir(path):
+        print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
         return
     site.serve_dir = new_value
     config.save()

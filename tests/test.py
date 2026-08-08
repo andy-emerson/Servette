@@ -694,7 +694,7 @@ def run_dispatch_tests(s):
     saved_reload  = s._reload_server
     saved_ssrv    = s._server_running
     saved_sact    = s._service_is_active
-    site_test_dir = tempfile.mkdtemp()
+    site_test_dir = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site now requires serve_dir under BASE_DIR
     new_site_cert_files = []  # populated below once add-site picks its (randomized) names
     try:
         s._server_running    = lambda: False
@@ -798,7 +798,7 @@ def run_dispatch_tests(s):
     saved_sact2   = s._service_is_active
     saved_chown   = s._chown_servette
     saved_obtain  = s._obtain_trusted_cert
-    dirs2 = [tempfile.mkdtemp() for _ in range(3)]
+    dirs2 = [tempfile.mkdtemp(dir=s.BASE_DIR) for _ in range(3)]  # add-site requires serve_dir under BASE_DIR
     generated_files = []
     try:
         s._server_running    = lambda: True
@@ -856,7 +856,7 @@ def run_dispatch_tests(s):
             site.domain = domain  # only happens on the real success path
         s._obtain_trusted_cert = _fake_obtain_success
         reload_calls.clear()
-        dir6 = tempfile.mkdtemp()
+        dir6 = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input3 = builtins.input
         try:
             script3 = iter([dir6, "domain-test.example.com", ""])
@@ -877,7 +877,7 @@ def run_dispatch_tests(s):
         # happened inside the failed _obtain_trusted_cert call.
         s._obtain_trusted_cert = lambda domain, site: None  # simulates ACME failure: no site.domain assignment
         reload_calls.clear()
-        dir6b = tempfile.mkdtemp()
+        dir6b = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input3b = builtins.input
         try:
             script3b = iter([dir6b, "unreachable.example.com", ""])
@@ -899,7 +899,7 @@ def run_dispatch_tests(s):
         # Duplicate-domain guard: add-site falls back to self-signed rather than
         # creating a second site that would silently steal the first's TLS identity.
         s.config.sites[1].domain = "taken.example.com"
-        dir7 = tempfile.mkdtemp()
+        dir7 = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input4 = builtins.input
         try:
             script4 = iter([dir7, "taken.example.com", ""])
@@ -928,6 +928,39 @@ def run_dispatch_tests(s):
               "already used by another site" in buf2.getvalue())
         check("...and leaves the editing site's own domain unchanged",
               s.config.sites[0].domain != "taken.example.com")
+
+        # serve_dir outside BASE_DIR breaks the publish pipeline's same-filesystem
+        # atomic swap and the systemd sandbox's ReadWritePaths — both add-site and
+        # 'dir' must refuse it rather than accept a site that silently can't publish.
+        outside_dir = tempfile.mkdtemp()  # deliberately NOT under BASE_DIR
+        try:
+            sites_before = len(s.config.sites)
+            saved_input6 = builtins.input
+            try:
+                script6 = iter([outside_dir, "", ""])
+                builtins.input = lambda prompt="": next(script6, "")
+                with contextlib.redirect_stdout(io.StringIO()) as buf3:
+                    s._config_add_site()
+            finally:
+                builtins.input = saved_input6
+            check("add-site refuses a serve_dir outside BASE_DIR",
+                  f"must be inside {s.BASE_DIR}" in buf3.getvalue())
+            check("...and no site was added", len(s.config.sites) == sites_before)
+
+            saved_dir = s.config.sites[0].serve_dir
+            saved_input7 = builtins.input
+            try:
+                builtins.input = lambda prompt="": outside_dir
+                with contextlib.redirect_stdout(io.StringIO()) as buf4:
+                    s._config_dir(s.config.sites[0])
+            finally:
+                builtins.input = saved_input7
+            check("'dir' refuses a serve_dir outside BASE_DIR",
+                  f"must be inside {s.BASE_DIR}" in buf4.getvalue())
+            check("...and leaves the site's serve_dir unchanged",
+                  s.config.sites[0].serve_dir == saved_dir)
+        finally:
+            shutil.rmtree(outside_dir, ignore_errors=True)
     finally:
         for fname in generated_files:
             p = os.path.join(s.BASE_DIR, fname)

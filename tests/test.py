@@ -303,6 +303,27 @@ serve_dir = "b"
         s.Config.CONFIG_FILE = saved_config_file
         shutil.rmtree(migrate_dir, ignore_errors=True)
 
+    section("Config save escapes control characters")
+
+    _cfg_saved = s.Config.CONFIG_FILE
+    _cfg_dir   = tempfile.mkdtemp()
+    try:
+        s.Config.CONFIG_FILE = os.path.join(_cfg_dir, "servette.toml")
+        c = s.Config()
+        # A value carrying control characters must survive save→load rather than
+        # corrupt the file into something tomllib refuses (which would stop
+        # Servette from starting on the next run).
+        nasty = "a\x00b\tc\x1bd\ne\rf\x7fg"
+        c.email = nasty
+        c.save()
+        check("A control-char value round-trips through save/load",
+              s.Config().email == nasty)
+        check("The saved file is valid TOML (reloaded without error)",
+              "[[site]]" in open(s.Config.CONFIG_FILE).read())
+    finally:
+        s.Config.CONFIG_FILE = _cfg_saved
+        shutil.rmtree(_cfg_dir, ignore_errors=True)
+
     section("Site selection by Host/SNI")
 
     saved_sites = s.config.sites
@@ -572,6 +593,22 @@ serve_dir = "b"
           s._serve_dir_exposes_secrets(os.path.join(_sbase, "certs", "example.com")))
     check("an ordinary child folder (site/) is fine",
           not s._serve_dir_exposes_secrets(os.path.join(_sbase, "site")))
+
+    section("_loggable escapes log-bound control characters")
+
+    check("ESC is escaped",       s._loggable("a\x1bb")    == "a\\x1bb")
+    check("newline is escaped",   s._loggable("x\ny")      == "x\\x0ay")
+    check("DEL is escaped",       s._loggable("\x7f")      == "\\x7f")
+    check("printable path kept",  s._loggable("/a/b?c=1")  == "/a/b?c=1")
+    check("non-ASCII kept as-is", s._loggable("/café") == "/café")
+
+    section("_is_downgrade (update version floor)")
+
+    check("older patch is a downgrade",            s._is_downgrade("0.26.219", "0.26.3"))
+    check("newer patch is not a downgrade",        not s._is_downgrade("0.26.3", "0.26.219"))
+    check("equal version is not a downgrade",      not s._is_downgrade("1.2.3", "1.2.3"))
+    check("a higher major is not a downgrade",     not s._is_downgrade("0.26.219", "1.0.0"))
+    check("an uncomparable version never blocks",  not s._is_downgrade("1.2.3", "2.0rc1"))
 
     section("_format_uptime")
 
@@ -1739,6 +1776,8 @@ def run_server_tests(s, serve_dir):
           req("GET", auth=("testuser", "testpass")).status == 200)
     check("Wrong username → 401",
           req("GET", auth=("wronguser", "testpass")).status == 401)
+    check("Non-ASCII username → 401 (compared as bytes, no TypeError crash)",
+          req("GET", auth=("café", "testpass")).status == 401)
     check("HEAD with correct credentials → 200",
           req("HEAD", auth=("testuser", "testpass")).status == 200)
 

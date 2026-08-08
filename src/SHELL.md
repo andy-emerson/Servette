@@ -703,6 +703,20 @@ def _parse_version(source_bytes):
     return m.group(1).decode() if m else None
 
 
+def _is_downgrade(current, candidate):
+    """True when candidate is an older version than current. Versions compare as
+    tuples of their dot-separated integers; if either carries a non-numeric part
+    it can't be ordered, so this returns False — an uncomparable version never
+    blocks an update."""
+    def parse(v):
+        try:
+            return tuple(int(p) for p in v.split("."))
+        except ValueError:
+            return None
+    a, b = parse(current), parse(candidate)
+    return a is not None and b is not None and b < a
+
+
 def _release_asset_url_ok(url):
     """True when a release-asset URL is HTTPS on github.com. Update downloads are
     pinned to the release host so a poisoned API response can't redirect the fetch
@@ -752,6 +766,15 @@ def cmd_update():
 
     if new_version == __version__:
         print(f"  Already up to date ({__version__}).")
+        return
+
+    # 'update' only moves forward. A signed but older release — a stale "latest"
+    # from the API, or a downgrade a network attacker slipped past TLS — must not
+    # roll the server back to a version with known holes. 'restore' is the
+    # deliberate path back to the previous version.
+    if _is_downgrade(__version__, new_version):
+        print(f"  Update declined: {new_version} is older than the running {__version__}.")
+        print("  Use 'restore' to roll back to the previous version on purpose.")
         return
 
     assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}

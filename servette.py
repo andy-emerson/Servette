@@ -213,7 +213,17 @@ class Config:
 
     def save(self):
         def s(v):
-            return '"' + str(v).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace('"', '\\"') + '"'
+            # TOML basic string: backslash and quote escaped, the common control
+            # characters given their named escapes, and every other control char
+            # (NUL, ESC, vertical tab, DEL, …) escaped as \uXXXX. An unescaped
+            # control character writes a file tomllib then refuses to load, so a
+            # value carrying one would otherwise make Servette fail to start.
+            out = str(v).replace("\\", "\\\\").replace('"', '\\"')
+            out = (out.replace("\b", "\\b").replace("\f", "\\f")
+                      .replace("\n", "\\n").replace("\r", "\\r"))
+            out = "".join(c if c == "\t" or (c >= " " and c != "\x7f")
+                          else f"\\u{ord(c):04x}" for c in out)
+            return '"' + out + '"'
 
         sites_content = "\n".join(f"""\
 [[site]]
@@ -602,6 +612,14 @@ def _backup_version():
         return None
 
 
+def _loggable(s):
+    """Escape control characters in a string bound for the logs. A request path
+    reaches the journal and, from there, an operator's terminal — an unescaped
+    ANSI/control sequence could move the cursor, clear the screen, or hide text.
+    Printable characters (including non-ASCII) pass through unchanged."""
+    return "".join(c if c >= " " and c != "\x7f" else f"\\x{ord(c):02x}" for c in s)
+
+
 def _handle_request(method, url_path, headers, raw_ip):
     """The request core. Given the method, URL path, the parsed request headers (a
     case-insensitive mapping — an http.client.HTTPMessage in production), and the raw
@@ -609,6 +627,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     response and the body blanked for HEAD. All the decision logic lives here; the
     handler just feeds it what http.server parsed and sends the result back."""
     ip = _normalize_ip(raw_ip)
+    log_path = _loggable(url_path)   # request path, escaped for the log lines below
     if config.trusted_proxy:
         xff = headers.get("X-Forwarded-For", "")
         # Rightmost XFF value is what the single trusted proxy appended.
@@ -676,9 +695,12 @@ def _handle_request(method, url_path, headers, raw_ip):
                 parts          = decoded.split(":", 1)
                 submitted_user = parts[0]
                 pw             = parts[1] if len(parts) == 2 else ""
-                # Evaluate both before combining so the password hash always runs, even
-                # when the username is wrong — no early-out timing signal for usernames.
-                user_ok = hmac.compare_digest(submitted_user, site.username)
+                # Compare as UTF-8 bytes: hmac.compare_digest raises TypeError on a
+                # non-ASCII str, so a crafted non-ASCII username would otherwise escape
+                # this try and crash the request. Evaluate both before combining so the
+                # password hash always runs even when the username is wrong — no
+                # early-out timing signal for usernames.
+                user_ok = hmac.compare_digest(submitted_user.encode("utf-8"), site.username.encode("utf-8"))
                 pass_ok = _check_password(pw, site.password_hash, site.password_salt)
                 authed  = user_ok and pass_ok
             except (ValueError, UnicodeDecodeError):
@@ -711,12 +733,12 @@ def _handle_request(method, url_path, headers, raw_ip):
     try:
         file_path, status = _resolve_request_path(url_path, site.serve_dir)
     except Exception as e:
-        log.error("500 resolving %s: %s", url_path, e)
+        log.error("500 resolving %s: %s", log_path, e)
         body_500 = b"Internal server error."
         return resp(500, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())], body_500)
 
     if status == 403:
-        log.warning("403 Forbidden %s from %s", url_path, ip)
+        log.warning("403 Forbidden %s from %s", log_path, ip)
         body_403 = b"Forbidden."
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
@@ -730,7 +752,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         else:
             body_404 = b"Not found."
             content_type_404 = b"text/plain"
-        log.warning("404 Not Found %s from %s", url_path, ip)
+        log.warning("404 Not Found %s from %s", log_path, ip)
         return resp(404, [(b"content-type", content_type_404), (b"content-length", str(len(body_404)).encode())], body_404)
 
     raw, compressed, etag = _get_cached_file(file_path)
@@ -741,7 +763,7 @@ def _handle_request(method, url_path, headers, raw_ip):
 
     # 304 Not Modified
     if headers.get("If-None-Match", "") == etag:
-        log.info("304 Not Modified %s to %s", url_path, ip)
+        log.info("304 Not Modified %s to %s", log_path, ip)
         return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header(site.username).encode())])
 
     accept_encoding = headers.get("Accept-Encoding", "")
@@ -757,7 +779,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     if use_gzip:
         # Byte ranges apply to the identity representation, so they aren't combined
         # with gzip; compressible types are small text anyway.
-        log.info("200 %s to %s", url_path, ip)
+        log.info("200 %s to %s", log_path, ip)
         return resp(200, common + [
             (b"content-length",   str(len(compressed)).encode()),
             (b"content-encoding", b"gzip"),
@@ -767,7 +789,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     total = len(raw)
     rng   = _parse_range(headers.get("Range", ""), total)
     if rng == "invalid":
-        log.info("416 Range Not Satisfiable %s to %s", url_path, ip)
+        log.info("416 Range Not Satisfiable %s to %s", log_path, ip)
         return resp(416, [
             (b"content-range",  f"bytes */{total}".encode()),
             (b"content-length", b"0"),
@@ -776,14 +798,14 @@ def _handle_request(method, url_path, headers, raw_ip):
     if rng is not None:
         start, end = rng
         chunk = raw[start:end + 1]
-        log.info("206 %s [%d-%d] to %s", url_path, start, end, ip)
+        log.info("206 %s [%d-%d] to %s", log_path, start, end, ip)
         return resp(206, common + [
             (b"content-range",  f"bytes {start}-{end}/{total}".encode()),
             (b"content-length", str(len(chunk)).encode()),
             (b"accept-ranges",  b"bytes"),
         ], chunk)
 
-    log.info("200 %s to %s", url_path, ip)
+    log.info("200 %s to %s", log_path, ip)
     return resp(200, common + [
         (b"content-length", str(total).encode()),
         (b"accept-ranges",  b"bytes"),
@@ -2843,6 +2865,20 @@ def _parse_version(source_bytes):
     return m.group(1).decode() if m else None
 
 
+def _is_downgrade(current, candidate):
+    """True when candidate is an older version than current. Versions compare as
+    tuples of their dot-separated integers; if either carries a non-numeric part
+    it can't be ordered, so this returns False — an uncomparable version never
+    blocks an update."""
+    def parse(v):
+        try:
+            return tuple(int(p) for p in v.split("."))
+        except ValueError:
+            return None
+    a, b = parse(current), parse(candidate)
+    return a is not None and b is not None and b < a
+
+
 def _release_asset_url_ok(url):
     """True when a release-asset URL is HTTPS on github.com. Update downloads are
     pinned to the release host so a poisoned API response can't redirect the fetch
@@ -2892,6 +2928,15 @@ def cmd_update():
 
     if new_version == __version__:
         print(f"  Already up to date ({__version__}).")
+        return
+
+    # 'update' only moves forward. A signed but older release — a stale "latest"
+    # from the API, or a downgrade a network attacker slipped past TLS — must not
+    # roll the server back to a version with known holes. 'restore' is the
+    # deliberate path back to the previous version.
+    if _is_downgrade(__version__, new_version):
+        print(f"  Update declined: {new_version} is older than the running {__version__}.")
+        print("  Use 'restore' to roll back to the previous version on purpose.")
         return
 
     assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}

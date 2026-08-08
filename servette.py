@@ -120,6 +120,7 @@ class Site:
         self.password_salt  = data.get("password_salt",  "")
         self.publish_url    = data.get("publish_url",    "")
         self.publish_key    = data.get("publish_key",    "")
+        self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
 class Config:
@@ -192,10 +193,11 @@ class Config:
         except OSError:
             pass
 
-        try:
-            self._cert_mtime = os.path.getmtime(_resolve(self.sites[0].cert_file))
-        except OSError:
-            self._cert_mtime = None
+        for site in self.sites:
+            try:
+                site._cert_mtime = os.path.getmtime(_resolve(site.cert_file))
+            except OSError:
+                site._cert_mtime = None
 
         if migrating:
             self.save()
@@ -1154,9 +1156,10 @@ _server_start_time    = None
 _watchdog_thread      = None
 _sweep_thread         = None
 _sweep_stop           = threading.Event()
-_last_renewal_attempt = 0.0
+_last_renewal_attempt = {}  # domain -> monotonic timestamp of the last renewal attempt;
+                            # per-domain so one site's failure-triggered backoff
+                            # can't delay another's renewal
 _publish_poll_thread  = None
-_cert_domain          = None  # cached domain from active cert; None means self-signed
 
 _TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
 ACME_RETRIES  = 3
@@ -1170,36 +1173,38 @@ def _server_running():
 
 
 def _cert_watchdog_tick():
-    """One renewal/reload pass. Exceptions are contained here so a failed pass can
-    never kill the watchdog thread — a dead watchdog would silently end renewals
-    for the life of the process; the next pass simply retries."""
-    global _last_renewal_attempt, _cert_domain
-    try:
-        cert_path = _resolve(config.cert_file)
+    """One renewal/reload pass over every configured site's certificate. Each
+    site's pass is wrapped in its own try/except: one site's failure can't skip
+    the rest, and nothing here can kill the watchdog thread — a dead watchdog
+    would silently end renewals for every site, for the life of the process;
+    the next pass simply retries."""
+    for site in config.sites:
+        try:
+            cert_path = _resolve(site.cert_file)
 
-        domain = _domain_from_cert(cert_path)
-        if domain:
-            # Let's Encrypt cert: auto-renew when fewer than 30 days remain
-            days = _cert_days_remaining(cert_path)
-            if days is not None and days < 30:
-                now = time.monotonic()
-                if now - _last_renewal_attempt >= 3600:
-                    _last_renewal_attempt = now
-                    log.info("Certificate for %s expires in %d days — renewing", domain, days)
-                    _obtain_trusted_cert(domain)
-                    _cert_domain = domain
-        else:
-            # Self-signed or externally managed cert: reload if the file changed on disk
-            try:
-                mtime = os.path.getmtime(cert_path)
-                if config._cert_mtime is not None and mtime != config._cert_mtime:
-                    log.info("Certificate changed on disk — reloading server")
-                    config._cert_mtime = mtime
-                    _reload_server()
-            except OSError:
-                pass
-    except Exception:
-        log.exception("Cert watchdog pass failed — will retry on the next pass")
+            if site.domain:
+                # Let's Encrypt cert: auto-renew when fewer than 30 days remain
+                days = _cert_days_remaining(cert_path)
+                if days is not None and days < 30:
+                    now  = time.monotonic()
+                    last = _last_renewal_attempt.get(site.domain, 0.0)
+                    if now - last >= 3600:
+                        _last_renewal_attempt[site.domain] = now
+                        log.info("Certificate for %s expires in %d days — renewing", site.domain, days)
+                        _obtain_trusted_cert(site.domain, site)
+            else:
+                # Self-signed or externally managed cert: reload if the file changed on disk
+                try:
+                    mtime = os.path.getmtime(cert_path)
+                    if site._cert_mtime is not None and mtime != site._cert_mtime:
+                        log.info("Certificate changed on disk — reloading server")
+                        site._cert_mtime = mtime
+                        _reload_server()
+                except OSError:
+                    pass
+        except Exception:
+            log.exception("Cert watchdog pass failed for %s — will retry on the next pass",
+                          site.domain or "a self-signed site")
 
 
 def _cert_watchdog():
@@ -1244,7 +1249,7 @@ def _publish_poll():
 
 
 def start_server():
-    global _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread, \
+    global _server_start_time, _watchdog_thread, _sweep_thread, \
         _publish_poll_thread, _https_server, _https_thread, _http_server
 
     if _server_running():
@@ -1305,21 +1310,22 @@ def start_server():
         _publish_poll_thread = threading.Thread(target=_publish_poll, daemon=True)
         _publish_poll_thread.start()
     _server_start_time = time.monotonic()
-    _cert_domain = _domain_from_cert(_resolve(config.cert_file))
     log.info("Server started on port %d", config.port)
-    print(f"\nServing {config.serve_dir}/ at https://localhost:{config.port}\n")
+    for site in config.sites:
+        host_display = site.domain or "localhost"
+        print(f"\nServing {site.serve_dir}/ at https://{host_display}:{config.port}\n")
 
-    cert_path = _resolve(config.cert_file)
-    days      = _cert_days_remaining(cert_path)
-    if days is not None and days < 30:
-        if days <= 0:
-            print("Warning: SSL certificate has expired. Browsers will block visitors.")
-            print("Run 'config' then 'cert' to renew it.\n")
-            log.warning("SSL certificate has expired")
-        else:
-            print(f"Warning: SSL certificate expires in {days} days.")
-            print("Run 'config' then 'cert' to renew it.\n")
-            log.warning("SSL certificate expires in %d days", days)
+        days = _cert_days_remaining(_resolve(site.cert_file))
+        if days is not None and days < 30:
+            label = site.domain or "this site"
+            if days <= 0:
+                print(f"Warning: SSL certificate for {label} has expired. Browsers will block visitors.")
+                print("Run 'config' then 'cert' to renew it.\n")
+                log.warning("SSL certificate for %s has expired", label)
+            else:
+                print(f"Warning: SSL certificate for {label} expires in {days} days.")
+                print("Run 'config' then 'cert' to renew it.\n")
+                log.warning("SSL certificate for %s expires in %d days", label, days)
 
     for issue in _production_issues():
         print(_c(f"  {issue}", "yellow"))
@@ -1661,13 +1667,14 @@ def _write_unit_files():
     subprocess.run(["systemctl", "enable", "--now", "servette-netwatch.timer"],
                    check=True, capture_output=True)
 
-    # Chown files the service process needs to read
+    # Chown files the service process needs to read, across every site
     _chown_servette(config.CONFIG_FILE)
-    if config.cert_file:
-        _chown_servette(_resolve(config.cert_file))
-    if config.key_file:
-        _chown_servette(_resolve(config.key_file))
-    _chown_servette(_resolve(config.serve_dir))
+    for site in config.sites:
+        if site.cert_file:
+            _chown_servette(_resolve(site.cert_file))
+        if site.key_file:
+            _chown_servette(_resolve(site.key_file))
+        _chown_servette(_resolve(site.serve_dir))
     _chown_servette(os.path.join(BASE_DIR, "certs"))
     _chown_servette(os.path.join(BASE_DIR, ".acme-account.pem"))
     # Create the ACME webroot now so it exists when systemd applies ReadWritePaths
@@ -1675,9 +1682,11 @@ def _write_unit_files():
     os.makedirs(ACME_WEBROOT, exist_ok=True)
     _chown_servette(ACME_WEBROOT)
 
-    # Warn if serve_dir isn't world-readable
-    if config.serve_dir:
-        serve_path = _resolve(config.serve_dir)
+    # Warn if any site's serve_dir isn't world-readable
+    for site in config.sites:
+        if not site.serve_dir:
+            continue
+        serve_path = _resolve(site.serve_dir)
         if os.path.isdir(serve_path):
             mode = os.stat(serve_path).st_mode
             if not (mode & 0o005 == 0o005):  # world read+execute on directory
@@ -2040,9 +2049,10 @@ class _ACMEClient:
                     pass
 
 
-def _obtain_trusted_cert(domain):
+def _obtain_trusted_cert(domain, site):
     """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
-    minimal ACME client (_ACMEClient) on stdlib urllib + cryptography."""
+    minimal ACME client (_ACMEClient) on stdlib urllib + cryptography, and store it
+    on `site`."""
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
@@ -2129,11 +2139,10 @@ def _obtain_trusted_cert(domain):
                     os.chmod(key_path, 0o600)
                     _chown_servette(CERTS_DIR)
 
-                config.cert_file = cert_path
-                config.key_file  = key_path
+                site.cert_file = cert_path
+                site.key_file  = key_path
+                site.domain    = domain
                 config.save()
-                global _cert_domain
-                _cert_domain = domain
 
                 issued_names = f"{domain} and {www_domain}" if include_www else domain
                 print(f"  Certificate issued for {issued_names}.")
@@ -2398,7 +2407,9 @@ def _config_set(attr, label, cast=str, validate=None, error="invalid value", hin
 
 
 def _config_cert():
-    cert_path = _resolve(config.cert_file)
+    # Single-site editing until 'add site' lands — always the first configured site.
+    site      = config.sites[0]
+    cert_path = _resolve(site.cert_file)
     if os.path.exists(cert_path):
         days = _cert_days_remaining(cert_path)
         if days is not None and days <= 0:
@@ -2406,20 +2417,21 @@ def _config_cert():
         elif days is not None:
             print(f"  Current certificate expires in {days} days.")
         else:
-            print(f"  Current: {config.cert_file}")
+            print(f"  Current: {site.cert_file}")
     print()
 
     domain = _input("  Domain name (leave blank for self-signed): ").strip()
 
     if domain:
-        _obtain_trusted_cert(domain)
+        _obtain_trusted_cert(domain, site)
     else:
-        cert_path = _resolve(config.cert_file or "cert.pem")
-        key_path  = _resolve(config.key_file or "key.pem")
+        cert_path = _resolve(site.cert_file or "cert.pem")
+        key_path  = _resolve(site.key_file or "key.pem")
         print("  Generating self-signed certificate...")
         _generate_self_signed_cert(cert_path, key_path)
-        config.cert_file = config.cert_file or "cert.pem"
-        config.key_file  = config.key_file or "key.pem"
+        site.cert_file = site.cert_file or "cert.pem"
+        site.key_file  = site.key_file or "key.pem"
+        site.domain    = ""
         config.save()
         print("  → self-signed certificate generated.")
         print("  Note: your browser will show a security warning until you add a domain.\n")
@@ -3053,18 +3065,24 @@ def _format_uptime(seconds):
 
 
 def _production_issues():
-    """Return a list of strings describing conditions that prevent production readiness."""
-    issues = []
-    if not config.serve_dir or not os.path.exists(_resolve(config.serve_dir)):
-        issues.append("serve directory not configured — run 'config'")
-    if not config.cert_file or not os.path.exists(_resolve(config.cert_file)):
-        issues.append("certificate not configured — run 'config cert'")
-    elif _domain_from_cert(_resolve(config.cert_file)) is None:
-        issues.append("self-signed certificate — run 'config cert' to add a domain")
-    if not config.username:
-        issues.append("no password protection — run 'config' to set credentials")
-    if bool(config.publish_url) != bool(config.publish_key):
-        issues.append("publish channel partially configured — run 'config publish' to finish setup")
+    """Return a list of strings describing conditions that prevent production
+    readiness, across every configured site. Single-site installs (still the
+    common case) see exactly today's unlabeled messages; a labeled site name
+    is added only once there's more than one to tell apart."""
+    issues  = []
+    labeled = len(config.sites) > 1
+    for site in config.sites:
+        tag = f" ({site.domain or site.serve_dir})" if labeled else ""
+        if not site.serve_dir or not os.path.exists(_resolve(site.serve_dir)):
+            issues.append(f"serve directory not configured{tag} — run 'config'")
+        if not site.cert_file or not os.path.exists(_resolve(site.cert_file)):
+            issues.append(f"certificate not configured{tag} — run 'config cert'")
+        elif _domain_from_cert(_resolve(site.cert_file)) is None:
+            issues.append(f"self-signed certificate{tag} — run 'config cert' to add a domain")
+        if not site.username:
+            issues.append(f"no password protection{tag} — run 'config' to set credentials")
+        if bool(site.publish_url) != bool(site.publish_key):
+            issues.append(f"publish channel partially configured{tag} — run 'config publish' to finish setup")
     mem_kb, avail_kb, swap_kb = _meminfo()
     rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
     active_mb = (swap_kb or 0) // 1024
@@ -3080,30 +3098,35 @@ def _production_issues():
 
 
 def _cache_warnings():
-    """Warn when the site, or any single file, is too big for the in-memory cache."""
-    warnings   = []
-    serve_dir  = _resolve(config.serve_dir)
-    if not os.path.isdir(serve_dir):
-        return warnings
+    """Warn when a site, or any single file within it, is too big for the shared
+    in-memory cache. Single-site installs see exactly today's unlabeled messages;
+    a labeled site name is added only once there's more than one to tell apart."""
+    warnings  = []
     cache_max = config.cache_size_mb * 1024 * 1024
-    total     = 0
-    for root, _dirs, files in os.walk(serve_dir):
-        for name in files:
-            try:
-                size = os.path.getsize(os.path.join(root, name))
-            except OSError:
-                continue
-            total += size
-            if size > cache_max:
-                warnings.append(
-                    f"{name} ({size / 1048576:.1f} MB) is larger than the cache "
-                    f"({config.cache_size_mb} MB) and is never cached"
-                )
-    if total > cache_max:
-        warnings.append(
-            f"site is {total / 1048576:.1f} MB but the cache is {config.cache_size_mb} MB "
-            f"— not all of it stays cached at once"
-        )
+    labeled   = len(config.sites) > 1
+    for site in config.sites:
+        serve_dir = _resolve(site.serve_dir)
+        if not os.path.isdir(serve_dir):
+            continue
+        tag   = f" in {site.domain or site.serve_dir}" if labeled else ""
+        total = 0
+        for root, _dirs, files in os.walk(serve_dir):
+            for name in files:
+                try:
+                    size = os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    continue
+                total += size
+                if size > cache_max:
+                    warnings.append(
+                        f"{name}{tag} ({size / 1048576:.1f} MB) is larger than the cache "
+                        f"({config.cache_size_mb} MB) and is never cached"
+                    )
+        if total > cache_max:
+            warnings.append(
+                f"site{tag} is {total / 1048576:.1f} MB but the cache is {config.cache_size_mb} MB "
+                f"— not all of it stays cached at once"
+            )
     return warnings
 
 

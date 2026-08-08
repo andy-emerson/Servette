@@ -1850,20 +1850,93 @@ def run_install_tests(s, tmpdir):
 
     section("Cert watchdog survives a failing pass")
 
-    saved_dfc = s._domain_from_cert
+    saved_cdr         = s._cert_days_remaining
+    saved_orig_domain = s.config.sites[0].domain
     logging.disable(logging.CRITICAL)   # the contained failure logs a traceback — mute it
     try:
         def _boom(path):
             raise RuntimeError("watchdog test failure")
-        s._domain_from_cert = _boom
+        s._cert_days_remaining  = _boom
+        s.config.sites[0].domain = "watchdog-test.example.com"  # take the domain-bearing branch
         try:
             s._cert_watchdog_tick()
             check("A raising pass is contained by the tick", True)
         except Exception as e:
             check(f"A raising pass is contained by the tick (raised {e})", False)
     finally:
-        s._domain_from_cert = saved_dfc
+        s._cert_days_remaining   = saved_cdr
+        s.config.sites[0].domain = saved_orig_domain
         logging.disable(logging.NOTSET)
+
+    section("Cert watchdog: one site's failure doesn't stop the others")
+
+    saved_cdr2    = s._cert_days_remaining
+    saved_reload  = s._reload_server
+    saved_sites4  = s.config.sites
+    watchdog_dir  = tempfile.mkdtemp()
+    try:
+        cert_a = os.path.join(watchdog_dir, "a-cert.pem")
+        key_a  = os.path.join(watchdog_dir, "a-key.pem")
+        subprocess.run([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_a,
+            "-out", cert_a, "-days", "1", "-nodes", "-subj", "/CN=a.example.com"
+        ], capture_output=True, check=True)
+        site_a = s.Site({"domain": "a.example.com", "cert_file": cert_a, "key_file": key_a, "serve_dir": watchdog_dir})
+
+        cert_b = os.path.join(watchdog_dir, "b-cert.pem")
+        key_b  = os.path.join(watchdog_dir, "b-key.pem")
+        subprocess.run([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_b,
+            "-out", cert_b, "-days", "1", "-nodes", "-subj", "/CN=localhost"
+        ], capture_output=True, check=True)
+        site_b = s.Site({"domain": "", "cert_file": cert_b, "key_file": key_b, "serve_dir": watchdog_dir})
+        site_b._cert_mtime = os.path.getmtime(cert_b) - 100  # force a "changed on disk" detection
+
+        s.config.sites = [site_a, site_b]
+
+        def _boom_for_a(path):
+            if path == cert_a:
+                raise RuntimeError("site A failure")
+            return saved_cdr2(path)
+
+        reload_calls = []
+        s._cert_days_remaining = _boom_for_a
+        s._reload_server       = lambda: reload_calls.append(1)
+
+        logging.disable(logging.CRITICAL)
+        try:
+            s._cert_watchdog_tick()
+        finally:
+            logging.disable(logging.NOTSET)
+
+        check("Site B's self-signed reload still runs despite site A's failure",
+              reload_calls == [1])
+    finally:
+        s._cert_days_remaining = saved_cdr2
+        s._reload_server       = saved_reload
+        s.config.sites         = saved_sites4
+        shutil.rmtree(watchdog_dir, ignore_errors=True)
+
+    section("Production issues and cache warnings: multi-site labeling")
+
+    saved_sites5 = s.config.sites
+    try:
+        site_solo = s.Site({"domain": "", "serve_dir": "", "cert_file": "", "username": ""})
+        s.config.sites = [site_solo]
+        issues = s._production_issues()
+        check("Single site: messages carry no site label",
+              any(i == "serve directory not configured — run 'config'" for i in issues))
+
+        site_x = s.Site({"domain": "x.example.com", "serve_dir": "", "cert_file": "", "username": ""})
+        site_y = s.Site({"domain": "", "serve_dir": "y", "cert_file": "", "username": ""})
+        s.config.sites = [site_x, site_y]
+        issues2 = s._production_issues()
+        check("Multi-site: a domain-bearing site is labeled with its domain",
+              any("serve directory not configured (x.example.com) —" in i for i in issues2))
+        check("Multi-site: a domainless site is labeled with its serve_dir",
+              any("serve directory not configured (y) —" in i for i in issues2))
+    finally:
+        s.config.sites = saved_sites5
 
     section("Publish poll tick")
 

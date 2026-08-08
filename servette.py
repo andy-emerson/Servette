@@ -2476,6 +2476,16 @@ def _config_add_site():
     suffix = os.urandom(4).hex()
     site.cert_file = f"cert-{suffix}.pem"
     site.key_file  = f"key-{suffix}.pem"
+    # Generated unconditionally, before the domain is even asked about: if a
+    # domain is given below and ACME issuance fails, cert_file/key_file must
+    # still point at real files on disk rather than a placeholder name that
+    # was config.save()'d but never written — start_server()'s pre-flight
+    # existence check refuses to start the WHOLE server, for every site, the
+    # next time anything restarts it, if a site's cert_file is missing.
+    print("  Generating self-signed certificate...")
+    _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
+    _chown_servette(_resolve(site.cert_file))
+    _chown_servette(_resolve(site.key_file))
     config.save()
     print(f"  → site {idx} added.\n")
 
@@ -2487,14 +2497,15 @@ def _config_add_site():
     reloaded = False
     if domain:
         _obtain_trusted_cert(domain, site)  # reloads the server itself on success
-        reloaded = True
+        # site.domain is only assigned inside _obtain_trusted_cert on the
+        # success path, so this distinguishes a real reload from a failed
+        # ACME attempt that left the self-signed fallback (already generated
+        # above) as the site's live cert.
+        if site.domain == domain:
+            reloaded = True
+        else:
+            print("  → keeping the self-signed certificate for now. Browsers will show a security warning until you retry the domain.\n")
     else:
-        print("  Generating self-signed certificate...")
-        _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
-        _chown_servette(_resolve(site.cert_file))
-        _chown_servette(_resolve(site.key_file))
-        config.save()
-        print("  → self-signed certificate generated.")
         print("  Note: browsers will show a security warning until you add a domain.\n")
 
     print("  Password protection (optional). Leave username blank to disable.")

@@ -851,7 +851,10 @@ def run_dispatch_tests(s):
 
         # Domain branch: _obtain_trusted_cert already reloads on success — add-site
         # must not reload a second time on top of it.
-        s._obtain_trusted_cert = lambda domain, site: reload_calls.append("obtain-reloaded")
+        def _fake_obtain_success(domain, site):
+            reload_calls.append("obtain-reloaded")
+            site.domain = domain  # only happens on the real success path
+        s._obtain_trusted_cert = _fake_obtain_success
         reload_calls.clear()
         dir6 = tempfile.mkdtemp()
         saved_input3 = builtins.input
@@ -865,6 +868,33 @@ def run_dispatch_tests(s):
             shutil.rmtree(dir6, ignore_errors=True)
         check("add-site's own reload doesn't double up on the domain branch's",
               reload_calls.count(1) == 0 and reload_calls.count("obtain-reloaded") == 1)
+        generated_files.extend([s.config.sites[-1].cert_file, s.config.sites[-1].key_file])
+
+        # ACME failure on the domain branch must not leave a dangling cert
+        # reference: the self-signed fallback (generated unconditionally,
+        # before the domain is even asked about) stays as the site's live
+        # cert, and add-site's own reload must still fire since no reload
+        # happened inside the failed _obtain_trusted_cert call.
+        s._obtain_trusted_cert = lambda domain, site: None  # simulates ACME failure: no site.domain assignment
+        reload_calls.clear()
+        dir6b = tempfile.mkdtemp()
+        saved_input3b = builtins.input
+        try:
+            script3b = iter([dir6b, "unreachable.example.com", ""])
+            builtins.input = lambda prompt="": next(script3b, "")
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._config_add_site()
+        finally:
+            builtins.input = saved_input3b
+            shutil.rmtree(dir6b, ignore_errors=True)
+        failed_site = s.config.sites[-1]
+        check("A failed ACME attempt leaves the site with a real, generated self-signed cert",
+              os.path.exists(s._resolve(failed_site.cert_file)) and os.path.exists(s._resolve(failed_site.key_file)))
+        check("...and the site's domain stays unset rather than the failed one",
+              failed_site.domain == "")
+        check("...and add-site still reloads to bring the self-signed fallback live",
+              reload_calls.count(1) == 1)
+        generated_files.extend([failed_site.cert_file, failed_site.key_file])
 
         # Duplicate-domain guard: add-site falls back to self-signed rather than
         # creating a second site that would silently steal the first's TLS identity.

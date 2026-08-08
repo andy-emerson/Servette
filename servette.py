@@ -767,6 +767,16 @@ def _select_site(host):
     for site in config.sites:
         if site.domain and site.domain.lower() == host:
             return site
+    # www.<domain> reaches the site configured as <domain>. _obtain_trusted_cert
+    # deliberately issues one certificate covering both names, so routing has to
+    # honour the same pair or the www name gets a certificate and then a 404.
+    # Only after the exact loop above, so a site explicitly configured as
+    # www.<domain> still wins its own traffic rather than being shadowed.
+    if host.startswith("www."):
+        bare = host[4:]
+        for site in config.sites:
+            if site.domain and site.domain.lower() == bare:
+                return site
     for site in config.sites:
         if not site.domain:
             return site
@@ -823,7 +833,16 @@ def _build_site_ssl_contexts():
     for site in config.sites:
         ctx = _build_ssl_context(_resolve(site.cert_file), _resolve(site.key_file))
         if site.domain:
-            domain_ctx[site.domain.lower()] = ctx
+            d = site.domain.lower()
+            domain_ctx[d] = ctx
+            # The issued certificate covers www.<domain> too, so the SNI table
+            # has to answer for that name as well — otherwise a www connection
+            # falls through to the default context and is served a certificate
+            # for nothing it asked for, before routing ever runs. setdefault,
+            # and exact matches assign unconditionally, so a site explicitly
+            # configured as www.<domain> keeps its own context regardless of
+            # which order the two sites appear in.
+            domain_ctx.setdefault(f"www.{d}", ctx)
         elif default_ctx is None:
             default_ctx = ctx  # first domainless site is the catch-all/default
 

@@ -323,6 +323,34 @@ serve_dir = "b"
               s._select_site("nope.example.com") is catch_all)
         check("A real domain match still wins over the catch-all",
               s._select_site("a.example.com") is site_a)
+
+        # _obtain_trusted_cert issues one certificate covering <domain> and
+        # www.<domain>, so routing has to answer for both or the www name gets a
+        # certificate and then a 404.
+        site_www = s.Site({"domain": "www.a.example.com", "serve_dir": "w"})
+
+        s.config.sites = [site_a, site_b]
+        check("www.<domain> reaches the site configured as <domain>",
+              s._select_site("www.a.example.com") is site_a)
+        check("www fallback is case-insensitive",
+              s._select_site("WWW.A.Example.COM") is site_a)
+        check("www fallback strips the port too",
+              s._select_site("www.a.example.com:443") is site_a)
+        check("www of an unconfigured domain still misses",
+              s._select_site("www.nope.example.com") is None)
+
+        s.config.sites = [site_a, site_www]
+        check("An explicit www.<domain> site wins its own traffic",
+              s._select_site("www.a.example.com") is site_www)
+        s.config.sites = [site_www, site_a]
+        check("An explicit www.<domain> site wins whatever the list order",
+              s._select_site("www.a.example.com") is site_www)
+        check("The bare domain still reaches the bare site alongside it",
+              s._select_site("a.example.com") is site_a)
+
+        s.config.sites = [site_a, catch_all]
+        check("www fallback is preferred over the domainless catch-all",
+              s._select_site("www.a.example.com") is site_a)
     finally:
         s.config.sites = saved_sites
 
@@ -378,6 +406,15 @@ serve_dir = "b"
         sni_cb(fake_b, "b.example.com", default_ctx2)
         check("A different domain switches to a different context",
               fake_b.context is not fake_a.context)
+
+        # The issued certificate covers www.<domain>, so SNI for that name must
+        # land on the same context. Without this the connection falls to the
+        # default context and the visitor is shown a certificate for nothing
+        # they asked for — a warning before routing ever runs.
+        fake_www = _FakeSSLSocket(default_ctx2)
+        sni_cb(fake_www, "www.a.example.com", default_ctx2)
+        check("SNI for www.<domain> gets the same context as <domain>",
+              fake_www.context is fake_a.context)
 
         fake_miss = _FakeSSLSocket(default_ctx2)
         sni_cb(fake_miss, "unrecognized.example.com", default_ctx2)

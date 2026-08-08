@@ -908,6 +908,18 @@ def _select_site(host):
     return None
 
 
+def _domain_in_use(domain, excluding=None):
+    """True if some other configured site already claims this domain
+    (case-insensitive). Two sites sharing a domain would make TLS and HTTP
+    routing silently disagree about which site is being served:
+    _build_site_ssl_contexts keys its SNI table by domain, so the later site
+    registered wins there, while _select_site above returns the first
+    matching site — a visitor would get one site's certificate and the
+    other's content."""
+    domain = domain.lower()
+    return any(s is not excluding and s.domain and s.domain.lower() == domain for s in config.sites)
+
+
 def _build_ssl_context(cert_path, key_path):
     """TLS context for one certificate — minimum version enforced, optional cipher
     override, ALPN pinned to HTTP/1.1. Raises if the cert or key is unreadable, so
@@ -2457,17 +2469,30 @@ def _config_add_site():
     # A unique self-signed cert/key pair, so a second self-signed site doesn't
     # collide with the first's cert.pem/key.pem — overwritten if a domain is
     # obtained below, which uses the domain-scoped certs/<domain>/ path instead.
-    site.cert_file = f"cert-{idx}.pem"
-    site.key_file  = f"key-{idx}.pem"
+    # Suffixed with randomness, not the site's list position: a position-based
+    # name (cert-{idx}.pem) collides with a surviving site's own files after a
+    # remove-site/add-site sequence shifts indices, silently overwriting that
+    # site's live certificate.
+    suffix = os.urandom(4).hex()
+    site.cert_file = f"cert-{suffix}.pem"
+    site.key_file  = f"key-{suffix}.pem"
     config.save()
     print(f"  → site {idx} added.\n")
 
     domain = _input("  Domain name (leave blank for self-signed): ").strip()
+    if domain and _domain_in_use(domain):
+        print(f"  → {domain} is already used by another site on this box — using a self-signed certificate instead.")
+        domain = ""
+
+    reloaded = False
     if domain:
-        _obtain_trusted_cert(domain, site)
+        _obtain_trusted_cert(domain, site)  # reloads the server itself on success
+        reloaded = True
     else:
         print("  Generating self-signed certificate...")
         _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
+        _chown_servette(_resolve(site.cert_file))
+        _chown_servette(_resolve(site.key_file))
         config.save()
         print("  → self-signed certificate generated.")
         print("  Note: browsers will show a security warning until you add a domain.\n")
@@ -2478,7 +2503,7 @@ def _config_add_site():
         _config_password(site)
 
     print(f"\n  Site {idx} added. Run 'publish {idx}' to set up its publish channel.")
-    if _server_running() or _service_is_active():
+    if not reloaded and (_server_running() or _service_is_active()):
         _reload_server()
 
 
@@ -2563,6 +2588,10 @@ def _config_cert(site):
 
     domain = _input("  Domain name (leave blank for self-signed): ").strip()
 
+    if domain and _domain_in_use(domain, excluding=site):
+        print(f"  → {domain} is already used by another site on this box, unchanged")
+        return
+
     if domain:
         _obtain_trusted_cert(domain, site)
     else:
@@ -2570,6 +2599,8 @@ def _config_cert(site):
         key_path  = _resolve(site.key_file or "key.pem")
         print("  Generating self-signed certificate...")
         _generate_self_signed_cert(cert_path, key_path)
+        _chown_servette(cert_path)
+        _chown_servette(key_path)
         site.cert_file = site.cert_file or "cert.pem"
         site.key_file  = site.key_file or "key.pem"
         site.domain    = ""

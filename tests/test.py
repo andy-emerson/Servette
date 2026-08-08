@@ -688,11 +688,14 @@ def run_dispatch_tests(s):
 
     section("Site management (add/remove/select)")
 
-    saved_sites7  = s.config.sites
+    saved_sites7  = list(s.config.sites)  # a copy: add-site/remove-site mutate the
+                                          # list in place, so a bare reference here
+                                          # wouldn't actually restore anything
     saved_reload  = s._reload_server
     saved_ssrv    = s._server_running
     saved_sact    = s._service_is_active
     site_test_dir = tempfile.mkdtemp()
+    new_site_cert_files = []  # populated below once add-site picks its (randomized) names
     try:
         s._server_running    = lambda: False
         s._service_is_active = lambda: False
@@ -725,6 +728,7 @@ def run_dispatch_tests(s):
             check("add-site generates a real self-signed cert",
                   os.path.isfile(s._resolve(s.config.sites[1].cert_file)))
             check("add-site reports the new site's index", "Site 1 added" in buf.getvalue())
+            new_site_cert_files.extend([s.config.sites[1].cert_file, s.config.sites[1].key_file])
         finally:
             builtins.input = saved_input
 
@@ -756,7 +760,7 @@ def run_dispatch_tests(s):
         finally:
             s._prompt = saved_prompt
     finally:
-        for fname in ("cert-1.pem", "key-1.pem"):
+        for fname in new_site_cert_files:
             p = os.path.join(s.BASE_DIR, fname)
             if os.path.exists(p):
                 os.remove(p)
@@ -765,6 +769,148 @@ def run_dispatch_tests(s):
         s._service_is_active = saved_sact
         s.config.sites       = saved_sites7
         shutil.rmtree(site_test_dir, ignore_errors=True)
+
+    section("_domain_in_use")
+
+    saved_sites9 = s.config.sites
+    try:
+        site_a = s.Site({"domain": "a.example.com"})
+        site_b = s.Site({"domain": ""})
+        s.config.sites = [site_a, site_b]
+        check("Domain already claimed by another site is in use",
+              s._domain_in_use("a.example.com") is True)
+        check("Matching is case-insensitive",
+              s._domain_in_use("A.EXAMPLE.COM") is True)
+        check("A different domain is not in use",
+              s._domain_in_use("b.example.com") is False)
+        check("excluding= lets a site's own current domain pass",
+              s._domain_in_use("a.example.com", excluding=site_a) is False)
+        check("excluding= doesn't hide a genuine collision with a different site",
+              s._domain_in_use("a.example.com", excluding=site_b) is True)
+    finally:
+        s.config.sites = saved_sites9
+
+    section("Site management: cert collision, chown, reload, duplicate-domain guards")
+
+    saved_sites10 = list(s.config.sites)  # a copy — see the note in the previous section
+    saved_reload2 = s._reload_server
+    saved_ssrv2   = s._server_running
+    saved_sact2   = s._service_is_active
+    saved_chown   = s._chown_servette
+    saved_obtain  = s._obtain_trusted_cert
+    dirs2 = [tempfile.mkdtemp() for _ in range(3)]
+    generated_files = []
+    try:
+        s._server_running    = lambda: True
+        s._service_is_active = lambda: False
+        reload_calls = []
+        s._reload_server = lambda: reload_calls.append(1)
+        chown_calls = []
+        s._chown_servette = lambda path: chown_calls.append(path)
+
+        saved_input2 = builtins.input
+        try:
+            # Two self-signed sites added back to back must not collide.
+            script = iter([dirs2[0], "", "", dirs2[1], "", ""])
+            builtins.input = lambda prompt="": next(script, "")
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._config_add_site()
+                s._config_add_site()
+            check("Two self-signed sites get distinct cert files",
+                  s.config.sites[1].cert_file != s.config.sites[2].cert_file)
+            check("Self-signed add-site chowns its new cert and key",
+                  s._resolve(s.config.sites[2].cert_file) in chown_calls
+                  and s._resolve(s.config.sites[2].key_file) in chown_calls)
+            generated_files.extend([s.config.sites[1].cert_file, s.config.sites[1].key_file,
+                                     s.config.sites[2].cert_file, s.config.sites[2].key_file])
+
+            # Remove the middle site, then add a third — its cert must not reuse
+            # the surviving site's filename just because a list index freed up.
+            survivor_cert = s.config.sites[2].cert_file
+            saved_prompt2 = s._prompt
+            try:
+                s._prompt = lambda *a, **k: True
+                with contextlib.redirect_stdout(io.StringIO()):
+                    s._config_remove_site(["1"])
+            finally:
+                s._prompt = saved_prompt2
+            check("Survivor kept its own cert file across the removal",
+                  s.config.sites[1].cert_file == survivor_cert)
+
+            script2 = iter([dirs2[2], "", ""])
+            builtins.input = lambda prompt="": next(script2, "")
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._config_add_site()
+            check("A newly added site's cert never collides with a survivor's",
+                  s.config.sites[2].cert_file != survivor_cert)
+            check("The survivor's cert file is unchanged, not silently overwritten",
+                  s.config.sites[1].cert_file == survivor_cert)
+            generated_files.extend([s.config.sites[2].cert_file, s.config.sites[2].key_file])
+        finally:
+            builtins.input = saved_input2
+
+        # Domain branch: _obtain_trusted_cert already reloads on success — add-site
+        # must not reload a second time on top of it.
+        s._obtain_trusted_cert = lambda domain, site: reload_calls.append("obtain-reloaded")
+        reload_calls.clear()
+        dir6 = tempfile.mkdtemp()
+        saved_input3 = builtins.input
+        try:
+            script3 = iter([dir6, "domain-test.example.com", ""])
+            builtins.input = lambda prompt="": next(script3, "")
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._config_add_site()
+        finally:
+            builtins.input = saved_input3
+            shutil.rmtree(dir6, ignore_errors=True)
+        check("add-site's own reload doesn't double up on the domain branch's",
+              reload_calls.count(1) == 0 and reload_calls.count("obtain-reloaded") == 1)
+
+        # Duplicate-domain guard: add-site falls back to self-signed rather than
+        # creating a second site that would silently steal the first's TLS identity.
+        s.config.sites[1].domain = "taken.example.com"
+        dir7 = tempfile.mkdtemp()
+        saved_input4 = builtins.input
+        try:
+            script4 = iter([dir7, "taken.example.com", ""])
+            builtins.input = lambda prompt="": next(script4, "")
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                s._config_add_site()
+        finally:
+            builtins.input = saved_input4
+            shutil.rmtree(dir7, ignore_errors=True)
+        check("add-site refuses a domain already claimed by another site",
+              "already used by another site" in buf.getvalue())
+        check("...and the new site ends up self-signed instead", s.config.sites[-1].domain == "")
+        generated_files.extend([s.config.sites[-1].cert_file, s.config.sites[-1].key_file])
+
+        # Same guard on the single-site 'cert' command: editing an existing
+        # site's cert to a domain another site already holds must refuse,
+        # leaving that other site's TLS identity alone.
+        saved_input5 = builtins.input
+        try:
+            builtins.input = lambda prompt="": "taken.example.com"
+            with contextlib.redirect_stdout(io.StringIO()) as buf2:
+                s._config_cert(s.config.sites[0])
+        finally:
+            builtins.input = saved_input5
+        check("'cert' refuses a domain already claimed by another site",
+              "already used by another site" in buf2.getvalue())
+        check("...and leaves the editing site's own domain unchanged",
+              s.config.sites[0].domain != "taken.example.com")
+    finally:
+        for fname in generated_files:
+            p = os.path.join(s.BASE_DIR, fname)
+            if os.path.exists(p):
+                os.remove(p)
+        for d in dirs2:
+            shutil.rmtree(d, ignore_errors=True)
+        s._reload_server     = saved_reload2
+        s._server_running    = saved_ssrv2
+        s._service_is_active = saved_sact2
+        s._chown_servette    = saved_chown
+        s._obtain_trusted_cert = saved_obtain
+        s.config.sites        = saved_sites10
 
     section("Setup wizard smoke test")
 

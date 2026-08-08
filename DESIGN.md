@@ -32,7 +32,7 @@ A request to add any of these is not a feature request; it is a request for a di
 
 ## The request-time invariant
 
-One property underwrites the whole security story and is worth naming on its own, because it — not the file types served — is what makes the guarantees hold: **at request time, Servette never writes to disk and never evaluates user input.** Serving a request is read-and-send, nothing more. Several security properties are not features anyone coded; they are what you get for free by never doing certain things — a read-only served tree, a closed threat model, a systemd sandbox that never has to widen. Every write Servette does perform (config, cert issuance, the ACME challenge file) happens in the shell or a background thread, never on the serving path. A proposed change is measured against this invariant first: if it adds a request-time write or evaluates request input, it breaks guarantees the static design gets for free, and it is a different program — not a feature.
+One property underwrites the whole security story and is worth naming on its own, because it — not the file types served — is what makes the guarantees hold: **at request time, Servette never writes to disk and never evaluates user input.** Serving a request is read-and-send, nothing more. Several security properties are not features anyone coded; they are what you get for free by never doing certain things — a read-only served tree, a closed threat model, a systemd sandbox that never has to widen. Every write Servette does perform (config, cert issuance, the ACME challenge file, the published site content) happens in the shell or a background thread, never on the serving path. A proposed change is measured against this invariant first: if it adds a request-time write or evaluates request input, it breaks guarantees the static design gets for free, and it is a different program — not a feature.
 
 ## Verification bar
 
@@ -46,13 +46,13 @@ Prefer understatement: `_production_issues()` is the model — it lists what is 
 
 ## How it works
 
-Servette is a single file (`servette.py`, ~2,700 lines) with three sections, each readable on its own. Settings persist to `servette.toml` beside it.
+Servette is a single file (`servette.py`, ~3,000 lines) with three sections, each readable on its own. Settings persist to `servette.toml` beside it.
 
 | Section | Lines | Responsibility |
 | - | - | - |
-| **Server** | ~750 | every incoming request: config, rate limiting, file cache, the request handler and the HTTP servers |
-| **System** | ~1,100 | the environment: bootstrap, server lifecycle, certificates (incl. the ACME client), systemd and host provisioning |
-| **Shell** | ~800 | the interactive terminal interface |
+| **Server** | ~850 | every incoming request: config, rate limiting, file cache, the request handler and the HTTP servers |
+| **System** | ~1,200 | the environment: bootstrap, server lifecycle, certificates (incl. the ACME client), systemd and host provisioning |
+| **Shell** | ~950 | the interactive terminal interface |
 
 ```mermaid
 graph LR
@@ -72,6 +72,7 @@ graph LR
         SRV[Server Lifecycle]
         ASG[HTTP Servers]
         CW[Cert Watchdog]
+        PP[Publish Poll]
         ACME[ACME]
         SD[systemd]
     end
@@ -92,6 +93,7 @@ graph LR
 
     SRV --> ASG
     SRV --> CW
+    SRV --> PP
     ASG --> HTTPS
     ASG --> HTTP
 
@@ -142,9 +144,19 @@ Unless a session-mode server is running in this very process (re-executing would
 
 The release-publishing procedure (a maintainer task, since it needs the private key) is in the release procedure below.
 
+**Publish channel (`cmd_pull` / `cmd_restore_site`).** A second, independent update channel — for the site's *content*, not Servette's own code — configured by two settings: `publish_url` (an `https://` URL for a signed bundle) and `publish_key` (a public Ed25519 key distinct from `_SIGNING_PUBLIC_KEY`, so a compromised content key can never forge a code update or vice versa). Disabled by default; `_production_issues()` flags a half-configured channel (one setting present, not both).
+
+`_check_for_content_update()` is the whole pipeline, and returns a short status string ("not-configured", "invalid-key", "fetch-failed", "bad-signature", "rejected", "published") its callers act on: fetch `publish_url` and `publish_url + ".sig"`, verify the signature, extract the tar.gz bundle into a staging directory, and atomically swap it in. `_extract_bundle()` is defense in depth against a compromised or buggy publisher: entries must be plain files or directories (no symlinks/devices), every path is realpath-checked against the destination to reject traversal, uncompressed size is capped at `_MAX_BUNDLE_BYTES` (500 MB) to bound a decompression bomb, and `filter="data"` (PEP 706) is passed to `extractall()` too — an independent, library-level enforcement of the same containment and entry-type rules. `_swap_site_content()` mirrors `servette.py.bak` exactly: the live `serve_dir` is renamed to `serve_dir.bak` (single-shot, overwritten on each successful publish) before the staged directory is renamed into its place — two renames back to back, atomic on the same filesystem. `cmd_restore_site()` is `cmd_restore`'s content counterpart: renames the backup back over the live directory and consumes it.
+
+Two triggers call `_check_for_content_update()` off the request path, plus the interactive `pull` command calling it synchronously and printing its returned status:
+- **Poke** (`GET /.well-known/servette/poke`) — deliberately *not* gated behind the site's Basic Auth, unlike version discovery below: poking reveals no information and installs nothing without still passing signature verification. Starts the check in a background thread and returns `202` immediately; a monotonic cooldown (`_PUBLISH_POKE_COOLDOWN`, 30s) bounds how often a poke actually triggers a fetch, and the request still passes through the general per-IP rate limiter above it — no separate tracker.
+- **Fallback poll** (`_publish_poll`) — a daemon thread the same shape as `_cert_watchdog`, ticking every 60s and gated by `_PUBLISH_POLL_INTERVAL` (300s, matching the network watchdog's cadence) so a box that never receives a poke (just rebooted, publisher tool never opened) still converges.
+
+**Version discovery** (`GET /.well-known/servette`) reports `{"running": __version__, "backup": <servette.py.bak's version, or null>}` as JSON — what a publish tool needs to show "your server is running vX, backup is vY" without any further disclosure. Unlike poke, it respects the site's Basic Auth: this endpoint reveals information, poke only triggers an action.
+
 ### Shell
 
-The interactive REPL shown when running without `--serve`. Dispatches to `cmd_setup`, `cmd_config`, `cmd_enable`/`cmd_disable`, `cmd_start`/`cmd_stop`, `cmd_status`, `cmd_log`, `cmd_update`/`cmd_restore`. The `config` sub-shell writes each setting to `servette.toml` immediately. It contains only UI logic and is the only layer that writes to Config interactively.
+The interactive REPL shown when running without `--serve`. Dispatches to `cmd_setup`, `cmd_config`, `cmd_enable`/`cmd_disable`, `cmd_start`/`cmd_stop`, `cmd_status`, `cmd_log`, `cmd_update`/`cmd_restore`, `cmd_pull`/`cmd_restore_site`. The `config` sub-shell writes each setting to `servette.toml` immediately. It contains only UI logic and is the only layer that writes to Config interactively.
 
 ### Key constants
 
@@ -156,6 +168,7 @@ The interactive REPL shown when running without `--serve`. Dispatches to `cmd_se
 | `ACME_WEBROOT` | `/var/lib/letsencrypt/webroot` | ACME challenge file root |
 | `_SWAP_PATH` | `/swapfile` | the swapfile install offers to create |
 | `RATE_WINDOW` | `60` seconds | sliding window for both rate limits |
+| `_MAX_BUNDLE_BYTES` | `500 MB` | uncompressed size cap for a publish-channel bundle |
 
 ### Notable design decisions
 

@@ -1086,6 +1086,25 @@ def run_install_tests(s, tmpdir):
     finally:
         s._meminfo = saved_meminfo
 
+    section("Publish channel config")
+
+    saved_url, saved_key = s.config.publish_url, s.config.publish_key
+    try:
+        s.config.publish_url = s.config.publish_key = ""
+        check("Neither set → not flagged",
+              not any("publish channel" in issue for issue in s._production_issues()))
+        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", "a" * 64
+        check("Both set → not flagged",
+              not any("publish channel" in issue for issue in s._production_issues()))
+        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", ""
+        check("URL only → flagged as partial",
+              any("publish channel" in issue for issue in s._production_issues()))
+        s.config.publish_url, s.config.publish_key = "", "a" * 64
+        check("Key only → flagged as partial",
+              any("publish channel" in issue for issue in s._production_issues()))
+    finally:
+        s.config.publish_url, s.config.publish_key = saved_url, saved_key
+
     section("Server watch (--serve supervision)")
 
     # _watch_server must return once the HTTPS thread has been dead for the grace

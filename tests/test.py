@@ -547,6 +547,32 @@ serve_dir = "b"
     path, status = s._resolve_request_path("/%2e%2e/etc/passwd", s.config.sites[0].serve_dir)
     check("Encoded traversal %2e%2e → 403", path is None and status == 403)
 
+    # Hidden files are refused before existence is even checked (#45), so a .git
+    # checkout or a .env under serve_dir is never served.
+    path, status = s._resolve_request_path("/.git/config", s.config.sites[0].serve_dir)
+    check("Dotfile .git/config → 403",       path is None and status == 403)
+    path, status = s._resolve_request_path("/.env", s.config.sites[0].serve_dir)
+    check("Dotfile .env → 403",              path is None and status == 403)
+    path, status = s._resolve_request_path("/sub/.secret", s.config.sites[0].serve_dir)
+    check("Hidden file in a subdirectory → 403", path is None and status == 403)
+    # .well-known is the exception: not refused by the dotfile rule, so an absent
+    # file there is a plain 404 (403 would mean the rule wrongly caught it).
+    path, status = s._resolve_request_path("/.well-known/security.txt", s.config.sites[0].serve_dir)
+    check("/.well-known is exempt (absent file → 404, not 403)",
+          path is None and status == 404)
+
+    section("_serve_dir_exposes_secrets (#45)")
+
+    _sbase = os.path.realpath(s.BASE_DIR)
+    check("serve_dir == BASE_DIR is refused (holds config + keys)",
+          s._serve_dir_exposes_secrets(_sbase))
+    check("serve_dir == certs/ is refused (the TLS private keys)",
+          s._serve_dir_exposes_secrets(os.path.join(_sbase, "certs")))
+    check("serve_dir under certs/ is refused",
+          s._serve_dir_exposes_secrets(os.path.join(_sbase, "certs", "example.com")))
+    check("an ordinary child folder (site/) is fine",
+          not s._serve_dir_exposes_secrets(os.path.join(_sbase, "site")))
+
     section("_format_uptime")
 
     check("Seconds",  s._format_uptime(45)    == "45s")
@@ -1884,6 +1910,37 @@ def run_server_tests(s, serve_dir):
     s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
+    section("Auth rate limit gates the scrypt hash (#46)")
+
+    # The fix: once an IP is over the auth-fail limit, further Basic attempts are
+    # refused BEFORE the memory-hard scrypt runs. Count real hashes across a flood
+    # far larger than the limit — it must stay near the limit, not scale with the
+    # flood (which is what let a flood burn CPU/RAM regardless of the limit).
+    s.config.sites[0].username = "testuser"
+    s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")
+    s.config.auth_rate_limit = 6
+    s._auth_fail_times.clear()
+
+    hashes    = {"n": 0}
+    real_check = s._check_password
+    s._check_password = lambda *a, **k: (hashes.__setitem__("n", hashes["n"] + 1) or real_check(*a, **k))
+    try:
+        for _ in range(50):
+            req("GET", auth=("testuser", "wrong"))
+        check("A 50-request flood computes far fewer than 50 hashes",
+              hashes["n"] <= s.config.auth_rate_limit + 2)
+        check("At least one real attempt was hashed (legit auth still works)",
+              hashes["n"] >= 1)
+        check("The flood is being refused with 429",
+              req("GET", auth=("testuser", "wrong")).status == 429)
+    finally:
+        s._check_password = real_check
+
+    s.config.sites[0].username      = ""
+    s.config.sites[0].password_hash = ""
+    s.config.sites[0].password_salt = ""
+    s._auth_fail_times.clear()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CERT TESTS
@@ -1962,6 +2019,11 @@ def run_install_tests(s, tmpdir):
     check("Private /tmp",                              "PrivateTmp=yes" in service)
     check("Writes confined to BASE_DIR + ACME webroot",
           f"ReadWritePaths={s.BASE_DIR} {s.ACME_WEBROOT}" in service)
+    ro_line = next((l for l in service.splitlines() if l.startswith("ReadOnlyPaths=")), "")
+    check("The source file is pinned read-only within the writable dir (#47)",
+          servette_path in ro_line)
+    check("The managed venv is pinned read-only",
+          s._VENV_DIR in ro_line)
 
     # Validate the real unit with systemd-analyze where available (Ubuntu CI has it;
     # skipped on macOS / non-systemd hosts). Catches typo'd or unknown directives.

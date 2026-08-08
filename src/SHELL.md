@@ -187,6 +187,19 @@ def _is_within_base_dir(path):
     return _within(os.path.realpath(BASE_DIR), os.path.realpath(path))
 
 
+def _serve_dir_exposes_secrets(path):
+    """True when serving `path` would hand out Servette's own secrets. serve_dir
+    is already required to sit inside BASE_DIR (see _is_within_base_dir); the
+    danger left is a folder that also holds the config (password hashes), the
+    ACME account key, or the TLS private keys under certs/. BASE_DIR itself holds
+    all three; the certs tree is the keys. Either would be served as plain file
+    reads, so both are refused as a serve_dir."""
+    real  = os.path.realpath(path)
+    base  = os.path.realpath(BASE_DIR)
+    certs = os.path.join(base, "certs")
+    return real == base or real == certs or real.startswith(certs + os.sep)
+
+
 def _config_add_site():
     """Add a site — the same questions cmd_setup asks for the very first one
     (domain, password), plus the folder question the first site gets for free
@@ -204,6 +217,9 @@ def _config_add_site():
         return
     if not _is_within_base_dir(_resolve(folder)):
         print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
+        return
+    if _serve_dir_exposes_secrets(_resolve(folder)):
+        print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
 
     site = Site({"serve_dir": folder})
@@ -318,6 +334,9 @@ def _config_dir(site):
         return
     if not _is_within_base_dir(path):
         print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
+        return
+    if _serve_dir_exposes_secrets(path):
+        print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
     site.serve_dir = new_value
     config.save()

@@ -373,14 +373,21 @@ def _rate_sweep(stop_event):
                         del tracker[k]
 
 
-def _rate_limit_exceeded(tracker, ip, limit):
-    """Record this request for ip and return True if the limit has been exceeded."""
+def _rate_limit_exceeded(tracker, ip, limit, record=True):
+    """Return True if ip is over `limit` within the window.
+
+    record=True (the default) counts this request before deciding — the normal
+    "note this hit, am I over?" call. record=False only peeks: it reports whether
+    ip is already over without adding a hit, so an expensive operation can be
+    gated on the limit without the check itself counting as traffic."""
     with _rate_lock:
         now    = time.monotonic()
         cutoff = now - RATE_WINDOW
 
         timestamps = tracker.get(ip)
         if timestamps is None:
+            if not record:
+                return False   # nothing tracked for this ip yet — not over
             # Bounded: past the limit the exact count stops mattering, only that
             # it is over. Without maxlen one IP's deque grows with everything it
             # sends inside the window — a client already being refused still
@@ -392,7 +399,8 @@ def _rate_limit_exceeded(tracker, ip, limit):
             tracker[ip] = timestamps
         while timestamps and timestamps[0] <= cutoff:
             timestamps.popleft()
-        timestamps.append(now)
+        if record:
+            timestamps.append(now)
 
         return len(timestamps) > limit
 
@@ -516,9 +524,18 @@ def _within(base, target):
 
 def _resolve_request_path(url_path, serve_dir):
     """Resolve a URL path to an absolute file path within the matched site's
-    serve_dir. Returns (None, 403) on traversal, (None, 404) if not found."""
+    serve_dir. Returns (None, 403) on traversal or a hidden path, (None, 404) if
+    not found."""
     serve_dir = os.path.realpath(_resolve(serve_dir))
     clean     = unquote(url_path.split("?")[0]).lstrip("/")   # lstrip: never an absolute path
+    # Refuse hidden files and directories. A dotfile is never meant to be public,
+    # and a static deploy routinely leaves sensitive ones under serve_dir — a
+    # .git checkout, a .env, an editor backup — so serving them leaks source and
+    # secrets. .well-known is the one dotdir the web reserves for public content
+    # (security.txt, ACME), so it is the sole exception; the ".." of a traversal
+    # is caught here too, with _within below as the backstop.
+    if any(seg.startswith(".") and seg != ".well-known" for seg in clean.split("/") if seg):
+        return None, 403
     abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
     if not _within(serve_dir, abs_path):
         return None, 403
@@ -665,10 +682,19 @@ def _handle_request(method, url_path, headers, raw_ip):
     if site.username:
         auth                  = headers.get("Authorization", "")
         authed                = False
-        credentials_submitted = False
+        credentials_submitted = auth.startswith("Basic ")
 
-        if auth.startswith("Basic "):
-            credentials_submitted = True
+        # Gate the scrypt hash behind the auth rate limiter BEFORE it runs, not
+        # after. scrypt is memory-hard by design (~16 MB and ~30 ms per check), so
+        # hashing first and rate-limiting only the response lets a flood of Basic
+        # credentials burn CPU and RAM on every attempt no matter the limit. The
+        # peek (record=False) decides whether to spend the hash at all; an actual
+        # failure below is what records a strike toward the limit.
+        if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit, record=False):
+            log.warning("Auth rate limited %s", ip)
+            return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
+
+        if credentials_submitted:
             try:
                 decoded        = base64.b64decode(auth[6:]).decode("utf-8", errors="strict")
                 parts          = decoded.split(":", 1)

@@ -318,7 +318,10 @@ def _systemd_unit(python_path, servette_path):
     webroot (HTTP-01 challenge files during renewal); ProtectSystem=strict makes the
     rest of the filesystem read-only, and the unit runs as a least-privilege user
     holding only CAP_NET_BIND_SERVICE. The served directory ends up read-write only
-    because it lives under the server's own directory; the server never writes it."""
+    because it lives under the server's own directory; the server never writes it.
+    The service's own code (servette.py and its .bak) and the managed venv are
+    pinned read-only on top of that writable directory — the serving process never
+    rewrites them, so a compromised one cannot patch the program it re-execs into."""
     return f"""[Unit]
 Description=Servette — The Simple Secure Server
 After=network.target
@@ -330,6 +333,7 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths={BASE_DIR} {ACME_WEBROOT}
+ReadOnlyPaths={servette_path} -{_VENV_DIR} -{servette_path}.bak
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

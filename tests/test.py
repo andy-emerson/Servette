@@ -807,7 +807,12 @@ def run_dispatch_tests(s):
     saved_last_poke  = s._last_poke_attempt
     try:
         s._check_for_content_update = lambda: calls.append(1)
-        s._last_poke_attempt = 0.0
+        # time.monotonic()'s epoch is unspecified (often time-since-boot on
+        # Linux) — 0.0 only reads as "long ago" if the host has been up longer
+        # than _PUBLISH_POKE_COOLDOWN, which a freshly booted CI runner isn't.
+        # Compute "elapsed" relative to now throughout instead.
+        long_ago = lambda: time.monotonic() - s._PUBLISH_POKE_COOLDOWN - 1
+        s._last_poke_attempt = long_ago()
 
         s._poke_content_update()
         time.sleep(0.05)  # let the daemon thread run
@@ -817,14 +822,14 @@ def run_dispatch_tests(s):
         time.sleep(0.05)
         check("Second poke within the cooldown window is a no-op", len(calls) == 1)
 
-        s._last_poke_attempt = 0.0  # simulate the cooldown having elapsed
+        s._last_poke_attempt = long_ago()  # simulate the cooldown having elapsed
         s._poke_content_update()
         time.sleep(0.05)
         check("Poke after the cooldown elapses triggers again", len(calls) == 2)
 
         # Concurrent pokes racing the cooldown's check-then-set: without the
         # lock around it, both could read the stale timestamp and both spawn.
-        s._last_poke_attempt = 0.0
+        s._last_poke_attempt = long_ago()
         calls.clear()
         threads = [threading.Thread(target=s._poke_content_update) for _ in range(10)]
         for t in threads:
@@ -1655,7 +1660,11 @@ def run_install_tests(s, tmpdir):
         check("No publish channel configured: tick is a no-op", calls == [])
 
         s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", "a" * 64
-        s._last_publish_poll = 0.0
+        # time.monotonic()'s epoch is unspecified (often time-since-boot on
+        # Linux) — 0.0 only reads as "long ago" if the host has been up longer
+        # than _PUBLISH_POLL_INTERVAL, which a freshly booted CI runner isn't.
+        # Compute "elapsed" relative to now instead, as the later cases do.
+        s._last_publish_poll = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
         s._publish_poll_tick()
         check("Channel configured, interval elapsed: tick fires", calls == [1])
 

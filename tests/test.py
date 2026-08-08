@@ -14,6 +14,7 @@ import base64
 import gzip
 import http.client
 import http.server
+import io
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -535,6 +537,197 @@ def run_dispatch_tests(s):
         s.config.serve_dir     = saved_serve
         s.config.password_hash = saved_pw
     shutil.rmtree(tmpd, ignore_errors=True)
+
+    section("Bundle extraction safety")
+
+    def make_tar_gz(entries):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for name, content in entries:
+                data = content.encode() if isinstance(content, str) else content
+                info = tarfile.TarInfo(name=name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    extract_root = tempfile.mkdtemp()
+    try:
+        good = make_tar_gz([("index.html", "<h1>hi</h1>"), ("sub/page.html", "sub")])
+        dest = os.path.join(extract_root, "good")
+        s._extract_bundle(good, dest)
+        check("Valid bundle extracts top-level files",
+              os.path.isfile(os.path.join(dest, "index.html")))
+        check("Valid bundle extracts nested files",
+              os.path.isfile(os.path.join(dest, "sub", "page.html")))
+
+        traversal = make_tar_gz([("../evil.txt", "pwned")])
+        dest2 = os.path.join(extract_root, "traversal")
+        raised = False
+        try:
+            s._extract_bundle(traversal, dest2)
+        except ValueError:
+            raised = True
+        check("Path-traversal entry rejected", raised)
+        check("Nothing escaped the destination",
+              not os.path.exists(os.path.join(extract_root, "evil.txt")))
+
+        symlink_bytes = io.BytesIO()
+        with tarfile.open(fileobj=symlink_bytes, mode="w:gz") as tf:
+            info = tarfile.TarInfo(name="evil-link")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tf.addfile(info)
+        dest3 = os.path.join(extract_root, "symlink")
+        raised = False
+        try:
+            s._extract_bundle(symlink_bytes.getvalue(), dest3)
+        except ValueError:
+            raised = True
+        check("Symlink entry rejected", raised)
+
+        saved_max = s._MAX_BUNDLE_BYTES
+        try:
+            s._MAX_BUNDLE_BYTES = 10  # tiny, so an ordinary small file trips the cap
+            oversized = make_tar_gz([("big.txt", "x" * 1000)])
+            dest4 = os.path.join(extract_root, "oversized")
+            raised = False
+            try:
+                s._extract_bundle(oversized, dest4)
+            except ValueError:
+                raised = True
+            check("Oversized bundle rejected", raised)
+        finally:
+            s._MAX_BUNDLE_BYTES = saved_max
+    finally:
+        shutil.rmtree(extract_root, ignore_errors=True)
+
+    section("Atomic site-content swap and restore")
+
+    saved_serve_dir = s.config.serve_dir
+    swap_root = tempfile.mkdtemp()
+    try:
+        s.config.serve_dir = os.path.join(swap_root, "site")  # does not exist yet
+
+        new1 = os.path.join(swap_root, "new1")
+        os.makedirs(new1)
+        with open(os.path.join(new1, "marker.txt"), "w") as f:
+            f.write("v1")
+        s._swap_site_content(new1)
+        check("First swap: content is live",
+              open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v1")
+        check("First swap: no backup (nothing existed to back up)",
+              not os.path.isdir(s.config.serve_dir + ".bak"))
+
+        new2 = os.path.join(swap_root, "new2")
+        os.makedirs(new2)
+        with open(os.path.join(new2, "marker.txt"), "w") as f:
+            f.write("v2")
+        s._swap_site_content(new2)
+        check("Second swap: new content is live",
+              open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v2")
+        check("Second swap: previous content became the backup",
+              open(os.path.join(s.config.serve_dir + ".bak", "marker.txt")).read() == "v1")
+
+        new3 = os.path.join(swap_root, "new3")
+        os.makedirs(new3)
+        with open(os.path.join(new3, "marker.txt"), "w") as f:
+            f.write("v3")
+        s._swap_site_content(new3)
+        check("Third swap: backup now holds v2, not v1 — single-shot, not a history",
+              open(os.path.join(s.config.serve_dir + ".bak", "marker.txt")).read() == "v2")
+
+        saved_input = builtins.input
+        try:
+            builtins.input = lambda prompt="": "y"
+            with contextlib.redirect_stdout(io.StringIO()):
+                s.cmd_restore_site()
+        finally:
+            builtins.input = saved_input
+        check("Restore: live content reverts to the backup (v2)",
+              open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v2")
+        check("Restore: backup is consumed",
+              not os.path.isdir(s.config.serve_dir + ".bak"))
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_restore_site()
+        check("Restoring again with nothing to restore reports cleanly, does not raise",
+              "Nothing to restore" in buf.getvalue())
+    finally:
+        s.config.serve_dir = saved_serve_dir
+        shutil.rmtree(swap_root, ignore_errors=True)
+
+    section("Content update pipeline")
+
+    saved_url, saved_key = s.config.publish_url, s.config.publish_key
+    try:
+        s.config.publish_url = s.config.publish_key = ""
+        try:
+            s._check_for_content_update()
+            check("Neither publish_url nor publish_key set: no-ops cleanly", True)
+        except Exception as e:
+            check(f"Neither set: no-ops cleanly (raised {e})", False)
+
+        s.config.publish_url = "https://example.com/site.tar.gz"
+        s.config.publish_key = "not-valid-hex"
+        logging.disable(logging.CRITICAL)
+        try:
+            s._check_for_content_update()
+            check("Invalid publish_key rejected before any network call", True)
+        except Exception as e:
+            check(f"Invalid publish_key rejected cleanly (raised {e})", False)
+        finally:
+            logging.disable(logging.NOTSET)
+    finally:
+        s.config.publish_url, s.config.publish_key = saved_url, saved_key
+
+    section("Content update pipeline: full pull/verify/swap (network mocked)")
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization as _ser2
+
+    priv_key = Ed25519PrivateKey.generate()
+    pub_hex  = priv_key.public_key().public_bytes(
+        _ser2.Encoding.Raw, _ser2.PublicFormat.Raw).hex()
+    bundle_bytes = make_tar_gz([("index.html", "published content")])
+    signature    = priv_key.sign(bundle_bytes)
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._data = data
+        def read(self):
+            return self._data
+
+    saved_urlopen    = urllib.request.urlopen
+    saved_serve_dir2 = s.config.serve_dir
+    saved_url2, saved_key2 = s.config.publish_url, s.config.publish_key
+    swap_root2 = tempfile.mkdtemp()
+    try:
+        s.config.serve_dir   = os.path.join(swap_root2, "site")
+        s.config.publish_url = "https://example.com/site.tar.gz"
+        s.config.publish_key = pub_hex
+
+        urllib.request.urlopen = lambda url, timeout=None: (
+            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+        s._check_for_content_update()
+        check("Correctly signed bundle is published",
+              open(os.path.join(s.config.serve_dir, "index.html")).read() == "published content")
+
+        other_key = Ed25519PrivateKey.generate()
+        bad_sig   = other_key.sign(bundle_bytes)
+        urllib.request.urlopen = lambda url, timeout=None: (
+            _FakeResp(bad_sig) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+        with open(os.path.join(s.config.serve_dir, "index.html"), "w") as f:
+            f.write("unchanged")
+        logging.disable(logging.CRITICAL)
+        s._check_for_content_update()
+        logging.disable(logging.NOTSET)
+        check("Bundle signed by the wrong key is rejected, content unchanged",
+              open(os.path.join(s.config.serve_dir, "index.html")).read() == "unchanged")
+    finally:
+        urllib.request.urlopen = saved_urlopen
+        s.config.serve_dir = saved_serve_dir2
+        s.config.publish_url, s.config.publish_key = saved_url2, saved_key2
+        shutil.rmtree(swap_root2, ignore_errors=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

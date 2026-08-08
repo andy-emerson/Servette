@@ -22,9 +22,11 @@ import gzip
 import hashlib
 import hmac
 import http.server
+import io
 import ipaddress
 import json
 import logging
+import tarfile
 import tomllib
 import os
 import re
@@ -2577,6 +2579,124 @@ def cmd_restore():
 
     print(f"  Restored {__version__} → {bak_version}.")
     _offer_restart(bak_version)
+
+
+# ── Site content publishing ─────────────────────────────────────────────────
+#
+# The content-side sibling of self-update: a signed tar.gz bundle, pulled from
+# publish_url, verified against publish_key (a keypair distinct from
+# Servette's own release-signing key), and swapped into serve_dir with the
+# same single-shot .bak/restore pattern 'update'/'restore' already give the
+# code. Pull-only — this box never accepts an inbound push of content, only
+# fetches from a URL it already trusts.
+
+_MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
+
+
+def _extract_bundle(data, dest_dir):
+    """Extract a tar.gz byte string into dest_dir (must not yet exist).
+
+    Every entry's resolved path is checked against dest_dir, every entry must
+    be a plain file or directory (no symlinks/devices), and the total
+    uncompressed size is capped — all validated before anything is written,
+    so a bad bundle leaves no partial extraction behind. filter='data' is
+    passed to extractall() too: defense in depth, not the only guard — it
+    independently enforces the same containment and rejects the same entry
+    types at the library level."""
+    os.makedirs(dest_dir)
+    dest_real = os.path.realpath(dest_dir)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        members = tf.getmembers()
+        total = 0
+        for m in members:
+            if not (m.isfile() or m.isdir()):
+                raise ValueError(f"unsupported entry type in bundle: {m.name}")
+            target = os.path.realpath(os.path.join(dest_dir, m.name))
+            if not (target == dest_real or target.startswith(dest_real + os.sep)):
+                raise ValueError(f"entry escapes the target directory: {m.name}")
+            total += m.size
+            if total > _MAX_BUNDLE_BYTES:
+                raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
+        tf.extractall(dest_dir, members=members, filter="data")
+
+
+def _swap_site_content(new_dir):
+    """Atomically replace the live serve_dir with new_dir's contents, keeping
+    a single-shot backup — the same one-step-back pattern as servette.py.bak.
+    new_dir must be on the same filesystem as serve_dir (both under BASE_DIR)
+    so the renames are atomic; the only unavoidable risk window is the two
+    renames themselves, each a single fast syscall back to back — proportionate
+    to Servette's scale, not a high-QPS system where that window would matter."""
+    live_dir = _resolve(config.serve_dir).rstrip(os.sep)
+    bak_dir  = live_dir + ".bak"
+    shutil.rmtree(bak_dir, ignore_errors=True)
+    if os.path.isdir(live_dir):
+        os.rename(live_dir, bak_dir)
+    os.rename(new_dir, live_dir)
+
+
+def _check_for_content_update():
+    """Pull, verify, and swap in a new site bundle if the publish channel is
+    configured. No-ops silently (not an error) if publish_url/publish_key
+    aren't both set — publishing is opt-in. Runs off the request path: called
+    from the poke handler's background thread and the periodic fallback poll,
+    never synchronously from a request."""
+    if not (config.publish_url and config.publish_key):
+        return
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+
+    try:
+        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(config.publish_key))
+    except ValueError:
+        log.error("publish_key is not a valid Ed25519 public key — publishing disabled")
+        return
+
+    try:
+        bundle    = urllib.request.urlopen(config.publish_url, timeout=30).read()
+        signature = urllib.request.urlopen(config.publish_url + ".sig", timeout=15).read()
+    except Exception as e:
+        log.warning("Could not fetch publish bundle: %s", e)
+        return
+
+    try:
+        pub_key.verify(signature, bundle)
+    except InvalidSignature:
+        log.error("Publish bundle signature verification failed — rejecting")
+        return
+
+    staging = _resolve(config.serve_dir).rstrip(os.sep) + ".new"
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        _extract_bundle(bundle, staging)
+        _swap_site_content(staging)
+    except Exception as e:
+        log.error("Publish bundle rejected: %s", e)
+        shutil.rmtree(staging, ignore_errors=True)
+        return
+
+    log.info("Published new site content from %s", config.publish_url)
+
+
+def cmd_restore_site():
+    """Roll back to the content saved by the last successful publish. Mirrors
+    cmd_restore exactly: single-shot, consumed on use."""
+    live_dir = _resolve(config.serve_dir).rstrip(os.sep)
+    bak_dir  = live_dir + ".bak"
+
+    if not os.path.isdir(bak_dir):
+        print("  Nothing to restore — no site backup. (Publishing saves one each time it swaps in new content.)")
+        return
+
+    if not _prompt("Restore site content from backup? The backup is then removed."):
+        print("  Restore cancelled.")
+        return
+
+    if os.path.isdir(live_dir):
+        shutil.rmtree(live_dir)
+    os.rename(bak_dir, live_dir)
+    print("  Site content restored from backup.")
 
 
 def _format_uptime(seconds):

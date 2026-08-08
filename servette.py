@@ -3522,10 +3522,9 @@ def shell():
             print(f"Unknown command: {cmd}. Type 'help' for a list of commands.")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-# Not a fourth section: wires the three above together and has to sit physically
-# last, since it's the one place that calls into all three. Instantiates the
-# shared config, then argv picks SERVER+SYSTEM (--serve) or SHELL (the prompt).
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Config is a module-level singleton, instantiated here (not at its class
 # definition, near the top) because migrating a pre-multi-site flat config

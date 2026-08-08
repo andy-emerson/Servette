@@ -1319,6 +1319,52 @@ def run_server_tests(s, serve_dir):
     s.config.password_salt = ""
     s._auth_fail_times.clear()
 
+    section("Multi-site Host routing")
+
+    # The TLS listener was already built (at start_server()) from the single
+    # domainless test site, so it keeps presenting that cert regardless of what
+    # config.sites holds from here — irrelevant to this section, which tests
+    # only the HTTP-layer Host routing added on top (TLS/SNI selection itself
+    # is covered directly against _build_site_ssl_contexts() in run_unit_tests).
+    second_dir = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(second_dir, "index.html"), "w") as f:
+            f.write("second site content")
+
+        saved_sites       = s.config.sites
+        original_site     = saved_sites[0]  # domainless — the catch-all in this fixture
+        saved_orig_domain = original_site.domain
+        second_site       = s.Site({
+            "domain": "second.example.com", "serve_dir": second_dir,
+            "cert_file": original_site.cert_file, "key_file": original_site.key_file,
+        })
+        s.config.sites = [original_site, second_site]
+        try:
+            check("Host matching the second site's domain serves that site's content",
+                  req("GET", headers={"Host": "second.example.com"}).body == b"second site content")
+            check("Unmatched Host falls through to the domainless catch-all",
+                  req("GET", headers={"Host": "unrecognized.example.com"}).body.decode() == TEST_HTML)
+
+            # Give the original site a domain too, removing the catch-all — an
+            # unmatched Host should now be a bare, closed-system 404.
+            original_site.domain = "first.example.com"
+            resp = req("GET", headers={"Host": "unrecognized.example.com"})
+            check("No catch-all site left: unmatched Host is a bare 404",
+                  resp.status == 404 and resp.body == b"Not found.")
+            check("Closed-system 404 sends no HSTS",
+                  resp.headers.get("Strict-Transport-Security") is None)
+            check("Closed-system 404 carries the ordinary security headers",
+                  resp.headers.get("X-Frame-Options") == "DENY")
+
+            resp2 = req("GET", headers={"Host": "first.example.com"})
+            check("The now-domain-bearing original site still matches its own domain",
+                  resp2.status == 200 and resp2.body.decode() == TEST_HTML)
+        finally:
+            original_site.domain = saved_orig_domain
+            s.config.sites = saved_sites
+    finally:
+        shutil.rmtree(second_dir, ignore_errors=True)
+
     section("Version discovery endpoint")
 
     resp = req("GET", "/.well-known/servette")

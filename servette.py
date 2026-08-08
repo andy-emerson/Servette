@@ -554,9 +554,11 @@ def _within(base, target):
         return False
 
 
-def _resolve_request_path(url_path):
-    """Resolve a URL path to an absolute file path within serve_dir. Returns (None, 403) on traversal, (None, 404) if not found."""
-    serve_dir = os.path.realpath(_resolve(config.serve_dir))
+def _resolve_request_path(url_path, serve_dir=None):
+    """Resolve a URL path to an absolute file path within serve_dir (the matched
+    site's, or config.serve_dir — sites[0]'s, via the back-compat property — when
+    not given explicitly). Returns (None, 403) on traversal, (None, 404) if not found."""
+    serve_dir = os.path.realpath(_resolve(serve_dir if serve_dir is not None else config.serve_dir))
     clean     = unquote(url_path.split("?")[0]).lstrip("/")   # lstrip: never an absolute path
     abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
     if not _within(serve_dir, abs_path):
@@ -570,8 +572,13 @@ def _resolve_request_path(url_path):
     return abs_path, 200
 
 
-def _cache_control_header():
-    scope = "private" if config.username else "public"
+def _cache_control_header(username=None):
+    """username=None means "not given, use config.username" (sites[0]'s, via the
+    back-compat property) — a real site's username is never None, only "" or a
+    real string, so the sentinel is unambiguous."""
+    if username is None:
+        username = config.username
+    scope = "private" if username else "public"
     if config.cache_policy == "no-store":
         return "no-store"
     if config.cache_policy == "no-cache":
@@ -605,8 +612,11 @@ def _parse_range(header, total):
     return (start, end)
 
 
-def _security_headers():
-    """Security headers sent on every HTTPS response — success or error."""
+def _security_headers(site):
+    """Security headers sent on every HTTPS response — success or error. site is
+    the matched site (whose domain gates HSTS — a real Let's Encrypt cert backs
+    the pin) or None for the closed-system case (no site matched: no HSTS, no
+    per-site information of any kind)."""
     headers = [
         (b"x-frame-options",        b"DENY"),
         (b"x-content-type-options", b"nosniff"),
@@ -616,7 +626,7 @@ def _security_headers():
         headers.append((b"content-security-policy", config.csp.encode()))
     if config.permissions_policy:
         headers.append((b"permissions-policy", config.permissions_policy.encode()))
-    if _cert_domain:
+    if site is not None and site.domain:
         headers.append((b"strict-transport-security", b"max-age=31536000; includeSubDomains"))
     return headers
 
@@ -676,32 +686,50 @@ def _handle_request(method, url_path, headers, raw_ip):
         if xff and ip == config.trusted_proxy:
             ip = _normalize_ip(xff.split(",")[-1].strip())
 
+    site = None  # resolved below by Host header; None until then, and if nothing matches
+
     def resp(status, hdrs, body=b""):
-        # Security headers (and HSTS) go on every response; HEAD keeps the headers but drops the body.
-        return status, _security_headers() + hdrs, (b"" if method == "HEAD" else body)
+        # Security headers (and HSTS, gated on `site`) go on every response;
+        # HEAD keeps the headers but drops the body. `site` is read fresh at
+        # call time (Python closures are late-binding), so this is correct
+        # whether called before or after site selection below.
+        return status, _security_headers(site) + hdrs, (b"" if method == "HEAD" else body)
 
     if method not in ("GET", "HEAD"):
         return resp(405, [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
 
     config.reload_if_changed()
 
-    # Rate limiting
+    # Rate limiting — host-level, shared across every site on the box.
     if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
+
+    # Site selection — uniform regardless of site count (see _select_site). No
+    # match: the closed-system miss. Bare 404, no site-specific information of
+    # any kind (no HSTS either, since `site` stays None for resp() above).
+    site = _select_site(headers.get("Host", ""))
+    if site is None:
+        log.warning("404 (no matching site) Host=%r from %s", headers.get("Host", ""), ip)
+        body_404 = b"Not found."
+        return resp(404, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_404)).encode())], body_404)
 
     # Publish poke: ask Servette to check for new site content now, instead of
     # waiting for the next fallback poll. Deliberately NOT gated behind the
     # site's Basic Auth (unlike version discovery below) — poking reveals no
     # information and can install nothing on its own; the fetched bundle still
     # has to pass Ed25519 verification in _check_for_content_update(). Still
-    # subject to the general rate limiter above.
+    # subject to the general rate limiter above. Not yet site-scoped — still
+    # checks config.publish_url/key (sites[0]'s, via the back-compat property)
+    # regardless of which site the Host matched; becomes per-site in a later
+    # commit alongside the rest of the publish pipeline.
     if url_path.split("?", 1)[0] == _WELL_KNOWN_POKE_PATH:
         _poke_content_update()
         return resp(202, [(b"content-length", b"0")])
 
-    # Authentication
-    if config.username:
+    # Authentication — the matched site's own username/password; per the closed
+    # decision, purely per-site, no fallback to any other level.
+    if site.username:
         auth                  = headers.get("Authorization", "")
         authed                = False
         credentials_submitted = False
@@ -715,8 +743,8 @@ def _handle_request(method, url_path, headers, raw_ip):
                 pw             = parts[1] if len(parts) == 2 else ""
                 # Evaluate both before combining so the password hash always runs, even
                 # when the username is wrong — no early-out timing signal for usernames.
-                user_ok = hmac.compare_digest(submitted_user, config.username)
-                pass_ok = _check_password(pw, config.password_hash, config.password_salt)
+                user_ok = hmac.compare_digest(submitted_user, site.username)
+                pass_ok = _check_password(pw, site.password_hash, site.password_salt)
                 authed  = user_ok and pass_ok
             except (ValueError, UnicodeDecodeError):
                 pass
@@ -737,14 +765,16 @@ def _handle_request(method, url_path, headers, raw_ip):
     # any) — the publish tool's "current vs. latest / current vs. backup"
     # prompts read this. Deliberately reports only what THIS box knows;
     # "latest available" comes from GitHub, which the tool queries directly.
+    # Host-level (one servette.py process, one version), not site-scoped —
+    # reached through whichever site's Host/auth got you past the checks above.
     if url_path.split("?", 1)[0] == _WELL_KNOWN_VERSION_PATH:
         body = json.dumps({"running": __version__, "backup": _backup_version()}).encode()
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
 
-    # Resolve request path to a file
+    # Resolve request path to a file within the matched site's own serve_dir
     try:
-        file_path, status = _resolve_request_path(url_path)
+        file_path, status = _resolve_request_path(url_path, site.serve_dir)
     except Exception as e:
         log.error("500 resolving %s: %s", url_path, e)
         body_500 = b"Internal server error."
@@ -757,7 +787,7 @@ def _handle_request(method, url_path, headers, raw_ip):
 
     if status == 404 or file_path is None:
         # Try custom 404.html in serve_dir root
-        custom_404 = os.path.join(_resolve(config.serve_dir), "404.html")
+        custom_404 = os.path.join(_resolve(site.serve_dir), "404.html")
         if os.path.isfile(custom_404):
             raw_404, _, _ = _get_cached_file(custom_404)
             body_404 = raw_404 or b"Not found."
@@ -777,7 +807,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # 304 Not Modified
     if headers.get("If-None-Match", "") == etag:
         log.info("304 Not Modified %s to %s", url_path, ip)
-        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header().encode())])
+        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header(site.username).encode())])
 
     accept_encoding = headers.get("Accept-Encoding", "")
     use_gzip        = compressed is not None and "gzip" in accept_encoding
@@ -785,7 +815,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     common = [
         (b"content-type",  mime.encode()),
         (b"etag",          etag.encode()),
-        (b"cache-control", _cache_control_header().encode()),
+        (b"cache-control", _cache_control_header(site.username).encode()),
         (b"vary",          b"Accept-Encoding"),
     ]
 

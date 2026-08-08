@@ -457,6 +457,23 @@ serve_dir = "b"
     s.config.sites[0].username     = ""
     s.config.cache_policy = "no-cache"
 
+    section("Rate limiter bounds memory per IP")
+
+    # _RATE_IP_CAP bounds how many IPs are tracked; nothing bounded a single
+    # IP's deque, and a client already being refused still appends on every 429.
+    rl_tracker = {}
+    for _ in range(500):
+        s._rate_limit_exceeded(rl_tracker, "203.0.113.9", 10)
+    check("One IP's deque stays bounded regardless of volume",
+          len(rl_tracker["203.0.113.9"]) == 11)
+    check("A flooding IP is still over the limit after the bound applies",
+          s._rate_limit_exceeded(rl_tracker, "203.0.113.9", 10) is True)
+    under = {}
+    for _ in range(5):
+        s._rate_limit_exceeded(under, "203.0.113.10", 10)
+    check("A well-behaved IP is unaffected and stays under",
+          s._rate_limit_exceeded(under, "203.0.113.10", 10) is False)
+
     section("IPv6 normalization")
 
     check("::ffff: prefix stripped",       s._normalize_ip("::ffff:192.168.1.1") == "192.168.1.1")
@@ -466,6 +483,42 @@ serve_dir = "b"
     check("Plain IPv4 unchanged",          s._normalize_ip("10.0.0.1") == "10.0.0.1")
     check("Plain IPv6 unchanged",          s._normalize_ip("2001:db8::1") == "2001:db8::1")
     check("Non-address passes through",    s._normalize_ip("unknown") == "unknown")
+
+    section("_is_within_base_dir (serve_dir containment)")
+
+    # Added by the commit that rejected a serve_dir outside BASE_DIR, which
+    # shipped without one. The containment rule is what keeps the publish
+    # pipeline's atomic rename on one filesystem and inside the systemd unit's
+    # ReadWritePaths — a serve_dir outside it fails silently under the sandbox
+    # while working fine in a manual run.
+    _base = os.path.realpath(s.BASE_DIR)
+    check("BASE_DIR itself is inside",            s._is_within_base_dir(_base))
+    check("A child of BASE_DIR is inside",        s._is_within_base_dir(os.path.join(_base, "site")))
+    check("A deep child is inside",               s._is_within_base_dir(os.path.join(_base, "a", "b", "c")))
+    check("A parent of BASE_DIR is outside",      not s._is_within_base_dir(os.path.dirname(_base)))
+    check("An unrelated absolute path is outside", not s._is_within_base_dir("/etc"))
+    # The prefix trap: a sibling whose name merely starts with BASE_DIR's.
+    check("A sibling sharing BASE_DIR's prefix is outside",
+          not s._is_within_base_dir(_base + "-evil"))
+    # Traversal back out through a child must not read as inside.
+    check("Traversal out of BASE_DIR is outside",
+          not s._is_within_base_dir(os.path.join(_base, "..", "elsewhere")))
+
+    _sym_root = tempfile.mkdtemp()
+    try:
+        _outside = os.path.join(_sym_root, "outside")
+        os.makedirs(_outside, exist_ok=True)
+        _link = os.path.join(_base, "symlink-escape-test")
+        if os.path.islink(_link) or os.path.exists(_link):
+            os.remove(_link)
+        os.symlink(_outside, _link)
+        try:
+            check("A symlink pointing outside BASE_DIR is outside",
+                  not s._is_within_base_dir(_link))
+        finally:
+            os.remove(_link)
+    finally:
+        shutil.rmtree(_sym_root, ignore_errors=True)
 
     section("_resolve_request_path")
 
@@ -906,6 +959,38 @@ def run_dispatch_tests(s):
         check("add-site's own reload doesn't double up on the domain branch's",
               reload_calls.count(1) == 0 and reload_calls.count("obtain-reloaded") == 1)
         generated_files.extend([s.config.sites[-1].cert_file, s.config.sites[-1].key_file])
+
+        # A real issuance repoints cert_file/key_file at certs/<domain>/, which
+        # orphans the placeholder pair add-site generates before it even asks
+        # about a domain. Those must not accumulate on disk forever.
+        acme_dir = tempfile.mkdtemp(dir=s.BASE_DIR)
+        def _fake_obtain_repoints(domain, site):
+            new_cert = os.path.join(acme_dir, "fullchain.pem")
+            new_key  = os.path.join(acme_dir, "privkey.pem")
+            for p in (new_cert, new_key):
+                with open(p, "w") as f:
+                    f.write("x")
+            site.cert_file = new_cert
+            site.key_file  = new_key
+            site.domain    = domain   # only happens on the real success path
+        s._obtain_trusted_cert = _fake_obtain_repoints
+        placeholders_before = {f for f in os.listdir(s.BASE_DIR) if f.startswith(("cert-", "key-"))}
+        dir6c = tempfile.mkdtemp(dir=s.BASE_DIR)
+        saved_input3c = builtins.input
+        try:
+            script3c = iter([dir6c, "issued.example.com", ""])
+            builtins.input = lambda prompt="": next(script3c, "")
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._config_add_site()
+        finally:
+            builtins.input = saved_input3c
+            shutil.rmtree(dir6c, ignore_errors=True)
+        placeholders_after = {f for f in os.listdir(s.BASE_DIR) if f.startswith(("cert-", "key-"))}
+        check("Issuance repointed the site away from its placeholder",
+              s._resolve(s.config.sites[-1].cert_file) == os.path.join(acme_dir, "fullchain.pem"))
+        check("The orphaned placeholder cert/key are removed after issuance succeeds",
+              placeholders_after == placeholders_before)
+        shutil.rmtree(acme_dir, ignore_errors=True)
 
         # ACME failure on the domain branch must not leave a dangling cert
         # reference: the self-signed fallback (generated unconditionally,

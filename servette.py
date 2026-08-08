@@ -111,7 +111,7 @@ class Site:
 
     def __init__(self, data=None):
         data = data or {}
-        self.domain        = data.get("domain",        "")
+        self.domain         = data.get("domain",         "")
         self.serve_dir      = data.get("serve_dir",      "site")
         self.cert_file      = data.get("cert_file",      "cert.pem")
         self.key_file       = data.get("key_file",       "key.pem")
@@ -371,7 +371,14 @@ def _rate_limit_exceeded(tracker, ip, limit):
 
         timestamps = tracker.get(ip)
         if timestamps is None:
-            timestamps = collections.deque()
+            # Bounded: past the limit the exact count stops mattering, only that
+            # it is over. Without maxlen one IP's deque grows with everything it
+            # sends inside the window — a client already being refused still
+            # appends on every 429 — so _RATE_IP_CAP would bound how many IPs
+            # are tracked while a single IP grew without limit. Dropping the
+            # oldest keeps the deque at limit + 1 in-window entries, which is
+            # still over the limit, so the verdict is unchanged.
+            timestamps = collections.deque(maxlen=limit + 1)
             tracker[ip] = timestamps
         while timestamps and timestamps[0] <= cutoff:
             timestamps.popleft()
@@ -2286,10 +2293,12 @@ def _is_within_base_dir(path):
     renames within the same filesystem, and the systemd unit's
     ReadWritePaths only grants write access under BASE_DIR — a serve_dir
     outside it breaks the swap silently under the sandboxed service even
-    though a manual, unsandboxed run would never show the problem."""
-    real = os.path.realpath(path)
-    base = os.path.realpath(BASE_DIR)
-    return real == base or real.startswith(base + os.sep)
+    though a manual, unsandboxed run would never show the problem.
+
+    Defers to _within so containment is decided in exactly one place: two
+    implementations of the same security predicate can drift apart, and only
+    one of them would be the one anybody reads."""
+    return _within(os.path.realpath(BASE_DIR), os.path.realpath(path))
 
 
 def _config_add_site():
@@ -2344,6 +2353,7 @@ def _config_add_site():
 
     reloaded = False
     if domain:
+        placeholder = (_resolve(site.cert_file), _resolve(site.key_file))
         _obtain_trusted_cert(domain, site)  # reloads the server itself on success
         # site.domain is only assigned inside _obtain_trusted_cert on the
         # success path, so this distinguishes a real reload from a failed
@@ -2351,6 +2361,17 @@ def _config_add_site():
         # above) as the site's live cert.
         if site.domain == domain:
             reloaded = True
+            # The placeholder pair was insurance against ACME failing; issuance
+            # succeeded and repointed the site at certs/<domain>/, so nothing
+            # references these any more. Compared against the site's current
+            # paths rather than deleted blind — if issuance somehow left the
+            # site pointing at them, they are live files, not litter.
+            for stale in placeholder:
+                if stale not in (_resolve(site.cert_file), _resolve(site.key_file)):
+                    try:
+                        os.remove(stale)
+                    except OSError:
+                        pass
         else:
             print("  → keeping the self-signed certificate for now. Browsers will show a security warning until you retry the domain.\n")
     else:
@@ -2762,6 +2783,10 @@ def cmd_log(n=20):
 RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
 _SIGNING_PUBLIC_KEY = "abb8854be0b82df813f3b052296a26573063fc6314ea2701d54354605e6f15db"
 _VERSION_RE         = re.compile(rb"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
+# Ceiling on a downloaded servette.py. The file is one order of magnitude under
+# this; the cap exists so a hostile or broken response is bounded before the
+# signature check, not to constrain growth.
+_MAX_SOURCE_BYTES   = 4 * 1024 * 1024
 
 def _parse_version(source_bytes):
     """Extract __version__ from servette.py source bytes. Returns the string or None."""
@@ -2845,8 +2870,14 @@ def cmd_update():
     # Download source and signature
     try:
         with _spinner(f"Downloading {new_version}..."):
-            new_source = urllib.request.urlopen(assets["servette.py"],     timeout=30).read()
-            signature  = urllib.request.urlopen(assets["servette.py.sig"], timeout=15).read()
+            # Capped at the socket, like the publish bundle: bound memory before
+            # the signature is checked rather than after, so what arrives can't
+            # be larger than what is worth reading whatever the response claims.
+            new_source = urllib.request.urlopen(assets["servette.py"],     timeout=30).read(_MAX_SOURCE_BYTES + 1)
+            if len(new_source) > _MAX_SOURCE_BYTES:
+                print(f"  Update failed: servette.py asset exceeds {_MAX_SOURCE_BYTES // 1024} KB.")
+                return
+            signature  = urllib.request.urlopen(assets["servette.py.sig"], timeout=15).read(4096)
     except Exception as e:
         print(f"  Update failed: {e}")
         return

@@ -4,8 +4,6 @@
 
 *Authored here. `servette.py` is built from this file (and its three siblings) by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-## Config
-
 ```python
 # ─────────────────────────────────────────────────────────────────────────────
 # SERVER
@@ -15,6 +13,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+```
+
+## Config
+
+```python
 # ── Config ────────────────────────────────────────────────────────────────────
 
 
@@ -23,10 +26,14 @@ def _resolve(path):
     return path if os.path.isabs(path) else os.path.join(BASE_DIR, path)
 
 
-# scrypt cost parameters — OWASP baseline (N=2**14, r=8, p=1 ≈ 16 MB per hash).
-# scrypt is memory-hard: each guess must hold that much RAM, denying an attacker
-# who steals the hash the cheap GPU parallelism that PBKDF2 (CPU-hard) allows.
-# ~16 MB and ~30 ms per check stays comfortable even on a Raspberry Pi.
+```
+
+> scrypt cost parameters — OWASP baseline (N=2**14, r=8, p=1 ≈ 16 MB per hash).
+> scrypt is memory-hard: each guess must hold that much RAM, denying an attacker
+> who steals the hash the cheap GPU parallelism that PBKDF2 (CPU-hard) allows.
+> ~16 MB and ~30 ms per check stays comfortable even on a Raspberry Pi.
+
+```python
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1
 
 
@@ -166,54 +173,98 @@ class Config:
 
         sites_content = "\n".join(f"""\
 [[site]]
-# Leave domain blank for a self-signed certificate (browsers will warn visitors)
+```
+
+> Leave domain blank for a self-signed certificate (browsers will warn visitors)
+
+```python
 domain = {s(site.domain)}
 serve_dir = {s(site.serve_dir)}
 cert_file = {s(site.cert_file)}
 key_file = {s(site.key_file)}
 
-# Leave username blank to disable password protection
+```
+
+> Leave username blank to disable password protection
+
+```python
 username = {s(site.username)}
 
-# Site publish channel: where signed content bundles are pulled from, and the
-# public key (distinct from Servette's own release-signing key) that verifies
-# them. Leave blank to disable — no polling happens without both set.
+```
+
+> Site publish channel: where signed content bundles are pulled from, and the
+> public key (distinct from Servette's own release-signing key) that verifies
+> them. Leave blank to disable — no polling happens without both set.
+
+```python
 publish_url = {s(site.publish_url)}
 publish_key = {s(site.publish_key)}
 
-# Machine-generated — do not edit by hand
+```
+
+> Machine-generated — do not edit by hand
+
+```python
 password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
 """ for site in self.sites)
 
         content = f"""\
-# Servette configuration — https://github.com/andy-emerson/servette
-#
-# Host-level settings below apply to every site on this box. Each [[site]]
-# block below is one hosted domain — its own folder, certificate, auth, and
-# publish channel.
+```
+
+> Servette configuration — https://github.com/andy-emerson/servette
+>
+> Host-level settings below apply to every site on this box. Each [[site]]
+> block below is one hosted domain — its own folder, certificate, auth, and
+> publish channel.
+
+```python
 
 port = {self.port}
 
-# Rate limiting (requests per minute per IP, shared across all sites)
+```
+
+> Rate limiting (requests per minute per IP, shared across all sites)
+
+```python
 rate_limit = {self.rate_limit}
 auth_rate_limit = {self.auth_rate_limit}
 
-# Browser cache policy: no-store, no-cache, or max-age
+```
+
+> Browser cache policy: no-store, no-cache, or max-age
+
+```python
 cache_policy = {s(self.cache_policy)}
 cache_max_age = {self.cache_max_age}
-# In-memory file cache limit in MB — reduce on constrained hardware
+```
+
+> In-memory file cache limit in MB — reduce on constrained hardware
+
+```python
 cache_size_mb = {self.cache_size_mb}
 
-# Let's Encrypt registration email and optional reverse proxy IP
+```
+
+> Let's Encrypt registration email and optional reverse proxy IP
+
+```python
 email = {s(self.email)}
 trusted_proxy = {s(self.trusted_proxy)}
 
-# TLS settings
+```
+
+> TLS settings
+
+```python
 tls_min_version = {s(self.tls_min_version)}
 ciphers = {s(self.ciphers)}
 
-# Security headers — use config shell to adjust
+```
+
+> Security headers — use config shell to adjust
+
+```python
 csp = {s(self.csp)}
 permissions_policy = {s(self.permissions_policy)}
 
@@ -357,8 +408,12 @@ _file_cache       = collections.OrderedDict()
 _file_cache_lock  = threading.Lock()
 _file_cache_bytes = 0
 
-# Text-like types worth gzipping. Already-compressed formats (images, woff/woff2,
-# pdf, video, archives) gain nothing, so they're served and stored uncompressed.
+```
+
+> Text-like types worth gzipping. Already-compressed formats (images, woff/woff2,
+> pdf, video, archives) gain nothing, so they're served and stored uncompressed.
+
+```python
 _COMPRESSIBLE_EXTS = {
     ".html", ".css", ".js", ".json", ".svg", ".txt", ".xml", ".webmanifest", ".ttf",
 }
@@ -925,9 +980,13 @@ class _RedirectHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-# Ceiling on concurrent connections. Each connection holds one worker thread for its
-# lifetime (up to the 30s idle timeout on keep-alive), so the cap bounds thread/memory
-# use under a connection flood — light enough for a Raspberry Pi, ample for a static site.
+```
+
+> Ceiling on concurrent connections. Each connection holds one worker thread for its
+> lifetime (up to the 30s idle timeout on keep-alive), so the cap bounds thread/memory
+> use under a connection flood — light enough for a Raspberry Pi, ample for a static site.
+
+```python
 MAX_CONNECTIONS = 128
 
 

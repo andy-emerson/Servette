@@ -4,8 +4,6 @@
 
 *Authored here. `servette.py` is built from this file (and its three siblings) by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-## Imports and constants
-
 ```python
 """
 servette.py — The Simple Secure Static Site Server
@@ -59,9 +57,13 @@ SERVICE_PATH  = "/etc/systemd/system/servette.service"
 NETWATCH_PATH = "/etc/systemd/system/servette-netwatch"  # + ".service" / ".timer"
 ACME_WEBROOT  = "/var/lib/letsencrypt/webroot"
 
-# The closed-system TLS fallback: presented for connections whose SNI matches no
-# configured site (absent, unrecognized, or direct-IP access) when no site is
-# itself domainless. Tied to no site's identity, generated once and reused.
+```
+
+> The closed-system TLS fallback: presented for connections whose SNI matches no
+> configured site (absent, unrecognized, or direct-IP access) when no site is
+> itself domainless. Tied to no site's identity, generated once and reused.
+
+```python
 _DEFAULT_CERT_DIR  = os.path.join(BASE_DIR, "certs", "_default")
 _DEFAULT_CERT_FILE = os.path.join(_DEFAULT_CERT_DIR, "cert.pem")
 _DEFAULT_KEY_FILE  = os.path.join(_DEFAULT_CERT_DIR, "key.pem")

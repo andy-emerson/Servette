@@ -4,8 +4,6 @@
 
 *Authored here. `servette.py` is built from this file (and its three siblings) by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-## Bootstrap
-
 ```python
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM
@@ -15,6 +13,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+```
+
+## Bootstrap
+
+```python
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 #
 # Every invocation from the system Python re-execs into the managed virtualenv.
@@ -394,9 +397,13 @@ def _meminfo():
         return None, None, None
 
 
-# The unpredictable part of demand: an allowance for the single-process spike
-# nobody plans for, sized to the largest one observed in production (fwupd
-# ballooning to ~656 MB virtual on a 414 MB host, hourly, for weeks).
+```
+
+> The unpredictable part of demand: an allowance for the single-process spike
+> nobody plans for, sized to the largest one observed in production (fwupd
+> ballooning to ~656 MB virtual on a 414 MB host, hourly, for weeks).
+
+```python
 _SPIKE_ALLOWANCE_KB = 700 * 1024
 _SWAP_MIN_MB        = 512
 _SWAP_MAX_MB        = 2048

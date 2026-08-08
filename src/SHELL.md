@@ -4,8 +4,6 @@
 
 *Authored here. `servette.py` is built from this file (and its three siblings) by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-## SHELL
-
 ```python
 # ─────────────────────────────────────────────────────────────────────────────
 # SHELL
@@ -14,8 +12,12 @@
 # is delegated to functions in the SYSTEM section.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Menus are generated so the right-hand column always begins at the same place
-# (2-space indent + a 22-wide label) as the status and config displays.
+```
+
+> Menus are generated so the right-hand column always begins at the same place
+> (2-space indent + a 22-wide label) as the status and config displays.
+
+```python
 _PAD = 22
 
 
@@ -38,10 +40,14 @@ def _section(title):
     print(_section_text(title), end="")
 
 
-# Ordered like systemctl's own manual: runtime control (start/stop) before
-# persistence (enable/disable) — Servette wraps systemd, and its audience
-# already has that convention's intuition. Onboarding, then runtime control,
-# then persistence, then observability, then maintenance, then meta.
+```
+
+> Ordered like systemctl's own manual: runtime control (start/stop) before
+> persistence (enable/disable) — Servette wraps systemd, and its audience
+> already has that convention's intuition. Onboarding, then runtime control,
+> then persistence, then observability, then maintenance, then meta.
+
+```python
 _COMMANDS = [
     ("setup",            "guided walkthrough for getting started"),
     ("config",           "view and edit settings"),
@@ -60,12 +66,16 @@ _COMMANDS = [
 ]
 HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
 
-# Ordered: sites first (list/add/remove — the multi-site entry points), then
-# what a site serves and how it's reached (dir/port/cert/email — email is the
-# ACME registration address, grouped with the certificate it belongs to), then
-# access control, then traffic shaping, then advanced/rarely-touched security
-# tuning, then meta. dir/cert/publish/username/password take an optional site
-# index (default 0) — same [n] convention as the top-level 'log [n]'.
+```
+
+> Ordered: sites first (list/add/remove — the multi-site entry points), then
+> what a site serves and how it's reached (dir/port/cert/email — email is the
+> ACME registration address, grouped with the certificate it belongs to), then
+> access control, then traffic shaping, then advanced/rarely-touched security
+> tuning, then meta. dir/cert/publish/username/password take an optional site
+> index (default 0) — same [n] convention as the top-level 'log [n]'.
+
+```python
 _CONFIG_COMMANDS = [
     ("sites",           "list configured sites"),
     ("add-site",        "add a new site (folder, domain, password, publish channel)"),
@@ -659,9 +669,13 @@ def cmd_log(n=20):
 RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
 _SIGNING_PUBLIC_KEY = "abb8854be0b82df813f3b052296a26573063fc6314ea2701d54354605e6f15db"
 _VERSION_RE         = re.compile(rb"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
-# Ceiling on a downloaded servette.py. The file is one order of magnitude under
-# this; the cap exists so a hostile or broken response is bounded before the
-# signature check, not to constrain growth.
+```
+
+> Ceiling on a downloaded servette.py. The file is one order of magnitude under
+> this; the cap exists so a hostile or broken response is bounded before the
+> signature check, not to constrain growth.
+
+```python
 _MAX_SOURCE_BYTES   = 4 * 1024 * 1024
 
 def _parse_version(source_bytes):
@@ -1315,14 +1329,18 @@ def shell():
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Config is a module-level singleton, instantiated here (not at its class
-# definition, near the top) because migrating a pre-multi-site flat config
-# calls _domain_from_cert() to backfill the migrated site's domain, and that
-# function is defined much later, in Certificate management. Dependency
-# injection (passing config into every function) is the textbook alternative,
-# but the stdlib request handlers have fixed signatures and cannot accept
-# extra arguments. In a single-file server that is always run as a process,
-# the global is the right call.
+```
+
+> Config is a module-level singleton, instantiated here (not at its class
+> definition, near the top) because migrating a pre-multi-site flat config
+> calls _domain_from_cert() to backfill the migrated site's domain, and that
+> function is defined much later, in Certificate management. Dependency
+> injection (passing config into every function) is the textbook alternative,
+> but the stdlib request handlers have fixed signatures and cannot accept
+> extra arguments. In a single-file server that is always run as a process,
+> the global is the right call.
+
+```python
 config = Config()
 
 if __name__ == "__main__":

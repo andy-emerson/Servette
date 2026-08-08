@@ -50,6 +50,13 @@ SERVICE_PATH  = "/etc/systemd/system/servette.service"
 NETWATCH_PATH = "/etc/systemd/system/servette-netwatch"  # + ".service" / ".timer"
 ACME_WEBROOT  = "/var/lib/letsencrypt/webroot"
 
+# The closed-system TLS fallback: presented for connections whose SNI matches no
+# configured site (absent, unrecognized, or direct-IP access) when no site is
+# itself domainless. Tied to no site's identity, generated once and reused.
+_DEFAULT_CERT_DIR  = os.path.join(BASE_DIR, "certs", "_default")
+_DEFAULT_CERT_FILE = os.path.join(_DEFAULT_CERT_DIR, "cert.pem")
+_DEFAULT_KEY_FILE  = os.path.join(_DEFAULT_CERT_DIR, "key.pem")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SERVER
@@ -95,6 +102,27 @@ def _check_password(submitted, stored_hash, stored_salt):
         return False
 
 
+class Site:
+    """One `[[site]]` block: everything that varies per hosted domain — the domain
+    itself, its folder, its own certificate, its visitor auth, its publish channel.
+    Host-level settings (port, TLS, rate limits, cache, ACME email, security headers,
+    ...) live once on Config, not here: every field lives at exactly one level, no
+    fallback lookup between them."""
+
+    def __init__(self, data=None):
+        data = data or {}
+        self.domain         = data.get("domain",         "")
+        self.serve_dir      = data.get("serve_dir",      "site")
+        self.cert_file      = data.get("cert_file",      "cert.pem")
+        self.key_file       = data.get("key_file",       "key.pem")
+        self.username       = data.get("username",       "")
+        self.password_hash  = data.get("password_hash",  "")
+        self.password_salt  = data.get("password_salt",  "")
+        self.publish_url    = data.get("publish_url",    "")
+        self.publish_key    = data.get("publish_key",    "")
+        self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
+
+
 class Config:
     """Holds all Servette settings and handles reading/writing servette.toml."""
 
@@ -106,7 +134,8 @@ class Config:
 
     def _load(self):
         data = {}
-        if os.path.exists(self.CONFIG_FILE):
+        existed = os.path.exists(self.CONFIG_FILE)
+        if existed:
             try:
                 with open(self.CONFIG_FILE, "rb") as f:
                     data = tomllib.load(f)
@@ -115,13 +144,38 @@ class Config:
                 print(f"Fix or delete {self.CONFIG_FILE} and try again.")
                 sys.exit(1)
 
-        self.serve_dir       = data.get("serve_dir",       "site")
+        site_tables = data.get("site", [])
+        migrating   = existed and not site_tables
+        if site_tables:
+            self.sites = [Site(t) for t in site_tables]
+        else:
+            # No [[site]] tables: either a fresh install (data is empty, defaults
+            # apply) or a pre-multi-site flat config being migrated in place —
+            # both produce the same single default/legacy-derived Site.
+            legacy = Site({
+                "serve_dir":     data.get("serve_dir",     "site"),
+                "cert_file":     data.get("cert_file",     "cert.pem"),
+                "key_file":      data.get("key_file",      "key.pem"),
+                "username":      data.get("username",      ""),
+                "password_hash": data.get("password_hash", ""),
+                "password_salt": data.get("password_salt", ""),
+                "publish_url":   data.get("publish_url",   ""),
+                "publish_key":   data.get("publish_key",   ""),
+            })
+            if data.get("password") and not legacy.password_hash:
+                legacy.password_hash, legacy.password_salt = _hash_password(data["password"])
+            if migrating:
+                # Domain was never a stored field pre-migration — it lived only in
+                # the certificate. _domain_from_cert is defined later in the file
+                # (Certificate management); by the time _load() actually runs
+                # (module-level `config = Config()` sits at the bottom of the
+                # file, after every function is defined) it's available.
+                cert_path = _resolve(legacy.cert_file)
+                if os.path.exists(cert_path):
+                    legacy.domain = _domain_from_cert(cert_path) or ""
+            self.sites = [legacy]
+
         self.port            = data.get("port",            443)
-        self.cert_file       = data.get("cert_file",       "cert.pem")
-        self.key_file        = data.get("key_file",        "key.pem")
-        self.username        = data.get("username",        "")
-        self.password_hash   = data.get("password_hash",   "")
-        self.password_salt   = data.get("password_salt",   "")
         self.rate_limit      = data.get("rate_limit",      120)
         self.auth_rate_limit = data.get("auth_rate_limit", 6)
         self.cache_policy       = data.get("cache_policy",       "no-cache")
@@ -133,21 +187,19 @@ class Config:
         self.ciphers            = data.get("ciphers",            "")
         self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
         self.permissions_policy = data.get("permissions_policy", "camera=(), microphone=(), usb=(), midi=(), serial=()")
-        self.publish_url        = data.get("publish_url",        "")
-        self.publish_key        = data.get("publish_key",        "")
 
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
             pass
 
-        try:
-            self._cert_mtime = os.path.getmtime(_resolve(self.cert_file))
-        except OSError:
-            self._cert_mtime = None
+        for site in self.sites:
+            try:
+                site._cert_mtime = os.path.getmtime(_resolve(site.cert_file))
+            except OSError:
+                site._cert_mtime = None
 
-        if data.get("password") and not self.password_hash:
-            self.password_hash, self.password_salt = _hash_password(data["password"])
+        if migrating:
             self.save()
 
     def reload_if_changed(self):
@@ -163,18 +215,38 @@ class Config:
         def s(v):
             return '"' + str(v).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace('"', '\\"') + '"'
 
-        content = f"""\
-# Servette configuration — https://github.com/andy-emerson/servette
-
-serve_dir = {s(self.serve_dir)}
-port = {self.port}
-cert_file = {s(self.cert_file)}
-key_file = {s(self.key_file)}
+        sites_content = "\n".join(f"""\
+[[site]]
+# Leave domain blank for a self-signed certificate (browsers will warn visitors)
+domain = {s(site.domain)}
+serve_dir = {s(site.serve_dir)}
+cert_file = {s(site.cert_file)}
+key_file = {s(site.key_file)}
 
 # Leave username blank to disable password protection
-username = {s(self.username)}
+username = {s(site.username)}
 
-# Rate limiting (requests per minute per IP)
+# Site publish channel: where signed content bundles are pulled from, and the
+# public key (distinct from Servette's own release-signing key) that verifies
+# them. Leave blank to disable — no polling happens without both set.
+publish_url = {s(site.publish_url)}
+publish_key = {s(site.publish_key)}
+
+# Machine-generated — do not edit by hand
+password_hash = {s(site.password_hash)}
+password_salt = {s(site.password_salt)}
+""" for site in self.sites)
+
+        content = f"""\
+# Servette configuration — https://github.com/andy-emerson/servette
+#
+# Host-level settings below apply to every site on this box. Each [[site]]
+# block below is one hosted domain — its own folder, certificate, auth, and
+# publish channel.
+
+port = {self.port}
+
+# Rate limiting (requests per minute per IP, shared across all sites)
 rate_limit = {self.rate_limit}
 auth_rate_limit = {self.auth_rate_limit}
 
@@ -196,16 +268,7 @@ ciphers = {s(self.ciphers)}
 csp = {s(self.csp)}
 permissions_policy = {s(self.permissions_policy)}
 
-# Site publish channel: where signed content bundles are pulled from, and the
-# public key (distinct from Servette's own release-signing key) that verifies
-# them. Leave blank to disable — no polling happens without both set.
-publish_url = {s(self.publish_url)}
-publish_key = {s(self.publish_key)}
-
-# Machine-generated — do not edit by hand
-password_hash = {s(self.password_hash)}
-password_salt = {s(self.password_salt)}
-"""
+{sites_content}"""
         # Write to a temp file in the same directory (mkstemp creates it 0o600), then
         # atomically replace, so a crash mid-write can't truncate the live config.
         d = os.path.dirname(self.CONFIG_FILE) or "."
@@ -224,13 +287,6 @@ password_salt = {s(self.password_salt)}
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
             pass
-
-
-# Config is a module-level singleton. Dependency injection (passing config into
-# every function) is the textbook alternative, but the stdlib request handlers have
-# fixed signatures and cannot accept extra arguments. In a single-file server that is
-# always run as a process, the global is the right call.
-config = Config()
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -315,7 +371,14 @@ def _rate_limit_exceeded(tracker, ip, limit):
 
         timestamps = tracker.get(ip)
         if timestamps is None:
-            timestamps = collections.deque()
+            # Bounded: past the limit the exact count stops mattering, only that
+            # it is over. Without maxlen one IP's deque grows with everything it
+            # sends inside the window — a client already being refused still
+            # appends on every 429 — so _RATE_IP_CAP would bound how many IPs
+            # are tracked while a single IP grew without limit. Dropping the
+            # oldest keeps the deque at limit + 1 in-window entries, which is
+            # still over the limit, so the verdict is unchanged.
+            timestamps = collections.deque(maxlen=limit + 1)
             tracker[ip] = timestamps
         while timestamps and timestamps[0] <= cutoff:
             timestamps.popleft()
@@ -432,9 +495,10 @@ def _within(base, target):
         return False
 
 
-def _resolve_request_path(url_path):
-    """Resolve a URL path to an absolute file path within serve_dir. Returns (None, 403) on traversal, (None, 404) if not found."""
-    serve_dir = os.path.realpath(_resolve(config.serve_dir))
+def _resolve_request_path(url_path, serve_dir):
+    """Resolve a URL path to an absolute file path within the matched site's
+    serve_dir. Returns (None, 403) on traversal, (None, 404) if not found."""
+    serve_dir = os.path.realpath(_resolve(serve_dir))
     clean     = unquote(url_path.split("?")[0]).lstrip("/")   # lstrip: never an absolute path
     abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
     if not _within(serve_dir, abs_path):
@@ -448,8 +512,11 @@ def _resolve_request_path(url_path):
     return abs_path, 200
 
 
-def _cache_control_header():
-    scope = "private" if config.username else "public"
+def _cache_control_header(username):
+    """Cache-Control for the matched site. A site behind Basic Auth gets
+    `private`, so a shared cache never holds a response only some visitors
+    are entitled to."""
+    scope = "private" if username else "public"
     if config.cache_policy == "no-store":
         return "no-store"
     if config.cache_policy == "no-cache":
@@ -483,8 +550,11 @@ def _parse_range(header, total):
     return (start, end)
 
 
-def _security_headers():
-    """Security headers sent on every HTTPS response — success or error."""
+def _security_headers(site):
+    """Security headers sent on every HTTPS response — success or error. site is
+    the matched site (whose domain gates HSTS — a real Let's Encrypt cert backs
+    the pin) or None for the closed-system case (no site matched: no HSTS, no
+    per-site information of any kind)."""
     headers = [
         (b"x-frame-options",        b"DENY"),
         (b"x-content-type-options", b"nosniff"),
@@ -494,7 +564,7 @@ def _security_headers():
         headers.append((b"content-security-policy", config.csp.encode()))
     if config.permissions_policy:
         headers.append((b"permissions-policy", config.permissions_policy.encode()))
-    if _cert_domain:
+    if site is not None and site.domain:
         headers.append((b"strict-transport-security", b"max-age=31536000; includeSubDomains"))
     return headers
 
@@ -515,30 +585,6 @@ def _backup_version():
         return None
 
 
-_WELL_KNOWN_POKE_PATH  = _WELL_KNOWN_VERSION_PATH + "/poke"
-_last_poke_attempt     = 0.0
-_poke_cooldown_lock    = threading.Lock()
-_PUBLISH_POKE_COOLDOWN = 30  # seconds; bounds how often a poke actually triggers a
-                             # fetch, regardless of how often (or from how many
-                             # sources) pokes themselves arrive
-
-
-def _poke_content_update():
-    """Trigger a content-update check off the request thread, at most once per
-    cooldown window. The poke response returns immediately either way; the
-    actual fetch/verify/swap runs in the background, same as the periodic
-    fallback poll. The check-then-set on the cooldown clock is itself locked —
-    concurrent pokes (poke needs no auth, so any number of requests can race
-    here) would otherwise both read a stale _last_poke_attempt and both spawn."""
-    global _last_poke_attempt
-    with _poke_cooldown_lock:
-        now = time.monotonic()
-        if now - _last_poke_attempt < _PUBLISH_POKE_COOLDOWN:
-            return
-        _last_poke_attempt = now
-    threading.Thread(target=_check_for_content_update, daemon=True).start()
-
-
 def _handle_request(method, url_path, headers, raw_ip):
     """The request core. Given the method, URL path, the parsed request headers (a
     case-insensitive mapping — an http.client.HTTPMessage in production), and the raw
@@ -554,32 +600,45 @@ def _handle_request(method, url_path, headers, raw_ip):
         if xff and ip == config.trusted_proxy:
             ip = _normalize_ip(xff.split(",")[-1].strip())
 
-    def resp(status, hdrs, body=b""):
-        # Security headers (and HSTS) go on every response; HEAD keeps the headers but drops the body.
-        return status, _security_headers() + hdrs, (b"" if method == "HEAD" else body)
+    site = None  # resolved below by Host header; None until then, and if nothing matches
 
-    if method not in ("GET", "HEAD"):
-        return resp(405, [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
+    def resp(status, hdrs, body=b""):
+        # Security headers (and HSTS, gated on `site`) go on every response;
+        # HEAD keeps the headers but drops the body. `site` is read fresh at
+        # call time (Python closures are late-binding), so this is correct
+        # whether called before or after site selection below.
+        return status, _security_headers(site) + hdrs, (b"" if method == "HEAD" else body)
 
     config.reload_if_changed()
 
-    # Rate limiting
+    # Rate limiting — host-level, shared across every site on the box. Ahead of
+    # site selection so a flood of requests carrying random/unmatched Host
+    # headers still gets throttled rather than dodging the limiter under the
+    # closed-system 404 below; the cost is that a rate-limited response never
+    # carries HSTS even for a real site's domain.
     if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
-    # Publish poke: ask Servette to check for new site content now, instead of
-    # waiting for the next fallback poll. Deliberately NOT gated behind the
-    # site's Basic Auth (unlike version discovery below) — poking reveals no
-    # information and can install nothing on its own; the fetched bundle still
-    # has to pass Ed25519 verification in _check_for_content_update(). Still
-    # subject to the general rate limiter above.
-    if url_path.split("?", 1)[0] == _WELL_KNOWN_POKE_PATH:
-        _poke_content_update()
-        return resp(202, [(b"content-length", b"0")])
+    # Site selection — uniform regardless of site count (see _select_site). No
+    # match: the closed-system miss. Bare 404, no site-specific information of
+    # any kind (no HSTS either, since `site` stays None for resp() above) —
+    # deliberately ahead of the method check below, so a POST/PUT/etc. to an
+    # unmatched Host gets the same undifferentiated 404 a GET would, rather
+    # than a 405 that would leak "something is here, it just doesn't take this
+    # method."
+    site = _select_site(headers.get("Host", ""))
+    if site is None:
+        log.warning("404 (no matching site) Host=%r from %s", headers.get("Host", ""), ip)
+        body_404 = b"Not found."
+        return resp(404, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_404)).encode())], body_404)
 
-    # Authentication
-    if config.username:
+    if method not in ("GET", "HEAD"):
+        return resp(405, [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
+
+    # Authentication — the matched site's own username/password; per the closed
+    # decision, purely per-site, no fallback to any other level.
+    if site.username:
         auth                  = headers.get("Authorization", "")
         authed                = False
         credentials_submitted = False
@@ -593,8 +652,8 @@ def _handle_request(method, url_path, headers, raw_ip):
                 pw             = parts[1] if len(parts) == 2 else ""
                 # Evaluate both before combining so the password hash always runs, even
                 # when the username is wrong — no early-out timing signal for usernames.
-                user_ok = hmac.compare_digest(submitted_user, config.username)
-                pass_ok = _check_password(pw, config.password_hash, config.password_salt)
+                user_ok = hmac.compare_digest(submitted_user, site.username)
+                pass_ok = _check_password(pw, site.password_hash, site.password_salt)
                 authed  = user_ok and pass_ok
             except (ValueError, UnicodeDecodeError):
                 pass
@@ -615,14 +674,16 @@ def _handle_request(method, url_path, headers, raw_ip):
     # any) — the publish tool's "current vs. latest / current vs. backup"
     # prompts read this. Deliberately reports only what THIS box knows;
     # "latest available" comes from GitHub, which the tool queries directly.
+    # Host-level (one servette.py process, one version), not site-scoped —
+    # reached through whichever site's Host/auth got you past the checks above.
     if url_path.split("?", 1)[0] == _WELL_KNOWN_VERSION_PATH:
         body = json.dumps({"running": __version__, "backup": _backup_version()}).encode()
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
 
-    # Resolve request path to a file
+    # Resolve request path to a file within the matched site's own serve_dir
     try:
-        file_path, status = _resolve_request_path(url_path)
+        file_path, status = _resolve_request_path(url_path, site.serve_dir)
     except Exception as e:
         log.error("500 resolving %s: %s", url_path, e)
         body_500 = b"Internal server error."
@@ -635,7 +696,7 @@ def _handle_request(method, url_path, headers, raw_ip):
 
     if status == 404 or file_path is None:
         # Try custom 404.html in serve_dir root
-        custom_404 = os.path.join(_resolve(config.serve_dir), "404.html")
+        custom_404 = os.path.join(_resolve(site.serve_dir), "404.html")
         if os.path.isfile(custom_404):
             raw_404, _, _ = _get_cached_file(custom_404)
             body_404 = raw_404 or b"Not found."
@@ -655,7 +716,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # 304 Not Modified
     if headers.get("If-None-Match", "") == etag:
         log.info("304 Not Modified %s to %s", url_path, ip)
-        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header().encode())])
+        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header(site.username).encode())])
 
     accept_encoding = headers.get("Accept-Encoding", "")
     use_gzip        = compressed is not None and "gzip" in accept_encoding
@@ -663,7 +724,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     common = [
         (b"content-type",  mime.encode()),
         (b"etag",          etag.encode()),
-        (b"cache-control", _cache_control_header().encode()),
+        (b"cache-control", _cache_control_header(site.username).encode()),
         (b"vary",          b"Accept-Encoding"),
     ]
 
@@ -703,17 +764,107 @@ def _handle_request(method, url_path, headers, raw_ip):
     ], raw)
 
 
-def _build_ssl_context():
-    """TLS context for the HTTPS server — cert/key loaded, minimum version enforced,
-    optional cipher override, ALPN pinned to HTTP/1.1. Raises if the cert or key is
-    unreadable, so startup can fail closed rather than serve nothing."""
+def _select_site(host):
+    """Match a Host/SNI value (bare hostname, port stripped if present) against
+    configured sites — uniform regardless of site count. Exact domain match
+    first; else the first domainless site, which acts as the catch-all (any
+    Host reaches a self-signed/LAN site with no domain configured). No
+    domainless site and no domain match: None, the closed-system miss."""
+    host = (host or "").split(":")[0].strip().lower()
+    for site in config.sites:
+        if site.domain and site.domain.lower() == host:
+            return site
+    # www.<domain> reaches the site configured as <domain>. _obtain_trusted_cert
+    # deliberately issues one certificate covering both names, so routing has to
+    # honour the same pair or the www name gets a certificate and then a 404.
+    # Only after the exact loop above, so a site explicitly configured as
+    # www.<domain> still wins its own traffic rather than being shadowed.
+    if host.startswith("www."):
+        bare = host[4:]
+        for site in config.sites:
+            if site.domain and site.domain.lower() == bare:
+                return site
+    for site in config.sites:
+        if not site.domain:
+            return site
+    return None
+
+
+def _domain_in_use(domain, excluding=None):
+    """True if some other configured site already claims this domain
+    (case-insensitive). Two sites sharing a domain would make TLS and HTTP
+    routing silently disagree about which site is being served:
+    _build_site_ssl_contexts keys its SNI table by domain, so the later site
+    registered wins there, while _select_site above returns the first
+    matching site — a visitor would get one site's certificate and the
+    other's content."""
+    domain = domain.lower()
+    return any(s is not excluding and s.domain and s.domain.lower() == domain for s in config.sites)
+
+
+def _build_ssl_context(cert_path, key_path):
+    """TLS context for one certificate — minimum version enforced, optional cipher
+    override, ALPN pinned to HTTP/1.1. Raises if the cert or key is unreadable, so
+    startup can fail closed rather than serve nothing."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
     if config.ciphers:
         ctx.set_ciphers(config.ciphers)
-    ctx.load_cert_chain(_resolve(config.cert_file), _resolve(config.key_file))
+    ctx.load_cert_chain(cert_path, key_path)
     ctx.set_alpn_protocols(["http/1.1"])
     return ctx
+
+
+def _ensure_default_cert():
+    """The generic, no-domain cert behind the closed-system TLS fallback — used
+    only when no configured site is itself domainless (which would otherwise
+    serve as the natural default). Generated once, lazily, the same way a
+    self-signed site cert is."""
+    if not os.path.exists(_DEFAULT_CERT_FILE):
+        os.makedirs(_DEFAULT_CERT_DIR, exist_ok=True)
+        _generate_self_signed_cert(_DEFAULT_CERT_FILE, _DEFAULT_KEY_FILE)
+        _chown_servette(_DEFAULT_CERT_DIR)
+    return _DEFAULT_CERT_FILE, _DEFAULT_KEY_FILE
+
+
+def _build_site_ssl_contexts():
+    """Build one SSLContext per configured site, plus the default/base context the
+    listening socket is constructed with and that's presented whenever SNI doesn't
+    match any site (absent, unrecognized, or direct-IP access) — the closed
+    system. A domainless site's own context serves as that default when one
+    exists; otherwise _ensure_default_cert() supplies one tied to no site's
+    identity. Returns the default context, already carrying sni_callback —
+    the per-site contexts live only inside its closure."""
+    domain_ctx  = {}
+    default_ctx = None
+    for site in config.sites:
+        ctx = _build_ssl_context(_resolve(site.cert_file), _resolve(site.key_file))
+        if site.domain:
+            d = site.domain.lower()
+            domain_ctx[d] = ctx
+            # The issued certificate covers www.<domain> too, so the SNI table
+            # has to answer for that name as well — otherwise a www connection
+            # falls through to the default context and is served a certificate
+            # for nothing it asked for, before routing ever runs. setdefault,
+            # and exact matches assign unconditionally, so a site explicitly
+            # configured as www.<domain> keeps its own context regardless of
+            # which order the two sites appear in.
+            domain_ctx.setdefault(f"www.{d}", ctx)
+        elif default_ctx is None:
+            default_ctx = ctx  # first domainless site is the catch-all/default
+
+    if default_ctx is None:
+        cert_path, key_path = _ensure_default_cert()
+        default_ctx = _build_ssl_context(cert_path, key_path)
+
+    def _sni_callback(ssl_socket, server_name, ssl_context):
+        ctx = domain_ctx.get((server_name or "").lower())
+        if ctx is not None:
+            ssl_socket.context = ctx
+        # else: leave the default context in place — closed system
+
+    default_ctx.sni_callback = _sni_callback
+    return default_ctx
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -938,9 +1089,9 @@ _server_start_time    = None
 _watchdog_thread      = None
 _sweep_thread         = None
 _sweep_stop           = threading.Event()
-_last_renewal_attempt = 0.0
-_publish_poll_thread  = None
-_cert_domain          = None  # cached domain from active cert; None means self-signed
+_last_renewal_attempt = {}  # domain -> monotonic timestamp of the last renewal attempt;
+                            # per-domain so one site's failure-triggered backoff
+                            # can't delay another's renewal
 
 _TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
 ACME_RETRIES  = 3
@@ -954,36 +1105,38 @@ def _server_running():
 
 
 def _cert_watchdog_tick():
-    """One renewal/reload pass. Exceptions are contained here so a failed pass can
-    never kill the watchdog thread — a dead watchdog would silently end renewals
-    for the life of the process; the next pass simply retries."""
-    global _last_renewal_attempt, _cert_domain
-    try:
-        cert_path = _resolve(config.cert_file)
+    """One renewal/reload pass over every configured site's certificate. Each
+    site's pass is wrapped in its own try/except: one site's failure can't skip
+    the rest, and nothing here can kill the watchdog thread — a dead watchdog
+    would silently end renewals for every site, for the life of the process;
+    the next pass simply retries."""
+    for site in config.sites:
+        try:
+            cert_path = _resolve(site.cert_file)
 
-        domain = _domain_from_cert(cert_path)
-        if domain:
-            # Let's Encrypt cert: auto-renew when fewer than 30 days remain
-            days = _cert_days_remaining(cert_path)
-            if days is not None and days < 30:
-                now = time.monotonic()
-                if now - _last_renewal_attempt >= 3600:
-                    _last_renewal_attempt = now
-                    log.info("Certificate for %s expires in %d days — renewing", domain, days)
-                    _obtain_trusted_cert(domain)
-                    _cert_domain = domain
-        else:
-            # Self-signed or externally managed cert: reload if the file changed on disk
-            try:
-                mtime = os.path.getmtime(cert_path)
-                if config._cert_mtime is not None and mtime != config._cert_mtime:
-                    log.info("Certificate changed on disk — reloading server")
-                    config._cert_mtime = mtime
-                    _reload_server()
-            except OSError:
-                pass
-    except Exception:
-        log.exception("Cert watchdog pass failed — will retry on the next pass")
+            if site.domain:
+                # Let's Encrypt cert: auto-renew when fewer than 30 days remain
+                days = _cert_days_remaining(cert_path)
+                if days is not None and days < 30:
+                    now  = time.monotonic()
+                    last = _last_renewal_attempt.get(site.domain, 0.0)
+                    if now - last >= 3600:
+                        _last_renewal_attempt[site.domain] = now
+                        log.info("Certificate for %s expires in %d days — renewing", site.domain, days)
+                        _obtain_trusted_cert(site.domain, site)
+            else:
+                # Self-signed or externally managed cert: reload if the file changed on disk
+                try:
+                    mtime = os.path.getmtime(cert_path)
+                    if site._cert_mtime is not None and mtime != site._cert_mtime:
+                        log.info("Certificate changed on disk — reloading server")
+                        site._cert_mtime = mtime
+                        _reload_server()
+                except OSError:
+                    pass
+        except Exception:
+            log.exception("Cert watchdog pass failed for %s — will retry on the next pass",
+                          site.domain or "a self-signed site")
 
 
 def _cert_watchdog():
@@ -995,64 +1148,33 @@ def _cert_watchdog():
         _cert_watchdog_tick()
 
 
-_last_publish_poll     = 0.0
-_PUBLISH_POLL_INTERVAL = 300  # seconds; mirrors the network watchdog's 5-minute
-                              # cadence — the floor under the poke mechanism, for
-                              # boxes that never receive one (just rebooted, tool
-                              # never opened)
-
-
-def _publish_poll_tick():
-    """One publish-check pass, gated to at most once per _PUBLISH_POLL_INTERVAL —
-    same shape as _cert_watchdog_tick's renewal gate."""
-    global _last_publish_poll
-    if not (config.publish_url and config.publish_key):
-        return
-    now = time.monotonic()
-    if now - _last_publish_poll < _PUBLISH_POLL_INTERVAL:
-        return
-    _last_publish_poll = now
-    _check_for_content_update()
-
-
-def _publish_poll():
-    """Fallback poll for the publish channel — the floor under the poke
-    mechanism, not the primary path. A poke still gets new content live
-    within seconds; this just guarantees convergence even if one never
-    arrives."""
-    while _server_running():
-        time.sleep(60)
-        if not _server_running():
-            break
-        _publish_poll_tick()
-
-
 def start_server():
-    global _server_start_time, _watchdog_thread, _cert_domain, _sweep_thread, \
-        _publish_poll_thread, _https_server, _https_thread, _http_server
+    global _server_start_time, _watchdog_thread, _sweep_thread, \
+        _https_server, _https_thread, _http_server
 
     if _server_running():
         print("Server is already running.")
         return
 
-    for fname in [config.serve_dir, config.cert_file, config.key_file]:
-        if not fname:
-            print("Not fully configured. Run 'config' to set up the server.")
-            if "--serve" in sys.argv:
-                sys.exit(1)
-            return
-        full_path = _resolve(fname)
-        if not os.path.exists(full_path):
-            print(f"File not found: {full_path}")
-            if "--serve" in sys.argv:
-                sys.exit(1)
-            return
+    for site in config.sites:
+        for fname in [site.serve_dir, site.cert_file, site.key_file]:
+            if not fname:
+                print("Not fully configured. Run 'config' to set up the server.")
+                if "--serve" in sys.argv:
+                    sys.exit(1)
+                return
+            full_path = _resolve(fname)
+            if not os.path.exists(full_path):
+                print(f"File not found: {full_path}")
+                if "--serve" in sys.argv:
+                    sys.exit(1)
+                return
 
-    # Build the HTTPS server, failing closed if the socket can't bind or the cert is
+    # Build the HTTPS server, failing closed if the socket can't bind or a cert is
     # unreadable — better than a live process that serves nothing. Both surface here
-    # synchronously: the bind happens in the constructor, the cert in _build_ssl_context.
+    # synchronously: the bind happens in the constructor, the certs in _build_site_ssl_contexts.
     try:
-        https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_ssl_context())
+        https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_site_ssl_contexts())
     except Exception as e:
         log.error("Server failed to start on port %d: %s", config.port, e)
         print(f"Server failed to start on port {config.port}: {e}")
@@ -1084,25 +1206,23 @@ def start_server():
         _sweep_thread = threading.Thread(target=_rate_sweep, args=(_sweep_stop,), daemon=True)
         _sweep_thread.start()
 
-    if _publish_poll_thread is None or not _publish_poll_thread.is_alive():
-        _publish_poll_thread = threading.Thread(target=_publish_poll, daemon=True)
-        _publish_poll_thread.start()
     _server_start_time = time.monotonic()
-    _cert_domain = _domain_from_cert(_resolve(config.cert_file))
     log.info("Server started on port %d", config.port)
-    print(f"\nServing {config.serve_dir}/ at https://localhost:{config.port}\n")
+    for site in config.sites:
+        host_display = site.domain or "localhost"
+        print(f"\nServing {site.serve_dir}/ at https://{host_display}:{config.port}\n")
 
-    cert_path = _resolve(config.cert_file)
-    days      = _cert_days_remaining(cert_path)
-    if days is not None and days < 30:
-        if days <= 0:
-            print("Warning: SSL certificate has expired. Browsers will block visitors.")
-            print("Run 'config' then 'cert' to renew it.\n")
-            log.warning("SSL certificate has expired")
-        else:
-            print(f"Warning: SSL certificate expires in {days} days.")
-            print("Run 'config' then 'cert' to renew it.\n")
-            log.warning("SSL certificate expires in %d days", days)
+        days = _cert_days_remaining(_resolve(site.cert_file))
+        if days is not None and days < 30:
+            label = site.domain or "this site"
+            if days <= 0:
+                print(f"Warning: SSL certificate for {label} has expired. Browsers will block visitors.")
+                print("Run 'config' then 'cert' to renew it.\n")
+                log.warning("SSL certificate for %s has expired", label)
+            else:
+                print(f"Warning: SSL certificate for {label} expires in {days} days.")
+                print("Run 'config' then 'cert' to renew it.\n")
+                log.warning("SSL certificate for %s expires in %d days", label, days)
 
     for issue in _production_issues():
         print(_c(f"  {issue}", "yellow"))
@@ -1411,9 +1531,9 @@ def _write_unit_files():
     the file ownership they depend on. Returns True if a service file already
     existed (a refresh) or False if this is a fresh enable. Contains no prompts,
     so it is safe to call silently — shared by cmd_enable (interactive) and
-    the post-update path (silent), so an update that changes what the unit
-    should contain (this release added the watchdog timer) reaches an
-    already-enabled host without a separate manual 'enable'."""
+    the post-update path (silent), so a release that changes what the unit
+    should contain reaches an already-enabled host without a separate manual
+    'enable'."""
     updating      = _service_file_exists()
     servette_path = os.path.abspath(__file__)
     python_path   = _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(
@@ -1444,13 +1564,14 @@ def _write_unit_files():
     subprocess.run(["systemctl", "enable", "--now", "servette-netwatch.timer"],
                    check=True, capture_output=True)
 
-    # Chown files the service process needs to read
+    # Chown files the service process needs to read, across every site
     _chown_servette(config.CONFIG_FILE)
-    if config.cert_file:
-        _chown_servette(_resolve(config.cert_file))
-    if config.key_file:
-        _chown_servette(_resolve(config.key_file))
-    _chown_servette(_resolve(config.serve_dir))
+    for site in config.sites:
+        if site.cert_file:
+            _chown_servette(_resolve(site.cert_file))
+        if site.key_file:
+            _chown_servette(_resolve(site.key_file))
+        _chown_servette(_resolve(site.serve_dir))
     _chown_servette(os.path.join(BASE_DIR, "certs"))
     _chown_servette(os.path.join(BASE_DIR, ".acme-account.pem"))
     # Create the ACME webroot now so it exists when systemd applies ReadWritePaths
@@ -1458,9 +1579,11 @@ def _write_unit_files():
     os.makedirs(ACME_WEBROOT, exist_ok=True)
     _chown_servette(ACME_WEBROOT)
 
-    # Warn if serve_dir isn't world-readable
-    if config.serve_dir:
-        serve_path = _resolve(config.serve_dir)
+    # Warn if any site's serve_dir isn't world-readable
+    for site in config.sites:
+        if not site.serve_dir:
+            continue
+        serve_path = _resolve(site.serve_dir)
         if os.path.isdir(serve_path):
             mode = os.stat(serve_path).st_mode
             if not (mode & 0o005 == 0o005):  # world read+execute on directory
@@ -1823,9 +1946,10 @@ class _ACMEClient:
                     pass
 
 
-def _obtain_trusted_cert(domain):
+def _obtain_trusted_cert(domain, site):
     """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
-    minimal ACME client (_ACMEClient) on stdlib urllib + cryptography."""
+    minimal ACME client (_ACMEClient) on stdlib urllib + cryptography, and store it
+    on `site`."""
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
@@ -1912,11 +2036,10 @@ def _obtain_trusted_cert(domain):
                     os.chmod(key_path, 0o600)
                     _chown_servette(CERTS_DIR)
 
-                config.cert_file = cert_path
-                config.key_file  = key_path
+                site.cert_file = cert_path
+                site.key_file  = key_path
+                site.domain    = domain
                 config.save()
-                global _cert_domain
-                _cert_domain = domain
 
                 issued_names = f"{domain} and {www_domain}" if include_www else domain
                 print(f"  Certificate issued for {issued_names}.")
@@ -2049,43 +2172,48 @@ def _section(title):
 # already has that convention's intuition. Onboarding, then runtime control,
 # then persistence, then observability, then maintenance, then meta.
 _COMMANDS = [
-    ("setup",        "guided walkthrough for getting started"),
-    ("config",       "view and edit settings"),
-    ("start",        "start the server"),
-    ("stop",         "stop the server"),
-    ("enable",       "enable Servette as a system service"),
-    ("disable",      "remove the system service"),
-    ("status",       "show whether the server is running"),
-    ("log [n]",      "show the last n log entries"),
-    ("update",       "download the latest version of servette.py"),
-    ("restore",      "roll back to the previous version (undoes the last update)"),
-    ("pull",         "check the publish channel and pull new site content now"),
-    ("restore-site", "roll back site content to the previous version (undoes the last pull)"),
-    ("help",         "show this message"),
-    ("quit",         "exit"),
+    ("setup",            "guided walkthrough for getting started"),
+    ("config",           "view and edit settings"),
+    ("start",            "start the server"),
+    ("stop",             "stop the server"),
+    ("enable",           "enable Servette as a system service"),
+    ("disable",          "remove the system service"),
+    ("status",           "show whether the server is running"),
+    ("log [n]",          "show the last n log entries"),
+    ("update",           "download the latest version of servette.py"),
+    ("restore",          "roll back to the previous version (undoes the last update)"),
+    ("pull [n]",         "check a site's publish channel and pull new content now"),
+    ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
+    ("help",             "show this message"),
+    ("quit",             "exit"),
 ]
 HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
 
-# Ordered: what to serve and how it's reached (dir/port/cert/email — email is
-# the ACME registration address, grouped with the certificate it belongs to),
-# then access control, then traffic shaping, then advanced/rarely-touched
-# security tuning, then meta.
+# Ordered: sites first (list/add/remove — the multi-site entry points), then
+# what a site serves and how it's reached (dir/port/cert/email — email is the
+# ACME registration address, grouped with the certificate it belongs to), then
+# access control, then traffic shaping, then advanced/rarely-touched security
+# tuning, then meta. dir/cert/publish/username/password take an optional site
+# index (default 0) — same [n] convention as the top-level 'log [n]'.
 _CONFIG_COMMANDS = [
-    ("dir",      "directory to serve"),
-    ("port",     "HTTPS port"),
-    ("cert",     "SSL certificate and key"),
-    ("email",    "email address"),
-    ("publish",  "site publish channel (watch URL and signing key)"),
-    ("username", "login username"),
-    ("password", "login password"),
-    ("limits",   "rate limits"),
-    ("cache",    "browser cache policy"),
-    ("proxy",    "trusted proxy IP for X-Forwarded-For"),
-    ("tls",      "minimum TLS version and cipher suites"),
-    ("csp",      "Content-Security-Policy header"),
-    ("perms",    "Permissions-Policy header"),
-    ("show",     "show current settings"),
-    ("back",     "return to main shell"),
+    ("sites",           "list configured sites"),
+    ("add-site",        "add a new site (folder, domain, password, publish channel)"),
+    ("remove-site <n>", "remove a site"),
+    ("dir [n]",         "directory to serve"),
+    ("port",            "HTTPS port"),
+    ("cert [n]",        "SSL certificate and key"),
+    ("email",           "email address"),
+    ("publish [n]",     "site publish channel (watch URL and signing key)"),
+    ("username [n]",    "login username"),
+    ("password [n]",    "login password"),
+    ("limits",          "rate limits"),
+    ("cache",           "browser cache policy"),
+    ("proxy",           "trusted proxy IP for X-Forwarded-For"),
+    ("tls",             "minimum TLS version and cipher suites"),
+    ("csp",             "Content-Security-Policy header"),
+    ("perms",           "Permissions-Policy header"),
+    ("show",            "show current settings"),
+    ("back",            "return to main shell"),
 ]
 CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
 
@@ -2115,16 +2243,9 @@ def _config_show():
     if config.cache_policy == "max-age":
         cache_display += f" ({config.cache_max_age}s)"
 
-    rows = [
-        ("Directory",          val(config.serve_dir)),
+    host_rows = [
         ("HTTPS port",         config.port),
-        ("Certificate",        val(config.cert_file)),
-        ("Key",                val(config.key_file)),
         ("Email",              val(config.email)),
-        ("Publish URL",        val(config.publish_url)),
-        ("Publish key",        val(config.publish_key)),
-        ("Username",           val(config.username)),
-        ("Password",           "(set)" if config.password_hash else "(not set)"),
         ("Rate limit",         f"{config.rate_limit} req/min"),
         ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
         ("Cache policy",       cache_display),
@@ -2137,18 +2258,171 @@ def _config_show():
     ]
 
     _section("Current Settings")
-    for label, value in rows:
+    for label, value in host_rows:
         print(f"  {label:<{_PAD}} {value}")
+
+    for i, site in enumerate(config.sites):
+        print(f"\n  Site {i}: {site.domain or '(self-signed)'}")
+        site_rows = [
+            ("Directory",   val(site.serve_dir)),
+            ("Certificate", val(site.cert_file)),
+            ("Key",         val(site.key_file)),
+            ("Publish URL", val(site.publish_url)),
+            ("Publish key", val(site.publish_key)),
+            ("Username",    val(site.username)),
+            ("Password",    "(set)" if site.password_hash else "(not set)"),
+        ]
+        for label, value in site_rows:
+            print(f"    {label:<{_PAD - 2}} {value}")
     print()
 
 
-def _config_dir():
+def _config_sites():
+    _section("Sites")
+    for i, site in enumerate(config.sites):
+        auth = "password-protected" if site.username else "no password"
+        print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}")
+    print()
+    print("  Edit one with e.g. 'dir 1', 'cert 1', 'publish 1' (index defaults to 0).")
+    print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
+
+
+def _is_within_base_dir(path):
+    """True if path (already resolved) is BASE_DIR itself or somewhere under
+    it. serve_dir must satisfy this: the publish pipeline's atomic swap
+    renames within the same filesystem, and the systemd unit's
+    ReadWritePaths only grants write access under BASE_DIR — a serve_dir
+    outside it breaks the swap silently under the sandboxed service even
+    though a manual, unsandboxed run would never show the problem.
+
+    Defers to _within so containment is decided in exactly one place: two
+    implementations of the same security predicate can drift apart, and only
+    one of them would be the one anybody reads."""
+    return _within(os.path.realpath(BASE_DIR), os.path.realpath(path))
+
+
+def _config_add_site():
+    """Add a site — the same questions cmd_setup asks for the very first one
+    (domain, password), plus the folder question the first site gets for free
+    (its default, 'site', is baked in and can't also serve a second site)."""
+    print("\n  Adding a new site.\n")
+    dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
+    if dirs:
+        print("  Existing folders:")
+        for d in dirs:
+            print(f"    {d}")
+        print()
+    folder = _input("  serve_dir: ").strip()
+    if not folder or not os.path.isdir(_resolve(folder)):
+        print(f"  → directory not found: {_resolve(folder or '(blank)')}. Create it first, then try again.")
+        return
+    if not _is_within_base_dir(_resolve(folder)):
+        print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
+        return
+
+    site = Site({"serve_dir": folder})
+    config.sites.append(site)
+    idx = len(config.sites) - 1
+    # A unique self-signed cert/key pair, so a second self-signed site doesn't
+    # collide with the first's cert.pem/key.pem — overwritten if a domain is
+    # obtained below, which uses the domain-scoped certs/<domain>/ path instead.
+    # Suffixed with randomness, not the site's list position: a position-based
+    # name (cert-{idx}.pem) collides with a surviving site's own files after a
+    # remove-site/add-site sequence shifts indices, silently overwriting that
+    # site's live certificate.
+    suffix = os.urandom(4).hex()
+    site.cert_file = f"cert-{suffix}.pem"
+    site.key_file  = f"key-{suffix}.pem"
+    # Generated unconditionally, before the domain is even asked about: if a
+    # domain is given below and ACME issuance fails, cert_file/key_file must
+    # still point at real files on disk rather than a placeholder name that
+    # was config.save()'d but never written — start_server()'s pre-flight
+    # existence check refuses to start the WHOLE server, for every site, the
+    # next time anything restarts it, if a site's cert_file is missing.
+    print("  Generating self-signed certificate...")
+    _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
+    _chown_servette(_resolve(site.cert_file))
+    _chown_servette(_resolve(site.key_file))
+    config.save()
+    print(f"  → site {idx} added.\n")
+
+    domain = _input("  Domain name (leave blank for self-signed): ").strip()
+    if domain and _domain_in_use(domain):
+        print(f"  → {domain} is already used by another site on this box — using a self-signed certificate instead.")
+        domain = ""
+
+    reloaded = False
+    if domain:
+        placeholder = (_resolve(site.cert_file), _resolve(site.key_file))
+        _obtain_trusted_cert(domain, site)  # reloads the server itself on success
+        # site.domain is only assigned inside _obtain_trusted_cert on the
+        # success path, so this distinguishes a real reload from a failed
+        # ACME attempt that left the self-signed fallback (already generated
+        # above) as the site's live cert.
+        if site.domain == domain:
+            reloaded = True
+            # The placeholder pair was insurance against ACME failing; issuance
+            # succeeded and repointed the site at certs/<domain>/, so nothing
+            # references these any more. Compared against the site's current
+            # paths rather than deleted blind — if issuance somehow left the
+            # site pointing at them, they are live files, not litter.
+            for stale in placeholder:
+                if stale not in (_resolve(site.cert_file), _resolve(site.key_file)):
+                    try:
+                        os.remove(stale)
+                    except OSError:
+                        pass
+        else:
+            print("  → keeping the self-signed certificate for now. Browsers will show a security warning until you retry the domain.\n")
+    else:
+        print("  Note: browsers will show a security warning until you add a domain.\n")
+
+    print("  Password protection (optional). Leave username blank to disable.")
+    _config_username(site)
+    if site.username:
+        _config_password(site)
+
+    print(f"\n  Site {idx} added. Run 'publish {idx}' to set up its publish channel.")
+    if not reloaded and (_server_running() or _service_is_active()):
+        _reload_server()
+
+
+def _config_remove_site(args):
+    if not args:
+        print("  Usage: remove-site <site index>")
+        return
+    try:
+        idx = int(args[0])
+    except ValueError:
+        print("  Usage: remove-site <site index>")
+        return
+    if not (0 <= idx < len(config.sites)):
+        print(f"  No site {idx} — run 'sites' to list them.")
+        return
+    if len(config.sites) == 1:
+        print("  Can't remove the only site — a box needs at least one.")
+        return
+
+    site  = config.sites[idx]
+    label = site.domain or site.serve_dir
+    if not _prompt(f"Remove site {idx} ({label})? Its config is discarded; its files on disk are not touched."):
+        print("  Cancelled.")
+        return
+
+    del config.sites[idx]
+    config.save()
+    print(f"  → site {idx} removed.")
+    if _server_running() or _service_is_active():
+        _reload_server()
+
+
+def _config_dir(site):
     dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
     if dirs:
         print()
         for d in dirs:
-            print(f"    {d}{' ←' if d == config.serve_dir else ''}")
-    new_value = _input(f"\n  serve_dir [{config.serve_dir}]: ").strip()
+            print(f"    {d}{' ←' if d == site.serve_dir else ''}")
+    new_value = _input(f"\n  serve_dir [{site.serve_dir}]: ").strip()
     if not new_value:
         print("  → unchanged")
         return
@@ -2156,7 +2430,10 @@ def _config_dir():
     if not os.path.isdir(path):
         print(f"  → directory not found: {path}")
         return
-    config.serve_dir = new_value
+    if not _is_within_base_dir(path):
+        print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
+        return
+    site.serve_dir = new_value
     config.save()
     print("  → saved")
 
@@ -2180,8 +2457,8 @@ def _config_set(attr, label, cast=str, validate=None, error="invalid value", hin
         print(f"  → {error}, unchanged")
 
 
-def _config_cert():
-    cert_path = _resolve(config.cert_file)
+def _config_cert(site):
+    cert_path = _resolve(site.cert_file)
     if os.path.exists(cert_path):
         days = _cert_days_remaining(cert_path)
         if days is not None and days <= 0:
@@ -2189,20 +2466,27 @@ def _config_cert():
         elif days is not None:
             print(f"  Current certificate expires in {days} days.")
         else:
-            print(f"  Current: {config.cert_file}")
+            print(f"  Current: {site.cert_file}")
     print()
 
     domain = _input("  Domain name (leave blank for self-signed): ").strip()
 
+    if domain and _domain_in_use(domain, excluding=site):
+        print(f"  → {domain} is already used by another site on this box, unchanged")
+        return
+
     if domain:
-        _obtain_trusted_cert(domain)
+        _obtain_trusted_cert(domain, site)
     else:
-        cert_path = _resolve(config.cert_file or "cert.pem")
-        key_path  = _resolve(config.key_file or "key.pem")
+        cert_path = _resolve(site.cert_file or "cert.pem")
+        key_path  = _resolve(site.key_file or "key.pem")
         print("  Generating self-signed certificate...")
         _generate_self_signed_cert(cert_path, key_path)
-        config.cert_file = config.cert_file or "cert.pem"
-        config.key_file  = config.key_file or "key.pem"
+        _chown_servette(cert_path)
+        _chown_servette(key_path)
+        site.cert_file = site.cert_file or "cert.pem"
+        site.key_file  = site.key_file or "key.pem"
+        site.domain    = ""
         config.save()
         print("  → self-signed certificate generated.")
         print("  Note: your browser will show a security warning until you add a domain.\n")
@@ -2210,25 +2494,25 @@ def _config_cert():
             _reload_server()
 
 
-def _config_username():
-    current   = config.username
+def _config_username(site):
+    current   = site.username
     new_value = _input(f"  username [{current}]: ").strip()
     if new_value == "" and current != "":
-        config.username      = ""
-        config.password_hash = ""
-        config.password_salt = ""
+        site.username      = ""
+        site.password_hash = ""
+        site.password_salt = ""
         config.save()
         print("  → auth disabled, password cleared")
     elif new_value and new_value != current:
-        config.username = new_value
+        site.username = new_value
         config.save()
         print("  → saved")
     else:
         print("  → unchanged")
 
 
-def _config_password():
-    if not config.username:
+def _config_password(site):
+    if not site.username:
         print("  Set a username first.")
         return
     try:
@@ -2243,7 +2527,7 @@ def _config_password():
     if pwd != confirm:
         print("  → passwords do not match, unchanged")
         return
-    config.password_hash, config.password_salt = _hash_password(pwd)
+    site.password_hash, site.password_salt = _hash_password(pwd)
     config.save()
     print("  → saved")
 
@@ -2294,28 +2578,28 @@ def _config_trusted_proxy():
     print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
 
 
-def _config_publish():
-    print(f"\n  Current watch URL: {config.publish_url or '(not set)'}")
+def _config_publish(site):
+    print(f"\n  Current watch URL: {site.publish_url or '(not set)'}")
     print("  Where signed content bundles (a .tar.gz plus its .sig) are pulled from —")
     print("  typically a GitHub release. Leave blank to disable publishing.\n")
     url = _input("  publish_url: ").strip()
     if url and not url.startswith("https://"):
         print("  → must be an https:// URL, unchanged")
-    elif url != config.publish_url:
-        config.publish_url = url
+    elif url != site.publish_url:
+        site.publish_url = url
         config.save()
         print("  → saved" if url else "  → cleared, publishing disabled")
     else:
         print("  → unchanged")
 
-    print(f"\n  Current signing key: {config.publish_key or '(not set)'}")
+    print(f"\n  Current signing key: {site.publish_key or '(not set)'}")
     print("  The public half of the content-signing keypair generated by the publish")
     print("  tool — 64 hex characters (a 32-byte Ed25519 public key). Leave blank to clear.\n")
     key = _input("  publish_key: ").strip().lower()
     if key and not re.fullmatch(r"[0-9a-f]{64}", key):
         print("  → not a 64-character hex string, unchanged")
-    elif key != config.publish_key:
-        config.publish_key = key
+    elif key != site.publish_key:
+        site.publish_key = key
         config.save()
         print("  → saved" if key else "  → cleared")
     else:
@@ -2348,6 +2632,24 @@ def _config_tls():
     print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
 
 
+def _config_site_arg(args):
+    """Resolve dir/cert/username/password/publish's optional site-index
+    argument to a Site, defaulting to site 0 — same [n] convention as the
+    top-level 'log [n]'. Prints its own error and returns None if given but
+    invalid, so callers can just no-op on None."""
+    if not args:
+        return config.sites[0]
+    try:
+        idx = int(args[0])
+    except ValueError:
+        print(f"  Not a site index: {args[0]!r}")
+        return None
+    if not (0 <= idx < len(config.sites)):
+        print(f"  No site {idx} — run 'sites' to list them.")
+        return None
+    return config.sites[idx]
+
+
 def cmd_config():
     _config_show()
     print(CONFIG_HELP)
@@ -2362,24 +2664,42 @@ def cmd_config():
         if not raw:
             continue
 
-        cmd = raw.split()[0].lower()
+        parts = raw.split()
+        cmd   = parts[0].lower()
+        args  = parts[1:]
 
         if cmd == "show":
             _config_show()
+        elif cmd == "sites":
+            _config_sites()
+        elif cmd == "add-site":
+            _config_add_site()
+        elif cmd == "remove-site":
+            _config_remove_site(args)
         elif cmd in ("dir", "directory"):
-            _config_dir()
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_dir(site)
         elif cmd == "port":
             _config_set("port", "port", int, lambda v: 1 <= v <= 65535, "invalid port number")
         elif cmd == "cert":
-            _config_cert()
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_cert(site)
         elif cmd == "username":
-            _config_username()
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_username(site)
         elif cmd == "password":
-            _config_password()
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_password(site)
         elif cmd == "email":
             _config_set("email", "email")
         elif cmd == "publish":
-            _config_publish()
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_publish(site)
         elif cmd == "limits":
             _config_limits()
         elif cmd == "cache":
@@ -2463,6 +2783,10 @@ def cmd_log(n=20):
 RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
 _SIGNING_PUBLIC_KEY = "abb8854be0b82df813f3b052296a26573063fc6314ea2701d54354605e6f15db"
 _VERSION_RE         = re.compile(rb"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
+# Ceiling on a downloaded servette.py. The file is one order of magnitude under
+# this; the cap exists so a hostile or broken response is bounded before the
+# signature check, not to constrain growth.
+_MAX_SOURCE_BYTES   = 4 * 1024 * 1024
 
 def _parse_version(source_bytes):
     """Extract __version__ from servette.py source bytes. Returns the string or None."""
@@ -2546,8 +2870,14 @@ def cmd_update():
     # Download source and signature
     try:
         with _spinner(f"Downloading {new_version}..."):
-            new_source = urllib.request.urlopen(assets["servette.py"],     timeout=30).read()
-            signature  = urllib.request.urlopen(assets["servette.py.sig"], timeout=15).read()
+            # Capped at the socket, like the publish bundle: bound memory before
+            # the signature is checked rather than after, so what arrives can't
+            # be larger than what is worth reading whatever the response claims.
+            new_source = urllib.request.urlopen(assets["servette.py"],     timeout=30).read(_MAX_SOURCE_BYTES + 1)
+            if len(new_source) > _MAX_SOURCE_BYTES:
+                print(f"  Update failed: servette.py asset exceeds {_MAX_SOURCE_BYTES // 1024} KB.")
+                return
+            signature  = urllib.request.urlopen(assets["servette.py.sig"], timeout=15).read(4096)
     except Exception as e:
         print(f"  Update failed: {e}")
         return
@@ -2692,14 +3022,14 @@ def _extract_bundle(data, dest_dir):
         tf.extractall(dest_dir, members=members, filter="data")
 
 
-def _swap_site_content(new_dir):
+def _swap_site_content(new_dir, serve_dir):
     """Atomically replace the live serve_dir with new_dir's contents, keeping
     a single-shot backup — the same one-step-back pattern as servette.py.bak.
     new_dir must be on the same filesystem as serve_dir (both under BASE_DIR)
     so the renames are atomic; the only unavoidable risk window is the two
     renames themselves, each a single fast syscall back to back — proportionate
     to Servette's scale, not a high-QPS system where that window would matter."""
-    live_dir = _resolve(config.serve_dir).rstrip(os.sep)
+    live_dir = _resolve(serve_dir).rstrip(os.sep)
     bak_dir  = live_dir + ".bak"
     shutil.rmtree(bak_dir, ignore_errors=True)
     if os.path.isdir(live_dir):
@@ -2707,11 +3037,10 @@ def _swap_site_content(new_dir):
     os.rename(new_dir, live_dir)
 
 
-_publish_lock = threading.Lock()  # serializes every site-content mutation — poke's
-                                   # background thread, the periodic poll, the
-                                   # interactive 'pull', and cmd_restore_site can
-                                   # all fire independently, and the swap below is
-                                   # multiple unguarded filesystem ops, not one
+_publish_lock = threading.Lock()  # serializes site-content mutation across every
+                                   # site: 'pull' and 'restore-site' can run from
+                                   # two shell sessions at once, and the swap is
+                                   # multiple unguarded filesystem ops, not one.
 
 
 def _publish_sig_url(url):
@@ -2723,25 +3052,23 @@ def _publish_sig_url(url):
     return urlunsplit(parts._replace(path=parts.path + ".sig"))
 
 
-def _check_for_content_update():
-    """Pull, verify, and swap in a new site bundle if the publish channel is
-    configured. No-ops silently (not an error) if publish_url/publish_key
-    aren't both set — publishing is opt-in. Runs off the request path: called
-    from the poke handler's background thread and the periodic fallback poll —
-    neither is watching stdout, so every outcome is logged here. Also called
-    synchronously by the interactive 'pull' command, which turns the returned
-    status into a printed line rather than duplicating this logic.
+def _check_for_content_update(site):
+    """Pull, verify, and swap in a new site bundle for `site` if its publish
+    channel is configured. No-ops silently (not an error) if publish_url/
+    publish_key aren't both set on it — publishing is opt-in, per site. Called
+    by the interactive 'pull' command, which turns the returned status into a
+    printed line.
 
     Returns a short status string: "not-configured", "invalid-key",
     "fetch-failed", "too-large", "bad-signature", "rejected", or "published"."""
-    if not (config.publish_url and config.publish_key):
+    if not (site.publish_url and site.publish_key):
         return "not-configured"
 
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     from cryptography.exceptions import InvalidSignature
 
     try:
-        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(config.publish_key))
+        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(site.publish_key))
     except ValueError:
         log.error("publish_key is not a valid Ed25519 public key — publishing disabled")
         return "invalid-key"
@@ -2749,13 +3076,12 @@ def _check_for_content_update():
     with _publish_lock:
         try:
             # Capped read: bounds memory to _MAX_BUNDLE_BYTES regardless of what
-            # the response claims or how much data is actually sent — poke makes
-            # this fetch reachable by any unauthenticated visitor, repeatedly.
-            bundle = urllib.request.urlopen(config.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
+            # the response claims or how much data is actually sent.
+            bundle = urllib.request.urlopen(site.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
             if len(bundle) > _MAX_BUNDLE_BYTES:
                 log.error("Publish bundle exceeds %d bytes — rejecting before signature check", _MAX_BUNDLE_BYTES)
                 return "too-large"
-            signature = urllib.request.urlopen(_publish_sig_url(config.publish_url), timeout=15).read(4096)
+            signature = urllib.request.urlopen(_publish_sig_url(site.publish_url), timeout=15).read(4096)
         except Exception as e:
             log.warning("Could not fetch publish bundle: %s", e)
             return "fetch-failed"
@@ -2766,28 +3092,27 @@ def _check_for_content_update():
             log.error("Publish bundle signature verification failed — rejecting")
             return "bad-signature"
 
-        staging = _resolve(config.serve_dir).rstrip(os.sep) + ".new"
+        staging = _resolve(site.serve_dir).rstrip(os.sep) + ".new"
         shutil.rmtree(staging, ignore_errors=True)
         try:
             _extract_bundle(bundle, staging)
-            _swap_site_content(staging)
+            _swap_site_content(staging, site.serve_dir)
         except Exception as e:
             log.error("Publish bundle rejected: %s", e)
             shutil.rmtree(staging, ignore_errors=True)
             return "rejected"
 
-    log.info("Published new site content from %s", config.publish_url)
+    log.info("Published new content for %s from %s", site.domain or site.serve_dir, site.publish_url)
     return "published"
 
 
-def cmd_pull():
-    """Manually check the publish channel for new site content and pull it in
-    now, rather than waiting for the next poke or fallback poll."""
-    if not (config.publish_url and config.publish_key):
+def cmd_pull(site):
+    """Manually check the publish channel for new site content and pull it in."""
+    if not (site.publish_url and site.publish_key):
         print("  No publish channel configured — run 'config publish' first.")
         return
     with _spinner("Checking for new site content..."):
-        result = _check_for_content_update()
+        result = _check_for_content_update(site)
     messages = {
         "invalid-key":   "Pull failed: publish_key is not a valid Ed25519 public key.",
         "fetch-failed":  "Pull failed: could not fetch the publish bundle. See 'log' for details.",
@@ -2799,10 +3124,10 @@ def cmd_pull():
     print(f"  {messages[result]}")
 
 
-def cmd_restore_site():
+def cmd_restore_site(site):
     """Roll back to the content saved by the last successful publish. Mirrors
     cmd_restore exactly: single-shot, consumed on use."""
-    live_dir = _resolve(config.serve_dir).rstrip(os.sep)
+    live_dir = _resolve(site.serve_dir).rstrip(os.sep)
     bak_dir  = live_dir + ".bak"
 
     if not os.path.isdir(bak_dir):
@@ -2836,18 +3161,28 @@ def _format_uptime(seconds):
 
 
 def _production_issues():
-    """Return a list of strings describing conditions that prevent production readiness."""
-    issues = []
-    if not config.serve_dir or not os.path.exists(_resolve(config.serve_dir)):
-        issues.append("serve directory not configured — run 'config'")
-    if not config.cert_file or not os.path.exists(_resolve(config.cert_file)):
-        issues.append("certificate not configured — run 'config cert'")
-    elif _domain_from_cert(_resolve(config.cert_file)) is None:
-        issues.append("self-signed certificate — run 'config cert' to add a domain")
-    if not config.username:
-        issues.append("no password protection — run 'config' to set credentials")
-    if bool(config.publish_url) != bool(config.publish_key):
-        issues.append("publish channel partially configured — run 'config publish' to finish setup")
+    """Return a list of strings describing conditions that prevent production
+    readiness, across every configured site. Single-site installs (still the
+    common case) see exactly today's unlabeled messages; a labeled site name
+    is added only once there's more than one to tell apart."""
+    issues  = []
+    labeled = len(config.sites) > 1
+    for site in config.sites:
+        tag = f" ({site.domain or site.serve_dir})" if labeled else ""
+        if not site.serve_dir or not os.path.exists(_resolve(site.serve_dir)):
+            issues.append(f"serve directory not configured{tag} — run 'config'")
+        if not site.cert_file or not os.path.exists(_resolve(site.cert_file)):
+            issues.append(f"certificate not configured{tag} — run 'config cert'")
+        elif not site.domain:
+            # Keyed on the configured domain rather than the certificate's
+            # subject: a site with no domain is the catch-all whatever its cert
+            # contains, gets no HSTS, and is not reachable by name — so 'add a
+            # domain' is the advice that actually changes any of that.
+            issues.append(f"self-signed certificate{tag} — run 'config cert' to add a domain")
+        if not site.username:
+            issues.append(f"no password protection{tag} — run 'config' to set credentials")
+        if bool(site.publish_url) != bool(site.publish_key):
+            issues.append(f"publish channel partially configured{tag} — run 'config publish' to finish setup")
     mem_kb, avail_kb, swap_kb = _meminfo()
     rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
     active_mb = (swap_kb or 0) // 1024
@@ -2863,30 +3198,35 @@ def _production_issues():
 
 
 def _cache_warnings():
-    """Warn when the site, or any single file, is too big for the in-memory cache."""
-    warnings   = []
-    serve_dir  = _resolve(config.serve_dir)
-    if not os.path.isdir(serve_dir):
-        return warnings
+    """Warn when a site, or any single file within it, is too big for the shared
+    in-memory cache. Single-site installs see exactly today's unlabeled messages;
+    a labeled site name is added only once there's more than one to tell apart."""
+    warnings  = []
     cache_max = config.cache_size_mb * 1024 * 1024
-    total     = 0
-    for root, _dirs, files in os.walk(serve_dir):
-        for name in files:
-            try:
-                size = os.path.getsize(os.path.join(root, name))
-            except OSError:
-                continue
-            total += size
-            if size > cache_max:
-                warnings.append(
-                    f"{name} ({size / 1048576:.1f} MB) is larger than the cache "
-                    f"({config.cache_size_mb} MB) and is never cached"
-                )
-    if total > cache_max:
-        warnings.append(
-            f"site is {total / 1048576:.1f} MB but the cache is {config.cache_size_mb} MB "
-            f"— not all of it stays cached at once"
-        )
+    labeled   = len(config.sites) > 1
+    for site in config.sites:
+        serve_dir = _resolve(site.serve_dir)
+        if not os.path.isdir(serve_dir):
+            continue
+        tag   = f" in {site.domain or site.serve_dir}" if labeled else ""
+        total = 0
+        for root, _dirs, files in os.walk(serve_dir):
+            for name in files:
+                try:
+                    size = os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    continue
+                total += size
+                if size > cache_max:
+                    warnings.append(
+                        f"{name}{tag} ({size / 1048576:.1f} MB) is larger than the cache "
+                        f"({config.cache_size_mb} MB) and is never cached"
+                    )
+        if total > cache_max:
+            warnings.append(
+                f"site{tag} is {total / 1048576:.1f} MB but the cache is {config.cache_size_mb} MB "
+                f"— not all of it stays cached at once"
+            )
     return warnings
 
 
@@ -2941,9 +3281,6 @@ def _runtime_stats(service_active):
 def cmd_status():
     service_active = _service_is_active()
     running        = service_active or _server_running()
-    cert_path      = _resolve(config.cert_file)
-    domain         = _domain_from_cert(cert_path)
-    url            = f"https://{domain}" if domain else f"https://localhost:{config.port}"
     W              = _PAD
 
     print()
@@ -2954,18 +3291,26 @@ def cmd_status():
         mode = "System service" if service_active else "Session only"
         print(f"  {'Mode':<{W}} {mode}")
 
-    print(f"  {'URL':<{W}} {url}")
-    print(f"  {'Directory':<{W}} {config.serve_dir or '(not configured)'}")
-    auth_str = _c("enabled", "green") if config.username else _c("disabled", "yellow")
-    print(f"  {'Auth':<{W}} {auth_str}")
+    for i, site in enumerate(config.sites):
+        cert_path = _resolve(site.cert_file)
+        # site.domain, not the certificate's subject: routing, TLS selection and
+        # HSTS all key off the configured domain, so reporting anything else can
+        # print a URL that does not actually reach this site.
+        url       = f"https://{site.domain}" if site.domain else f"https://localhost:{config.port}"
+        if len(config.sites) > 1:
+            print(f"\n  Site {i}")
+        print(f"  {'URL':<{W}} {url}")
+        print(f"  {'Directory':<{W}} {site.serve_dir or '(not configured)'}")
+        auth_str = _c("enabled", "green") if site.username else _c("disabled", "yellow")
+        print(f"  {'Auth':<{W}} {auth_str}")
 
-    days = _cert_days_remaining(cert_path)
-    if days is not None:
-        if days <= 0:
-            cert_str = _c("expired", "red")
-        else:
-            cert_str = _c(f"{days} days remaining", "yellow" if days < 30 else "green")
-        print(f"  {'Cert':<{W}} {cert_str}")
+        days = _cert_days_remaining(cert_path)
+        if days is not None:
+            if days <= 0:
+                cert_str = _c("expired", "red")
+            else:
+                cert_str = _c(f"{days} days remaining", "yellow" if days < 30 else "green")
+            print(f"  {'Cert':<{W}} {cert_str}")
 
     issues = _production_issues() + _cache_warnings()
     if issues:
@@ -2991,18 +3336,20 @@ def cmd_setup():
 
     _banner("Getting Started")
 
+    site = config.sites[0]  # the site setup provisions; 'add-site' handles the rest
+
     print()
     print("  Step 1 — SSL certificate")
     print(f"  Your public IP is {public_ip}. Point a domain here for a trusted certificate.")
     print("  Leave blank to use a self-signed certificate (browsers will warn visitors).\n")
-    _config_cert()
+    _config_cert(site)
 
     print()
     print("  Step 2 — Password protection (optional)")
     print("  Leave username blank to disable. Press Enter to keep current value.")
-    _config_username()
-    if config.username:
-        _config_password()
+    _config_username(site)
+    if site.username:
+        _config_password(site)
 
     print()
     if _prompt("Ready to start?"):
@@ -3056,9 +3403,13 @@ def shell():
         elif cmd == "restore":
             cmd_restore()
         elif cmd == "pull":
-            cmd_pull()
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_pull(site)
         elif cmd == "restore-site":
-            cmd_restore_site()
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_restore_site(site)
         elif cmd in ("help", "?"):
             print(HELP)
         elif cmd in ("quit", "exit"):
@@ -3072,6 +3423,16 @@ def shell():
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Config is a module-level singleton, instantiated here (not at its class
+# definition, near the top) because migrating a pre-multi-site flat config
+# calls _domain_from_cert() to backfill the migrated site's domain, and that
+# function is defined much later, in Certificate management. Dependency
+# injection (passing config into every function) is the textbook alternative,
+# but the stdlib request handlers have fixed signatures and cannot accept
+# extra arguments. In a single-file server that is always run as a process,
+# the global is the right call.
+config = Config()
 
 if __name__ == "__main__":
     _bootstrap()  # no-op if already in venv; otherwise re-execs into venv

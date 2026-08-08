@@ -1,399 +1,1650 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Servette — It's working.</title>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --bg:      #0e0e0e;
-      --surface: #161616;
-      --border:  #2a2a2a;
-      --text:    #e8e8e8;
-      --muted:   #555;
-      --green:   #4ade80;
-      --red:     #f87171;
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Servette — The Simple, Secure, Static-Site Server</title>
+<meta name="description" content="Servette is a production nanoserver in a single readable Python file: trusted HTTPS that renews itself, security headers, rate limiting, and a hardened service that survives reboots. No configuration language, and one dependency it installs for you.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&amp;family=DM+Sans:opsz,wght@9..40,400..600&amp;display=swap">
+
+<style>
+/* Organized in page order: tokens, base, shared patterns, then one block per
+   region of the markup below. */
+
+/* ── Design tokens ─────────────────────────────────────────────────
+   The dark palette is the demo page's, unchanged (site/demo.html); the
+   light palette is its counterpart, built around the same #5A8466 the
+   logo uses in both themes. */
+
+:root {
+  --bg:       #faf9f7;
+  --bg-2:     #f1efeb;
+  --surface:  #ffffff;
+  --code-bg:  #f1efeb;
+  --border:   #e2ded7;
+  --text:     #1c1b1a;
+  --text-2:   #4a4845;
+  --muted:    #857f76;
+  --green:    #4d7358;
+  --green-2:  #5A8466;
+  --band:     #1c1b1a;
+  --band-ink: #f5f2ed;
+}
+
+html[data-theme="dark"] {
+  --bg:       #0e0e0e;
+  --bg-2:     #131313;
+  --surface:  #161616;
+  --code-bg:  #0a0a0a;
+  --border:   #2a2a2a;
+  --text:     #e8e8e8;
+  --text-2:   #a8a49e;
+  --muted:    #6f6a63;
+  --green:    #7BA888;
+  --green-2:  #5A8466;
+  --band:     #080808;
+  --band-ink: #e8e8e8;
+}
+
+/* ── Base ──────────────────────────────────────────────────────── */
+
+* { box-sizing: border-box; }
+
+html { background: var(--bg); }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "DM Sans", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-wrap: pretty;
+}
+
+/* The grain the demo page wears, at the same weight. Fixed and inert, so it
+   sits under everything without intercepting a single click. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  pointer-events: none;
+  opacity: 0.4;
+  z-index: 0;
+}
+
+body > * { position: relative; z-index: 1; }
+
+a { color: var(--green); text-decoration: none; }
+a:hover { color: var(--text); }
+
+h1, h2, h3 {
+  font-family: "DM Mono", ui-monospace, monospace;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+code, pre, kbd { font-family: "DM Mono", ui-monospace, monospace; }
+
+pre { min-width: 0; }
+
+::selection { background: color-mix(in oklab, var(--green) 30%, transparent); }
+
+:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ── Shared patterns ───────────────────────────────────────────── */
+
+.wrap {
+  max-width: 1140px;
+  margin: 0 auto;
+  padding-inline: clamp(16px, 3vw, 28px);
+}
+
+.autogrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--min, 280px), 1fr));
+  gap: var(--gap, 20px);
+}
+
+.section { padding-block: clamp(48px, 6vw, 76px) 0; }
+.section--last { padding-block: clamp(48px, 6vw, 76px); }
+
+.sec-head { max-width: 62ch; margin-bottom: 32px; }
+
+.sec-head h2 {
+  font-size: clamp(25px, 3.2vw, 33px);
+  line-height: 1.2;
+  margin-bottom: 12px;
+}
+
+.sec-head p {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.62;
+  color: var(--text-2);
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  font: 500 11.5px/1 "DM Mono", monospace;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--green);
+}
+
+.prose { margin-top: 22px; max-width: 74ch; display: grid; gap: 15px; }
+.prose p { margin: 0; font-size: 16px; line-height: 1.68; color: var(--text-2); }
+.prose p.aside { color: var(--muted); font-size: 15px; }
+.prose strong { color: var(--text); font-weight: 500; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+}
+
+.card h3 { font-size: 18px; margin-bottom: 9px; }
+.card p { margin: 0; font-size: 15px; line-height: 1.62; color: var(--text-2); }
+
+.btn {
+  display: inline-block;
+  font-family: "DM Mono", monospace;
+  font-weight: 500;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.btn--primary { background: var(--green-2); color: #ffffff; border: 1px solid var(--green-2); }
+.btn--outline { border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.btn--s { font-size: 13px; padding: 8px 14px; }
+.btn--m { font-size: 13.5px; padding: 9px 16px; }
+.btn--l { font-size: 15px; padding: 13px 22px; }
+
+.cmt { color: var(--muted); }
+.hi  { color: var(--text); }
+.acc { color: var(--green); }
+
+/* ── Logo ──────────────────────────────────────────────────────────
+   Set in text rather than shipped as an image so the cursor can blink and
+   both palettes are served by one mark — the same construction as the demo
+   page and the two SVGs in assets/. */
+
+.logo {
+  font-family: "DM Mono", monospace;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.logo .ette { color: var(--green-2); }
+.logo .cursor { color: inherit; animation: blink 1.1s steps(1) infinite; }
+
+@keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .logo .cursor { animation: none; }
+}
+
+/* ── Header ────────────────────────────────────────────────────── */
+
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.site-header .wrap {
+  padding-block: 10px;
+  min-height: 62px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 26px;
+}
+
+.brand { display: flex; align-items: center; flex: none; }
+.brand .logo { font-size: 25px; }
+
+/* The tab strip. These are the site's navigation — each one swaps the whole
+   main region, so they carry the same weight nav links would. */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1 1 auto;
+}
+
+.tab {
+  font-family: "DM Mono", monospace;
+  font-size: 13.5px;
+  font-weight: 500;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.tab:hover { color: var(--text); }
+
+.tab[aria-selected="true"] {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  flex: none;
+}
+
+.theme-toggle {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+  font: 500 13px/1 "DM Mono", monospace;
+}
+
+.theme-toggle:hover { color: var(--text); border-color: var(--muted); }
+
+/* ── Tab panels ────────────────────────────────────────────────── */
+
+/* Each panel is a whole page's worth of markup; only one is in the document
+   flow at a time. */
+.panel[hidden] { display: none; }
+
+/* ── Hero ──────────────────────────────────────────────────────── */
+
+.hero {
+  --min: 330px;
+  --gap: 44px;
+  padding-block: clamp(40px, 6vw, 76px) 56px;
+  align-items: center;
+}
+
+.hero-logo { margin-bottom: 20px; }
+.hero-logo .logo { font-size: clamp(40px, 6vw, 56px); }
+
+.pill {
+  display: inline-block;
+  margin: 0 0 16px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  font: 500 11.5px/1.5 "DM Mono", monospace;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.hero h1 {
+  font-size: clamp(30px, 4.4vw, 46px);
+  line-height: 1.14;
+  margin-bottom: 18px;
+}
+
+.hero-lead {
+  margin: 0 0 14px;
+  font-size: 17.5px;
+  line-height: 1.62;
+  color: var(--text-2);
+  max-width: 54ch;
+}
+
+.hero-sub {
+  margin: 0 0 26px;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 54ch;
+}
+
+.hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 22px; }
+
+.install-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code-bg);
+  font-size: 13px;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.install-line__prompt { color: var(--green); flex: none; }
+.install-line code { color: var(--text); white-space: nowrap; }
+
+.copy-btn {
+  margin-left: auto;
+  flex: none;
+  font: 500 11.5px/1 "DM Mono", monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.copy-btn:hover { color: var(--text); }
+
+/* The terminal beside the hero. */
+.term {
+  min-width: 0;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.term__head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font: 400 12px/1 "DM Mono", monospace;
+  color: var(--muted);
+}
+
+.term__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  flex: none;
+}
+
+.term pre {
+  margin: 0;
+  padding: 18px 16px;
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--text-2);
+  overflow-x: auto;
+}
+
+/* ── Stat band ─────────────────────────────────────────────────── */
+
+.statband {
+  background: var(--band);
+  color: var(--band-ink);
+  border-block: 1px solid var(--border);
+}
+
+.statband .wrap { --min: 190px; --gap: 28px; padding-block: 40px; }
+
+.stat__n {
+  margin: 0 0 6px;
+  font: 500 clamp(26px, 3.4vw, 34px)/1 "DM Mono", monospace;
+  letter-spacing: -0.02em;
+  color: var(--green-2);
+}
+
+html[data-theme="dark"] .stat__n { color: var(--green); }
+
+.stat__what {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  opacity: 0.7;
+}
+
+/* ── Comparison table ──────────────────────────────────────────── */
+
+.tablewrap {
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.ctable {
+  width: 100%;
+  min-width: 660px;
+  border-collapse: collapse;
+  font-size: 14.5px;
+}
+
+.ctable thead tr { background: var(--bg-2); }
+
+.ctable th, .ctable td {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.ctable tbody tr:last-child th,
+.ctable tbody tr:last-child td { border-bottom: none; }
+
+.ctable th.ctable__dim {
+  font: 500 11.5px/1.4 "DM Mono", monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.ctable th.ctable__ours {
+  font: 500 16px/1.3 "DM Mono", monospace;
+  color: var(--green);
+}
+
+.ctable th.ctable__peer {
+  font: 500 13.5px/1.3 "DM Sans", sans-serif;
+  color: var(--text-2);
+}
+
+.ctable tbody th {
+  font: 400 14.5px/1.5 "DM Sans", sans-serif;
+  color: var(--text);
+}
+
+.ctable td { color: var(--text-2); }
+.ctable td.ctable__ours { color: var(--text); background: color-mix(in oklab, var(--green) 7%, transparent); }
+
+/* ── Steps ─────────────────────────────────────────────────────── */
+
+.steps { --min: 300px; --gap: 20px; counter-reset: step; }
+
+/* Column, so the code block absorbs the extra height the grid hands a short
+   card — otherwise the three cards stretch to match but their panels do not. */
+.step {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.step__head { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+
+.step__head h3 { font-size: 17px; margin-bottom: 4px; }
+
+.step__head h3::before {
+  counter-increment: step;
+  content: counter(step) ". ";
+  color: var(--green);
+}
+
+.step__head p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+
+.step pre {
+  flex: 1;
+  margin: 0;
+  padding: 18px 20px;
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--text);
+  background: var(--code-bg);
+  overflow-x: auto;
+}
+
+/* ── Command reference ─────────────────────────────────────────── */
+
+.cmds { --min: 320px; --gap: 20px; margin-top: 24px; }
+
+.cmdbox {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.cmdbox__label {
+  margin: 0;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--border);
+  font: 500 11.5px/1 "DM Mono", monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cmdlist { margin: 0; padding: 8px 18px 14px; font-size: 13.5px; }
+
+.cmdlist div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 7px 0;
+  line-height: 1.5;
+}
+
+.cmdlist dt {
+  flex: 0 0 auto;
+  min-width: 9.5em;
+  font-family: "DM Mono", monospace;
+  color: var(--green);
+}
+
+.cmdlist dd { margin: 0; flex: 1 1 12em; color: var(--text-2); }
+
+/* ── Architecture figure ───────────────────────────────────────────
+   The diagram draws itself from the data table in the script at the end of
+   this file. It reads its palette from these custom properties, so it needs
+   no per-theme code of its own — and the names are declared here, on the
+   figure, rather than in :root, so the diagram stays a self-contained piece
+   that can be lifted in and out. */
+
+.arch {
+  --dg-panel:    var(--surface);
+  --dg-ink:      var(--text);
+  --dg-faint:    var(--muted);
+  --dg-system:   var(--muted);
+  --dg-system-bg: var(--bg-2);
+  --dg-server:   var(--green);
+  --dg-server-bg: color-mix(in oklab, var(--green) 12%, var(--bg));
+  --dg-write:    #a86a3c;
+  --dg-write-bg: color-mix(in oklab, #a86a3c 12%, var(--bg));
+
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 18px;
+  overflow-x: auto;
+}
+
+html[data-theme="dark"] .arch {
+  --dg-write: #cf9058;
+}
+
+.arch svg { display: block; width: 100%; height: auto; }
+
+figcaption {
+  margin-top: 14px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-2);
+  max-width: 78ch;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 26px;
+  padding: 13px 18px;
+  margin-top: 16px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.legend-item { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.swatch { width: 22px; height: 3px; border-radius: 2px; flex: none; background: var(--muted); }
+.swatch--write { background: #a86a3c; height: 4px; }
+html[data-theme="dark"] .swatch--write { background: #cf9058; }
+.swatch--boundary { background: var(--green); }
+.swatch--dotted {
+  background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 9px);
+  height: 2px;
+}
+
+/* ── LOC table ─────────────────────────────────────────────────── */
+
+.loc-table {
+  margin-top: 30px;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+}
+
+.loc-table caption {
+  text-align: left;
+  font: 500 11.5px/1 "DM Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+
+.loc-table th, .loc-table td {
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.loc-table thead th {
+  font: 500 11px/1 "DM Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.loc-table td.num, .loc-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: "DM Mono", monospace;
+}
+
+.loc-table tr.total td, .loc-table tr.total th {
+  font-weight: 600;
+  border-bottom: none;
+  border-top: 2px solid var(--border);
+}
+
+/* ── Closing call to action ────────────────────────────────────── */
+
+.cta {
+  --min: 270px;
+  --gap: 34px;
+  background: var(--band);
+  color: var(--band-ink);
+  border-radius: 14px;
+  padding: clamp(30px, 5vw, 52px);
+  align-items: center;
+}
+
+.cta h2 { font-size: clamp(24px, 3vw, 31px); line-height: 1.18; margin-bottom: 12px; }
+.cta p { margin: 0; font-size: 16px; line-height: 1.6; opacity: 0.75; }
+.cta__actions { display: flex; flex-direction: column; gap: 10px; }
+.cta__actions .btn { text-align: center; }
+.cta__actions .btn--outline {
+  background: none;
+  border-color: color-mix(in oklab, var(--band-ink) 30%, transparent);
+  color: var(--band-ink);
+}
+
+/* ── Footer ────────────────────────────────────────────────────── */
+
+.site-footer { border-top: 1px solid var(--border); background: var(--bg-2); }
+.site-footer > .wrap { --min: 175px; --gap: 30px; padding-block: 42px; }
+
+.footer-brand { margin-bottom: 12px; }
+.footer-brand .logo { font-size: 23px; }
+
+.footer-tag { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--muted); max-width: 34ch; }
+
+.footer-label {
+  margin: 0 0 12px;
+  font: 500 11.5px/1 "DM Mono", monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.footer-links { display: grid; gap: 9px; font-size: 14px; }
+.footer-links a { color: var(--text-2); }
+.footer-links button {
+  font: inherit;
+  font-family: "DM Sans", sans-serif;
+  text-align: left;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.footer-links a:hover, .footer-links button:hover { color: var(--text); }
+
+.legal { border-top: 1px solid var(--border); }
+.legal .wrap { padding-block: 17px; font-size: 13px; color: var(--muted); }
+</style>
+
+<script>
+  /* Set the palette before first paint so the page never flashes the wrong
+     one. The toggle at the end of the body takes over from here. */
+  (function () {
+    var theme;
+    try { theme = localStorage.getItem("servette-theme"); } catch (e) {}
+    if (!theme) {
+      theme = window.matchMedia
+        && window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark" : "light";
     }
-
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: 'DM Mono', monospace;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 2rem;
-    }
-
-    body::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
-      pointer-events: none;
-      opacity: 0.4;
-      z-index: 0;
-    }
-
-    .container {
-      position: relative;
-      z-index: 1;
-      max-width: 480px;
-      width: 100%;
-    }
-
-    .header {
-      margin-bottom: 3rem;
-      opacity: 0;
-      animation: rise 0.6s ease forwards;
-    }
-
-    .servette-logo {
-      font-family: 'DM Mono', monospace;
-      font-weight: 500;
-      font-size: 3rem;
-      letter-spacing: 0;
-      color: var(--text);
-      line-height: 1;
-    }
-
-    .servette-logo .ette   { color: #5A8466; }
-    .servette-logo .cursor { color: inherit; animation: servette-blink 1.1s steps(1) infinite; }
-
-    @keyframes servette-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
-
-    .tagline {
-      margin-top: 0.5rem;
-      color: var(--muted);
-      font-size: 0.75rem;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    .dot {
-      display: inline-block;
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--green);
-      margin-right: 0.5rem;
-      animation: pulse 2s ease infinite;
-      vertical-align: middle;
-      position: relative;
-      top: -1px;
-    }
-
-    .dot.red { background: var(--red); animation: none; }
-
-    /* ── Connection card ── */
-    .verified {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      overflow: hidden;
-      margin-bottom: 1.5rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.2s forwards;
-    }
-
-    .verified-header {
-      background: var(--surface);
-      padding: 1.25rem;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 1rem;
-    }
-
-    .verified-label {
-      font-size: 0.7rem;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 0.25rem;
-    }
-
-    .verified-value { font-size: 0.9rem; color: var(--text); }
-
-    .badge {
-      font-size: 0.7rem;
-      font-weight: 500;
-      padding: 0.3rem 0.7rem;
-      border-radius: 4px;
-      letter-spacing: 0.05em;
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-
-    .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
-    .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
-
-    /* ── Self-test ── */
-    .selftest {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      overflow: hidden;
-      background: var(--surface);
-      margin-bottom: 1.5rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.35s forwards;
-    }
-
-    .selftest-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 1rem;
-      padding: 0.75rem 1.25rem;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .selftest-title {
-      font-size: 0.7rem;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
-
-    .run-again {
-      font-family: inherit;
-      font-size: 0.7rem;
-      color: var(--muted);
-      background: none;
-      border: none;
-      cursor: pointer;
-      letter-spacing: 0.05em;
-      white-space: nowrap;
-    }
-    .run-again:hover { color: var(--text); }
-
-    .t-log { padding: 0.6rem 1.25rem; }
-
-    .t-row {
-      display: flex;
-      gap: 0.85rem;
-      padding: 0.32rem 0;
-      font-size: 0.72rem;
-      line-height: 1.45;
-    }
-
-    .t-st       { flex: 0 0 2.6em; font-weight: 500; }
-    .t-pass     { color: var(--green); }
-    .t-fail     { color: var(--red); }
-    .t-skip     { color: var(--muted); }
-    .t-pending  { color: var(--muted); }
-
-    .t-body { flex: 1; min-width: 0; }
-    .t-req  { color: var(--text); }
-    .t-obs  { color: var(--muted); }
-
-    .t-summary {
-      padding: 0.75rem 1.25rem;
-      border-top: 1px solid var(--border);
-      font-size: 0.72rem;
-      color: var(--muted);
-    }
-    .t-summary b { color: var(--text); font-weight: 500; }
-
-    /* ── Other features (prose) ── */
-    .features {
-      font-size: 0.72rem;
-      color: var(--muted);
-      line-height: 1.7;
-      margin-bottom: 2rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.45s forwards;
-    }
-    .features b { color: var(--text); font-weight: 500; }
-
-    /* ── Footer ── */
-    .note {
-      font-size: 0.7rem;
-      color: var(--muted);
-      line-height: 1.7;
-      opacity: 0;
-      animation: rise 0.5s ease 0.55s forwards;
-    }
-    .note a { color: #60a5fa; text-decoration: none; }
-    .note a:hover { text-decoration: underline; }
-    .note a.brand { color: #5A8466; }
-
-    @keyframes rise {
-      from { opacity: 0; transform: translateY(10px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0.3; }
-    }
-  </style>
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
 </head>
 <body>
 
-<div class="container">
-
-  <div class="header">
-    <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline" id="tagline">
-      <span class="dot" id="dot"></span><span id="tagline-text">checking...</span>
+<header class="site-header">
+  <div class="wrap">
+    <span class="brand">
+      <span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span>
+    </span>
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button class="tab" type="button" role="tab" aria-selected="true"  aria-controls="page-compares" id="tabbtn-compares">How it Compares</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-use"      id="tabbtn-use">How to Use it</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-works"    id="tabbtn-works">How it Works</button>
+    </nav>
+    <div class="header-actions">
+      <button class="theme-toggle" type="button" title="Toggle light / dark" aria-label="Toggle light or dark theme">☾</button>
+      <a class="btn btn--outline btn--s" href="https://github.com/andy-emerson/servette">GitHub</a>
     </div>
   </div>
+</header>
 
-  <div class="verified">
-    <div class="verified-header">
-      <div>
-        <div class="verified-label">Connection</div>
-        <div class="verified-value" id="url">—</div>
+<main>
+
+<!-- ══ Page 1 — How it Compares ════════════════════════════════════ -->
+
+<div class="panel" id="page-compares" role="tabpanel" aria-labelledby="tabbtn-compares" tabindex="-1">
+
+  <section class="wrap autogrid hero">
+    <div>
+      <div class="hero-logo">
+        <span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span>
       </div>
-      <div class="badge" id="badge">—</div>
+      <p class="pill">One file · HTTPS by default · No config language</p>
+      <h1>Everything necessary to do one thing well.</h1>
+      <p class="hero-lead">Servette is a production nanoserver: a single readable Python file that serves a static site on the public internet with a trusted certificate that renews itself, security headers on every response, rate limiting, and a hardened service that survives reboots.</p>
+      <p class="hero-sub">No configuration language to learn, and a single dependency it installs for you. Copy one file to a server, run it, follow the wizard, done.</p>
+      <div class="hero-actions">
+        <a class="btn btn--primary btn--l" href="#how-to-use-it">Get started</a>
+        <a class="btn btn--outline btn--l" href="#how-it-works">See how it works</a>
+      </div>
+      <div class="install-line">
+        <span class="install-line__prompt">$</span>
+        <code id="install-cmd">python3 servette.py</code>
+        <button class="copy-btn" type="button" aria-controls="install-cmd">Copy</button>
+      </div>
     </div>
-  </div>
+    <div class="term">
+      <div class="term__head">
+        <span class="term__dot"></span>
+        servette — first run
+      </div>
+      <pre>servette&gt; <span class="hi">setup</span>
 
-  <div class="selftest">
-    <div class="selftest-head">
-      <span class="selftest-title">Self-test — live from your browser</span>
-      <button class="run-again" id="run-again" type="button">↻ run again</button>
+  Domain          <span class="hi">example.com</span>
+  Folder to serve <span class="hi">site</span>
+  Email for certs <span class="hi">you@example.com</span>
+
+  <span class="acc">✓</span> certificate issued (Let's Encrypt)
+  <span class="acc">✓</span> HTTP → HTTPS redirect active
+  <span class="acc">✓</span> security headers enabled
+  <span class="acc">✓</span> installed as a system service
+
+<span class="cmt">Your site is live at https://example.com</span>
+<span class="cmt">Renewal is automatic. Nothing else to do.</span></pre>
     </div>
-    <div class="t-log" id="t-log"></div>
-    <div class="t-summary" id="t-summary">running…</div>
-  </div>
+  </section>
 
-  <p class="features">
-    Beyond what a browser can probe, Servette gzip-compresses responses,
-    redirects all HTTP traffic to HTTPS, rate-limits abusive clients, can sit behind
-    a password, and renews its Let's Encrypt certificate automatically.
-  </p>
+  <section class="statband">
+    <div class="wrap autogrid">
+      <div>
+        <p class="stat__n">1</p>
+        <p class="stat__what">file to copy — <code>servette.py</code>, and nothing else</p>
+      </div>
+      <div>
+        <p class="stat__n">1</p>
+        <p class="stat__what">third-party dependency — <code>cryptography</code>, installed for you on first run</p>
+      </div>
+      <div>
+        <p class="stat__n">3,468</p>
+        <p class="stat__what">lines you can read top to bottom in an afternoon</p>
+      </div>
+      <div>
+        <p class="stat__n">0</p>
+        <p class="stat__what">config files to write; a wizard asks, then it runs</p>
+      </div>
+    </div>
+  </section>
 
-  <div class="note">
-    Served by <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> — The Simple, Secure, Static-Site Server.
-  </div>
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">The space between</p>
+      <h2>Most ways to serve a site sit at an extreme.</h2>
+      <p>General-purpose servers do everything, once you have configured them. Development servers do one thing and stop there. Managed platforms do it for you, on terms that are theirs. Servette aims at the space between.</p>
+    </div>
+    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+      <div class="card">
+        <h3>General-purpose servers</h3>
+        <p>nginx, Apache, Caddy. Any site, at any scale — after you have learned a configuration language and taken a large system on trust.</p>
+      </div>
+      <div class="card">
+        <h3>Development servers</h3>
+        <p><code>http.server</code> and friends. Perfect while you build; by their own documentation, not built to face the internet.</p>
+      </div>
+      <div class="card">
+        <h3>Managed platforms</h3>
+        <p>GitHub Pages, Netlify, Vercel. They host it for you, on their infrastructure, under their terms and their limits.</p>
+      </div>
+      <div class="card" style="border-color: var(--green);">
+        <h3 style="color: var(--green);">Servette</h3>
+        <p>Do everything <strong>necessary</strong> to do one thing <strong>well</strong>: host a static site you own, securely, on a server you control.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Peer comparison</p>
+      <h2>How it compares</h2>
+      <p>The tools closest in spirit are small and focused. Here is how a few of them compare on the one job Servette is built for.</p>
+    </div>
+    <div class="tablewrap">
+      <table class="ctable">
+        <thead>
+          <tr>
+            <th class="ctable__dim" scope="col">&nbsp;</th>
+            <th class="ctable__ours" scope="col">Servette</th>
+            <th class="ctable__peer" scope="col">bottle.py</th>
+            <th class="ctable__peer" scope="col">srv</th>
+            <th class="ctable__peer" scope="col">Static Web Server</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Built for</th>
+            <td class="ctable__ours">static sites</td>
+            <td>dynamic web apps</td>
+            <td>static sites</td>
+            <td>static sites</td>
+          </tr>
+          <tr>
+            <th scope="row">Automatic trusted HTTPS</th>
+            <td class="ctable__ours">✓</td>
+            <td>✗</td>
+            <td>✓</td>
+            <td>✗</td>
+          </tr>
+          <tr>
+            <th scope="row">Hardened for production</th>
+            <td class="ctable__ours">✓</td>
+            <td>✗</td>
+            <td>✗</td>
+            <td>~</td>
+          </tr>
+          <tr>
+            <th scope="row">Readable source</th>
+            <td class="ctable__ours">~3,500 lines</td>
+            <td>~4,600 lines</td>
+            <td>binary</td>
+            <td>binary</td>
+          </tr>
+          <tr>
+            <th scope="row">Actively maintained</th>
+            <td class="ctable__ours">✓</td>
+            <td>✓</td>
+            <td>✗</td>
+            <td>✓</td>
+          </tr>
+          <tr>
+            <th scope="row">Runs on a Raspberry Pi out of the box</th>
+            <td class="ctable__ours">✓</td>
+            <td>✓</td>
+            <td>✗</td>
+            <td>✗</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>All of these are excellent at what they are built for. None of them do quite what Servette does: serve a static site you own, securely, on the public internet, from a single file you can read.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Fit</p>
+      <h2>Who it is for</h2>
+    </div>
+    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+      <div class="card">
+        <h3>You want to understand your server</h3>
+        <p>One readable file with no hidden machinery, rather than a large system you configure and take on trust.</p>
+      </div>
+      <div class="card">
+        <h3>You have a real site that needs a real server</h3>
+        <p>Trusted HTTPS that renews itself, and a hardened service that survives reboots — not a terminal you cannot close.</p>
+      </div>
+      <div class="card">
+        <h3>You want to own what you serve</h3>
+        <p>Your own server, your own certificate, behind a password if you want one. No platform terms in between.</p>
+      </div>
+      <div class="card">
+        <h3>You are on a Raspberry Pi</h3>
+        <p>Designed with the Pi in mind. If you can SSH in and run a Python script, you can have a real HTTPS site live in minutes.</p>
+      </div>
+    </div>
+    <div class="prose">
+      <p class="aside">Servette is not for dynamic applications, server-side rendering, or anything that needs to run code per request. It serves files — anything that runs in a browser, from a portfolio to a serious client-side app — and deliberately stops there.</p>
+    </div>
+  </section>
+
+  <section class="wrap section--last">
+    <div class="autogrid cta">
+      <div>
+        <h2>Serve your site in under ten minutes.</h2>
+        <p>Copy one file to a server, run it, and answer a few questions.</p>
+      </div>
+      <div class="cta__actions">
+        <a class="btn btn--primary btn--l" href="#how-to-use-it">Read the walkthrough</a>
+        <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette">View on GitHub</a>
+      </div>
+    </div>
+  </section>
 
 </div>
 
+<!-- ══ Page 2 — How to Use it ══════════════════════════════════════ -->
+
+<div class="panel" id="page-use" role="tabpanel" aria-labelledby="tabbtn-use" tabindex="-1" hidden>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Getting started</p>
+      <h2>How to use it</h2>
+      <p>Servette needs Python 3.11 or newer and a server you can SSH into. There is nothing for you to install beyond the file itself: it pulls its one dependency, <code>cryptography</code>, on first run. No configuration language, and nothing to build.</p>
+    </div>
+
+    <div class="autogrid steps">
+      <div class="step">
+        <div class="step__head">
+          <h3>Copy the file</h3>
+          <p>One file and the folder you want to serve.</p>
+        </div>
+        <pre><span class="cmt"># on your server</span>
+curl -O https://raw.githubusercontent\
+.com/andy-emerson/servette/main\
+/servette.py
+
+<span class="cmt"># your site goes beside it</span>
+mkdir site
+</pre>
+      </div>
+      <div class="step">
+        <div class="step__head">
+          <h3>Run the wizard</h3>
+          <p>It asks for a domain, a folder, and an email.</p>
+        </div>
+        <pre>python3 servette.py
+
+servette&gt; <span class="hi">setup</span>
+</pre>
+      </div>
+      <div class="step">
+        <div class="step__head">
+          <h3>Leave it running</h3>
+          <p>Installed as a system service, it restarts itself.</p>
+        </div>
+        <pre>servette&gt; <span class="hi">enable</span>
+servette&gt; <span class="hi">status</span>
+
+<span class="acc">running</span> · https://example.com
+</pre>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p>The wizard issues a Let's Encrypt certificate, redirects plain HTTP up to HTTPS, and installs a systemd service so the server comes back after a reboot. Renewal happens on its own — a watchdog checks the certificate on a timer and renews it well before it expires.</p>
+      <p class="aside">Serving over a self-signed certificate works too, for a local network or a machine without a public domain. The browser will warn once; everything else behaves the same.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Reference</p>
+      <h2>The shell</h2>
+      <p>Running <code>servette.py</code> drops you into an interactive shell. Everything is a command — there is no config file to hand-edit, and nothing that requires restarting the server to take effect.</p>
+    </div>
+
+    <div class="autogrid cmds">
+      <div class="cmdbox">
+        <p class="cmdbox__label">Main shell</p>
+        <dl class="cmdlist">
+          <div><dt>setup</dt><dd>guided walkthrough for getting started</dd></div>
+          <div><dt>config</dt><dd>view and edit settings</dd></div>
+          <div><dt>start / stop</dt><dd>start or stop the server</dd></div>
+          <div><dt>enable / disable</dt><dd>install or remove the system service</dd></div>
+          <div><dt>status</dt><dd>show whether the server is running</dd></div>
+          <div><dt>log [n]</dt><dd>show the last n log entries</dd></div>
+          <div><dt>update</dt><dd>download the latest version of servette.py</dd></div>
+          <div><dt>restore</dt><dd>roll back to the previous version</dd></div>
+          <div><dt>pull [n]</dt><dd>pull a site's new content now</dd></div>
+          <div><dt>restore-site [n]</dt><dd>roll back a site's content</dd></div>
+        </dl>
+      </div>
+      <div class="cmdbox">
+        <p class="cmdbox__label">config</p>
+        <dl class="cmdlist">
+          <div><dt>sites</dt><dd>list configured sites</dd></div>
+          <div><dt>add-site</dt><dd>add a site (folder, domain, password, channel)</dd></div>
+          <div><dt>dir [n]</dt><dd>directory to serve</dd></div>
+          <div><dt>cert [n]</dt><dd>SSL certificate and key</dd></div>
+          <div><dt>publish [n]</dt><dd>site publish channel and signing key</dd></div>
+          <div><dt>username / password</dt><dd>optional login for a site</dd></div>
+          <div><dt>limits</dt><dd>rate limits</dd></div>
+          <div><dt>cache</dt><dd>browser cache policy</dd></div>
+          <div><dt>tls</dt><dd>minimum TLS version and cipher suites</dd></div>
+          <div><dt>csp / perms</dt><dd>Content-Security-Policy, Permissions-Policy</dd></div>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Publishing</p>
+      <h2>Updating your site</h2>
+      <p>Edit files in the served folder and the change is live on the next request — there is no build step and no restart. For a site you publish from somewhere else, Servette can fetch a signed bundle on request.</p>
+    </div>
+    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+      <div class="card">
+        <h3>Edit in place</h3>
+        <p>Change a file in the served folder. The next request sees it. Nothing to reload, nothing to invalidate.</p>
+      </div>
+      <div class="card">
+        <h3>Pull a signed bundle</h3>
+        <p>Point a site at a publish channel, then run <code>pull</code>. Servette fetches the bundle, verifies its signature, and swaps it in atomically.</p>
+      </div>
+      <div class="card">
+        <h3>Roll it back</h3>
+        <p><code>restore-site</code> undoes the last pull. <code>restore</code> undoes the last <code>update</code> to Servette itself.</p>
+      </div>
+    </div>
+    <div class="prose">
+      <p class="aside">Publishing is always operator-triggered — from the shell, over SSH. No HTTP request can cause Servette to write anything. See <a href="#how-it-works">How it Works</a> for why that line is drawn where it is.</p>
+    </div>
+  </section>
+
+  <section class="wrap section--last">
+    <div class="autogrid cta">
+      <div>
+        <h2>See it working first.</h2>
+        <p>Every copy of Servette ships with a page that tests the live connection from your own browser and reports what it observed.</p>
+      </div>
+      <div class="cta__actions">
+        <a class="btn btn--primary btn--l" href="demo.html">Open the self-test page</a>
+        <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette">Read the source</a>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<!-- ══ Page 3 — How it Works ═══════════════════════════════════════ -->
+
+<div class="panel" id="page-works" role="tabpanel" aria-labelledby="tabbtn-works" tabindex="-1" hidden>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Architecture</p>
+      <h2>Four regions, one boundary, nothing that writes on request</h2>
+      <p>Servette is one file, but not one undifferentiated mass. It divides into four regions, and the line between two of them is the property the whole design rests on: no HTTP request ever reaches code that writes.</p>
+    </div>
+
+    <figure class="arch">
+      <div id="chord" role="img" aria-label="Servette architecture diagram, circular layout. Three arcs, coloured by section. SYSTEM holds Bootstrap, Server Lifecycle, Cert Watchdog, Certificate Management, and Service Management, chained in that order. SHELL, which reads and writes, holds the Main Shell Loop, which an SSH-connected operator reaches directly, dispatching to add-site and config, pull, update, and restore-site and restore; pull and update both feed a shared fetch, verify, and swap pipeline. SERVER, which is read-only, holds Config, HTTPS Handler, Rate Limiter, Site Selection, Auth, Version Discovery, and Static File Serving; a GET request connects directly to the HTTPS Handler. Across sections: INIT enters only at Bootstrap; Bootstrap also starts the Main Shell Loop; Certificate Management reloads the server's TLS context on renewal; add-site and config delegate to Service Management and Certificate Management; the fetch-verify-swap pipeline and restore-site both write into Static File Serving; and Config is read by both Bootstrap and the Main Shell Loop."></div>
+    </figure>
+
+    <div class="legend">
+      <div class="legend-item"><span class="swatch"></span> control flow</div>
+      <div class="legend-item"><span class="swatch swatch--write"></span> writes (thick)</div>
+      <div class="legend-item"><span class="swatch swatch--boundary"></span> reloads Server's TLS on renewal</div>
+      <div class="legend-item"><span class="swatch swatch--dotted"></span> dependency / delegation (dotted)</div>
+    </div>
+
+    <figcaption>Every node sits on one of two rings — the module ring, or the outer ring carrying the three ways in. Edges between modules curve toward the centre; the three entry points reach their module in a straight line. Nothing here is placed by hand: the layout is computed from the module list and call graph at the bottom of this page's source.</figcaption>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">The invariant</p>
+      <h2>Requests read. Only the operator writes.</h2>
+    </div>
+    <div class="prose">
+      <p><strong>SERVER</strong> is the only region a network request can reach, and it is read-only. It selects a site, applies rate limits, checks a password if one is set, and serves a file. It has no path to a write — not to disk, not to configuration, not to the site's contents.</p>
+      <p><strong>SHELL</strong> is the only region that writes, and it is reachable only by an operator over SSH. Adding a site, pulling new content, updating Servette itself, rolling any of it back — all of it lives here, behind an interactive prompt.</p>
+      <p><strong>SYSTEM</strong> is what runs on its own schedule rather than on anyone's request: the bootstrap sequence, the service lifecycle, and the certificate watchdog that renews on a timer and hands the fresh certificate to the running server.</p>
+      <p><strong>INIT</strong> is the entry dispatch and the module preamble — the ninety lines that decide which of the other three you get.</p>
+      <p class="aside">Read the diagram for the consequence: there is no arrow from anything a visitor touches into anything that writes. That is not an access-control rule that could be misconfigured; it is the shape of the code.</p>
+    </div>
+
+    <table class="loc-table">
+      <caption>Lines per top-level section</caption>
+      <thead>
+        <tr>
+          <th scope="col">Section</th>
+          <th class="num" scope="col">Total</th>
+          <th class="num" scope="col">Code</th>
+          <th class="num" scope="col">Share</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row">Init</th><td class="num">91</td><td class="num">53</td><td class="num">3%</td></tr>
+        <tr><th scope="row">System</th><td class="num">1,120</td><td class="num">780</td><td class="num">32%</td></tr>
+        <tr><th scope="row">Shell</th><td class="num">1,254</td><td class="num">948</td><td class="num">36%</td></tr>
+        <tr><th scope="row">Server</th><td class="num">1,003</td><td class="num">624</td><td class="num">29%</td></tr>
+        <tr class="total"><th scope="row">Total</th><td class="num">3,468</td><td class="num">2,405</td><td class="num">100%</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="wrap section--last">
+    <div class="autogrid cta">
+      <div>
+        <h2>Read it yourself.</h2>
+        <p>The whole server is one file. The diagram above is a map of it — the territory is 3,468 lines away.</p>
+      </div>
+      <div class="cta__actions">
+        <a class="btn btn--primary btn--l" href="https://github.com/andy-emerson/servette/blob/main/servette.py">Open servette.py</a>
+        <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette/blob/main/DESIGN.md">Read DESIGN.md</a>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap autogrid">
+    <div>
+      <div class="footer-brand">
+        <span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span>
+      </div>
+      <p class="footer-tag">The simple, secure, static-site server. One file, one dependency, MIT licensed.</p>
+    </div>
+    <div>
+      <p class="footer-label">This site</p>
+      <div class="footer-links">
+        <button type="button" data-goto="how-it-compares">How it Compares</button>
+        <button type="button" data-goto="how-to-use-it">How to Use it</button>
+        <button type="button" data-goto="how-it-works">How it Works</button>
+      </div>
+    </div>
+    <div>
+      <p class="footer-label">Project</p>
+      <div class="footer-links">
+        <a href="https://github.com/andy-emerson/servette">GitHub</a>
+        <a href="https://github.com/andy-emerson/servette/blob/main/README.md">README</a>
+        <a href="https://github.com/andy-emerson/servette/blob/main/DESIGN.md">DESIGN.md</a>
+        <a href="https://github.com/andy-emerson/servette/blob/main/SECURITY.md">Security</a>
+      </div>
+    </div>
+    <div>
+      <p class="footer-label">Community</p>
+      <div class="footer-links">
+        <a href="https://github.com/andy-emerson/servette/issues">Issues</a>
+        <a href="https://github.com/andy-emerson/servette/blob/main/CONTRIBUTING.md">Contributing</a>
+        <a href="https://github.com/andy-emerson/servette/blob/main/LICENSE">License</a>
+      </div>
+    </div>
+  </div>
+  <div class="legal">
+    <div class="wrap">© 2026 Andy Emerson · Served by Servette.</div>
+  </div>
+</footer>
+
 <script>
-  const $ = (id) => document.getElementById(id);
+/* Three pieces: the light/dark toggle, the copy button on the install line,
+   and the tab router that swaps whole pages in and out. The theme itself is
+   applied by the script in <head>, before first paint. */
 
-  // ── Connection card ───────────────────────────────────────────────
-  const isHttps = location.protocol === 'https:';
-  $('url').textContent = location.protocol + '//' + location.host;
+(function () {
+  "use strict";
 
-  if (isHttps) {
-    $('badge').textContent = '✓ Verified encrypted';
-    $('badge').className    = 'badge badge-green';
-    $('tagline-text').textContent = 'YOUR NANOSERVER IS RUNNING';
-  } else {
-    $('badge').textContent = '⚠ Not encrypted';
-    $('badge').className    = 'badge badge-red';
-    $('dot').className      = 'dot red';
-    $('tagline-text').textContent = 'Connection is not secure';
+  var root = document.documentElement;
+
+  /* ── Theme toggle ───────────────────────────────────────────── */
+
+  var toggle = document.querySelector(".theme-toggle");
+
+  function applyTheme(theme) {
+    root.setAttribute("data-theme", theme);
+    toggle.textContent = theme === "dark" ? "☀" : "☾";
+    try {
+      localStorage.setItem("servette-theme", theme);
+    } catch (e) {
+      /* Private browsing, or storage disabled: the toggle still works. */
+    }
   }
 
-  // ── Self-test ─────────────────────────────────────────────────────
-  // Each check makes a real request and reports the value it observed.
-  // ok: true = PASS, false = FAIL, null = SKIP (can't be judged here —
-  // never faked as a pass).
-  const here = location.href.split('#')[0];
+  applyTheme(root.getAttribute("data-theme") === "dark" ? "dark" : "light");
 
-  let _hdrs = null;
-  const H = async () => (_hdrs ||= (await fetch(here, { cache: 'no-store' })).headers);
-  const seen = (v) => v || '(absent)';
+  toggle.addEventListener("click", function () {
+    applyTheme(root.getAttribute("data-theme") === "dark" ? "light" : "dark");
+  });
 
-  const checks = [
-    { req: 'GET /', run: async () => {
-        const v = (await H()).get('X-Frame-Options');
-        return { ok: v === 'DENY', obs: 'X-Frame-Options: ' + seen(v) }; } },
+  /* ── Copy the run command ───────────────────────────────────── */
 
-    { req: 'GET /', run: async () => {
-        const v = (await H()).get('X-Content-Type-Options');
-        return { ok: v === 'nosniff', obs: 'X-Content-Type-Options: ' + seen(v) }; } },
+  var copy = document.querySelector(".copy-btn");
 
-    { req: 'GET /', run: async () => {
-        const v = (await H()).get('Referrer-Policy');
-        return { ok: !!v, obs: 'Referrer-Policy: ' + seen(v) }; } },
+  copy.addEventListener("click", function () {
+    var text = document.getElementById(copy.getAttribute("aria-controls"));
+    try {
+      navigator.clipboard.writeText(text.textContent);
+    } catch (e) {
+      /* No clipboard permission: fall through to the label change anyway. */
+    }
+    copy.textContent = "Copied";
+    setTimeout(function () { copy.textContent = "Copy"; }, 1600);
+  });
 
-    { req: 'GET /', run: async () => {
-        const v = (await H()).get('Content-Security-Policy');
-        return { ok: !!v, obs: 'Content-Security-Policy: ' + (v ? 'present' : '(absent)') }; } },
+  /* ── Tab router ──────────────────────────────────────────────────
+     Each tab swaps a whole page of markup, and the URL hash follows, so
+     a tab can be linked to, bookmarked, and walked back through with the
+     browser's own Back button — the three things that would otherwise be
+     lost by not being separate documents. */
 
-    { req: 'GET /', run: async () => {
-        const v = (await H()).get('Permissions-Policy');
-        return { ok: !!v, obs: 'Permissions-Policy: ' + (v ? 'present' : '(absent)') }; } },
+  var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
 
-    { req: 'GET /', run: async () => {
-        const h = await H();
-        return { ok: !!h.get('ETag') && !!h.get('Cache-Control'),
-                 obs: 'Cache-Control + ETag: ' + (h.get('ETag') || '(absent)') }; } },
+  var SLUGS = {
+    "how-it-compares": "tabbtn-compares",
+    "how-to-use-it": "tabbtn-use",
+    "how-it-works": "tabbtn-works",
+  };
 
-    { req: 'GET /  (If-None-Match)', run: async () => {
-        const etag = (await H()).get('ETag');
-        if (!etag) return { ok: null, obs: 'no ETag to revalidate' };
-        const r = await fetch(here, { cache: 'no-store', headers: { 'If-None-Match': etag } });
-        return r.status === 304
-          ? { ok: true, obs: '→ 304 Not Modified' }
-          : { ok: null, obs: '→ ' + r.status + ' (browser cache varies)' }; } },
+  var slugOf = {};
+  Object.keys(SLUGS).forEach(function (slug) { slugOf[SLUGS[slug]] = slug; });
 
-    { req: 'POST /', run: async () => {
-        const s = (await fetch(here, { method: 'POST' })).status;
-        return { ok: s === 405, obs: '→ ' + s + (s === 405 ? ' Method Not Allowed' : '') }; } },
+  function show(tab, focusPanel) {
+    tabs.forEach(function (other) {
+      var selected = other === tab;
+      other.setAttribute("aria-selected", selected ? "true" : "false");
+      document.getElementById(other.getAttribute("aria-controls")).hidden = !selected;
+    });
+    if (tab.id === "tabbtn-works") drawDiagram();
+    if (focusPanel) {
+      /* Moving focus into the new page is what makes this behave like a
+         navigation for a keyboard or screen-reader user, rather than a
+         silent DOM swap that leaves them where they were. */
+      document.getElementById(tab.getAttribute("aria-controls")).focus();
+    }
+  }
 
-    { req: 'GET /<random>', run: async () => {
-        const s = (await fetch('/__servette_probe_' + Date.now())).status;
-        return { ok: s === 404, obs: '→ ' + s + (s === 404 ? ' Not Found' : '') }; } },
+  /* An unknown or empty slug resolves to the first page rather than being
+     ignored — otherwise going Back to the bare URL leaves whichever page was
+     open still showing, with the address bar disagreeing. */
+  function showSlug(slug, focusPanel) {
+    show(document.getElementById(SLUGS[slug] || tabs[0].id), focusPanel);
+  }
 
-    { req: 'GET /%2e%2e%2f…', run: async () => {
-        const s = (await fetch('/%2e%2e%2f%2e%2e%2fetc%2fpasswd')).status;
-        return { ok: s === 403, obs: '→ ' + s + (s === 403 ? ' Forbidden' : '') }; } },
+  tabs.forEach(function (tab) {
+    tab.addEventListener("click", function () {
+      location.hash = slugOf[tab.id];
+    });
+  });
 
-    { req: 'GET /', run: async () => {
-        const v = (await H()).get('Strict-Transport-Security');
-        return v
-          ? { ok: true, obs: 'Strict-Transport-Security: present' }
-          : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
+  /* In-page links and footer buttons route through the same hash. */
+  document.querySelectorAll("[data-goto]").forEach(function (el) {
+    el.addEventListener("click", function () {
+      location.hash = el.getAttribute("data-goto");
+    });
+  });
+
+  window.addEventListener("hashchange", function () {
+    showSlug(location.hash.slice(1), true);
+    window.scrollTo(0, 0);
+  });
+
+  /* ── Architecture diagram ────────────────────────────────────────
+     Drawn from the data below, not from a checked-in image, so the map
+     changes when the description of the code does. It is drawn lazily:
+     the panel it lives in starts hidden, and an element with no layout
+     box measures as zero, which would collapse the layout. */
+
+  var drawn = false;
+
+  function drawDiagram() {
+    if (drawn) return;
+    drawn = true;
+    renderChord(document.getElementById("chord"));
+  }
+
+  /* Data — the only part to edit when servette.py's structure changes.
+     range is [startDeg, endDeg], counter-clockwise from due east. */
+  var GROUPS = [
+    { title: "SYSTEM", subtitle: "", range: [95, 175],
+      color: "var(--dg-system)", bg: "var(--dg-system-bg)",
+      nodes: ["BOOT", "SRVLIFE", "WATCHDOG", "CERTMGMT", "SVCMGMT"] },
+    { title: "SHELL", subtitle: "read+write", range: [185, 335],
+      color: "var(--dg-write)", bg: "var(--dg-write-bg)",
+      nodes: ["LOOP", "SITECFG", "PULLCMD", "UPDATECMD", "PIPE", "RESTORE"] },
+    { title: "SERVER", subtitle: "read-only", range: [345, 445],
+      color: "var(--dg-server)", bg: "var(--dg-server-bg)",
+      nodes: ["CONFIG", "HTTPSH", "RATELIM", "SITESEL", "AUTHN", "VERSION", "STATIC"] },
   ];
 
-  const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };
-  const logEl = $('t-log');
+  var LABELS = {
+    BOOT: "Bootstrap", SRVLIFE: "Server Lifecycle", WATCHDOG: "Cert Watchdog\nself-timed, 60s",
+    CERTMGMT: "Certificate Mgmt\nACME, renew", SVCMGMT: "Service Mgmt\nsystemd unit files",
+    LOOP: "Main Shell Loop", SITECFG: "add-site / config", PULLCMD: "pull [n]",
+    UPDATECMD: "update", PIPE: "fetch → verify → swap", RESTORE: "restore-site / restore",
+    CONFIG: "Config", HTTPSH: "HTTPS Handler", RATELIM: "Rate Limiter", SITESEL: "Site Selection",
+    AUTHN: "Auth (optional)", VERSION: "Version Discovery", STATIC: "Static File Serving",
+  };
 
-  function addRow(reqText) {
-    const st  = document.createElement('span'); st.className  = 't-st t-pending'; st.textContent = LABEL.pending;
-    const req = document.createElement('span'); req.className = 't-req';  req.textContent = reqText;
-    const obs = document.createElement('span'); obs.className = 't-obs';  obs.textContent = '';
-    const body = document.createElement('span'); body.className = 't-body';
-    body.append(req, document.createTextNode('  '), obs);
-    const row = document.createElement('div'); row.className = 't-row';
-    row.append(st, body);
-    logEl.appendChild(row);
-    return { st, obs };
+  /* Each satellite is one way in, and the single node it enters through. */
+  var SATELLITES = { INIT: "BOOT", GET: "HTTPSH", SSH: "LOOP" };
+  var SATELLITE_IDS = Object.keys(SATELLITES);
+
+  /* [from, to, kind?] — kind is "boundary" | "write" | "dotted", or absent
+     for plain control flow. */
+  var EDGES = [
+    ["BOOT", "SRVLIFE"], ["SRVLIFE", "WATCHDOG"], ["WATCHDOG", "CERTMGMT"],
+    ["HTTPSH", "RATELIM"], ["RATELIM", "SITESEL"], ["SITESEL", "AUTHN"],
+    ["AUTHN", "VERSION"], ["AUTHN", "STATIC"],
+    ["LOOP", "SITECFG"], ["LOOP", "PULLCMD"], ["LOOP", "UPDATECMD"], ["LOOP", "RESTORE"],
+    ["PULLCMD", "PIPE"], ["UPDATECMD", "PIPE"],
+    ["INIT", "BOOT"], ["GET", "HTTPSH"], ["SSH", "LOOP"],
+    ["BOOT", "LOOP"], ["SRVLIFE", "HTTPSH"],
+    ["CERTMGMT", "HTTPSH", "boundary"],
+    ["SITECFG", "SVCMGMT", "dotted"], ["SITECFG", "CERTMGMT", "dotted"],
+    ["PIPE", "STATIC", "write"], ["RESTORE", "STATIC", "write"],
+    ["CONFIG", "BOOT", "dotted"], ["CONFIG", "LOOP", "dotted"],
+  ];
+
+  /* Tunables. The node ring's radius is not among them: it is grown until
+     no two labels collide, so a longer label or an added node pushes the
+     ring outward on its own rather than needing a number bumped here. */
+  var NS = "http://www.w3.org/2000/svg";
+  var BAND = 46;        // wedge half-thickness around the node ring
+  var WEDGE_PAD = 6;    // degrees a wedge extends past its outermost nodes
+  var LABEL_GAP = 22;   // px from the wedge's outer edge to its title
+  var SAT_GAP = 60;     // px from the wedge's outer edge to the satellite ring
+  var PULL = 0.45;      // 0 = straight chord, 1 = through dead centre
+  var SAT_R = 32;
+  var NODE_GAP = 14;
+  var NODE_PAD_X = 14, NODE_PAD_Y = 10, LINE_HEIGHT = 15;
+  var ARROW = 13, ARROW_STRONG = 17;
+
+  function toRad(deg) { return (deg * Math.PI) / 180; }
+
+  function polar(cx, cy, r, deg) {
+    return [cx + r * Math.cos(toRad(deg)), cy - r * Math.sin(toRad(deg))];
   }
 
-  function paint(st, state) { st.textContent = LABEL[state]; st.className = 't-st t-' + state; }
+  function el(tag, attrs, parent) {
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
 
-  async function runTests() {
-    _hdrs = null;                 // force fresh requests on each run
-    logEl.innerHTML = '';
-    $('t-summary').textContent = 'running…';
-    let pass = 0, fail = 0, skip = 0;
-    for (const c of checks) {
-      const { st, obs } = addRow(c.req);
-      let r;
-      try { r = await c.run(); }
-      catch (e) { r = { ok: null, obs: 'could not run' }; }
-      obs.textContent = r.obs;
-      if (r.ok === true)       { paint(st, 'pass'); pass++; }
-      else if (r.ok === false) { paint(st, 'fail'); fail++; }
-      else                     { paint(st, 'skip'); skip++; }
+  function clipToShape(shape, dx, dy) {
+    if (shape.r != null) {
+      var len = Math.hypot(dx, dy) || 1;
+      return [shape.x + (dx / len) * shape.r, shape.y + (dy / len) * shape.r];
     }
-    $('t-summary').innerHTML =
-      '<b>' + pass + '</b> passed · <b>' + fail + '</b> failed · <b>' + skip + '</b> skipped';
+    var t = Math.min(
+      dx ? shape.hw / Math.abs(dx) : Infinity,
+      dy ? shape.hh / Math.abs(dy) : Infinity
+    );
+    return [shape.x + dx * t, shape.y + dy * t];
   }
 
-  $('run-again').addEventListener('click', runTests);
-  runTests();
+  /* Smallest arc containing every angle, unwrapped past 360 where the group
+     straddles due east — which SERVER does. */
+  function groupArc(angles) {
+    var s = angles.map(function (a) { return ((a % 360) + 360) % 360; })
+                  .sort(function (a, b) { return a - b; });
+    var n = s.length, bestGap = -1, bestIdx = 0;
+    for (var i = 0; i < n; i++) {
+      var gap = (s[(i + 1) % n] - s[i] + 360) % 360;
+      if (gap > bestGap) { bestGap = gap; bestIdx = i; }
+    }
+    var start = s[(bestIdx + 1) % n];
+    var end = s[bestIdx];
+    if (end < start) end += 360;
+    return [start - WEDGE_PAD, end + WEDGE_PAD];
+  }
+
+  function labelAnchor(deg) {
+    var a = ((deg % 360) + 360) % 360;
+    if (a >= 45 && a < 135) return "middle";
+    if (a >= 135 && a < 225) return "end";
+    if (a >= 225 && a < 315) return "middle";
+    return "start";
+  }
+
+  function renderChord(container) {
+    var cx = 400, cy = 400;   // provisional; the viewBox is fitted at the end
+    var svg = el("svg", { xmlns: NS });
+    container.appendChild(svg);
+
+    var wedgeLayer = el("g", {}, svg);
+    var edgeLayer = el("g", { fill: "none" }, svg);
+    var nodeLayer = el("g", {}, svg);
+    var satLayer = el("g", {}, svg);
+    var labelLayer = el("g", {
+      "font-family": "'DM Mono', ui-monospace, monospace",
+      "font-weight": "500", "font-size": "22",
+    }, svg);
+
+    /* 1. Angles come from group and index alone; radius does not. */
+    var angle = {};
+    GROUPS.forEach(function (g) {
+      var a0 = g.range[0], a1 = g.range[1], n = g.nodes.length;
+      g.nodes.forEach(function (id, i) {
+        angle[id] = a0 + ((a1 - a0) * (i + 0.5)) / n;
+      });
+    });
+
+    /* 2. Measure every label once, before anything is placed. */
+    var halfSize = {};
+    var measureLayer = el("g", { visibility: "hidden" }, svg);
+    GROUPS.forEach(function (g) {
+      g.nodes.forEach(function (id) {
+        var text = el("text", {
+          "font-family": "'DM Sans', system-ui, sans-serif", "font-size": 12.5,
+        }, measureLayer);
+        LABELS[id].split("\n").forEach(function (line, i) {
+          el("tspan", { x: 0, dy: i === 0 ? 0 : LINE_HEIGHT }, text).textContent = line;
+        });
+        var b = text.getBBox();
+        halfSize[id] = [b.width / 2 + NODE_PAD_X, b.height / 2 + NODE_PAD_Y];
+      });
+    });
+    measureLayer.remove();
+
+    /* 3. Grow the ring until no two boxes, at their fixed angles, collide. */
+    var allIds = GROUPS.reduce(function (acc, g) { return acc.concat(g.nodes); }, []);
+
+    function boxesAt(r) {
+      var boxes = {};
+      allIds.forEach(function (id) {
+        var p = polar(cx, cy, r, angle[id]);
+        boxes[id] = { x: p[0], y: p[1], hw: halfSize[id][0], hh: halfSize[id][1] };
+      });
+      return boxes;
+    }
+
+    function hasOverlap(boxes) {
+      for (var i = 0; i < allIds.length; i++) {
+        for (var j = i + 1; j < allIds.length; j++) {
+          var a = boxes[allIds[i]], b = boxes[allIds[j]];
+          var apart =
+            a.x + a.hw + NODE_GAP < b.x - b.hw || b.x + b.hw + NODE_GAP < a.x - a.hw ||
+            a.y + a.hh + NODE_GAP < b.y - b.hh || b.y + b.hh + NODE_GAP < a.y - a.hh;
+          if (!apart) return true;
+        }
+      }
+      return false;
+    }
+
+    var R1 = 150;
+    while (hasOverlap(boxesAt(R1)) && R1 < 2000) R1 += 10;
+    var shape = boxesAt(R1);
+    var R2 = R1 + BAND + SAT_GAP;
+
+    var pos = {};
+    allIds.forEach(function (id) { pos[id] = [shape[id].x, shape[id].y]; });
+    SATELLITE_IDS.forEach(function (sat) {
+      angle[sat] = angle[SATELLITES[sat]];
+      pos[sat] = polar(cx, cy, R2, angle[sat]);
+    });
+
+    /* 4. Module boxes. */
+    GROUPS.forEach(function (g) {
+      g.nodes.forEach(function (id) {
+        var s = shape[id];
+        var group = el("g", {}, nodeLayer);
+        el("rect", {
+          x: s.x - s.hw, y: s.y - s.hh, width: s.hw * 2, height: s.hh * 2,
+          rx: 9, ry: 9, fill: "var(--dg-panel)", stroke: g.color, "stroke-width": 1.3,
+        }, group);
+        var text = el("text", {
+          x: s.x, y: s.y, "text-anchor": "middle", "dominant-baseline": "middle",
+          fill: "var(--dg-ink)", "font-family": "'DM Sans', system-ui, sans-serif",
+          "font-size": 12.5,
+        }, group);
+        var lines = LABELS[id].split("\n");
+        var firstDy = -((lines.length - 1) / 2) * LINE_HEIGHT;
+        lines.forEach(function (line, i) {
+          el("tspan", { x: s.x, dy: i === 0 ? firstDy : LINE_HEIGHT }, text).textContent = line;
+        });
+      });
+    });
+
+    /* 5. The three ways in, on the outer ring. */
+    SATELLITE_IDS.forEach(function (sat) {
+      var x = pos[sat][0], y = pos[sat][1];
+      el("circle", {
+        cx: x, cy: y, r: SAT_R, fill: "none", stroke: "var(--dg-faint)",
+        "stroke-dasharray": "5,3", "stroke-width": 1.3,
+      }, satLayer);
+      el("text", {
+        x: x, y: y, "text-anchor": "middle", "dominant-baseline": "middle",
+        fill: "var(--dg-ink)", "font-family": "'DM Mono', ui-monospace, monospace",
+        "font-size": 12.5,
+      }, satLayer).textContent = sat;
+      shape[sat] = { x: x, y: y, r: SAT_R };
+    });
+
+    /* 6. Wedges, then their titles. A title is drawn, measured, and nudged
+          further out only if its nearest corner still overlaps the wedge —
+          so a two-line title clears by exactly as much as it needs to, and
+          a one-line title is not pushed away for nothing. */
+    GROUPS.forEach(function (g) {
+      var arc = groupArc(g.nodes.map(function (id) { return angle[id]; }));
+      var a0 = arc[0], a1 = arc[1];
+      var rOut = R1 + BAND, rIn = R1 - BAND;
+      var p0o = polar(cx, cy, rOut, a0), p1o = polar(cx, cy, rOut, a1);
+      var p0i = polar(cx, cy, rIn, a1), p1i = polar(cx, cy, rIn, a0);
+      var large = a1 - a0 > 180 ? 1 : 0;
+      el("path", {
+        d: "M " + p0o[0] + "," + p0o[1] +
+           " A " + rOut + "," + rOut + " 0 " + large + " 0 " + p1o[0] + "," + p1o[1] +
+           " L " + p0i[0] + "," + p0i[1] +
+           " A " + rIn + "," + rIn + " 0 " + large + " 1 " + p1i[0] + "," + p1i[1] + " Z",
+        fill: g.bg, stroke: g.color, "stroke-width": 1.2, opacity: 0.9,
+      }, wedgeLayer);
+
+      var mid = (a0 + a1) / 2;
+      var anchor = labelAnchor(mid);
+      var r = rOut + LABEL_GAP;
+      var text;
+      for (var attempt = 0; attempt < 3; attempt++) {
+        if (text) text.remove();
+        var p = polar(cx, cy, r, mid);
+        text = el("text", {
+          x: p[0], y: p[1], "text-anchor": anchor,
+          "dominant-baseline": "middle", fill: g.color,
+        }, labelLayer);
+        text.textContent = g.title;
+        if (g.subtitle) {
+          el("tspan", {
+            x: p[0], dy: "1.25em", "font-weight": "400", "font-size": "12",
+          }, text).textContent = g.subtitle;
+        }
+        var bb = text.getBBox();
+        var nearest = Math.min(
+          Math.hypot(bb.x - cx, bb.y - cy),
+          Math.hypot(bb.x + bb.width - cx, bb.y - cy),
+          Math.hypot(bb.x - cx, bb.y + bb.height - cy),
+          Math.hypot(bb.x + bb.width - cx, bb.y + bb.height - cy)
+        );
+        var clearance = nearest - rOut;
+        if (clearance >= 6) break;
+        r += 6 - clearance;
+      }
+    });
+
+    /* 7. Edges. Module-to-module curves bend toward the centre, which is
+          what makes the whole thing read as one hub; a satellite's edge is
+          a single entry point rather than a chord, and goes straight in. */
+    var COLOR = { boundary: "var(--dg-server)", write: "var(--dg-write)" };
+
+    EDGES.forEach(function (e) {
+      var from = e[0], to = e[1], kind = e[2];
+      var a = shape[from], b = shape[to];
+      var isSatellite = SATELLITE_IDS.indexOf(from) !== -1 || SATELLITE_IDS.indexOf(to) !== -1;
+      var start, end, tangent, d;
+
+      if (isSatellite) {
+        var dx = b.x - a.x, dy = b.y - a.y;
+        start = clipToShape(a, dx, dy);
+        end = clipToShape(b, -dx, -dy);
+        tangent = [dx, dy];
+        d = "M " + start[0] + "," + start[1] + " L " + end[0] + "," + end[1];
+      } else {
+        var mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        var ctrl = [mx + (cx - mx) * PULL, my + (cy - my) * PULL];
+        start = clipToShape(a, ctrl[0] - a.x, ctrl[1] - a.y);
+        end = clipToShape(b, ctrl[0] - b.x, ctrl[1] - b.y);
+        tangent = [end[0] - ctrl[0], end[1] - ctrl[1]];
+        d = "M " + start[0] + "," + start[1] +
+            " Q " + ctrl[0] + "," + ctrl[1] + " " + end[0] + "," + end[1];
+      }
+
+      var strong = kind === "boundary" || kind === "write";
+      var color = COLOR[kind] || "var(--dg-faint)";
+      var path = el("path", {
+        d: d, stroke: color, "stroke-width": strong ? 2.2 : 1.3,
+      }, edgeLayer);
+      if (kind === "dotted") path.setAttribute("stroke-dasharray", "1,5");
+
+      var tAng = Math.atan2(tangent[1], tangent[0]);
+      var size = strong ? ARROW_STRONG : ARROW;
+      var spread = 0.34;
+      var p1 = [end[0] - size * Math.cos(tAng - spread), end[1] - size * Math.sin(tAng - spread)];
+      var p2 = [end[0] - size * Math.cos(tAng + spread), end[1] - size * Math.sin(tAng + spread)];
+      el("path", {
+        d: "M " + end[0] + "," + end[1] + " L " + p1[0] + "," + p1[1] +
+           " L " + p2[0] + "," + p2[1] + " Z",
+        fill: color,
+      }, edgeLayer);
+    });
+
+    /* 8. Fit the viewBox to whatever was actually drawn. */
+    var bbox = svg.getBBox();
+    var m = 16;
+    svg.setAttribute("viewBox",
+      (bbox.x - m) + " " + (bbox.y - m) + " " +
+      (bbox.width + 2 * m) + " " + (bbox.height + 2 * m));
+  }
+
+  /* Open on whichever page the URL names, defaulting to the first. Focus is
+     left alone here: this is a page load, not a navigation within one. */
+  showSlug(location.hash.slice(1), false);
+})();
 </script>
 
 </body>

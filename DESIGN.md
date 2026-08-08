@@ -177,6 +177,7 @@ The interactive REPL shown when running without `--serve`. Dispatches to `cmd_se
 - **Stdlib `http.server` over an ASGI server** — a static site needs only HTTP/1.1, which every browser speaks; the threaded model (one capped worker thread per connection) is simple to reason about and removes the largest dependency. Servette owns its transport directly: TLS from `ssl.SSLContext`, the handshake off the accept loop, a per-connection timeout, and a connection cap — the hardening an ASGI server would otherwise supply, kept small enough to read in one file.
 - **Managed virtualenv over system packages** — `.servette-env/` is isolated, reproducible, and invisible to the rest of the system.
 - **CSP default blocks what static sites never need** — plugins (`object-src 'none'`), `eval()`, plain-HTTP external resources — while allowing own-origin, HTTPS externals, inline styles/scripts, and data URIs. Tune via `config > csp`; blank disables it.
+- **Per-site cooldown keys use `domain`/`serve_dir`, never `id(site)`** — a config reload replaces every `Site` object wholesale, and CPython's id-reuse can hand a fresh site the identity of a stale, unrelated one; keying by a field that persists across the reload avoids that entirely.
 
 ## Operating
 

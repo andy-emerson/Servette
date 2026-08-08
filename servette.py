@@ -650,11 +650,9 @@ def _backup_version():
 
 
 def _cooldown_key(site):
-    """A key for the per-site poke/poll cooldown dicts (_last_poke_attempt,
-    _last_publish_poll) that survives a config reload, which replaces every
-    Site object wholesale. domain when set, else the always-present
-    serve_dir — never id(site), which a reload could hand straight back out
-    to an unrelated site and silently mix up two sites' cooldowns."""
+    """A key for the per-site poke/poll cooldown dicts that survives a config
+    reload, which replaces every Site object wholesale — never id(site). See
+    DESIGN.md's "Notable design decisions" for why."""
     return site.domain or site.serve_dir
 
 
@@ -880,11 +878,9 @@ def _handle_request(method, url_path, headers, raw_ip):
 
 def _select_site(host):
     """Match a Host/SNI value (bare hostname, port stripped if present) against
-    configured sites — uniform regardless of site count, so a single-site box
-    exercises the same logic a multi-site one does. Exact domain match first;
-    else the first domainless site, which acts as the catch-all (this is what
-    lets a single self-signed/LAN site keep working with no domain configured,
-    exactly as before multi-site support existed — any Host reaches it). No
+    configured sites — uniform regardless of site count. Exact domain match
+    first; else the first domainless site, which acts as the catch-all (any
+    Host reaches a self-signed/LAN site with no domain configured). No
     domainless site and no domain match: None, the closed-system miss."""
     host = (host or "").split(":")[0].strip().lower()
     for site in config.sites:
@@ -894,18 +890,6 @@ def _select_site(host):
         if not site.domain:
             return site
     return None
-
-
-def _domain_in_use(domain, excluding=None):
-    """True if some other configured site already claims this domain
-    (case-insensitive). Two sites sharing a domain would make TLS and HTTP
-    routing silently disagree about which site is being served:
-    _build_site_ssl_contexts keys its SNI table by domain, so the later site
-    registered wins there, while _select_site above returns the first
-    matching site — a visitor would get one site's certificate and the
-    other's content."""
-    domain = domain.lower()
-    return any(s is not excluding and s.domain and s.domain.lower() == domain for s in config.sites)
 
 
 def _build_ssl_context(cert_path, key_path):
@@ -938,12 +922,9 @@ def _build_site_ssl_contexts():
     listening socket is constructed with and that's presented whenever SNI doesn't
     match any site (absent, unrecognized, or direct-IP access) — the closed
     system. A domainless site's own context serves as that default when one
-    exists, so a single self-signed/LAN site needs no generic cert and behaves
-    exactly as it always has; otherwise _ensure_default_cert() supplies one tied
-    to no site's identity.
-
-    Returns the default context, already carrying sni_callback and ready for
-    wrap_socket — the per-site contexts live only inside its closure."""
+    exists; otherwise _ensure_default_cert() supplies one tied to no site's
+    identity. Returns the default context, already carrying sni_callback —
+    the per-site contexts live only inside its closure."""
     domain_ctx  = {}
     default_ctx = None
     for site in config.sites:
@@ -2247,6 +2228,17 @@ def _is_real_domain(s):
         return False  # it's an IP, not a domain
     except ValueError:
         return bool(s)
+
+
+def _domain_in_use(domain, excluding=None):
+    """True if some other configured site already claims this domain
+    (case-insensitive). Two sites sharing a domain would make TLS and HTTP
+    routing silently disagree about which site is being served — each keys
+    its own site-matching table by domain, and a later registration or an
+    earlier list position would win independently, so a visitor could get
+    one site's certificate and the other's content."""
+    domain = domain.lower()
+    return any(s is not excluding and s.domain and s.domain.lower() == domain for s in config.sites)
 
 
 def _domain_from_cert(cert_path):

@@ -649,19 +649,31 @@ def _backup_version():
         return None
 
 
+def _cooldown_key(site):
+    """A key for the per-site poke/poll cooldown dicts (_last_poke_attempt,
+    _last_publish_poll). site.domain is stable across a config reload —
+    Config._load() (via reload_if_changed(), which a config edit made from a
+    separate `sudo python3 servette.py` shell session against an
+    already-running --serve process will trigger) replaces every Site object
+    wholesale, so id(site) alone would silently reset every site's cooldown
+    on the next reload. But domain is empty for every domainless site, and
+    two of them sharing one key isn't harmless the way it first looks: poke
+    only ever reaches the one domainless site _select_site's catch-all rule
+    can route to, but _publish_poll_tick iterates config.sites directly,
+    bypassing that rule entirely — a second domainless site would forever
+    find its shared key freshly reset by the first one processed each tick,
+    starving its fallback poll permanently, silently. Falling back to
+    id(site) when domain is empty accepts that a reload resets that specific
+    site's cooldown (self-healing, and not a security-relevant throttle to
+    begin with — reloads are never attacker-triggered) in exchange for
+    correctness: two distinct sites never share a key."""
+    return site.domain or id(site)
+
+
 _WELL_KNOWN_POKE_PATH  = _WELL_KNOWN_VERSION_PATH + "/poke"
-_last_poke_attempt     = {}  # site.domain -> monotonic timestamp of the last poke that
-                             # actually triggered a fetch. Keyed by domain rather than
-                             # id(site): Config._load() (via reload_if_changed(), which
-                             # a config edit made from a separate `sudo python3
-                             # servette.py` shell session against an already-running
-                             # --serve process will trigger) replaces every Site object
-                             # wholesale, so id()-keying would silently reset every
-                             # site's cooldown on the next reload. Per-domain still means
-                             # hammering one site's poke endpoint can't throttle
-                             # another's; domainless sites share the "" key, harmless
-                             # since only one is ever reachable at a time (the catch-all
-                             # in _select_site) — the others never receive a poke to race.
+_last_poke_attempt     = {}  # _cooldown_key(site) -> monotonic timestamp of the last
+                             # poke that actually triggered a fetch — per-site, so
+                             # hammering one site's poke endpoint can't throttle another's
 _poke_cooldown_lock    = threading.Lock()
 _PUBLISH_POKE_COOLDOWN = 30  # seconds; bounds how often a poke actually triggers a
                              # fetch, regardless of how often (or from how many
@@ -678,10 +690,11 @@ def _poke_content_update(site):
     timestamp and both spawn."""
     with _poke_cooldown_lock:
         now  = time.monotonic()
-        last = _last_poke_attempt.get(site.domain, 0.0)
+        key  = _cooldown_key(site)
+        last = _last_poke_attempt.get(key, 0.0)
         if now - last < _PUBLISH_POKE_COOLDOWN:
             return
-        _last_poke_attempt[site.domain] = now
+        _last_poke_attempt[key] = now
     threading.Thread(target=_check_for_content_update, args=(site,), daemon=True).start()
 
 
@@ -1236,11 +1249,8 @@ def _cert_watchdog():
         _cert_watchdog_tick()
 
 
-_last_publish_poll     = {}  # site.domain -> monotonic timestamp of the last full poll
-                             # pass. Keyed by domain rather than id(site) for the same
-                             # reason as _last_poke_attempt: Config._load() replaces
-                             # every Site object wholesale on reload, which would
-                             # otherwise silently reset this on every config edit.
+_last_publish_poll     = {}  # _cooldown_key(site) -> monotonic timestamp of the last
+                             # full poll pass for that site
 _PUBLISH_POLL_INTERVAL = 300  # seconds; mirrors the network watchdog's 5-minute
                               # cadence — the floor under the poke mechanism, for
                               # boxes that never receive one (just rebooted, tool
@@ -1251,16 +1261,20 @@ def _publish_poll_tick():
     """One publish-check pass over every configured site, each gated to at most
     once per _PUBLISH_POLL_INTERVAL — same shape as _cert_watchdog_tick's
     per-site renewal gate, including per-site exception containment (one
-    site's failure can't skip, or silently stop polling, another's)."""
+    site's failure can't skip, or silently stop polling, another's). Unlike
+    poke, this iterates config.sites directly rather than going through
+    _select_site's catch-all rule, so it must not assume only one domainless
+    site is ever "live" — _cooldown_key() accounts for that."""
     for site in config.sites:
         if not (site.publish_url and site.publish_key):
             continue
         try:
             now  = time.monotonic()
-            last = _last_publish_poll.get(site.domain, 0.0)
+            key  = _cooldown_key(site)
+            last = _last_publish_poll.get(key, 0.0)
             if now - last < _PUBLISH_POLL_INTERVAL:
                 continue
-            _last_publish_poll[site.domain] = now
+            _last_publish_poll[key] = now
             _check_for_content_update(site)
         except Exception:
             log.exception("Publish poll pass failed for %s — will retry on the next pass",

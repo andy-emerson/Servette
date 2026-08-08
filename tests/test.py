@@ -1107,7 +1107,7 @@ def run_dispatch_tests(s):
         # than _PUBLISH_POKE_COOLDOWN, which a freshly booted CI runner isn't.
         # Compute "elapsed" relative to now throughout instead.
         long_ago = lambda: time.monotonic() - s._PUBLISH_POKE_COOLDOWN - 1
-        s._last_poke_attempt[site.domain] = long_ago()
+        s._last_poke_attempt[s._cooldown_key(site)] = long_ago()
 
         s._poke_content_update(site)
         time.sleep(0.05)  # let the daemon thread run
@@ -1117,14 +1117,14 @@ def run_dispatch_tests(s):
         time.sleep(0.05)
         check("Second poke within the cooldown window is a no-op", len(calls) == 1)
 
-        s._last_poke_attempt[site.domain] = long_ago()  # simulate the cooldown having elapsed
+        s._last_poke_attempt[s._cooldown_key(site)] = long_ago()  # simulate the cooldown having elapsed
         s._poke_content_update(site)
         time.sleep(0.05)
         check("Poke after the cooldown elapses triggers again", len(calls) == 2)
 
         # Concurrent pokes racing the cooldown's check-then-set: without the
         # lock around it, both could read the stale timestamp and both spawn.
-        s._last_poke_attempt[site.domain] = long_ago()
+        s._last_poke_attempt[s._cooldown_key(site)] = long_ago()
         calls.clear()
         threads = [threading.Thread(target=s._poke_content_update, args=(site,)) for _ in range(10)]
         for t in threads:
@@ -1138,8 +1138,8 @@ def run_dispatch_tests(s):
         # Per-site independence: another site's active cooldown doesn't block
         # this one's — hammering one site's poke endpoint can't throttle another's.
         site2 = s.Site({"domain": "poke-other.example.com"})
-        s._last_poke_attempt[site.domain]  = time.monotonic()  # site just fired, in cooldown
-        s._last_poke_attempt.pop(site2.domain, None)           # site2 has never fired
+        s._last_poke_attempt[s._cooldown_key(site)]  = time.monotonic()  # site just fired, in cooldown
+        s._last_poke_attempt.pop(s._cooldown_key(site2), None)           # site2 has never fired
         calls.clear()
         s._poke_content_update(site2)
         time.sleep(0.05)
@@ -1154,7 +1154,7 @@ def run_dispatch_tests(s):
         # same domain still respects the timestamp from before the reload.
         saved_domain = site.domain
         site.domain  = "reload-test.example.com"
-        s._last_poke_attempt[site.domain] = time.monotonic()
+        s._last_poke_attempt[s._cooldown_key(site)] = time.monotonic()
         reloaded_site = s.Site({"domain": site.domain})  # simulates what reload produces
         calls.clear()
         s._poke_content_update(reloaded_site)
@@ -2111,7 +2111,7 @@ def run_install_tests(s, tmpdir):
         s._check_for_content_update = lambda site: calls.append(1)
 
         s.config.publish_url = s.config.publish_key = ""
-        s._last_publish_poll[site.domain] = 0.0
+        s._last_publish_poll[s._cooldown_key(site)] = 0.0
         s._publish_poll_tick()
         check("No publish channel configured: tick is a no-op", calls == [])
 
@@ -2120,14 +2120,14 @@ def run_install_tests(s, tmpdir):
         # Linux) — 0.0 only reads as "long ago" if the host has been up longer
         # than _PUBLISH_POLL_INTERVAL, which a freshly booted CI runner isn't.
         # Compute "elapsed" relative to now instead, as the later cases do.
-        s._last_publish_poll[site.domain] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
+        s._last_publish_poll[s._cooldown_key(site)] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
         s._publish_poll_tick()
         check("Channel configured, interval elapsed: tick fires", calls == [1])
 
         s._publish_poll_tick()
         check("Within the poll interval: second tick is a no-op", calls == [1])
 
-        s._last_publish_poll[site.domain] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
+        s._last_publish_poll[s._cooldown_key(site)] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
         s._publish_poll_tick()
         check("After the poll interval elapses: tick fires again", calls == [1, 1])
 
@@ -2137,7 +2137,7 @@ def run_install_tests(s, tmpdir):
             "domain": "poll-other.example.com", "publish_url": "https://example.com/other.tar.gz",
             "publish_key": "b" * 64,
         })
-        s._last_publish_poll.pop(site2.domain, None)
+        s._last_publish_poll.pop(s._cooldown_key(site2), None)
         s._check_for_content_update = lambda site: (_ for _ in ()).throw(RuntimeError("boom")) \
             if site is s.config.sites[0] else calls.append("site2")
         calls.clear()
@@ -2149,6 +2149,23 @@ def run_install_tests(s, tmpdir):
             logging.disable(logging.NOTSET)
         check("A failure checking one site doesn't stop the poll pass for another",
               calls == ["site2"])
+
+        # Regression: two domainless sites must not share a cooldown key —
+        # they'd otherwise starve each other, since whichever is processed
+        # first each tick resets the shared "" key just before the second's
+        # own check runs, permanently skipping it.
+        site3 = s.Site({"domain": "", "publish_url": "https://example.com/third.tar.gz",
+                         "publish_key": "c" * 64})
+        site4 = s.Site({"domain": "", "publish_url": "https://example.com/fourth.tar.gz",
+                         "publish_key": "d" * 64})
+        s._last_publish_poll.pop(s._cooldown_key(site3), None)
+        s._last_publish_poll.pop(s._cooldown_key(site4), None)
+        s._check_for_content_update = lambda site: calls.append(site)
+        calls.clear()
+        s.config.sites = [site3, site4]
+        s._publish_poll_tick()
+        check("Two domainless sites are both polled in the same tick, not just the first",
+              calls == [site3, site4])
     finally:
         s._check_for_content_update = saved_check
         s._last_publish_poll = saved_last

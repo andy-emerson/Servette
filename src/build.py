@@ -102,6 +102,16 @@ def main(argv=None):
 
     built = build(src_dir)
 
+    # Fail loudly on a broken assembly rather than writing (or blessing) a
+    # servette.py that won't parse. compile() parses without executing, so this
+    # has no side effects; it catches syntax errors, not runtime ones — the test
+    # suite covers the rest.
+    try:
+        compile(built, "servette.py", "exec")
+    except SyntaxError as e:
+        print(f"build failed: assembled servette.py has a syntax error: {e}", file=sys.stderr)
+        return 1
+
     if args.check:
         target = args.output or default
         try:

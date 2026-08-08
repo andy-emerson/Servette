@@ -115,6 +115,8 @@ Re-run `sudo python3 servette.py` any time to return to the shell:
 | `log [n]` | Show recent activity |
 | `update` | Download the latest signed release of Servette |
 | `restore` | Roll back to the previous version |
+| `pull [n]` | Pull new site content from a site's publish channel |
+| `restore-site [n]` | Roll back a site's content to before its last pull |
 | `help` · `quit` | Command list · exit |
 
 **Update your site** by copying new files over (`scp -r mysite/ user@your.server.ip:~/site`) — changes appear immediately, no restart. **Update Servette** with `update`; it pulls the latest signed release, verifies it, and reloads automatically — restarting the background service too, if you're running as one. Your `servette.toml` is never touched by an update.
@@ -134,7 +136,7 @@ Re-run `sudo python3 servette.py` any time to return to the shell:
 |---|---|
 | `servette.py` | The entire product — server, system, and shell in one file |
 | `tests/test.py` | The whole test suite, run by CI on Python 3.11 and 3.14 |
-| `site/` | The folder Servette serves — ships with the demo page; `site/assets/` holds the logos this README displays |
+| `site/` | The folder Servette serves by default — holds the project's own site pages and the self-test demo; `site/assets/` holds the logos this README displays |
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
 | `AGENTS.md` · `CLAUDE.md` | The human–agent working agreement, and the pointer to it |

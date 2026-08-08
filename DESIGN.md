@@ -46,13 +46,13 @@ Prefer understatement: `_production_issues()` is the model — it lists what is 
 
 ## How it works
 
-Servette is a single file (`servette.py`, ~3,500 lines) with three sections, each readable on its own, followed by a short entry-point block that instantiates the `Config` singleton and dispatches to the shell or `--serve`. Settings persist to `servette.toml` beside it.
+Servette is a single file (`servette.py`, ~3,450 lines) with three sections, each readable on its own, followed by a short entry-point block that instantiates the `Config` singleton and dispatches to the shell or `--serve`. Settings persist to `servette.toml` beside it.
 
 | Section | Lines | Responsibility |
 | - | - | - |
-| **Server** | ~1,000 | every incoming request: config, rate limiting, file cache, site selection, the request handler and the HTTP servers |
-| **System** | ~1,100 | the environment: bootstrap, server lifecycle, certificates (incl. the ACME client), systemd and host provisioning |
-| **Shell** | ~1,250 | the interactive terminal interface |
+| **Server** | ~960 | every incoming request: config, rate limiting, file cache, site selection, the request handler and the HTTP servers |
+| **System** | ~1,120 | the environment: bootstrap, server lifecycle, certificates (incl. the ACME client), systemd and host provisioning |
+| **Shell** | ~1,280 | the interactive terminal interface |
 
 ```mermaid
 graph LR

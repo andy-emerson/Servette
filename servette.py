@@ -650,27 +650,31 @@ def _backup_version():
 
 
 _WELL_KNOWN_POKE_PATH  = _WELL_KNOWN_VERSION_PATH + "/poke"
-_last_poke_attempt     = 0.0
+_last_poke_attempt     = {}  # id(site) -> monotonic timestamp of the last poke that
+                             # actually triggered a fetch — per-site, so hammering
+                             # one site's poke endpoint can't throttle another's
 _poke_cooldown_lock    = threading.Lock()
 _PUBLISH_POKE_COOLDOWN = 30  # seconds; bounds how often a poke actually triggers a
                              # fetch, regardless of how often (or from how many
                              # sources) pokes themselves arrive
 
 
-def _poke_content_update():
-    """Trigger a content-update check off the request thread, at most once per
-    cooldown window. The poke response returns immediately either way; the
-    actual fetch/verify/swap runs in the background, same as the periodic
-    fallback poll. The check-then-set on the cooldown clock is itself locked —
-    concurrent pokes (poke needs no auth, so any number of requests can race
-    here) would otherwise both read a stale _last_poke_attempt and both spawn."""
-    global _last_poke_attempt
+def _poke_content_update(site):
+    """Trigger a content-update check for `site` off the request thread, at most
+    once per cooldown window for that site. The poke response returns
+    immediately either way; the actual fetch/verify/swap runs in the
+    background, same as the periodic fallback poll. The check-then-set on the
+    cooldown clock is itself locked — concurrent pokes (poke needs no auth, so
+    any number of requests can race here) would otherwise both read a stale
+    timestamp and both spawn."""
     with _poke_cooldown_lock:
-        now = time.monotonic()
-        if now - _last_poke_attempt < _PUBLISH_POKE_COOLDOWN:
+        now  = time.monotonic()
+        key  = id(site)
+        last = _last_poke_attempt.get(key, 0.0)
+        if now - last < _PUBLISH_POKE_COOLDOWN:
             return
-        _last_poke_attempt = now
-    threading.Thread(target=_check_for_content_update, daemon=True).start()
+        _last_poke_attempt[key] = now
+    threading.Thread(target=_check_for_content_update, args=(site,), daemon=True).start()
 
 
 def _handle_request(method, url_path, headers, raw_ip):
@@ -716,17 +720,15 @@ def _handle_request(method, url_path, headers, raw_ip):
         body_404 = b"Not found."
         return resp(404, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_404)).encode())], body_404)
 
-    # Publish poke: ask Servette to check for new site content now, instead of
-    # waiting for the next fallback poll. Deliberately NOT gated behind the
-    # site's Basic Auth (unlike version discovery below) — poking reveals no
-    # information and can install nothing on its own; the fetched bundle still
-    # has to pass Ed25519 verification in _check_for_content_update(). Still
-    # subject to the general rate limiter above. Not yet site-scoped — still
-    # checks config.publish_url/key (sites[0]'s, via the back-compat property)
-    # regardless of which site the Host matched; becomes per-site in a later
-    # commit alongside the rest of the publish pipeline.
+    # Publish poke: ask Servette to check the matched site for new content now,
+    # instead of waiting for the next fallback poll. Deliberately NOT gated
+    # behind the site's Basic Auth (unlike version discovery below) — poking
+    # reveals no information and can install nothing on its own; the fetched
+    # bundle still has to pass Ed25519 verification in
+    # _check_for_content_update(). Still subject to the general rate limiter
+    # above, and separately cooldown-gated per site.
     if url_path.split("?", 1)[0] == _WELL_KNOWN_POKE_PATH:
-        _poke_content_update()
+        _poke_content_update(site)
         return resp(202, [(b"content-length", b"0")])
 
     # Authentication — the matched site's own username/password; per the closed
@@ -1216,7 +1218,7 @@ def _cert_watchdog():
         _cert_watchdog_tick()
 
 
-_last_publish_poll     = 0.0
+_last_publish_poll     = {}  # id(site) -> monotonic timestamp of the last full poll pass
 _PUBLISH_POLL_INTERVAL = 300  # seconds; mirrors the network watchdog's 5-minute
                               # cadence — the floor under the poke mechanism, for
                               # boxes that never receive one (just rebooted, tool
@@ -1224,16 +1226,24 @@ _PUBLISH_POLL_INTERVAL = 300  # seconds; mirrors the network watchdog's 5-minute
 
 
 def _publish_poll_tick():
-    """One publish-check pass, gated to at most once per _PUBLISH_POLL_INTERVAL —
-    same shape as _cert_watchdog_tick's renewal gate."""
-    global _last_publish_poll
-    if not (config.publish_url and config.publish_key):
-        return
-    now = time.monotonic()
-    if now - _last_publish_poll < _PUBLISH_POLL_INTERVAL:
-        return
-    _last_publish_poll = now
-    _check_for_content_update()
+    """One publish-check pass over every configured site, each gated to at most
+    once per _PUBLISH_POLL_INTERVAL — same shape as _cert_watchdog_tick's
+    per-site renewal gate, including per-site exception containment (one
+    site's failure can't skip, or silently stop polling, another's)."""
+    for site in config.sites:
+        if not (site.publish_url and site.publish_key):
+            continue
+        try:
+            now  = time.monotonic()
+            key  = id(site)
+            last = _last_publish_poll.get(key, 0.0)
+            if now - last < _PUBLISH_POLL_INTERVAL:
+                continue
+            _last_publish_poll[key] = now
+            _check_for_content_update(site)
+        except Exception:
+            log.exception("Publish poll pass failed for %s — will retry on the next pass",
+                          site.domain or "a site")
 
 
 def _publish_poll():
@@ -2921,14 +2931,14 @@ def _extract_bundle(data, dest_dir):
         tf.extractall(dest_dir, members=members, filter="data")
 
 
-def _swap_site_content(new_dir):
+def _swap_site_content(new_dir, serve_dir):
     """Atomically replace the live serve_dir with new_dir's contents, keeping
     a single-shot backup — the same one-step-back pattern as servette.py.bak.
     new_dir must be on the same filesystem as serve_dir (both under BASE_DIR)
     so the renames are atomic; the only unavoidable risk window is the two
     renames themselves, each a single fast syscall back to back — proportionate
     to Servette's scale, not a high-QPS system where that window would matter."""
-    live_dir = _resolve(config.serve_dir).rstrip(os.sep)
+    live_dir = _resolve(serve_dir).rstrip(os.sep)
     bak_dir  = live_dir + ".bak"
     shutil.rmtree(bak_dir, ignore_errors=True)
     if os.path.isdir(live_dir):
@@ -2936,11 +2946,15 @@ def _swap_site_content(new_dir):
     os.rename(new_dir, live_dir)
 
 
-_publish_lock = threading.Lock()  # serializes every site-content mutation — poke's
-                                   # background thread, the periodic poll, the
-                                   # interactive 'pull', and cmd_restore_site can
-                                   # all fire independently, and the swap below is
-                                   # multiple unguarded filesystem ops, not one
+_publish_lock = threading.Lock()  # serializes every site-content mutation, across
+                                   # every site — poke's background thread, the
+                                   # periodic poll, the interactive 'pull', and
+                                   # cmd_restore_site can all fire independently,
+                                   # for any site, and the swap below is multiple
+                                   # unguarded filesystem ops, not one. Shared
+                                   # rather than per-site: simpler, and cross-site
+                                   # serialization costs nothing worth optimizing
+                                   # away at Servette's scale.
 
 
 def _publish_sig_url(url):
@@ -2952,25 +2966,26 @@ def _publish_sig_url(url):
     return urlunsplit(parts._replace(path=parts.path + ".sig"))
 
 
-def _check_for_content_update():
-    """Pull, verify, and swap in a new site bundle if the publish channel is
-    configured. No-ops silently (not an error) if publish_url/publish_key
-    aren't both set — publishing is opt-in. Runs off the request path: called
-    from the poke handler's background thread and the periodic fallback poll —
-    neither is watching stdout, so every outcome is logged here. Also called
-    synchronously by the interactive 'pull' command, which turns the returned
-    status into a printed line rather than duplicating this logic.
+def _check_for_content_update(site):
+    """Pull, verify, and swap in a new site bundle for `site` if its publish
+    channel is configured. No-ops silently (not an error) if publish_url/
+    publish_key aren't both set on it — publishing is opt-in, per site. Runs
+    off the request path: called from the poke handler's background thread and
+    the periodic fallback poll — neither is watching stdout, so every outcome
+    is logged here. Also called synchronously by the interactive 'pull'
+    command, which turns the returned status into a printed line rather than
+    duplicating this logic.
 
     Returns a short status string: "not-configured", "invalid-key",
     "fetch-failed", "too-large", "bad-signature", "rejected", or "published"."""
-    if not (config.publish_url and config.publish_key):
+    if not (site.publish_url and site.publish_key):
         return "not-configured"
 
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     from cryptography.exceptions import InvalidSignature
 
     try:
-        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(config.publish_key))
+        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(site.publish_key))
     except ValueError:
         log.error("publish_key is not a valid Ed25519 public key — publishing disabled")
         return "invalid-key"
@@ -2980,11 +2995,11 @@ def _check_for_content_update():
             # Capped read: bounds memory to _MAX_BUNDLE_BYTES regardless of what
             # the response claims or how much data is actually sent — poke makes
             # this fetch reachable by any unauthenticated visitor, repeatedly.
-            bundle = urllib.request.urlopen(config.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
+            bundle = urllib.request.urlopen(site.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
             if len(bundle) > _MAX_BUNDLE_BYTES:
                 log.error("Publish bundle exceeds %d bytes — rejecting before signature check", _MAX_BUNDLE_BYTES)
                 return "too-large"
-            signature = urllib.request.urlopen(_publish_sig_url(config.publish_url), timeout=15).read(4096)
+            signature = urllib.request.urlopen(_publish_sig_url(site.publish_url), timeout=15).read(4096)
         except Exception as e:
             log.warning("Could not fetch publish bundle: %s", e)
             return "fetch-failed"
@@ -2995,28 +3010,29 @@ def _check_for_content_update():
             log.error("Publish bundle signature verification failed — rejecting")
             return "bad-signature"
 
-        staging = _resolve(config.serve_dir).rstrip(os.sep) + ".new"
+        staging = _resolve(site.serve_dir).rstrip(os.sep) + ".new"
         shutil.rmtree(staging, ignore_errors=True)
         try:
             _extract_bundle(bundle, staging)
-            _swap_site_content(staging)
+            _swap_site_content(staging, site.serve_dir)
         except Exception as e:
             log.error("Publish bundle rejected: %s", e)
             shutil.rmtree(staging, ignore_errors=True)
             return "rejected"
 
-    log.info("Published new site content from %s", config.publish_url)
+    log.info("Published new content for %s from %s", site.domain or site.serve_dir, site.publish_url)
     return "published"
 
 
 def cmd_pull():
     """Manually check the publish channel for new site content and pull it in
     now, rather than waiting for the next poke or fallback poll."""
-    if not (config.publish_url and config.publish_key):
+    site = config.sites[0]  # single-site editing until 'add site' lands
+    if not (site.publish_url and site.publish_key):
         print("  No publish channel configured — run 'config publish' first.")
         return
     with _spinner("Checking for new site content..."):
-        result = _check_for_content_update()
+        result = _check_for_content_update(site)
     messages = {
         "invalid-key":   "Pull failed: publish_key is not a valid Ed25519 public key.",
         "fetch-failed":  "Pull failed: could not fetch the publish bundle. See 'log' for details.",
@@ -3031,7 +3047,8 @@ def cmd_pull():
 def cmd_restore_site():
     """Roll back to the content saved by the last successful publish. Mirrors
     cmd_restore exactly: single-shot, consumed on use."""
-    live_dir = _resolve(config.serve_dir).rstrip(os.sep)
+    site     = config.sites[0]  # single-site editing until 'add site' lands
+    live_dir = _resolve(site.serve_dir).rstrip(os.sep)
     bak_dir  = live_dir + ".bak"
 
     if not os.path.isdir(bak_dir):

@@ -786,7 +786,7 @@ def run_dispatch_tests(s):
         os.makedirs(new1)
         with open(os.path.join(new1, "marker.txt"), "w") as f:
             f.write("v1")
-        s._swap_site_content(new1)
+        s._swap_site_content(new1, s.config.serve_dir)
         check("First swap: content is live",
               open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v1")
         check("First swap: no backup (nothing existed to back up)",
@@ -796,7 +796,7 @@ def run_dispatch_tests(s):
         os.makedirs(new2)
         with open(os.path.join(new2, "marker.txt"), "w") as f:
             f.write("v2")
-        s._swap_site_content(new2)
+        s._swap_site_content(new2, s.config.serve_dir)
         check("Second swap: new content is live",
               open(os.path.join(s.config.serve_dir, "marker.txt")).read() == "v2")
         check("Second swap: previous content became the backup",
@@ -806,7 +806,7 @@ def run_dispatch_tests(s):
         os.makedirs(new3)
         with open(os.path.join(new3, "marker.txt"), "w") as f:
             f.write("v3")
-        s._swap_site_content(new3)
+        s._swap_site_content(new3, s.config.serve_dir)
         check("Third swap: backup now holds v2, not v1 — single-shot, not a history",
               open(os.path.join(s.config.serve_dir + ".bak", "marker.txt")).read() == "v2")
 
@@ -836,7 +836,7 @@ def run_dispatch_tests(s):
     try:
         s.config.publish_url = s.config.publish_key = ""
         try:
-            s._check_for_content_update()
+            s._check_for_content_update(s.config.sites[0])
             check("Neither publish_url nor publish_key set: no-ops cleanly", True)
         except Exception as e:
             check(f"Neither set: no-ops cleanly (raised {e})", False)
@@ -845,7 +845,7 @@ def run_dispatch_tests(s):
         s.config.publish_key = "not-valid-hex"
         logging.disable(logging.CRITICAL)
         try:
-            s._check_for_content_update()
+            s._check_for_content_update(s.config.sites[0])
             check("Invalid publish_key rejected before any network call", True)
         except Exception as e:
             check(f"Invalid publish_key rejected cleanly (raised {e})", False)
@@ -882,7 +882,7 @@ def run_dispatch_tests(s):
 
         urllib.request.urlopen = lambda url, timeout=None: (
             _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        result = s._check_for_content_update()
+        result = s._check_for_content_update(s.config.sites[0])
         check("Correctly signed bundle is published",
               open(os.path.join(s.config.serve_dir, "index.html")).read() == "published content")
         check("Returns 'published'", result == "published")
@@ -894,7 +894,7 @@ def run_dispatch_tests(s):
         with open(os.path.join(s.config.serve_dir, "index.html"), "w") as f:
             f.write("unchanged")
         logging.disable(logging.CRITICAL)
-        result = s._check_for_content_update()
+        result = s._check_for_content_update(s.config.sites[0])
         logging.disable(logging.NOTSET)
         check("Bundle signed by the wrong key is rejected, content unchanged",
               open(os.path.join(s.config.serve_dir, "index.html")).read() == "unchanged")
@@ -908,7 +908,7 @@ def run_dispatch_tests(s):
             urllib.request.urlopen = lambda url, timeout=None: (
                 _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
             logging.disable(logging.CRITICAL)
-            result = s._check_for_content_update()
+            result = s._check_for_content_update(s.config.sites[0])
             logging.disable(logging.NOTSET)
             check("Oversized bundle rejected as 'too-large' before signature check",
                   result == "too-large")
@@ -921,7 +921,7 @@ def run_dispatch_tests(s):
             return _FakeResp(signature) if ".sig" in url else _FakeResp(bundle_bytes)
         s.config.publish_url = "https://example.com/site.tar.gz?token=abc123"
         urllib.request.urlopen = _record
-        s._check_for_content_update()
+        s._check_for_content_update(s.config.sites[0])
         sig_url = next(u for u in seen_urls if u != s.config.publish_url)
         check("'.sig' is appended to the path, not after the query string",
               sig_url == "https://example.com/site.tar.gz.sig?token=abc123")
@@ -933,15 +933,16 @@ def run_dispatch_tests(s):
             _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
         saved_swap = s._swap_site_content
         in_critical, max_concurrent = [], []
-        def _slow_swap(new_dir):
+        def _slow_swap(new_dir, serve_dir):
             in_critical.append(1)
             max_concurrent.append(len(in_critical))
             time.sleep(0.1)
-            saved_swap(new_dir)
+            saved_swap(new_dir, serve_dir)
             in_critical.pop()
         s._swap_site_content = _slow_swap
         try:
-            threads = [threading.Thread(target=s._check_for_content_update) for _ in range(3)]
+            threads = [threading.Thread(target=s._check_for_content_update, args=(s.config.sites[0],))
+                       for _ in range(3)]
             for t in threads:
                 t.start()
             for t in threads:
@@ -978,40 +979,52 @@ def run_dispatch_tests(s):
 
     calls = []
     saved_check      = s._check_for_content_update
-    saved_last_poke  = s._last_poke_attempt
+    saved_last_poke  = dict(s._last_poke_attempt)
+    site = s.config.sites[0]
     try:
-        s._check_for_content_update = lambda: calls.append(1)
+        s._check_for_content_update = lambda site: calls.append(1)
         # time.monotonic()'s epoch is unspecified (often time-since-boot on
         # Linux) — 0.0 only reads as "long ago" if the host has been up longer
         # than _PUBLISH_POKE_COOLDOWN, which a freshly booted CI runner isn't.
         # Compute "elapsed" relative to now throughout instead.
         long_ago = lambda: time.monotonic() - s._PUBLISH_POKE_COOLDOWN - 1
-        s._last_poke_attempt = long_ago()
+        s._last_poke_attempt[id(site)] = long_ago()
 
-        s._poke_content_update()
+        s._poke_content_update(site)
         time.sleep(0.05)  # let the daemon thread run
         check("First poke triggers a background check", len(calls) == 1)
 
-        s._poke_content_update()
+        s._poke_content_update(site)
         time.sleep(0.05)
         check("Second poke within the cooldown window is a no-op", len(calls) == 1)
 
-        s._last_poke_attempt = long_ago()  # simulate the cooldown having elapsed
-        s._poke_content_update()
+        s._last_poke_attempt[id(site)] = long_ago()  # simulate the cooldown having elapsed
+        s._poke_content_update(site)
         time.sleep(0.05)
         check("Poke after the cooldown elapses triggers again", len(calls) == 2)
 
         # Concurrent pokes racing the cooldown's check-then-set: without the
         # lock around it, both could read the stale timestamp and both spawn.
-        s._last_poke_attempt = long_ago()
+        s._last_poke_attempt[id(site)] = long_ago()
         calls.clear()
-        threads = [threading.Thread(target=s._poke_content_update) for _ in range(10)]
+        threads = [threading.Thread(target=s._poke_content_update, args=(site,)) for _ in range(10)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
         time.sleep(0.1)
         check("Ten concurrent pokes still trigger exactly one background check",
+              len(calls) == 1)
+
+        # Per-site independence: another site's active cooldown doesn't block
+        # this one's — hammering one site's poke endpoint can't throttle another's.
+        site2 = s.Site({"domain": "poke-other.example.com"})
+        s._last_poke_attempt[id(site)]  = time.monotonic()  # site just fired, in cooldown
+        s._last_poke_attempt.pop(id(site2), None)           # site2 has never fired
+        calls.clear()
+        s._poke_content_update(site2)
+        time.sleep(0.05)
+        check("A different site's poke fires independently of another site's active cooldown",
               len(calls) == 1)
     finally:
         s._check_for_content_update = saved_check
@@ -1400,7 +1413,7 @@ def run_server_tests(s, serve_dir):
 
     section("Publish poke endpoint")
 
-    s._last_poke_attempt = 0.0
+    s._last_poke_attempt.clear()
     resp = req("GET", "/.well-known/servette/poke")
     check("202 Accepted with an empty body",
           resp.status == 202 and resp.body == b"")
@@ -1417,7 +1430,7 @@ def run_server_tests(s, serve_dir):
     check("HEAD returns 202 with an empty body",
           req("HEAD", "/.well-known/servette/poke").status == 202
           and req("HEAD", "/.well-known/servette/poke").body == b"")
-    s._last_poke_attempt = 0.0
+    s._last_poke_attempt.clear()
 
     section("Cache-Control policies")
 
@@ -1942,13 +1955,15 @@ def run_install_tests(s, tmpdir):
 
     calls = []
     saved_check    = s._check_for_content_update
-    saved_last     = s._last_publish_poll
+    saved_last     = dict(s._last_publish_poll)
     saved_url, saved_key = s.config.publish_url, s.config.publish_key
+    saved_sites6   = s.config.sites
+    site = s.config.sites[0]
     try:
-        s._check_for_content_update = lambda: calls.append(1)
+        s._check_for_content_update = lambda site: calls.append(1)
 
         s.config.publish_url = s.config.publish_key = ""
-        s._last_publish_poll = 0.0
+        s._last_publish_poll[id(site)] = 0.0
         s._publish_poll_tick()
         check("No publish channel configured: tick is a no-op", calls == [])
 
@@ -1957,19 +1972,39 @@ def run_install_tests(s, tmpdir):
         # Linux) — 0.0 only reads as "long ago" if the host has been up longer
         # than _PUBLISH_POLL_INTERVAL, which a freshly booted CI runner isn't.
         # Compute "elapsed" relative to now instead, as the later cases do.
-        s._last_publish_poll = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
+        s._last_publish_poll[id(site)] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
         s._publish_poll_tick()
         check("Channel configured, interval elapsed: tick fires", calls == [1])
 
         s._publish_poll_tick()
         check("Within the poll interval: second tick is a no-op", calls == [1])
 
-        s._last_publish_poll = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
+        s._last_publish_poll[id(site)] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
         s._publish_poll_tick()
         check("After the poll interval elapses: tick fires again", calls == [1, 1])
+
+        # Per-site independence and per-site failure containment, same shape as
+        # the cert watchdog's: one site's exception can't skip or stop another's.
+        site2 = s.Site({
+            "domain": "poll-other.example.com", "publish_url": "https://example.com/other.tar.gz",
+            "publish_key": "b" * 64,
+        })
+        s._last_publish_poll.pop(id(site2), None)
+        s._check_for_content_update = lambda site: (_ for _ in ()).throw(RuntimeError("boom")) \
+            if site is s.config.sites[0] else calls.append("site2")
+        calls.clear()
+        s.config.sites = [s.config.sites[0], site2]
+        logging.disable(logging.CRITICAL)
+        try:
+            s._publish_poll_tick()
+        finally:
+            logging.disable(logging.NOTSET)
+        check("A failure checking one site doesn't stop the poll pass for another",
+              calls == ["site2"])
     finally:
         s._check_for_content_update = saved_check
         s._last_publish_poll = saved_last
+        s.config.sites = saved_sites6
         s.config.publish_url, s.config.publish_key = saved_url, saved_key
 
     section("serve_dir world-readable check")

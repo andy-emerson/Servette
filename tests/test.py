@@ -708,9 +708,10 @@ def run_dispatch_tests(s):
 
         urllib.request.urlopen = lambda url, timeout=None: (
             _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        s._check_for_content_update()
+        result = s._check_for_content_update()
         check("Correctly signed bundle is published",
               open(os.path.join(s.config.serve_dir, "index.html")).read() == "published content")
+        check("Returns 'published'", result == "published")
 
         other_key = Ed25519PrivateKey.generate()
         bad_sig   = other_key.sign(bundle_bytes)
@@ -719,15 +720,59 @@ def run_dispatch_tests(s):
         with open(os.path.join(s.config.serve_dir, "index.html"), "w") as f:
             f.write("unchanged")
         logging.disable(logging.CRITICAL)
-        s._check_for_content_update()
+        result = s._check_for_content_update()
         logging.disable(logging.NOTSET)
         check("Bundle signed by the wrong key is rejected, content unchanged",
               open(os.path.join(s.config.serve_dir, "index.html")).read() == "unchanged")
+        check("Returns 'bad-signature'", result == "bad-signature")
+
+        section("Manual pull command (cmd_pull)")
+
+        s.config.publish_url = s.config.publish_key = ""
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_pull()
+        check("No publish channel configured: reports cleanly, doesn't touch the network",
+              "No publish channel configured" in buf.getvalue())
+
+        s.config.publish_url, s.config.publish_key = "https://example.com/site.tar.gz", pub_hex
+        urllib.request.urlopen = lambda url, timeout=None: (
+            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_pull()
+        check("Successful pull prints a confirmation",
+              "New site content published" in buf.getvalue())
+        check("Successful pull actually swapped in the content",
+              open(os.path.join(s.config.serve_dir, "index.html")).read() == "published content")
     finally:
         urllib.request.urlopen = saved_urlopen
         s.config.serve_dir = saved_serve_dir2
         s.config.publish_url, s.config.publish_key = saved_url2, saved_key2
         shutil.rmtree(swap_root2, ignore_errors=True)
+
+    section("Publish poke cooldown")
+
+    calls = []
+    saved_check      = s._check_for_content_update
+    saved_last_poke  = s._last_poke_attempt
+    try:
+        s._check_for_content_update = lambda: calls.append(1)
+        s._last_poke_attempt = 0.0
+
+        s._poke_content_update()
+        time.sleep(0.05)  # let the daemon thread run
+        check("First poke triggers a background check", len(calls) == 1)
+
+        s._poke_content_update()
+        time.sleep(0.05)
+        check("Second poke within the cooldown window is a no-op", len(calls) == 1)
+
+        s._last_poke_attempt = 0.0  # simulate the cooldown having elapsed
+        s._poke_content_update()
+        time.sleep(0.05)
+        check("Poke after the cooldown elapses triggers again", len(calls) == 2)
+    finally:
+        s._check_for_content_update = saved_check
+        s._last_poke_attempt = saved_last_poke
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1063,6 +1108,27 @@ def run_server_tests(s, serve_dir):
     s.config.password_hash = ""
     s.config.password_salt = ""
     s._auth_fail_times.clear()
+
+    section("Publish poke endpoint")
+
+    s._last_poke_attempt = 0.0
+    resp = req("GET", "/.well-known/servette/poke")
+    check("202 Accepted with an empty body",
+          resp.status == 202 and resp.body == b"")
+
+    s.config.username = "testuser"
+    s.config.password_hash, s.config.password_salt = s._hash_password("testpass")
+    check("Not gated behind auth (unlike version discovery): no credentials → still 202",
+          req("GET", "/.well-known/servette/poke").status == 202)
+    s.config.username      = ""
+    s.config.password_hash = ""
+    s.config.password_salt = ""
+    s._auth_fail_times.clear()
+
+    check("HEAD returns 202 with an empty body",
+          req("HEAD", "/.well-known/servette/poke").status == 202
+          and req("HEAD", "/.well-known/servette/poke").body == b"")
+    s._last_poke_attempt = 0.0
 
     section("Cache-Control policies")
 

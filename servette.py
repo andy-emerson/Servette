@@ -515,6 +515,25 @@ def _backup_version():
         return None
 
 
+_WELL_KNOWN_POKE_PATH  = _WELL_KNOWN_VERSION_PATH + "/poke"
+_last_poke_attempt     = 0.0
+_PUBLISH_POKE_COOLDOWN = 30  # seconds; bounds how often a poke actually triggers a
+                             # fetch, regardless of how often (or from how many
+                             # sources) pokes themselves arrive
+
+
+def _poke_content_update():
+    """Trigger a content-update check off the request thread, at most once per
+    cooldown window. The poke response returns immediately either way; the
+    actual fetch/verify/swap runs in the background, same as the periodic
+    fallback poll."""
+    global _last_poke_attempt
+    now = time.monotonic()
+    if now - _last_poke_attempt < _PUBLISH_POKE_COOLDOWN:
+        return
+    _last_poke_attempt = now
+    threading.Thread(target=_check_for_content_update, daemon=True).start()
+
 
 def _handle_request(method, url_path, headers, raw_ip):
     """The request core. Given the method, URL path, the parsed request headers (a
@@ -544,6 +563,16 @@ def _handle_request(method, url_path, headers, raw_ip):
     if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
+
+    # Publish poke: ask Servette to check for new site content now, instead of
+    # waiting for the next fallback poll. Deliberately NOT gated behind the
+    # site's Basic Auth (unlike version discovery below) — poking reveals no
+    # information and can install nothing on its own; the fetched bundle still
+    # has to pass Ed25519 verification in _check_for_content_update(). Still
+    # subject to the general rate limiter above.
+    if url_path.split("?", 1)[0] == _WELL_KNOWN_POKE_PATH:
+        _poke_content_update()
+        return resp(202, [(b"content-length", b"0")])
 
     # Authentication
     if config.username:
@@ -1979,18 +2008,20 @@ def _section(title):
 # already has that convention's intuition. Onboarding, then runtime control,
 # then persistence, then observability, then maintenance, then meta.
 _COMMANDS = [
-    ("setup",   "guided walkthrough for getting started"),
-    ("config",  "view and edit settings"),
-    ("start",   "start the server"),
-    ("stop",    "stop the server"),
-    ("enable",  "enable Servette as a system service"),
-    ("disable", "remove the system service"),
-    ("status",  "show whether the server is running"),
-    ("log [n]", "show the last n log entries"),
-    ("update",  "download the latest version of servette.py"),
-    ("restore", "roll back to the previous version (undoes the last update)"),
-    ("help",    "show this message"),
-    ("quit",    "exit"),
+    ("setup",        "guided walkthrough for getting started"),
+    ("config",       "view and edit settings"),
+    ("start",        "start the server"),
+    ("stop",         "stop the server"),
+    ("enable",       "enable Servette as a system service"),
+    ("disable",      "remove the system service"),
+    ("status",       "show whether the server is running"),
+    ("log [n]",      "show the last n log entries"),
+    ("update",       "download the latest version of servette.py"),
+    ("restore",      "roll back to the previous version (undoes the last update)"),
+    ("pull",         "check the publish channel and pull new site content now"),
+    ("restore-site", "roll back site content to the previous version (undoes the last pull)"),
+    ("help",         "show this message"),
+    ("quit",         "exit"),
 ]
 HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
 
@@ -2639,10 +2670,15 @@ def _check_for_content_update():
     """Pull, verify, and swap in a new site bundle if the publish channel is
     configured. No-ops silently (not an error) if publish_url/publish_key
     aren't both set — publishing is opt-in. Runs off the request path: called
-    from the poke handler's background thread and the periodic fallback poll,
-    never synchronously from a request."""
+    from the poke handler's background thread and the periodic fallback poll —
+    neither is watching stdout, so every outcome is logged here. Also called
+    synchronously by the interactive 'pull' command, which turns the returned
+    status into a printed line rather than duplicating this logic.
+
+    Returns a short status string: "not-configured", "invalid-key",
+    "fetch-failed", "bad-signature", "rejected", or "published"."""
     if not (config.publish_url and config.publish_key):
-        return
+        return "not-configured"
 
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     from cryptography.exceptions import InvalidSignature
@@ -2651,20 +2687,20 @@ def _check_for_content_update():
         pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(config.publish_key))
     except ValueError:
         log.error("publish_key is not a valid Ed25519 public key — publishing disabled")
-        return
+        return "invalid-key"
 
     try:
         bundle    = urllib.request.urlopen(config.publish_url, timeout=30).read()
         signature = urllib.request.urlopen(config.publish_url + ".sig", timeout=15).read()
     except Exception as e:
         log.warning("Could not fetch publish bundle: %s", e)
-        return
+        return "fetch-failed"
 
     try:
         pub_key.verify(signature, bundle)
     except InvalidSignature:
         log.error("Publish bundle signature verification failed — rejecting")
-        return
+        return "bad-signature"
 
     staging = _resolve(config.serve_dir).rstrip(os.sep) + ".new"
     shutil.rmtree(staging, ignore_errors=True)
@@ -2674,9 +2710,28 @@ def _check_for_content_update():
     except Exception as e:
         log.error("Publish bundle rejected: %s", e)
         shutil.rmtree(staging, ignore_errors=True)
-        return
+        return "rejected"
 
     log.info("Published new site content from %s", config.publish_url)
+    return "published"
+
+
+def cmd_pull():
+    """Manually check the publish channel for new site content and pull it in
+    now, rather than waiting for the next poke or fallback poll."""
+    if not (config.publish_url and config.publish_key):
+        print("  No publish channel configured — run 'config publish' first.")
+        return
+    with _spinner("Checking for new site content..."):
+        result = _check_for_content_update()
+    messages = {
+        "invalid-key":   "Pull failed: publish_key is not a valid Ed25519 public key.",
+        "fetch-failed":  "Pull failed: could not fetch the publish bundle. See 'log' for details.",
+        "bad-signature": "Pull failed: bundle signature verification failed — rejecting.",
+        "rejected":      "Pull failed: bundle was rejected. See 'log' for details.",
+        "published":     "New site content published.",
+    }
+    print(f"  {messages[result]}")
 
 
 def cmd_restore_site():
@@ -2931,6 +2986,10 @@ def shell():
             cmd_update()
         elif cmd == "restore":
             cmd_restore()
+        elif cmd == "pull":
+            cmd_pull()
+        elif cmd == "restore-site":
+            cmd_restore_site()
         elif cmd in ("help", "?"):
             print(HELP)
         elif cmd in ("quit", "exit"):

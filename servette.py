@@ -651,23 +651,11 @@ def _backup_version():
 
 def _cooldown_key(site):
     """A key for the per-site poke/poll cooldown dicts (_last_poke_attempt,
-    _last_publish_poll). site.domain is stable across a config reload —
-    Config._load() (via reload_if_changed(), which a config edit made from a
-    separate `sudo python3 servette.py` shell session against an
-    already-running --serve process will trigger) replaces every Site object
-    wholesale, so id(site) alone would silently reset every site's cooldown
-    on the next reload. But domain is empty for every domainless site, and
-    two of them sharing one key isn't harmless the way it first looks: poke
-    only ever reaches the one domainless site _select_site's catch-all rule
-    can route to, but _publish_poll_tick iterates config.sites directly,
-    bypassing that rule entirely — a second domainless site would forever
-    find its shared key freshly reset by the first one processed each tick,
-    starving its fallback poll permanently, silently. Falling back to
-    id(site) when domain is empty accepts that a reload resets that specific
-    site's cooldown (self-healing, and not a security-relevant throttle to
-    begin with — reloads are never attacker-triggered) in exchange for
-    correctness: two distinct sites never share a key."""
-    return site.domain or id(site)
+    _last_publish_poll) that survives a config reload, which replaces every
+    Site object wholesale. domain when set, else the always-present
+    serve_dir — never id(site), which a reload could hand straight back out
+    to an unrelated site and silently mix up two sites' cooldowns."""
+    return site.domain or site.serve_dir
 
 
 _WELL_KNOWN_POKE_PATH  = _WELL_KNOWN_VERSION_PATH + "/poke"

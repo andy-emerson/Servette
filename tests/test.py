@@ -1339,6 +1339,21 @@ def run_dispatch_tests(s):
               "still respects the pre-reload cooldown",
               len(calls) == 0)
         site.domain = saved_domain
+
+        # Same guarantee for a domainless site, keyed by serve_dir instead —
+        # this is the case id(site) used to handle correctly only by luck of
+        # CPython's id-reuse timing, and could just as easily hand a fresh
+        # site's id back to a *different* stale site's entry instead.
+        site.domain = ""
+        s._last_poke_attempt[s._cooldown_key(site)] = time.monotonic()
+        reloaded_site2 = s.Site({"domain": "", "serve_dir": site.serve_dir})
+        calls.clear()
+        s._poke_content_update(reloaded_site2)
+        time.sleep(0.05)
+        check("A fresh domainless Site object for the same serve_dir "
+              "still respects the pre-reload cooldown",
+              len(calls) == 0)
+        site.domain = saved_domain
     finally:
         s._check_for_content_update = saved_check
         s._last_poke_attempt = saved_last_poke
@@ -2326,13 +2341,14 @@ def run_install_tests(s, tmpdir):
         check("A failure checking one site doesn't stop the poll pass for another",
               calls == ["site2"])
 
-        # Regression: two domainless sites must not share a cooldown key —
-        # they'd otherwise starve each other, since whichever is processed
-        # first each tick resets the shared "" key just before the second's
-        # own check runs, permanently skipping it.
-        site3 = s.Site({"domain": "", "publish_url": "https://example.com/third.tar.gz",
+        # Regression: two domainless sites (necessarily on distinct serve_dirs —
+        # that's what makes them different sites) must not share a cooldown
+        # key — they'd otherwise starve each other, since whichever is
+        # processed first each tick resets the shared key just before the
+        # second's own check runs, permanently skipping it.
+        site3 = s.Site({"domain": "", "serve_dir": "third", "publish_url": "https://example.com/third.tar.gz",
                          "publish_key": "c" * 64})
-        site4 = s.Site({"domain": "", "publish_url": "https://example.com/fourth.tar.gz",
+        site4 = s.Site({"domain": "", "serve_dir": "fourth", "publish_url": "https://example.com/fourth.tar.gz",
                          "publish_key": "d" * 64})
         s._last_publish_poll.pop(s._cooldown_key(site3), None)
         s._last_publish_poll.pop(s._cooldown_key(site4), None)

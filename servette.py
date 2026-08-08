@@ -650,9 +650,18 @@ def _backup_version():
 
 
 _WELL_KNOWN_POKE_PATH  = _WELL_KNOWN_VERSION_PATH + "/poke"
-_last_poke_attempt     = {}  # id(site) -> monotonic timestamp of the last poke that
-                             # actually triggered a fetch — per-site, so hammering
-                             # one site's poke endpoint can't throttle another's
+_last_poke_attempt     = {}  # site.domain -> monotonic timestamp of the last poke that
+                             # actually triggered a fetch. Keyed by domain rather than
+                             # id(site): Config._load() (via reload_if_changed(), which
+                             # a config edit made from a separate `sudo python3
+                             # servette.py` shell session against an already-running
+                             # --serve process will trigger) replaces every Site object
+                             # wholesale, so id()-keying would silently reset every
+                             # site's cooldown on the next reload. Per-domain still means
+                             # hammering one site's poke endpoint can't throttle
+                             # another's; domainless sites share the "" key, harmless
+                             # since only one is ever reachable at a time (the catch-all
+                             # in _select_site) — the others never receive a poke to race.
 _poke_cooldown_lock    = threading.Lock()
 _PUBLISH_POKE_COOLDOWN = 30  # seconds; bounds how often a poke actually triggers a
                              # fetch, regardless of how often (or from how many
@@ -669,11 +678,10 @@ def _poke_content_update(site):
     timestamp and both spawn."""
     with _poke_cooldown_lock:
         now  = time.monotonic()
-        key  = id(site)
-        last = _last_poke_attempt.get(key, 0.0)
+        last = _last_poke_attempt.get(site.domain, 0.0)
         if now - last < _PUBLISH_POKE_COOLDOWN:
             return
-        _last_poke_attempt[key] = now
+        _last_poke_attempt[site.domain] = now
     threading.Thread(target=_check_for_content_update, args=(site,), daemon=True).start()
 
 
@@ -701,24 +709,34 @@ def _handle_request(method, url_path, headers, raw_ip):
         # whether called before or after site selection below.
         return status, _security_headers(site) + hdrs, (b"" if method == "HEAD" else body)
 
-    if method not in ("GET", "HEAD"):
-        return resp(405, [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
-
     config.reload_if_changed()
 
-    # Rate limiting — host-level, shared across every site on the box.
+    # Rate limiting — host-level, shared across every site on the box. Ahead of
+    # site selection so a flood of requests carrying random/unmatched Host
+    # headers still gets throttled rather than dodging the limiter under the
+    # closed-system 404 below; the cost is that a rate-limited response never
+    # carries HSTS even for a real site's domain, same trade-off the original
+    # single-site code made (this check was already the first content-adjacent
+    # thing evaluated, ahead of anything else request-shaped).
     if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
     # Site selection — uniform regardless of site count (see _select_site). No
     # match: the closed-system miss. Bare 404, no site-specific information of
-    # any kind (no HSTS either, since `site` stays None for resp() above).
+    # any kind (no HSTS either, since `site` stays None for resp() above) —
+    # deliberately ahead of the method check below, so a POST/PUT/etc. to an
+    # unmatched Host gets the same undifferentiated 404 a GET would, rather
+    # than a 405 that would leak "something is here, it just doesn't take this
+    # method."
     site = _select_site(headers.get("Host", ""))
     if site is None:
         log.warning("404 (no matching site) Host=%r from %s", headers.get("Host", ""), ip)
         body_404 = b"Not found."
         return resp(404, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_404)).encode())], body_404)
+
+    if method not in ("GET", "HEAD"):
+        return resp(405, [(b"allow", b"GET, HEAD"), (b"content-length", b"0")])
 
     # Publish poke: ask Servette to check the matched site for new content now,
     # instead of waiting for the next fallback poll. Deliberately NOT gated
@@ -1218,7 +1236,11 @@ def _cert_watchdog():
         _cert_watchdog_tick()
 
 
-_last_publish_poll     = {}  # id(site) -> monotonic timestamp of the last full poll pass
+_last_publish_poll     = {}  # site.domain -> monotonic timestamp of the last full poll
+                             # pass. Keyed by domain rather than id(site) for the same
+                             # reason as _last_poke_attempt: Config._load() replaces
+                             # every Site object wholesale on reload, which would
+                             # otherwise silently reset this on every config edit.
 _PUBLISH_POLL_INTERVAL = 300  # seconds; mirrors the network watchdog's 5-minute
                               # cadence — the floor under the poke mechanism, for
                               # boxes that never receive one (just rebooted, tool
@@ -1235,11 +1257,10 @@ def _publish_poll_tick():
             continue
         try:
             now  = time.monotonic()
-            key  = id(site)
-            last = _last_publish_poll.get(key, 0.0)
+            last = _last_publish_poll.get(site.domain, 0.0)
             if now - last < _PUBLISH_POLL_INTERVAL:
                 continue
-            _last_publish_poll[key] = now
+            _last_publish_poll[site.domain] = now
             _check_for_content_update(site)
         except Exception:
             log.exception("Publish poll pass failed for %s — will retry on the next pass",
@@ -2285,20 +2306,20 @@ def _section(title):
 # already has that convention's intuition. Onboarding, then runtime control,
 # then persistence, then observability, then maintenance, then meta.
 _COMMANDS = [
-    ("setup",        "guided walkthrough for getting started"),
-    ("config",       "view and edit settings"),
-    ("start",        "start the server"),
-    ("stop",         "stop the server"),
-    ("enable",       "enable Servette as a system service"),
-    ("disable",      "remove the system service"),
-    ("status",       "show whether the server is running"),
-    ("log [n]",      "show the last n log entries"),
-    ("update",       "download the latest version of servette.py"),
-    ("restore",      "roll back to the previous version (undoes the last update)"),
-    ("pull",         "check the publish channel and pull new site content now"),
-    ("restore-site", "roll back site content to the previous version (undoes the last pull)"),
-    ("help",         "show this message"),
-    ("quit",         "exit"),
+    ("setup",            "guided walkthrough for getting started"),
+    ("config",           "view and edit settings"),
+    ("start",            "start the server"),
+    ("stop",             "stop the server"),
+    ("enable",           "enable Servette as a system service"),
+    ("disable",          "remove the system service"),
+    ("status",           "show whether the server is running"),
+    ("log [n]",          "show the last n log entries"),
+    ("update",           "download the latest version of servette.py"),
+    ("restore",          "roll back to the previous version (undoes the last update)"),
+    ("pull [n]",         "check a site's publish channel and pull new content now"),
+    ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
+    ("help",             "show this message"),
+    ("quit",             "exit"),
 ]
 HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
 
@@ -3156,10 +3177,9 @@ def _check_for_content_update(site):
     return "published"
 
 
-def cmd_pull():
+def cmd_pull(site):
     """Manually check the publish channel for new site content and pull it in
     now, rather than waiting for the next poke or fallback poll."""
-    site = config.sites[0]  # single-site editing until 'add site' lands
     if not (site.publish_url and site.publish_key):
         print("  No publish channel configured — run 'config publish' first.")
         return
@@ -3176,10 +3196,9 @@ def cmd_pull():
     print(f"  {messages[result]}")
 
 
-def cmd_restore_site():
+def cmd_restore_site(site):
     """Roll back to the content saved by the last successful publish. Mirrors
     cmd_restore exactly: single-shot, consumed on use."""
-    site     = config.sites[0]  # single-site editing until 'add site' lands
     live_dir = _resolve(site.serve_dir).rstrip(os.sep)
     bak_dir  = live_dir + ".bak"
 
@@ -3450,9 +3469,13 @@ def shell():
         elif cmd == "restore":
             cmd_restore()
         elif cmd == "pull":
-            cmd_pull()
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_pull(site)
         elif cmd == "restore-site":
-            cmd_restore_site()
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_restore_site(site)
         elif cmd in ("help", "?"):
             print(HELP)
         elif cmd in ("quit", "exit"):

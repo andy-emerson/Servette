@@ -593,13 +593,16 @@ def run_dispatch_tests(s):
     # feed scripted input. 'quit' calls stop_server, so stub it to keep the
     # live test server up for the integration tests that follow.
     calls       = []
-    saved       = {n: getattr(s, n) for n in ("cmd_status", "cmd_start", "stop_server")}
+    saved       = {n: getattr(s, n) for n in
+                   ("cmd_status", "cmd_start", "stop_server", "cmd_pull", "cmd_restore_site")}
     saved_input = builtins.input
     try:
-        s.cmd_status  = lambda: calls.append("status")
-        s.cmd_start   = lambda: calls.append("start")
-        s.stop_server = lambda: calls.append("stop")
-        script = iter(["status", "start", "bogus", "quit"])
+        s.cmd_status       = lambda: calls.append("status")
+        s.cmd_start        = lambda: calls.append("start")
+        s.stop_server      = lambda: calls.append("stop")
+        s.cmd_pull         = lambda site: calls.append(("pull", site))
+        s.cmd_restore_site = lambda site: calls.append(("restore-site", site))
+        script = iter(["status", "start", "pull 0", "restore-site 0", "pull 99", "bogus", "quit"])
         builtins.input = lambda prompt="": next(script, "quit")
         with contextlib.redirect_stdout(io.StringIO()):
             s.shell()
@@ -610,6 +613,12 @@ def run_dispatch_tests(s):
 
     check("'status' routed to cmd_status", "status" in calls)
     check("'start' routed to cmd_start",   "start" in calls)
+    check("'pull 0' routes to cmd_pull with site 0",
+          ("pull", s.config.sites[0]) in calls)
+    check("'restore-site 0' routes to cmd_restore_site with site 0",
+          ("restore-site", s.config.sites[0]) in calls)
+    pull_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "pull"]
+    check("'pull 99' (bad site index) does not call cmd_pull", len(pull_calls) == 1)
     check("'quit' stops server and exits", calls[-1] == "stop")
 
     section("Post-update reload")
@@ -924,7 +933,7 @@ def run_dispatch_tests(s):
         try:
             builtins.input = lambda prompt="": "y"
             with contextlib.redirect_stdout(io.StringIO()):
-                s.cmd_restore_site()
+                s.cmd_restore_site(s.config.sites[0])
         finally:
             builtins.input = saved_input
         check("Restore: live content reverts to the backup (v2)",
@@ -933,7 +942,7 @@ def run_dispatch_tests(s):
               not os.path.isdir(s.config.serve_dir + ".bak"))
 
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_restore_site()
+            s.cmd_restore_site(s.config.sites[0])
         check("Restoring again with nothing to restore reports cleanly, does not raise",
               "Nothing to restore" in buf.getvalue())
     finally:
@@ -1066,7 +1075,7 @@ def run_dispatch_tests(s):
 
         s.config.publish_url = s.config.publish_key = ""
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_pull()
+            s.cmd_pull(s.config.sites[0])
         check("No publish channel configured: reports cleanly, doesn't touch the network",
               "No publish channel configured" in buf.getvalue())
 
@@ -1074,7 +1083,7 @@ def run_dispatch_tests(s):
         urllib.request.urlopen = lambda url, timeout=None: (
             _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_pull()
+            s.cmd_pull(s.config.sites[0])
         check("Successful pull prints a confirmation",
               "New site content published" in buf.getvalue())
         check("Successful pull actually swapped in the content",
@@ -1098,7 +1107,7 @@ def run_dispatch_tests(s):
         # than _PUBLISH_POKE_COOLDOWN, which a freshly booted CI runner isn't.
         # Compute "elapsed" relative to now throughout instead.
         long_ago = lambda: time.monotonic() - s._PUBLISH_POKE_COOLDOWN - 1
-        s._last_poke_attempt[id(site)] = long_ago()
+        s._last_poke_attempt[site.domain] = long_ago()
 
         s._poke_content_update(site)
         time.sleep(0.05)  # let the daemon thread run
@@ -1108,14 +1117,14 @@ def run_dispatch_tests(s):
         time.sleep(0.05)
         check("Second poke within the cooldown window is a no-op", len(calls) == 1)
 
-        s._last_poke_attempt[id(site)] = long_ago()  # simulate the cooldown having elapsed
+        s._last_poke_attempt[site.domain] = long_ago()  # simulate the cooldown having elapsed
         s._poke_content_update(site)
         time.sleep(0.05)
         check("Poke after the cooldown elapses triggers again", len(calls) == 2)
 
         # Concurrent pokes racing the cooldown's check-then-set: without the
         # lock around it, both could read the stale timestamp and both spawn.
-        s._last_poke_attempt[id(site)] = long_ago()
+        s._last_poke_attempt[site.domain] = long_ago()
         calls.clear()
         threads = [threading.Thread(target=s._poke_content_update, args=(site,)) for _ in range(10)]
         for t in threads:
@@ -1129,13 +1138,31 @@ def run_dispatch_tests(s):
         # Per-site independence: another site's active cooldown doesn't block
         # this one's — hammering one site's poke endpoint can't throttle another's.
         site2 = s.Site({"domain": "poke-other.example.com"})
-        s._last_poke_attempt[id(site)]  = time.monotonic()  # site just fired, in cooldown
-        s._last_poke_attempt.pop(id(site2), None)           # site2 has never fired
+        s._last_poke_attempt[site.domain]  = time.monotonic()  # site just fired, in cooldown
+        s._last_poke_attempt.pop(site2.domain, None)           # site2 has never fired
         calls.clear()
         s._poke_content_update(site2)
         time.sleep(0.05)
         check("A different site's poke fires independently of another site's active cooldown",
               len(calls) == 1)
+
+        # Config reload (e.g. a config edit from a separate `sudo python3
+        # servette.py` shell session against an already-running --serve
+        # process) replaces every Site object wholesale via Config._load().
+        # Keying by id(site) used to silently reset every site's cooldown the
+        # moment that happened; keyed by domain, a fresh Site object for the
+        # same domain still respects the timestamp from before the reload.
+        saved_domain = site.domain
+        site.domain  = "reload-test.example.com"
+        s._last_poke_attempt[site.domain] = time.monotonic()
+        reloaded_site = s.Site({"domain": site.domain})  # simulates what reload produces
+        calls.clear()
+        s._poke_content_update(reloaded_site)
+        time.sleep(0.05)
+        check("A fresh Site object for the same domain (as a config reload produces) "
+              "still respects the pre-reload cooldown",
+              len(calls) == 0)
+        site.domain = saved_domain
     finally:
         s._check_for_content_update = saved_check
         s._last_poke_attempt = saved_last_poke
@@ -1482,6 +1509,17 @@ def run_server_tests(s, serve_dir):
             resp2 = req("GET", headers={"Host": "first.example.com"})
             check("The now-domain-bearing original site still matches its own domain",
                   resp2.status == 200 and resp2.body.decode() == TEST_HTML)
+            check("Its GET response carries HSTS",
+                  resp2.headers.get("Strict-Transport-Security") is not None)
+
+            resp405 = req("POST", headers={"Host": "first.example.com"})
+            check("POST to a domain-bearing site is 405 with HSTS "
+                  "(site is resolved before the method check now)",
+                  resp405.status == 405 and resp405.headers.get("Strict-Transport-Security") is not None)
+
+            resp_unmatched_post = req("POST", headers={"Host": "unrecognized.example.com"})
+            check("POST to an unmatched Host is still the closed-system 404, not 405",
+                  resp_unmatched_post.status == 404)
         finally:
             original_site.domain = saved_orig_domain
             s.config.sites = saved_sites
@@ -2073,7 +2111,7 @@ def run_install_tests(s, tmpdir):
         s._check_for_content_update = lambda site: calls.append(1)
 
         s.config.publish_url = s.config.publish_key = ""
-        s._last_publish_poll[id(site)] = 0.0
+        s._last_publish_poll[site.domain] = 0.0
         s._publish_poll_tick()
         check("No publish channel configured: tick is a no-op", calls == [])
 
@@ -2082,14 +2120,14 @@ def run_install_tests(s, tmpdir):
         # Linux) — 0.0 only reads as "long ago" if the host has been up longer
         # than _PUBLISH_POLL_INTERVAL, which a freshly booted CI runner isn't.
         # Compute "elapsed" relative to now instead, as the later cases do.
-        s._last_publish_poll[id(site)] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
+        s._last_publish_poll[site.domain] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
         s._publish_poll_tick()
         check("Channel configured, interval elapsed: tick fires", calls == [1])
 
         s._publish_poll_tick()
         check("Within the poll interval: second tick is a no-op", calls == [1])
 
-        s._last_publish_poll[id(site)] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
+        s._last_publish_poll[site.domain] = time.monotonic() - s._PUBLISH_POLL_INTERVAL - 1
         s._publish_poll_tick()
         check("After the poll interval elapses: tick fires again", calls == [1, 1])
 
@@ -2099,7 +2137,7 @@ def run_install_tests(s, tmpdir):
             "domain": "poll-other.example.com", "publish_url": "https://example.com/other.tar.gz",
             "publish_key": "b" * 64,
         })
-        s._last_publish_poll.pop(id(site2), None)
+        s._last_publish_poll.pop(site2.domain, None)
         s._check_for_content_update = lambda site: (_ for _ in ()).throw(RuntimeError("boom")) \
             if site is s.config.sites[0] else calls.append("site2")
         calls.clear()

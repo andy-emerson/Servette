@@ -694,8 +694,8 @@ def run_dispatch_tests(s):
     class _FakeResp:
         def __init__(self, data):
             self._data = data
-        def read(self):
-            return self._data
+        def read(self, size=None):
+            return self._data if size is None else self._data[:size]
 
     saved_urlopen    = urllib.request.urlopen
     saved_serve_dir2 = s.config.serve_dir
@@ -725,6 +725,57 @@ def run_dispatch_tests(s):
         check("Bundle signed by the wrong key is rejected, content unchanged",
               open(os.path.join(s.config.serve_dir, "index.html")).read() == "unchanged")
         check("Returns 'bad-signature'", result == "bad-signature")
+
+        section("Publish pipeline: size cap and sig-URL query handling")
+
+        saved_max2 = s._MAX_BUNDLE_BYTES
+        try:
+            s._MAX_BUNDLE_BYTES = 10  # smaller than bundle_bytes
+            urllib.request.urlopen = lambda url, timeout=None: (
+                _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+            logging.disable(logging.CRITICAL)
+            result = s._check_for_content_update()
+            logging.disable(logging.NOTSET)
+            check("Oversized bundle rejected as 'too-large' before signature check",
+                  result == "too-large")
+        finally:
+            s._MAX_BUNDLE_BYTES = saved_max2
+
+        seen_urls = []
+        def _record(url, timeout=None):
+            seen_urls.append(url)
+            return _FakeResp(signature) if ".sig" in url else _FakeResp(bundle_bytes)
+        s.config.publish_url = "https://example.com/site.tar.gz?token=abc123"
+        urllib.request.urlopen = _record
+        s._check_for_content_update()
+        sig_url = next(u for u in seen_urls if u != s.config.publish_url)
+        check("'.sig' is appended to the path, not after the query string",
+              sig_url == "https://example.com/site.tar.gz.sig?token=abc123")
+        s.config.publish_url = "https://example.com/site.tar.gz"
+
+        section("Publish pipeline serialization")
+
+        urllib.request.urlopen = lambda url, timeout=None: (
+            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+        saved_swap = s._swap_site_content
+        in_critical, max_concurrent = [], []
+        def _slow_swap(new_dir):
+            in_critical.append(1)
+            max_concurrent.append(len(in_critical))
+            time.sleep(0.1)
+            saved_swap(new_dir)
+            in_critical.pop()
+        s._swap_site_content = _slow_swap
+        try:
+            threads = [threading.Thread(target=s._check_for_content_update) for _ in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            check("Concurrent triggers never overlap inside the swap (max concurrent == 1)",
+                  max(max_concurrent) == 1)
+        finally:
+            s._swap_site_content = saved_swap
 
         section("Manual pull command (cmd_pull)")
 
@@ -770,6 +821,19 @@ def run_dispatch_tests(s):
         s._poke_content_update()
         time.sleep(0.05)
         check("Poke after the cooldown elapses triggers again", len(calls) == 2)
+
+        # Concurrent pokes racing the cooldown's check-then-set: without the
+        # lock around it, both could read the stale timestamp and both spawn.
+        s._last_poke_attempt = 0.0
+        calls.clear()
+        threads = [threading.Thread(target=s._poke_content_update) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        time.sleep(0.1)
+        check("Ten concurrent pokes still trigger exactly one background check",
+              len(calls) == 1)
     finally:
         s._check_for_content_update = saved_check
         s._last_poke_attempt = saved_last_poke

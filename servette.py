@@ -39,7 +39,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -517,6 +517,7 @@ def _backup_version():
 
 _WELL_KNOWN_POKE_PATH  = _WELL_KNOWN_VERSION_PATH + "/poke"
 _last_poke_attempt     = 0.0
+_poke_cooldown_lock    = threading.Lock()
 _PUBLISH_POKE_COOLDOWN = 30  # seconds; bounds how often a poke actually triggers a
                              # fetch, regardless of how often (or from how many
                              # sources) pokes themselves arrive
@@ -526,12 +527,15 @@ def _poke_content_update():
     """Trigger a content-update check off the request thread, at most once per
     cooldown window. The poke response returns immediately either way; the
     actual fetch/verify/swap runs in the background, same as the periodic
-    fallback poll."""
+    fallback poll. The check-then-set on the cooldown clock is itself locked —
+    concurrent pokes (poke needs no auth, so any number of requests can race
+    here) would otherwise both read a stale _last_poke_attempt and both spawn."""
     global _last_poke_attempt
-    now = time.monotonic()
-    if now - _last_poke_attempt < _PUBLISH_POKE_COOLDOWN:
-        return
-    _last_poke_attempt = now
+    with _poke_cooldown_lock:
+        now = time.monotonic()
+        if now - _last_poke_attempt < _PUBLISH_POKE_COOLDOWN:
+            return
+        _last_poke_attempt = now
     threading.Thread(target=_check_for_content_update, daemon=True).start()
 
 
@@ -2703,6 +2707,22 @@ def _swap_site_content(new_dir):
     os.rename(new_dir, live_dir)
 
 
+_publish_lock = threading.Lock()  # serializes every site-content mutation — poke's
+                                   # background thread, the periodic poll, the
+                                   # interactive 'pull', and cmd_restore_site can
+                                   # all fire independently, and the swap below is
+                                   # multiple unguarded filesystem ops, not one
+
+
+def _publish_sig_url(url):
+    """url's own '.sig' companion, with '.sig' appended to the path rather than
+    the whole URL — naive string concatenation breaks for a publish_url that
+    carries a query string (e.g. a pre-signed download link), landing '.sig'
+    after the query instead of after the file extension."""
+    parts = urlsplit(url)
+    return urlunsplit(parts._replace(path=parts.path + ".sig"))
+
+
 def _check_for_content_update():
     """Pull, verify, and swap in a new site bundle if the publish channel is
     configured. No-ops silently (not an error) if publish_url/publish_key
@@ -2713,7 +2733,7 @@ def _check_for_content_update():
     status into a printed line rather than duplicating this logic.
 
     Returns a short status string: "not-configured", "invalid-key",
-    "fetch-failed", "bad-signature", "rejected", or "published"."""
+    "fetch-failed", "too-large", "bad-signature", "rejected", or "published"."""
     if not (config.publish_url and config.publish_key):
         return "not-configured"
 
@@ -2726,28 +2746,35 @@ def _check_for_content_update():
         log.error("publish_key is not a valid Ed25519 public key — publishing disabled")
         return "invalid-key"
 
-    try:
-        bundle    = urllib.request.urlopen(config.publish_url, timeout=30).read()
-        signature = urllib.request.urlopen(config.publish_url + ".sig", timeout=15).read()
-    except Exception as e:
-        log.warning("Could not fetch publish bundle: %s", e)
-        return "fetch-failed"
+    with _publish_lock:
+        try:
+            # Capped read: bounds memory to _MAX_BUNDLE_BYTES regardless of what
+            # the response claims or how much data is actually sent — poke makes
+            # this fetch reachable by any unauthenticated visitor, repeatedly.
+            bundle = urllib.request.urlopen(config.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
+            if len(bundle) > _MAX_BUNDLE_BYTES:
+                log.error("Publish bundle exceeds %d bytes — rejecting before signature check", _MAX_BUNDLE_BYTES)
+                return "too-large"
+            signature = urllib.request.urlopen(_publish_sig_url(config.publish_url), timeout=15).read(4096)
+        except Exception as e:
+            log.warning("Could not fetch publish bundle: %s", e)
+            return "fetch-failed"
 
-    try:
-        pub_key.verify(signature, bundle)
-    except InvalidSignature:
-        log.error("Publish bundle signature verification failed — rejecting")
-        return "bad-signature"
+        try:
+            pub_key.verify(signature, bundle)
+        except InvalidSignature:
+            log.error("Publish bundle signature verification failed — rejecting")
+            return "bad-signature"
 
-    staging = _resolve(config.serve_dir).rstrip(os.sep) + ".new"
-    shutil.rmtree(staging, ignore_errors=True)
-    try:
-        _extract_bundle(bundle, staging)
-        _swap_site_content(staging)
-    except Exception as e:
-        log.error("Publish bundle rejected: %s", e)
+        staging = _resolve(config.serve_dir).rstrip(os.sep) + ".new"
         shutil.rmtree(staging, ignore_errors=True)
-        return "rejected"
+        try:
+            _extract_bundle(bundle, staging)
+            _swap_site_content(staging)
+        except Exception as e:
+            log.error("Publish bundle rejected: %s", e)
+            shutil.rmtree(staging, ignore_errors=True)
+            return "rejected"
 
     log.info("Published new site content from %s", config.publish_url)
     return "published"
@@ -2764,6 +2791,7 @@ def cmd_pull():
     messages = {
         "invalid-key":   "Pull failed: publish_key is not a valid Ed25519 public key.",
         "fetch-failed":  "Pull failed: could not fetch the publish bundle. See 'log' for details.",
+        "too-large":     f"Pull failed: bundle exceeds {_MAX_BUNDLE_BYTES} bytes.",
         "bad-signature": "Pull failed: bundle signature verification failed — rejecting.",
         "rejected":      "Pull failed: bundle was rejected. See 'log' for details.",
         "published":     "New site content published.",
@@ -2785,9 +2813,13 @@ def cmd_restore_site():
         print("  Restore cancelled.")
         return
 
-    if os.path.isdir(live_dir):
-        shutil.rmtree(live_dir)
-    os.rename(bak_dir, live_dir)
+    with _publish_lock:
+        if not os.path.isdir(bak_dir):
+            print("  Nothing to restore — a publish ran while you were deciding and consumed the backup.")
+            return
+        if os.path.isdir(live_dir):
+            shutil.rmtree(live_dir)
+        os.rename(bak_dir, live_dir)
     print("  Site content restored from backup.")
 
 

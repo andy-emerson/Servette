@@ -213,7 +213,17 @@ class Config:
 
     def save(self):
         def s(v):
-            return '"' + str(v).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace('"', '\\"') + '"'
+            # TOML basic string: backslash and quote escaped, the common control
+            # characters given their named escapes, and every other control char
+            # (NUL, ESC, vertical tab, DEL, …) escaped as \uXXXX. An unescaped
+            # control character writes a file tomllib then refuses to load, so a
+            # value carrying one would otherwise make Servette fail to start.
+            out = str(v).replace("\\", "\\\\").replace('"', '\\"')
+            out = (out.replace("\b", "\\b").replace("\f", "\\f")
+                      .replace("\n", "\\n").replace("\r", "\\r"))
+            out = "".join(c if c == "\t" or (c >= " " and c != "\x7f")
+                          else f"\\u{ord(c):04x}" for c in out)
+            return '"' + out + '"'
 
         sites_content = "\n".join(f"""\
 [[site]]
@@ -363,14 +373,21 @@ def _rate_sweep(stop_event):
                         del tracker[k]
 
 
-def _rate_limit_exceeded(tracker, ip, limit):
-    """Record this request for ip and return True if the limit has been exceeded."""
+def _rate_limit_exceeded(tracker, ip, limit, record=True):
+    """Return True if ip is over `limit` within the window.
+
+    record=True (the default) counts this request before deciding — the normal
+    "note this hit, am I over?" call. record=False only peeks: it reports whether
+    ip is already over without adding a hit, so an expensive operation can be
+    gated on the limit without the check itself counting as traffic."""
     with _rate_lock:
         now    = time.monotonic()
         cutoff = now - RATE_WINDOW
 
         timestamps = tracker.get(ip)
         if timestamps is None:
+            if not record:
+                return False   # nothing tracked for this ip yet — not over
             # Bounded: past the limit the exact count stops mattering, only that
             # it is over. Without maxlen one IP's deque grows with everything it
             # sends inside the window — a client already being refused still
@@ -382,7 +399,8 @@ def _rate_limit_exceeded(tracker, ip, limit):
             tracker[ip] = timestamps
         while timestamps and timestamps[0] <= cutoff:
             timestamps.popleft()
-        timestamps.append(now)
+        if record:
+            timestamps.append(now)
 
         return len(timestamps) > limit
 
@@ -497,9 +515,18 @@ def _within(base, target):
 
 def _resolve_request_path(url_path, serve_dir):
     """Resolve a URL path to an absolute file path within the matched site's
-    serve_dir. Returns (None, 403) on traversal, (None, 404) if not found."""
+    serve_dir. Returns (None, 403) on traversal or a hidden path, (None, 404) if
+    not found."""
     serve_dir = os.path.realpath(_resolve(serve_dir))
     clean     = unquote(url_path.split("?")[0]).lstrip("/")   # lstrip: never an absolute path
+    # Refuse hidden files and directories. A dotfile is never meant to be public,
+    # and a static deploy routinely leaves sensitive ones under serve_dir — a
+    # .git checkout, a .env, an editor backup — so serving them leaks source and
+    # secrets. .well-known is the one dotdir the web reserves for public content
+    # (security.txt, ACME), so it is the sole exception; the ".." of a traversal
+    # is caught here too, with _within below as the backstop.
+    if any(seg.startswith(".") and seg != ".well-known" for seg in clean.split("/") if seg):
+        return None, 403
     abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
     if not _within(serve_dir, abs_path):
         return None, 403
@@ -585,6 +612,14 @@ def _backup_version():
         return None
 
 
+def _loggable(s):
+    """Escape control characters in a string bound for the logs. A request path
+    reaches the journal and, from there, an operator's terminal — an unescaped
+    ANSI/control sequence could move the cursor, clear the screen, or hide text.
+    Printable characters (including non-ASCII) pass through unchanged."""
+    return "".join(c if c >= " " and c != "\x7f" else f"\\x{ord(c):02x}" for c in s)
+
+
 def _handle_request(method, url_path, headers, raw_ip):
     """The request core. Given the method, URL path, the parsed request headers (a
     case-insensitive mapping — an http.client.HTTPMessage in production), and the raw
@@ -592,6 +627,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     response and the body blanked for HEAD. All the decision logic lives here; the
     handler just feeds it what http.server parsed and sends the result back."""
     ip = _normalize_ip(raw_ip)
+    log_path = _loggable(url_path)   # request path, escaped for the log lines below
     if config.trusted_proxy:
         xff = headers.get("X-Forwarded-For", "")
         # Rightmost XFF value is what the single trusted proxy appended.
@@ -641,18 +677,30 @@ def _handle_request(method, url_path, headers, raw_ip):
     if site.username:
         auth                  = headers.get("Authorization", "")
         authed                = False
-        credentials_submitted = False
+        credentials_submitted = auth.startswith("Basic ")
 
-        if auth.startswith("Basic "):
-            credentials_submitted = True
+        # Gate the scrypt hash behind the auth rate limiter BEFORE it runs, not
+        # after. scrypt is memory-hard by design (~16 MB and ~30 ms per check), so
+        # hashing first and rate-limiting only the response lets a flood of Basic
+        # credentials burn CPU and RAM on every attempt no matter the limit. The
+        # peek (record=False) decides whether to spend the hash at all; an actual
+        # failure below is what records a strike toward the limit.
+        if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit, record=False):
+            log.warning("Auth rate limited %s", ip)
+            return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
+
+        if credentials_submitted:
             try:
                 decoded        = base64.b64decode(auth[6:]).decode("utf-8", errors="strict")
                 parts          = decoded.split(":", 1)
                 submitted_user = parts[0]
                 pw             = parts[1] if len(parts) == 2 else ""
-                # Evaluate both before combining so the password hash always runs, even
-                # when the username is wrong — no early-out timing signal for usernames.
-                user_ok = hmac.compare_digest(submitted_user, site.username)
+                # Compare as UTF-8 bytes: hmac.compare_digest raises TypeError on a
+                # non-ASCII str, so a crafted non-ASCII username would otherwise escape
+                # this try and crash the request. Evaluate both before combining so the
+                # password hash always runs even when the username is wrong — no
+                # early-out timing signal for usernames.
+                user_ok = hmac.compare_digest(submitted_user.encode("utf-8"), site.username.encode("utf-8"))
                 pass_ok = _check_password(pw, site.password_hash, site.password_salt)
                 authed  = user_ok and pass_ok
             except (ValueError, UnicodeDecodeError):
@@ -674,9 +722,16 @@ def _handle_request(method, url_path, headers, raw_ip):
     # any) — the publish tool's "current vs. latest / current vs. backup"
     # prompts read this. Deliberately reports only what THIS box knows;
     # "latest available" comes from GitHub, which the tool queries directly.
-    # Host-level (one servette.py process, one version), not site-scoped —
-    # reached through whichever site's Host/auth got you past the checks above.
-    if url_path.split("?", 1)[0] == _WELL_KNOWN_VERSION_PATH:
+    # Host-level (one servette.py process, one version).
+    #
+    # Gated on the site having auth, so the exact version reaches only a party
+    # that already holds the site's password — never an anonymous scanner, for
+    # whom a precise version is a targeting oracle the moment any version-specific
+    # hole is disclosed. A site with no password does not serve it at all: the
+    # path falls through to a normal 404, leaving the endpoint invisible to the
+    # public. (A remote tool for a no-auth site reads the version another way; a
+    # local operator has it from 'status'.)
+    if site.username and url_path.split("?", 1)[0] == _WELL_KNOWN_VERSION_PATH:
         body = json.dumps({"running": __version__, "backup": _backup_version()}).encode()
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
@@ -685,12 +740,12 @@ def _handle_request(method, url_path, headers, raw_ip):
     try:
         file_path, status = _resolve_request_path(url_path, site.serve_dir)
     except Exception as e:
-        log.error("500 resolving %s: %s", url_path, e)
+        log.error("500 resolving %s: %s", log_path, e)
         body_500 = b"Internal server error."
         return resp(500, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_500)).encode())], body_500)
 
     if status == 403:
-        log.warning("403 Forbidden %s from %s", url_path, ip)
+        log.warning("403 Forbidden %s from %s", log_path, ip)
         body_403 = b"Forbidden."
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
@@ -704,7 +759,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         else:
             body_404 = b"Not found."
             content_type_404 = b"text/plain"
-        log.warning("404 Not Found %s from %s", url_path, ip)
+        log.warning("404 Not Found %s from %s", log_path, ip)
         return resp(404, [(b"content-type", content_type_404), (b"content-length", str(len(body_404)).encode())], body_404)
 
     raw, compressed, etag = _get_cached_file(file_path)
@@ -715,7 +770,7 @@ def _handle_request(method, url_path, headers, raw_ip):
 
     # 304 Not Modified
     if headers.get("If-None-Match", "") == etag:
-        log.info("304 Not Modified %s to %s", url_path, ip)
+        log.info("304 Not Modified %s to %s", log_path, ip)
         return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header(site.username).encode())])
 
     accept_encoding = headers.get("Accept-Encoding", "")
@@ -731,7 +786,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     if use_gzip:
         # Byte ranges apply to the identity representation, so they aren't combined
         # with gzip; compressible types are small text anyway.
-        log.info("200 %s to %s", url_path, ip)
+        log.info("200 %s to %s", log_path, ip)
         return resp(200, common + [
             (b"content-length",   str(len(compressed)).encode()),
             (b"content-encoding", b"gzip"),
@@ -741,7 +796,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     total = len(raw)
     rng   = _parse_range(headers.get("Range", ""), total)
     if rng == "invalid":
-        log.info("416 Range Not Satisfiable %s to %s", url_path, ip)
+        log.info("416 Range Not Satisfiable %s to %s", log_path, ip)
         return resp(416, [
             (b"content-range",  f"bytes */{total}".encode()),
             (b"content-length", b"0"),
@@ -750,14 +805,14 @@ def _handle_request(method, url_path, headers, raw_ip):
     if rng is not None:
         start, end = rng
         chunk = raw[start:end + 1]
-        log.info("206 %s [%d-%d] to %s", url_path, start, end, ip)
+        log.info("206 %s [%d-%d] to %s", log_path, start, end, ip)
         return resp(206, common + [
             (b"content-range",  f"bytes {start}-{end}/{total}".encode()),
             (b"content-length", str(len(chunk)).encode()),
             (b"accept-ranges",  b"bytes"),
         ], chunk)
 
-    log.info("200 %s to %s", url_path, ip)
+    log.info("200 %s to %s", log_path, ip)
     return resp(200, common + [
         (b"content-length", str(total).encode()),
         (b"accept-ranges",  b"bytes"),
@@ -1314,7 +1369,10 @@ def _systemd_unit(python_path, servette_path):
     webroot (HTTP-01 challenge files during renewal); ProtectSystem=strict makes the
     rest of the filesystem read-only, and the unit runs as a least-privilege user
     holding only CAP_NET_BIND_SERVICE. The served directory ends up read-write only
-    because it lives under the server's own directory; the server never writes it."""
+    because it lives under the server's own directory; the server never writes it.
+    The service's own code (servette.py and its .bak) and the managed venv are
+    pinned read-only on top of that writable directory — the serving process never
+    rewrites them, so a compromised one cannot patch the program it re-execs into."""
     return f"""[Unit]
 Description=Servette — The Simple Secure Server
 After=network.target
@@ -1326,6 +1384,7 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths={BASE_DIR} {ACME_WEBROOT}
+ReadOnlyPaths={servette_path} -{_VENV_DIR} -{servette_path}.bak
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -2301,6 +2360,19 @@ def _is_within_base_dir(path):
     return _within(os.path.realpath(BASE_DIR), os.path.realpath(path))
 
 
+def _serve_dir_exposes_secrets(path):
+    """True when serving `path` would hand out Servette's own secrets. serve_dir
+    is already required to sit inside BASE_DIR (see _is_within_base_dir); the
+    danger left is a folder that also holds the config (password hashes), the
+    ACME account key, or the TLS private keys under certs/. BASE_DIR itself holds
+    all three; the certs tree is the keys. Either would be served as plain file
+    reads, so both are refused as a serve_dir."""
+    real  = os.path.realpath(path)
+    base  = os.path.realpath(BASE_DIR)
+    certs = os.path.join(base, "certs")
+    return real == base or real == certs or real.startswith(certs + os.sep)
+
+
 def _config_add_site():
     """Add a site — the same questions cmd_setup asks for the very first one
     (domain, password), plus the folder question the first site gets for free
@@ -2318,6 +2390,9 @@ def _config_add_site():
         return
     if not _is_within_base_dir(_resolve(folder)):
         print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
+        return
+    if _serve_dir_exposes_secrets(_resolve(folder)):
+        print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
 
     site = Site({"serve_dir": folder})
@@ -2432,6 +2507,9 @@ def _config_dir(site):
         return
     if not _is_within_base_dir(path):
         print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
+        return
+    if _serve_dir_exposes_secrets(path):
+        print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
     site.serve_dir = new_value
     config.save()
@@ -2794,6 +2872,20 @@ def _parse_version(source_bytes):
     return m.group(1).decode() if m else None
 
 
+def _is_downgrade(current, candidate):
+    """True when candidate is an older version than current. Versions compare as
+    tuples of their dot-separated integers; if either carries a non-numeric part
+    it can't be ordered, so this returns False — an uncomparable version never
+    blocks an update."""
+    def parse(v):
+        try:
+            return tuple(int(p) for p in v.split("."))
+        except ValueError:
+            return None
+    a, b = parse(current), parse(candidate)
+    return a is not None and b is not None and b < a
+
+
 def _release_asset_url_ok(url):
     """True when a release-asset URL is HTTPS on github.com. Update downloads are
     pinned to the release host so a poisoned API response can't redirect the fetch
@@ -2843,6 +2935,15 @@ def cmd_update():
 
     if new_version == __version__:
         print(f"  Already up to date ({__version__}).")
+        return
+
+    # 'update' only moves forward. A signed but older release — a stale "latest"
+    # from the API, or a downgrade a network attacker slipped past TLS — must not
+    # roll the server back to a version with known holes. 'restore' is the
+    # deliberate path back to the previous version.
+    if _is_downgrade(__version__, new_version):
+        print(f"  Update declined: {new_version} is older than the running {__version__}.")
+        print("  Use 'restore' to roll back to the previous version on purpose.")
         return
 
     assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}

@@ -135,7 +135,7 @@ Re-run `sudo python3 servette.py` any time to return to the shell:
 | Path | What it is |
 |---|---|
 | `servette.py` | The entire product — server, system, and shell in one file. Generated from `src/`; not edited by hand |
-| `src/` | The source of truth: four literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`) plus `build.py`, which assembles them into `servette.py` |
+| `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into `servette.py` |
 | `tests/test.py` | The whole test suite, run by CI on Python 3.11 and 3.14 |
 | `site/` | The folder Servette serves by default — holds the project's own site pages and the self-test demo; `site/assets/` holds the logos this README displays |
 | `README.md` | This file — the user-facing introduction and deploy guide |

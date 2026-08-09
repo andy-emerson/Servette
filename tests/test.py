@@ -1028,7 +1028,8 @@ def run_dispatch_tests(s):
         s.urllib.request.urlopen = _fake_urlopen_for(off_host, dpage, dsig)
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             got = s._fetch_demo()
-        check("Asset URL off github.com is refused", got is None and "github.com" in buf.getvalue())
+        check("Asset URL off the release host is refused",
+              got is None and "Demo page refused: asset URL" in buf.getvalue())
 
         unmarked     = b"<!doctype html>no marker here"
         s.urllib.request.urlopen = _fake_urlopen_for(demo_api, unmarked, dpriv.sign(unmarked))

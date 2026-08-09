@@ -1557,6 +1557,81 @@ def run_server_tests(s, serve_dir):
     finally:
         capped.server_close()
 
+    section("Per-IP connection cap")
+
+    # Drive process_request directly with thread start patched to a no-op, so each
+    # accepted connection stays "open" — its global slot and per-IP count held.
+    import socketserver as _ss
+    saved_pr = _ss.ThreadingMixIn.process_request
+    saved_pt = _ss.ThreadingMixIn.process_request_thread
+    percap   = s._CappedThreadingHTTPServer(("127.0.0.1", 0), s._RedirectHandler,
+                                            max_per_ip=3)
+    shed     = {"n": 0}
+    percap.shutdown_request = lambda req: shed.__setitem__("n", shed["n"] + 1)
+    try:
+        _ss.ThreadingMixIn.process_request        = lambda self, req, addr: None
+        _ss.ThreadingMixIn.process_request_thread = lambda self, req, addr: None
+
+        for i in range(3):
+            percap.process_request(object(), ("10.0.0.1", 1000 + i))
+        check("Up to the cap, connections from one IP are accepted", shed["n"] == 0)
+
+        percap.process_request(object(), ("10.0.0.1", 1099))
+        check("Past the cap, the same IP is shed", shed["n"] == 1)
+
+        percap.process_request(object(), ("::ffff:10.0.0.1", 1100))
+        check("IPv6-mapped spelling shares the bucket and is shed", shed["n"] == 2)
+
+        percap.process_request(object(), ("10.0.0.2", 2000))
+        check("A second IP is unaffected", shed["n"] == 2)
+
+        # A finished connection frees its per-IP count: the source is admitted again.
+        percap.process_request_thread(object(), ("10.0.0.1", 1000))
+        percap.process_request(object(), ("10.0.0.1", 1101))
+        check("After one connection closes, the source is admitted again", shed["n"] == 2)
+
+        # With the global pool exhausted, the per-IP count must not leak.
+        nopool = s._CappedThreadingHTTPServer(("127.0.0.1", 0), s._RedirectHandler,
+                                              max_connections=0, max_per_ip=3)
+        nopool.shutdown_request = lambda req: None
+        try:
+            nopool.process_request(object(), ("10.0.0.7", 1))
+            check("Global-capacity shed leaves no per-IP count behind",
+                  nopool._ip_counts == {})
+        finally:
+            nopool.server_close()
+
+        # Thread-start failure must reclaim the per-IP count (as it does the slot).
+        def _boom(self, req, addr):
+            raise RuntimeError("cannot start thread")
+        _ss.ThreadingMixIn.process_request = _boom
+        try:
+            percap.process_request(object(), ("10.0.0.9", 1))
+        except RuntimeError:
+            pass
+        check("Per-IP count reclaimed after failed thread start",
+              "10.0.0.9" not in percap._ip_counts)
+        _ss.ThreadingMixIn.process_request = lambda self, req, addr: None
+
+        # Behind a declared trusted_proxy every connection shares the proxy's
+        # address, so the cap is not enforced — but counting still runs.
+        saved_tp = s.config.trusted_proxy
+        s.config.trusted_proxy = "192.0.2.1"
+        try:
+            before = shed["n"]
+            for i in range(5):   # well past max_per_ip=3
+                percap.process_request(object(), ("10.0.0.3", 3000 + i))
+            check("With trusted_proxy set, the per-IP cap is not enforced",
+                  shed["n"] == before)
+            check("Connections are still counted while unenforced",
+                  percap._ip_counts.get("10.0.0.3") == 5)
+        finally:
+            s.config.trusted_proxy = saved_tp
+    finally:
+        _ss.ThreadingMixIn.process_request        = saved_pr
+        _ss.ThreadingMixIn.process_request_thread = saved_pt
+        percap.server_close()
+
     section("GET — gzip response")
 
     resp = req("GET", headers={"Accept-Encoding": "gzip"})

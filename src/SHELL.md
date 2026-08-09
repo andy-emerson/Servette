@@ -731,6 +731,53 @@ def _release_asset_url_ok(url):
     parts = urlsplit(url)
     return parts.scheme == "https" and parts.netloc == "github.com"
 
+
+def _fetch_release():
+    """The latest-release JSON from the GitHub API. Returns (release, None) on
+    success, (None, why) on failure — quiet either way, so each caller keeps
+    its own spinner and message prefix."""
+    try:
+        req = urllib.request.Request(
+            RELEASES_API_URL,
+            headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read()), None
+    except Exception as e:
+        return None, str(e)
+
+
+def _download_verified_asset(release, name):
+    """Download release asset `name` and its .sig companion and verify the
+    signature. Returns (bytes, None) on success, (None, why) on failure.
+
+    This is the one copy of the trust chain every release artifact goes
+    through — servette.py for 'update', demo.html for the seeded demo: asset
+    URLs pinned to github.com, the download capped at _MAX_SOURCE_BYTES
+    *before* the Ed25519 check against the pinned _SIGNING_PUBLIC_KEY."""
+    assets   = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
+    sig_name = name + ".sig"
+    if name not in assets or sig_name not in assets:
+        return None, f"release is missing {name} or {sig_name} assets"
+    if not all(_release_asset_url_ok(assets[n]) for n in (name, sig_name)):
+        return None, "asset URL is not on github.com"
+    try:
+        data = urllib.request.urlopen(assets[name], timeout=30).read(_MAX_SOURCE_BYTES + 1)
+        if len(data) > _MAX_SOURCE_BYTES:
+            return None, f"{name} asset exceeds {_MAX_SOURCE_BYTES // 1024} KB"
+        sig = urllib.request.urlopen(assets[sig_name], timeout=15).read(4096)
+    except Exception as e:
+        return None, str(e)
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from cryptography.exceptions import InvalidSignature
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(_SIGNING_PUBLIC_KEY)).verify(sig, data)
+    except InvalidSignature:
+        return None, "signature verification failed"
+    except Exception as e:
+        return None, f"could not verify signature: {e}"
+    return data, None
+
 def _offer_restart(version):
     """Apply a freshly swapped servette.py (from update or restore): restart the
     service if it's managed, otherwise tell the user how — this shell still holds the
@@ -753,17 +800,10 @@ def _offer_restart(version):
 def cmd_update():
     servette_path = os.path.abspath(__file__)
 
-    # Check latest release via GitHub API
-    try:
-        with _spinner("Checking for update..."):
-            req = urllib.request.Request(
-                RELEASES_API_URL,
-                headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                release = json.loads(resp.read())
-    except Exception as e:
-        print(f"  Update failed: {e}")
+    with _spinner("Checking for update..."):
+        release, why = _fetch_release()
+    if release is None:
+        print(f"  Update failed: {why}")
         return
 
     new_version = release.get("tag_name", "").lstrip("v")
@@ -784,14 +824,6 @@ def cmd_update():
         print("  Use 'restore' to roll back to the previous version on purpose.")
         return
 
-    assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
-    if "servette.py" not in assets or "servette.py.sig" not in assets:
-        print("  Update failed: release is missing servette.py or servette.py.sig assets.")
-        return
-    if not all(_release_asset_url_ok(assets[n]) for n in ("servette.py", "servette.py.sig")):
-        print("  Update failed: release asset URL is not on github.com.")
-        return
-
     # Gate on major version bump
     try:
         cur_major = int(__version__.split(".")[0])
@@ -806,32 +838,12 @@ def cmd_update():
             print("  Update cancelled.")
             return
 
-    # Download source and signature
-    try:
-        with _spinner(f"Downloading {new_version}..."):
-            # Capped at the socket, like the publish bundle: bound memory before
-            # the signature is checked rather than after, so what arrives can't
-            # be larger than what is worth reading whatever the response claims.
-            new_source = urllib.request.urlopen(assets["servette.py"],     timeout=30).read(_MAX_SOURCE_BYTES + 1)
-            if len(new_source) > _MAX_SOURCE_BYTES:
-                print(f"  Update failed: servette.py asset exceeds {_MAX_SOURCE_BYTES // 1024} KB.")
-                return
-            signature  = urllib.request.urlopen(assets["servette.py.sig"], timeout=15).read(4096)
-    except Exception as e:
-        print(f"  Update failed: {e}")
-        return
-
-    # Verify Ed25519 signature against pinned public key
-    try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        from cryptography.exceptions import InvalidSignature
-        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(_SIGNING_PUBLIC_KEY))
-        pub_key.verify(signature, new_source)
-    except InvalidSignature:
-        print("  Update failed: signature verification failed.")
-        return
-    except Exception as e:
-        print(f"  Update failed: could not verify signature: {e}")
+    # Download and verify through the shared trust chain (asset presence,
+    # github.com pinning, size cap before the Ed25519 check).
+    with _spinner(f"Downloading {new_version}..."):
+        new_source, why = _download_verified_asset(release, "servette.py")
+    if new_source is None:
+        print(f"  Update failed: {why}.")
         return
 
     file_version = _parse_version(new_source)
@@ -899,48 +911,19 @@ _DEMO_MARKER = "servette:demo"
 
 
 def _fetch_demo():
-    """Fetch and verify demo.html from the latest GitHub release. Returns the
-    page bytes, or None after printing why — a failed fetch is information
-    ("could not reach GitHub" matters at setup time), never an exception, and
-    never fails the caller's flow. Same trust chain as cmd_update: asset URLs
-    pinned to github.com, size capped before the Ed25519 check against the same
-    pinned _SIGNING_PUBLIC_KEY — the demo ships with the release, one trust
-    domain, deliberately not the per-site publish key."""
-    try:
-        req = urllib.request.Request(
-            RELEASES_API_URL,
-            headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            release = json.loads(resp.read())
-    except Exception as e:
-        print(f"  Demo page fetch failed: {e}")
+    """Fetch and verify demo.html from the latest GitHub release, through the
+    same _download_verified_asset trust chain 'update' uses — one trust domain
+    with the code, deliberately not the per-site publish key. Returns the page
+    bytes, or None after printing why: a failed fetch is information ("could
+    not reach GitHub" matters at setup time), never an exception, and never
+    fails the caller's flow."""
+    release, why = _fetch_release()
+    if release is None:
+        print(f"  Demo page not fetched: {why}.")
         return None
-    assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
-    if "demo.html" not in assets or "demo.html.sig" not in assets:
-        print("  Demo page unavailable: the latest release has no demo.html/.sig assets.")
-        return None
-    if not all(_release_asset_url_ok(assets[n]) for n in ("demo.html", "demo.html.sig")):
-        print("  Demo page refused: asset URL is not on github.com.")
-        return None
-    try:
-        page = urllib.request.urlopen(assets["demo.html"], timeout=30).read(_MAX_SOURCE_BYTES + 1)
-        if len(page) > _MAX_SOURCE_BYTES:
-            print("  Demo page refused: asset exceeds the size cap.")
-            return None
-        sig = urllib.request.urlopen(assets["demo.html.sig"], timeout=15).read(4096)
-    except Exception as e:
-        print(f"  Demo page fetch failed: {e}")
-        return None
-    try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        from cryptography.exceptions import InvalidSignature
-        Ed25519PublicKey.from_public_bytes(bytes.fromhex(_SIGNING_PUBLIC_KEY)).verify(sig, page)
-    except InvalidSignature:
-        print("  Demo page refused: signature verification failed.")
-        return None
-    except Exception as e:
-        print(f"  Demo page refused: could not verify signature: {e}")
+    page, why = _download_verified_asset(release, "demo.html")
+    if page is None:
+        print(f"  Demo page not fetched: {why}.")
         return None
     if _DEMO_MARKER.encode() not in page:
         # Without its marker the page could never be recognized for refresh —
@@ -1236,9 +1219,9 @@ def _production_issues():
     if offer is not None:
         if active_mb:
             issues.append(f"swapfile {active_mb} MB but {rec // (1024 * 1024)} MB "
-                          "recommended — run 'install' to resize")
+                          "recommended — run 'enable' to resize")
         else:
-            issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'install' to add a swapfile")
+            issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'enable' to add a swapfile")
     return issues
 
 

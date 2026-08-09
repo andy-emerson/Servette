@@ -1851,8 +1851,21 @@ def run_server_tests(s, serve_dir):
 
     section("Version discovery endpoint")
 
-    resp = req("GET", "/.well-known/servette")
-    check("200 with JSON content-type",
+    s._auth_fail_times.clear()
+
+    # Gated on auth: never disclosed to an anonymous client. On a no-auth site the
+    # path falls through to a normal 404 — the endpoint is invisible to the public.
+    check("No-auth site: /.well-known/servette is not disclosed (404)",
+          req("GET", "/.well-known/servette").status == 404)
+
+    s.config.sites[0].username = "testuser"
+    s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")
+
+    check("Auth site, no credentials → 401",
+          req("GET", "/.well-known/servette").status == 401)
+
+    resp = req("GET", "/.well-known/servette", auth=("testuser", "testpass"))
+    check("Auth site, correct credentials → 200 with JSON content-type",
           resp.status == 200 and "application/json" in resp.headers.get("Content-Type", ""))
     data = json.loads(resp.body)
     check("Reports the running version", data["running"] == s.__version__)
@@ -1862,21 +1875,15 @@ def run_server_tests(s, serve_dir):
     with open(bak_path, "w") as f:
         f.write('__version__ = "1.2.3"\n')
     try:
-        data = json.loads(req("GET", "/.well-known/servette").body)
+        data = json.loads(req("GET", "/.well-known/servette", auth=("testuser", "testpass")).body)
         check("Existing .bak's version is reported", data["backup"] == "1.2.3")
     finally:
         os.remove(bak_path)
 
-    check("HEAD returns 200 with an empty body",
-          req("HEAD", "/.well-known/servette").status == 200
-          and req("HEAD", "/.well-known/servette").body == b"")
+    check("HEAD with credentials → 200 with an empty body",
+          req("HEAD", "/.well-known/servette", auth=("testuser", "testpass")).status == 200
+          and req("HEAD", "/.well-known/servette", auth=("testuser", "testpass")).body == b"")
 
-    s.config.sites[0].username = "testuser"
-    s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")
-    check("Respects auth like any other path: no credentials → 401",
-          req("GET", "/.well-known/servette").status == 401)
-    check("Respects auth like any other path: correct credentials → 200",
-          req("GET", "/.well-known/servette", auth=("testuser", "testpass")).status == 200)
     s.config.sites[0].username      = ""
     s.config.sites[0].password_hash = ""
     s.config.sites[0].password_salt = ""

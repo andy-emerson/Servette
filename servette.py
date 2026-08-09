@@ -722,9 +722,16 @@ def _handle_request(method, url_path, headers, raw_ip):
     # any) — the publish tool's "current vs. latest / current vs. backup"
     # prompts read this. Deliberately reports only what THIS box knows;
     # "latest available" comes from GitHub, which the tool queries directly.
-    # Host-level (one servette.py process, one version), not site-scoped —
-    # reached through whichever site's Host/auth got you past the checks above.
-    if url_path.split("?", 1)[0] == _WELL_KNOWN_VERSION_PATH:
+    # Host-level (one servette.py process, one version).
+    #
+    # Gated on the site having auth, so the exact version reaches only a party
+    # that already holds the site's password — never an anonymous scanner, for
+    # whom a precise version is a targeting oracle the moment any version-specific
+    # hole is disclosed. A site with no password does not serve it at all: the
+    # path falls through to a normal 404, leaving the endpoint invisible to the
+    # public. (A remote tool for a no-auth site reads the version another way; a
+    # local operator has it from 'status'.)
+    if site.username and url_path.split("?", 1)[0] == _WELL_KNOWN_VERSION_PATH:
         body = json.dumps({"running": __version__, "backup": _backup_version()}).encode()
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)

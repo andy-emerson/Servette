@@ -1,3 +1,6 @@
+# GENERATED FILE — do not edit. servette.py is built from the Markdown
+# sources in src/ by src/build.py; edit those and rebuild. Hand edits here
+# are overwritten by the next build and fail CI's `build.py --check`.
 """
 servette.py — The Simple Secure Static Site Server
 

@@ -4,6 +4,10 @@
 
 *Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
+> GENERATED FILE — do not edit. servette.py is built from the Markdown
+> sources in src/ by src/build.py; edit those and rebuild. Hand edits here
+> are overwritten by the next build and fail CI's `build.py --check`.
+
 ```python
 """
 servette.py — The Simple Secure Static Site Server

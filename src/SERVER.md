@@ -1054,33 +1054,78 @@ class _RedirectHandler(http.server.BaseHTTPRequestHandler):
 
 ```
 
-> Ceiling on concurrent connections. Each connection holds one worker thread for its
-> lifetime (up to the 30s idle timeout on keep-alive), so the cap bounds thread/memory
-> use under a connection flood — light enough for a Raspberry Pi, ample for a static site.
+> Ceilings on concurrent connections — one global, one per source IP. Each connection
+> holds one worker thread for its lifetime (up to the 30s idle timeout on keep-alive),
+> so the global cap bounds thread/memory use under a connection flood — light enough
+> for a Raspberry Pi, ample for a static site. The per-IP cap stops one source from
+> holding every slot: monopolizing the pool takes cooperating addresses, not one client.
 
 ```python
-MAX_CONNECTIONS = 128
+MAX_CONNECTIONS        = 128
+MAX_CONNECTIONS_PER_IP = 32
 
 
 class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
-    """ThreadingHTTPServer with a ceiling on concurrent connections. Past the cap,
+    """ThreadingHTTPServer with ceilings on concurrent connections: a global cap,
+    and a per-source-IP cap so one source cannot monopolize the pool. Past either,
     new connections are closed immediately rather than spawning unbounded threads —
     a connection-exhaustion / slowloris mitigation that pairs with the per-connection
-    socket timeout on the handlers (which reaps slow or idle connections)."""
+    socket timeout on the handlers (which reaps slow or idle connections).
+
+    The per-IP cap is enforced at accept time, keyed on the socket address: that is
+    before any bytes are read, so it catches connections that never send a request —
+    the slowloris case a request-time check would miss. Behind a declared
+    trusted_proxy every connection carries the proxy's address and the count would
+    cap the whole site, so enforcement is skipped there: connection policing in that
+    topology belongs to the proxy, the only party that sees per-client connections.
+    Counting itself runs unconditionally, so a trusted_proxy edit mid-connection can
+    never unbalance the increment/decrement pairing."""
     daemon_threads = True
 
-    def __init__(self, address, handler, max_connections=MAX_CONNECTIONS):
+    def __init__(self, address, handler, max_connections=MAX_CONNECTIONS,
+                 max_per_ip=MAX_CONNECTIONS_PER_IP):
         super().__init__(address, handler)
-        self._slots = threading.BoundedSemaphore(max_connections)
+        self._slots      = threading.BoundedSemaphore(max_connections)
+        self._max_per_ip = max_per_ip
+        self._ip_counts  = {}
+        self._ip_lock    = threading.Lock()
+
+    @staticmethod
+    def _ip_key(client_address):
+        return _normalize_ip(client_address[0]) if client_address else "?"
+
+    def _ip_acquire(self, ip):
+        """Count a connection against ip. Returns False — without counting — when
+        the source is at its cap and enforcement is on."""
+        with self._ip_lock:
+            count = self._ip_counts.get(ip, 0)
+            if not config.trusted_proxy and count >= self._max_per_ip:
+                return False
+            self._ip_counts[ip] = count + 1
+            return True
+
+    def _ip_release(self, ip):
+        with self._ip_lock:
+            count = self._ip_counts.get(ip, 0) - 1
+            if count > 0:
+                self._ip_counts[ip] = count
+            else:
+                self._ip_counts.pop(ip, None)   # drop zeroed keys — dict stays bounded
 
     def process_request(self, request, client_address):
+        ip = self._ip_key(client_address)
+        if not self._ip_acquire(ip):
+            self.shutdown_request(request)   # source at its per-IP cap — shed, don't queue
+            return
         if not self._slots.acquire(blocking=False):
+            self._ip_release(ip)
             self.shutdown_request(request)   # at capacity — shed load, don't queue
             return
         try:
             super().process_request(request, client_address)
         except BaseException:
-            self._slots.release()   # the worker thread never started — reclaim its slot
+            self._slots.release()    # the worker thread never started — reclaim
+            self._ip_release(ip)     # both reservations
             raise
 
     def process_request_thread(self, request, client_address):
@@ -1088,6 +1133,7 @@ class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self._slots.release()
+            self._ip_release(self._ip_key(client_address))
 
     def handle_error(self, request, client_address):
         # A public server sees constant aborted handshakes and dropped connections

@@ -1557,6 +1557,81 @@ def run_server_tests(s, serve_dir):
     finally:
         capped.server_close()
 
+    section("Per-IP connection cap")
+
+    # Drive process_request directly with thread start patched to a no-op, so each
+    # accepted connection stays "open" — its global slot and per-IP count held.
+    import socketserver as _ss
+    saved_pr = _ss.ThreadingMixIn.process_request
+    saved_pt = _ss.ThreadingMixIn.process_request_thread
+    percap   = s._CappedThreadingHTTPServer(("127.0.0.1", 0), s._RedirectHandler,
+                                            max_per_ip=3)
+    shed     = {"n": 0}
+    percap.shutdown_request = lambda req: shed.__setitem__("n", shed["n"] + 1)
+    try:
+        _ss.ThreadingMixIn.process_request        = lambda self, req, addr: None
+        _ss.ThreadingMixIn.process_request_thread = lambda self, req, addr: None
+
+        for i in range(3):
+            percap.process_request(object(), ("10.0.0.1", 1000 + i))
+        check("Up to the cap, connections from one IP are accepted", shed["n"] == 0)
+
+        percap.process_request(object(), ("10.0.0.1", 1099))
+        check("Past the cap, the same IP is shed", shed["n"] == 1)
+
+        percap.process_request(object(), ("::ffff:10.0.0.1", 1100))
+        check("IPv6-mapped spelling shares the bucket and is shed", shed["n"] == 2)
+
+        percap.process_request(object(), ("10.0.0.2", 2000))
+        check("A second IP is unaffected", shed["n"] == 2)
+
+        # A finished connection frees its per-IP count: the source is admitted again.
+        percap.process_request_thread(object(), ("10.0.0.1", 1000))
+        percap.process_request(object(), ("10.0.0.1", 1101))
+        check("After one connection closes, the source is admitted again", shed["n"] == 2)
+
+        # With the global pool exhausted, the per-IP count must not leak.
+        nopool = s._CappedThreadingHTTPServer(("127.0.0.1", 0), s._RedirectHandler,
+                                              max_connections=0, max_per_ip=3)
+        nopool.shutdown_request = lambda req: None
+        try:
+            nopool.process_request(object(), ("10.0.0.7", 1))
+            check("Global-capacity shed leaves no per-IP count behind",
+                  nopool._ip_counts == {})
+        finally:
+            nopool.server_close()
+
+        # Thread-start failure must reclaim the per-IP count (as it does the slot).
+        def _boom(self, req, addr):
+            raise RuntimeError("cannot start thread")
+        _ss.ThreadingMixIn.process_request = _boom
+        try:
+            percap.process_request(object(), ("10.0.0.9", 1))
+        except RuntimeError:
+            pass
+        check("Per-IP count reclaimed after failed thread start",
+              "10.0.0.9" not in percap._ip_counts)
+        _ss.ThreadingMixIn.process_request = lambda self, req, addr: None
+
+        # Behind a declared trusted_proxy every connection shares the proxy's
+        # address, so the cap is not enforced — but counting still runs.
+        saved_tp = s.config.trusted_proxy
+        s.config.trusted_proxy = "192.0.2.1"
+        try:
+            before = shed["n"]
+            for i in range(5):   # well past max_per_ip=3
+                percap.process_request(object(), ("10.0.0.3", 3000 + i))
+            check("With trusted_proxy set, the per-IP cap is not enforced",
+                  shed["n"] == before)
+            check("Connections are still counted while unenforced",
+                  percap._ip_counts.get("10.0.0.3") == 5)
+        finally:
+            s.config.trusted_proxy = saved_tp
+    finally:
+        _ss.ThreadingMixIn.process_request        = saved_pr
+        _ss.ThreadingMixIn.process_request_thread = saved_pt
+        percap.server_close()
+
     section("GET — gzip response")
 
     resp = req("GET", headers={"Accept-Encoding": "gzip"})
@@ -2005,6 +2080,54 @@ def run_server_tests(s, serve_dir):
     s.config.sites[0].password_hash = ""
     s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
+
+    section("Concurrent scrypt hashing is bounded (#49)")
+
+    # The per-IP limiter above cannot bound concurrency across IPs: many distinct
+    # sources each get a first hash before their own limiter engages. _SCRYPT_SLOTS
+    # caps how many scrypt verifications run at once; excess callers block briefly
+    # rather than fail. Wrap hashlib.scrypt to measure true concurrency under a
+    # 12-thread burst — it must never exceed the semaphore's 4, and every
+    # legitimate login must still succeed.
+    ph, psalt   = s._hash_password("hunter2")
+    real_scrypt = s.hashlib.scrypt
+    conc  = {"cur": 0, "max": 0}
+    clock = threading.Lock()
+
+    def slow_scrypt(*a, **kw):
+        with clock:
+            conc["cur"] += 1
+            conc["max"]  = max(conc["max"], conc["cur"])
+        time.sleep(0.05)   # hold the permit long enough for the burst to pile up
+        try:
+            return real_scrypt(*a, **kw)
+        finally:
+            with clock:
+                conc["cur"] -= 1
+
+    s.hashlib.scrypt = slow_scrypt
+    try:
+        results = []
+        rlock   = threading.Lock()
+
+        def attempt():
+            ok = s._check_password("hunter2", ph, psalt)
+            with rlock:
+                results.append(ok)
+
+        burst = [threading.Thread(target=attempt) for _ in range(12)]
+        for t in burst:
+            t.start()
+        for t in burst:
+            t.join()
+        check("A 12-thread burst never runs more than 4 hashes at once",
+              conc["max"] <= s._SCRYPT_MAX_CONCURRENT)
+        check("The semaphore admits real concurrency (max observed ≥ 2)",
+              conc["max"] >= 2)
+        check("All 12 legitimate logins succeed under load",
+              len(results) == 12 and all(results))
+    finally:
+        s.hashlib.scrypt = real_scrypt
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 Contributions are welcome — written by hand, written with an AI agent, or anywhere in between. Use whatever process produces good work; the bar is the same either way, and it's the code that's judged, not who or what typed it.
 
-The detail this one points to lives in a few places: [`DESIGN.md`](DESIGN.md) holds the scope, the non-goals, and how we work; [`DESIGN.md`](DESIGN.md) explains how Servette is built; [`AGENTS.md`](AGENTS.md) holds the operational mechanics (running, testing, committing); and the new-user introduction is [`README.md`](README.md).
+The detail this one points to lives in a few places: [`DESIGN.md`](DESIGN.md) holds the scope, the non-goals, how we work, and how Servette is built; [`AGENTS.md`](AGENTS.md) holds the operational mechanics (running, testing, committing); and the new-user introduction is [`README.md`](README.md).
 
 ## Working with AI
 
@@ -21,3 +21,5 @@ Before proposing a feature, read [Scope & non-goals](DESIGN.md#scope--non-goals)
 ## Before you push
 
 The verification bar and the full pre-push checklist live in [`AGENTS.md`](AGENTS.md). In short: one scoped change, a test that can fail, the suite green (and CodeQL clean for security-relevant work), and the docs updated in the same change. Prefer understatement — describe what a change is verified to do, not what you hope it does.
+
+One mechanic worth calling out: `servette.py` is generated. Edit the Markdown sources under `src/`, run `python3 src/build.py`, and commit both — never hand-edit `servette.py`, since CI (`build.py --check`) rejects a commit where the two disagree. See [Building](DESIGN.md#building).

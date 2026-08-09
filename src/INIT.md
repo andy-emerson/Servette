@@ -2,7 +2,7 @@
 
 *Shebang docstring, version, imports, and module-level constants.*
 
-*Authored here. `servette.py` is built from this file (and its three siblings) by [`build.py`](build.py) — edit the Markdown, not the generated file.*
+*Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
 ```python
 """

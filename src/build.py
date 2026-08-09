@@ -30,8 +30,10 @@ import difflib
 import os
 import sys
 
-# The four sources, in the order they concatenate into servette.py.
-SECTION_FILES = ["INIT.md", "SERVER.md", "SYSTEM.md", "SHELL.md"]
+# The sources, in the order they concatenate into servette.py. MAIN.md is last
+# because the entry point it holds — `config = Config()` and the `__main__`
+# dispatch — runs on import and calls definitions from every section above it.
+SECTION_FILES = ["INIT.md", "SERVER.md", "SYSTEM.md", "SHELL.md", "MAIN.md"]
 
 _FENCE_OPEN  = "```python"
 _FENCE_CLOSE = "```"

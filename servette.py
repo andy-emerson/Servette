@@ -3539,7 +3539,7 @@ def shell():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT
+# MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Config is a module-level singleton, instantiated here (not at its class

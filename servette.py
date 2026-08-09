@@ -1,3 +1,6 @@
+# GENERATED FILE — do not edit. servette.py is built from the Markdown
+# sources in src/ by src/build.py; edit those and rebuild. Hand edits here
+# are overwritten by the next build and fail CI's `build.py --check`.
 """
 servette.py — The Simple Secure Static Site Server
 
@@ -2475,6 +2478,13 @@ def _config_add_site():
     if _serve_dir_exposes_secrets(_resolve(folder)):
         print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
+    # The same seeding offer setup makes for the first site (#37): a new site
+    # with no index.html would 404 on its own domain with no way to tell the
+    # server from the content. Declining, or a failed fetch, blocks nothing.
+    if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
+        if _prompt("No index.html here — fetch Servette's demo page so the site works immediately?"):
+            if _seed_demo(folder):
+                print("  Demo page installed as index.html — replace it with your own site when ready.")
 
     site = Site({"serve_dir": folder})
     config.sites.append(site)
@@ -2942,9 +2952,9 @@ def cmd_log(n=20):
 RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
 _SIGNING_PUBLIC_KEY = "abb8854be0b82df813f3b052296a26573063fc6314ea2701d54354605e6f15db"
 _VERSION_RE         = re.compile(rb"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
-# Ceiling on a downloaded servette.py. The file is one order of magnitude under
-# this; the cap exists so a hostile or broken response is bounded before the
-# signature check, not to constrain growth.
+# Ceiling on a downloaded release asset — servette.py or the demo page. Both are
+# orders of magnitude under this; the cap exists so a hostile or broken response
+# is bounded before the signature check, not to constrain growth.
 _MAX_SOURCE_BYTES   = 4 * 1024 * 1024
 
 def _parse_version(source_bytes):
@@ -3125,6 +3135,107 @@ def _apply_post_update():
                 _reload_server()
         except (PermissionError, FileNotFoundError, subprocess.CalledProcessError) as e:
             print(f"  Could not refresh the service unit: {e}")
+    # Refresh any site still serving the marked demo placeholder, so a release
+    # that changes the demo reaches hosts that never published their own page.
+    # One fetch seeds every marked site; operator pages (no marker) are untouched.
+    marked = [s for s in config.sites
+              if _demo_is_placeholder(os.path.join(_resolve(s.serve_dir), "index.html"))]
+    if marked:
+        page = _fetch_demo()
+        if page is not None:
+            for s in marked:
+                if _seed_demo(s.serve_dir, page):
+                    print(f"  Demo page refreshed in {s.serve_dir}.")
+
+
+_DEMO_MARKER = "servette:demo"
+
+
+def _fetch_demo():
+    """Fetch and verify demo.html from the latest GitHub release. Returns the
+    page bytes, or None after printing why — a failed fetch is information
+    ("could not reach GitHub" matters at setup time), never an exception, and
+    never fails the caller's flow. Same trust chain as cmd_update: asset URLs
+    pinned to github.com, size capped before the Ed25519 check against the same
+    pinned _SIGNING_PUBLIC_KEY — the demo ships with the release, one trust
+    domain, deliberately not the per-site publish key."""
+    try:
+        req = urllib.request.Request(
+            RELEASES_API_URL,
+            headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            release = json.loads(resp.read())
+    except Exception as e:
+        print(f"  Demo page fetch failed: {e}")
+        return None
+    assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
+    if "demo.html" not in assets or "demo.html.sig" not in assets:
+        print("  Demo page unavailable: the latest release has no demo.html/.sig assets.")
+        return None
+    if not all(_release_asset_url_ok(assets[n]) for n in ("demo.html", "demo.html.sig")):
+        print("  Demo page refused: asset URL is not on github.com.")
+        return None
+    try:
+        page = urllib.request.urlopen(assets["demo.html"], timeout=30).read(_MAX_SOURCE_BYTES + 1)
+        if len(page) > _MAX_SOURCE_BYTES:
+            print("  Demo page refused: asset exceeds the size cap.")
+            return None
+        sig = urllib.request.urlopen(assets["demo.html.sig"], timeout=15).read(4096)
+    except Exception as e:
+        print(f"  Demo page fetch failed: {e}")
+        return None
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from cryptography.exceptions import InvalidSignature
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(_SIGNING_PUBLIC_KEY)).verify(sig, page)
+    except InvalidSignature:
+        print("  Demo page refused: signature verification failed.")
+        return None
+    except Exception as e:
+        print(f"  Demo page refused: could not verify signature: {e}")
+        return None
+    if _DEMO_MARKER.encode() not in page:
+        # Without its marker the page could never be recognized for refresh —
+        # a marker-less asset is malformed, not adoptable.
+        print("  Demo page refused: fetched page lacks the servette:demo marker.")
+        return None
+    return page
+
+
+def _demo_is_placeholder(index_path):
+    """True when index_path exists and carries the servette:demo marker — i.e. it
+    is Servette's own placeholder, safe to refresh. An operator's page (no marker)
+    is never touched; an operator who deletes the marker has adopted the page
+    permanently. The rule is visible in the file itself, not hidden in state."""
+    try:
+        with open(index_path, "rb") as f:
+            return _DEMO_MARKER.encode() in f.read(_MAX_SOURCE_BYTES)
+    except OSError:
+        return False
+
+
+def _seed_demo(serve_dir, page=None):
+    """Write the demo page as serve_dir/index.html when that is safe: the file is
+    absent, or still the marked placeholder. Returns True when it was written.
+    page=None fetches from the latest release; passing bytes lets one fetch seed
+    several sites. Written via rename so a reader never sees a partial file."""
+    index_path = os.path.join(_resolve(serve_dir), "index.html")
+    if os.path.exists(index_path) and not _demo_is_placeholder(index_path):
+        return False   # operator content — never overwrite
+    if page is None:
+        page = _fetch_demo()
+        if page is None:
+            return False
+    tmp = index_path + ".new"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(page)
+        os.replace(tmp, index_path)
+    except OSError as e:
+        print(f"  Could not write the demo page: {e}")
+        return False
+    return True
 
 
 def cmd_restore():
@@ -3520,14 +3631,40 @@ def cmd_setup():
 
     site = config.sites[0]  # the site setup provisions; 'add-site' handles the rest
 
+    # Step 1 — the folder. Setup must never finish with nothing to serve (#37):
+    # create the folder if missing, and offer the signed demo page when it has
+    # no index.html — the demo diagnoses server/cert/redirect health before the
+    # operator's own files enter the picture. A failed fetch degrades with its
+    # own message and does not fail setup.
     print()
-    print("  Step 1 — SSL certificate")
+    print("  Step 1 — Site folder")
+    serve_path = _resolve(site.serve_dir)
+    if not os.path.isdir(serve_path):
+        if _is_within_base_dir(serve_path):
+            try:
+                os.makedirs(serve_path, exist_ok=True)
+                print(f"  Created {serve_path}.")
+            except OSError as e:
+                print(f"  Could not create {serve_path}: {e}")
+        else:
+            print(f"  serve_dir {serve_path} is outside {BASE_DIR} — fix it with 'config' > 'dir' first.")
+    if os.path.isdir(serve_path):
+        if os.path.exists(os.path.join(serve_path, "index.html")):
+            print(f"  Serving {serve_path}.")
+        else:
+            print(f"  {serve_path} has no index.html yet.")
+            if _prompt("Fetch Servette's demo page so the site works immediately?"):
+                if _seed_demo(site.serve_dir):
+                    print("  Demo page installed as index.html — replace it with your own site when ready.")
+
+    print()
+    print("  Step 2 — SSL certificate")
     print(f"  Your public IP is {public_ip}. Point a domain here for a trusted certificate.")
     print("  Leave blank to use a self-signed certificate (browsers will warn visitors).\n")
     _config_cert(site)
 
     print()
-    print("  Step 2 — Password protection (optional)")
+    print("  Step 3 — Password protection (optional)")
     print("  Leave username blank to disable. Press Enter to keep current value.")
     _config_username(site)
     if site.username:

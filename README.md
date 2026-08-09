@@ -93,7 +93,7 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
 
 ### Run setup
 
-Servette serves the `site/` folder next to `servette.py` (it ships with a self-testing demo page, so a fresh copy runs immediately — replace it when ready). From the server:
+Servette serves the `site/` folder next to `servette.py` — setup creates it if it's missing and offers Servette's self-testing demo page when it's empty, so a fresh copy runs immediately; replace it with your own files when ready. From the server:
 
 ```
 sudo python3 servette.py   # then, at the prompt: setup
@@ -145,7 +145,7 @@ Every site has an index, shown by `sites` and starting at `0` — the one `setup
 | `servette.py` | The entire product — server, system, and shell in one file. Generated from `src/`; not edited by hand |
 | `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into `servette.py` |
 | `tests/test.py` | The whole test suite, run by CI on Python 3.11 and 3.14 |
-| `site/` | The folder Servette serves by default — holds the project's own site pages and the self-test demo; `site/assets/` holds the logos this README displays |
+| `site/` | The Servette website's source, and the folder a checkout serves by default; `site/demo/` is the self-test page each release ships as `demo.html`, and `site/assets/` holds the logos this README displays |
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
 | `AGENTS.md` · `CLAUDE.md` | The human–agent working agreement, and the pointer to it |

@@ -46,7 +46,7 @@ Prefer understatement: `_production_issues()` is the model — it lists what is 
 
 ## How it works
 
-Servette is a single file (`servette.py`, ~3,550 lines) with three sections, each readable on its own, followed by a short entry-point block that instantiates the `Config` singleton and dispatches to the shell or `--serve`. Settings persist to `servette.toml` beside it. That single file is generated from the Markdown sources under `src/` — you edit those, not it (see [Building](#building)).
+Servette is a single file (`servette.py`, ~3,550 lines) with three sections, each readable on its own, followed by a short `MAIN` block that instantiates the `Config` singleton and dispatches to the shell or `--serve`. Settings persist to `servette.toml` beside it. That single file is generated from the Markdown sources under `src/` — you edit those, not it (see [Building](#building)).
 
 | Section | Lines | Responsibility |
 | - | - | - |
@@ -198,7 +198,7 @@ First run creates `.servette-env/` (a managed virtualenv), installs `cryptograph
 
 ### Building
 
-`servette.py` is generated, not hand-edited. The source of truth is four literate Markdown files under `src/` — `INIT.md`, `SERVER.md`, `SYSTEM.md`, `SHELL.md` — where the code lives in fenced `python` blocks and the module's own prose lives in Markdown (blockquotes and headings) around it. `src/build.py` reverses that mapping to assemble `servette.py`, adding nothing of its own — every output line comes from a code fence or a blockquote.
+`servette.py` is generated, not hand-edited. The source of truth is five literate Markdown files under `src/` — `INIT.md`, `SERVER.md`, `SYSTEM.md`, `SHELL.md`, `MAIN.md` — where the code lives in fenced `python` blocks and the module's own prose lives in Markdown (blockquotes and headings) around it. `src/build.py` concatenates them in that order (`MAIN` last, because the entry point it holds runs on import and calls definitions from every section above), reversing that mapping to assemble `servette.py` and adding nothing of its own — every output line comes from a code fence or a blockquote.
 
 ```bash
 python3 src/build.py            # regenerate servette.py from src/

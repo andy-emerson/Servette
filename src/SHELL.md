@@ -1,8 +1,8 @@
 # SHELL
 
-*The interactive terminal interface, plus the entry-point dispatch at the end of the file.*
+*The interactive terminal interface.*
 
-*Authored here. `servette.py` is built from this file (and its three siblings) by [`build.py`](build.py) — edit the Markdown, not the generated file.*
+*Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
 ```python
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1367,39 +1367,4 @@ def shell():
             print(f"Unknown command: {cmd}. Type 'help' for a list of commands.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
-
-```
-
-> Config is a module-level singleton, instantiated here (not at its class
-> definition, near the top) because migrating a pre-multi-site flat config
-> calls _domain_from_cert() to backfill the migrated site's domain, and that
-> function is defined much later, in Certificate management. Dependency
-> injection (passing config into every function) is the textbook alternative,
-> but the stdlib request handlers have fixed signatures and cannot accept
-> extra arguments. In a single-file server that is always run as a process,
-> the global is the right call.
-
-```python
-config = Config()
-
-if __name__ == "__main__":
-    _bootstrap()  # no-op if already in venv; otherwise re-execs into venv
-
-    if "--serve" in sys.argv:
-        start_server()
-        try:
-            _watch_server()
-        except KeyboardInterrupt:
-            stop_server()
-        else:
-            log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
-            sys.exit(1)
-    elif "--post-update" in sys.argv:
-        _apply_post_update()
-        shell()
-    else:
-        shell()
 ```

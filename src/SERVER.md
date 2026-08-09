@@ -532,6 +532,14 @@ def _within(base, target):
         return False
 
 
+def _hidden_segment(segments):
+    """True if any path segment names a dotfile, other than the one dotdir the
+    web reserves for public content — .well-known (security.txt, ACME). Shared
+    by the request-path and resolved-target checks in _resolve_request_path so
+    both refuse exactly the same set."""
+    return any(seg.startswith(".") and seg != ".well-known" for seg in segments if seg)
+
+
 def _resolve_request_path(url_path, serve_dir):
     """Resolve a URL path to an absolute file path within the matched site's
     serve_dir. Returns (None, 403) on traversal or a hidden path, (None, 404) if
@@ -541,10 +549,10 @@ def _resolve_request_path(url_path, serve_dir):
     # Refuse hidden files and directories. A dotfile is never meant to be public,
     # and a static deploy routinely leaves sensitive ones under serve_dir — a
     # .git checkout, a .env, an editor backup — so serving them leaks source and
-    # secrets. .well-known is the one dotdir the web reserves for public content
-    # (security.txt, ACME), so it is the sole exception; the ".." of a traversal
-    # is caught here too, with _within below as the backstop.
-    if any(seg.startswith(".") and seg != ".well-known" for seg in clean.split("/") if seg):
+    # secrets. This first pass reads the *requested* segments, closing the direct
+    # case (GET /.git/config); the ".." of a traversal is caught here too, with
+    # _within below as the backstop.
+    if _hidden_segment(clean.split("/")):
         return None, 403
     abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
     if not _within(serve_dir, abs_path):
@@ -553,6 +561,15 @@ def _resolve_request_path(url_path, serve_dir):
         abs_path = os.path.realpath(os.path.join(abs_path, "index.html"))
         if not _within(serve_dir, abs_path):
             return None, 403
+    # Re-check the *resolved* target's segments. The pass above reads the name
+    # the client asked for; a symlink inside serve_dir whose own name is not a
+    # dotfile can still resolve to a hidden target (serve_dir/x -> serve_dir/.git
+    # /config), and realpath keeps it within serve_dir, so _within passes.
+    # Applying the same rule to the resolved path refuses a hidden target by
+    # whatever name it was reached. abs_path is at or under serve_dir here, so
+    # the slice yields the relative segments (empty at the root — no dotfile).
+    if _hidden_segment(abs_path[len(serve_dir):].split(os.sep)):
+        return None, 403
     if not os.path.isfile(abs_path):
         return None, 404
     return abs_path, 200

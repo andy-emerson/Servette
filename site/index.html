@@ -6,10 +6,6 @@
 <title>Servette — The Simple, Secure, Static-Site Server</title>
 <meta name="description" content="Servette is a production nanoserver in a single readable Python file: trusted HTTPS that renews itself, security headers, rate limiting, and a hardened service that survives reboots. No configuration language, and one dependency it installs for you.">
 
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&amp;family=DM+Sans:opsz,wght@9..40,400..600&amp;display=swap">
-
 <style>
 /* Organized in page order: tokens, base, shared patterns, then one block per
    region of the markup below. */
@@ -20,6 +16,12 @@
    logo uses in both themes. */
 
 :root {
+  /* System font stacks — no web fonts, so the front door renders with zero
+     third-party requests, works offline, and needs nothing from a tightened
+     CSP. The SVG diagrams read these same tokens (see the script below). */
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
+
   --bg:       #faf9f7;
   --bg-2:     #f1efeb;
   --surface:  #ffffff;
@@ -61,7 +63,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: "DM Sans", system-ui, sans-serif;
+  font-family: var(--sans);
   -webkit-font-smoothing: antialiased;
   text-wrap: pretty;
 }
@@ -84,13 +86,13 @@ a { color: var(--green); text-decoration: none; }
 a:hover { color: var(--text); }
 
 h1, h2, h3 {
-  font-family: "DM Mono", ui-monospace, monospace;
+  font-family: var(--mono);
   font-weight: 500;
   letter-spacing: -0.02em;
   margin: 0;
 }
 
-code, pre, kbd { font-family: "DM Mono", ui-monospace, monospace; }
+code, pre, kbd { font-family: var(--mono); }
 
 pre { min-width: 0; }
 
@@ -130,7 +132,7 @@ pre { min-width: 0; }
 
 .eyebrow {
   margin: 0 0 10px;
-  font: 500 11.5px/1 "DM Mono", monospace;
+  font: 500 11.5px/1 var(--mono);
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--green);
@@ -163,7 +165,7 @@ pre { min-width: 0; }
 
 .btn {
   display: inline-block;
-  font-family: "DM Mono", monospace;
+  font-family: var(--mono);
   font-weight: 500;
   border-radius: 8px;
   cursor: pointer;
@@ -200,14 +202,14 @@ pre { min-width: 0; }
 .dtable tbody tr:last-child th, .dtable tbody tr:last-child td { border-bottom: none; }
 
 .dtable thead th {
-  font: 500 11.5px/1.4 "DM Mono", monospace;
+  font: 500 11.5px/1.4 var(--mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
 }
 
 .dtable tbody th {
-  font: 500 14.5px/1.5 "DM Mono", monospace;
+  font: 500 14.5px/1.5 var(--mono);
   color: var(--text);
   white-space: nowrap;
 }
@@ -220,7 +222,7 @@ pre { min-width: 0; }
    page and the two SVGs in assets/. */
 
 .logo {
-  font-family: "DM Mono", monospace;
+  font-family: var(--mono);
   font-weight: 500;
   letter-spacing: 0;
   line-height: 1;
@@ -264,7 +266,7 @@ pre { min-width: 0; }
 .tabs { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto; }
 
 .tab {
-  font-family: "DM Mono", monospace;
+  font-family: var(--mono);
   font-size: 13.5px;
   font-weight: 500;
   padding: 8px 14px;
@@ -324,7 +326,7 @@ pre { min-width: 0; }
   border: 1px solid transparent;
   color: var(--muted);
   cursor: pointer;
-  font: 400 13px/1 "DM Mono", monospace;
+  font: 400 13px/1 var(--mono);
   user-select: none;
 }
 
@@ -368,7 +370,7 @@ pre { min-width: 0; }
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--surface);
-  font: 500 11.5px/1.5 "DM Mono", monospace;
+  font: 500 11.5px/1.5 var(--mono);
   letter-spacing: 0.06em;
   color: var(--muted);
 }
@@ -397,7 +399,7 @@ pre { min-width: 0; }
 .copy-btn {
   margin-left: auto;
   flex: none;
-  font: 500 11.5px/1 "DM Mono", monospace;
+  font: 500 11.5px/1 var(--mono);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
@@ -423,7 +425,7 @@ pre { min-width: 0; }
   gap: 9px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
-  font: 400 12px/1 "DM Mono", monospace;
+  font: 400 12px/1 var(--mono);
   color: var(--muted);
 }
 
@@ -453,7 +455,7 @@ pre { min-width: 0; }
 
 .stat__n {
   margin: 0 0 6px;
-  font: 500 clamp(26px, 3.4vw, 34px)/1 "DM Mono", monospace;
+  font: 500 clamp(26px, 3.4vw, 34px)/1 var(--mono);
   letter-spacing: -0.02em;
   color: var(--green-2);
 }
@@ -492,15 +494,15 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 .ctable tbody tr:last-child th, .ctable tbody tr:last-child td { border-bottom: none; }
 
 .ctable th.ctable__dim {
-  font: 500 11.5px/1.4 "DM Mono", monospace;
+  font: 500 11.5px/1.4 var(--mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
 }
 
-.ctable th.ctable__ours { font: 500 16px/1.3 "DM Mono", monospace; color: var(--green); }
-.ctable th.ctable__peer { font: 500 13.5px/1.3 "DM Sans", sans-serif; color: var(--text-2); }
-.ctable tbody th { font: 400 14.5px/1.5 "DM Sans", sans-serif; color: var(--text); }
+.ctable th.ctable__ours { font: 500 16px/1.3 var(--mono); color: var(--green); }
+.ctable th.ctable__peer { font: 500 13.5px/1.3 var(--sans); color: var(--text-2); }
+.ctable tbody th { font: 400 14.5px/1.5 var(--sans); color: var(--text); }
 .ctable td { color: var(--text-2); }
 .ctable td.ctable__ours { color: var(--text); background: color-mix(in oklab, var(--green) 7%, transparent); }
 
@@ -558,7 +560,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
   margin: 0;
   padding: 13px 18px;
   border-bottom: 1px solid var(--border);
-  font: 500 11.5px/1 "DM Mono", monospace;
+  font: 500 11.5px/1 var(--mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
@@ -567,7 +569,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 .cmdlist { margin: 0; padding: 8px 18px 14px; font-size: 13.5px; }
 
 .cmdlist div { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 7px 0; line-height: 1.5; }
-.cmdlist dt { flex: 0 0 auto; min-width: 9.5em; font-family: "DM Mono", monospace; color: var(--green); }
+.cmdlist dt { flex: 0 0 auto; min-width: 9.5em; font-family: var(--mono); color: var(--green); }
 .cmdlist dd { margin: 0; flex: 1 1 12em; color: var(--text-2); }
 
 /* ── Code block ────────────────────────────────────────────────── */
@@ -585,7 +587,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
   margin: 0;
   padding: 13px 18px;
   border-bottom: 1px solid var(--border);
-  font: 500 11.5px/1 "DM Mono", monospace;
+  font: 500 11.5px/1 var(--mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
@@ -659,7 +661,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 
 .loc-table caption {
   text-align: left;
-  font: 500 11.5px/1 "DM Mono", monospace;
+  font: 500 11.5px/1 var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
@@ -669,7 +671,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 .loc-table th, .loc-table td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 
 .loc-table thead th {
-  font: 500 11px/1 "DM Mono", monospace;
+  font: 500 11px/1 var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--muted);
@@ -680,7 +682,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 .loc-table td.num, .loc-table th.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
-  font-family: "DM Mono", monospace;
+  font-family: var(--mono);
 }
 
 .loc-table tr.total td, .loc-table tr.total th { font-weight: 600; border-bottom: none; border-top: 2px solid var(--border); }
@@ -724,7 +726,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 
 .footer-label {
   margin: 0 0 12px;
-  font: 500 11.5px/1 "DM Mono", monospace;
+  font: 500 11.5px/1 var(--mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
@@ -734,7 +736,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 .footer-links a { color: var(--text-2); }
 .footer-links button {
   font: inherit;
-  font-family: "DM Sans", sans-serif;
+  font-family: var(--sans);
   text-align: left;
   padding: 0;
   border: none;
@@ -782,7 +784,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 .license-dialog__head h2 { font-size: 16px; }
 
 .license-dialog__close {
-  font: 500 12px/1 "DM Mono", monospace;
+  font: 500 12px/1 var(--mono);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
@@ -1703,6 +1705,13 @@ SOFTWARE.</pre>
   var NS = "http://www.w3.org/2000/svg";
   var root = document.documentElement;
 
+  /* The SVG diagrams set font-family as a presentation attribute, where a
+     CSS var() would not resolve — so read the resolved stacks once and reuse
+     the literal strings. One source of truth: the --sans/--mono tokens. */
+  var _cs = getComputedStyle(root);
+  var SANS = _cs.getPropertyValue("--sans").trim();
+  var MONO = _cs.getPropertyValue("--mono").trim();
+
   function el(tag, attrs, parent) {
     var e = document.createElementNS(NS, tag);
     for (var k in attrs) e.setAttribute(k, attrs[k]);
@@ -1912,7 +1921,7 @@ SOFTWARE.</pre>
 
     /* Axis titles, each with the direction that means "more". */
     var axisFont = {
-      "font-family": "'DM Mono', ui-monospace, monospace", "font-size": 12,
+      "font-family": MONO, "font-size": 12,
       "letter-spacing": "0.08em", fill: "var(--muted)",
     };
     var t = el("text", Object.assign({ x: (x0 + x1) / 2, y: H - 18, "text-anchor": "middle" }, axisFont), svg);
@@ -1926,7 +1935,7 @@ SOFTWARE.</pre>
     QUADRANTS.forEach(function (q) {
       var qt = el("text", {
         x: px(q.x), y: py(q.y), "text-anchor": q.anchor,
-        "font-family": "'DM Sans', system-ui, sans-serif", "font-size": 13,
+        "font-family": SANS, "font-size": 13,
         "font-style": "italic", fill: "var(--muted)",
       }, svg);
       qt.textContent = q.label;
@@ -1946,7 +1955,7 @@ SOFTWARE.</pre>
       var label = el("text", {
         x: cx + (right ? 15 : -15), y: cy + 4,
         "text-anchor": right ? "start" : "end",
-        "font-family": p.ours ? "'DM Mono', ui-monospace, monospace" : "'DM Sans', system-ui, sans-serif",
+        "font-family": p.ours ? MONO : SANS,
         "font-size": p.ours ? 15 : 13.5,
         "font-weight": p.ours ? 500 : 400,
         fill: p.ours ? "var(--green)" : "var(--text-2)",
@@ -2066,7 +2075,7 @@ SOFTWARE.</pre>
     var nodeLayer = el("g", {}, svg);
     var satLayer = el("g", {}, svg);
     var labelLayer = el("g", {
-      "font-family": "'DM Mono', ui-monospace, monospace",
+      "font-family": MONO,
       "font-weight": "500", "font-size": "22",
     }, svg);
 
@@ -2085,7 +2094,7 @@ SOFTWARE.</pre>
     GROUPS.forEach(function (g) {
       g.nodes.forEach(function (id) {
         var text = el("text", {
-          "font-family": "'DM Sans', system-ui, sans-serif", "font-size": 12.5,
+          "font-family": SANS, "font-size": 12.5,
         }, measureLayer);
         LABELS[id].split("\n").forEach(function (line, i) {
           el("tspan", { x: 0, dy: i === 0 ? 0 : LINE_HEIGHT }, text).textContent = line;
@@ -2144,7 +2153,7 @@ SOFTWARE.</pre>
         }, group);
         var text = el("text", {
           x: s.x, y: s.y, "text-anchor": "middle", "dominant-baseline": "middle",
-          fill: "var(--dg-ink)", "font-family": "'DM Sans', system-ui, sans-serif",
+          fill: "var(--dg-ink)", "font-family": SANS,
           "font-size": 12.5,
         }, group);
         var lines = LABELS[id].split("\n");
@@ -2164,7 +2173,7 @@ SOFTWARE.</pre>
       }, satLayer);
       el("text", {
         x: x, y: y, "text-anchor": "middle", "dominant-baseline": "middle",
-        fill: "var(--dg-ink)", "font-family": "'DM Mono', ui-monospace, monospace",
+        fill: "var(--dg-ink)", "font-family": MONO,
         "font-size": 12.5,
       }, satLayer).textContent = sat;
       shape[sat] = { x: x, y: y, r: SAT_R };

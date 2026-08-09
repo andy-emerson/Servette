@@ -2081,6 +2081,54 @@ def run_server_tests(s, serve_dir):
     s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
+    section("Concurrent scrypt hashing is bounded (#49)")
+
+    # The per-IP limiter above cannot bound concurrency across IPs: many distinct
+    # sources each get a first hash before their own limiter engages. _SCRYPT_SLOTS
+    # caps how many scrypt verifications run at once; excess callers block briefly
+    # rather than fail. Wrap hashlib.scrypt to measure true concurrency under a
+    # 12-thread burst — it must never exceed the semaphore's 4, and every
+    # legitimate login must still succeed.
+    ph, psalt   = s._hash_password("hunter2")
+    real_scrypt = s.hashlib.scrypt
+    conc  = {"cur": 0, "max": 0}
+    clock = threading.Lock()
+
+    def slow_scrypt(*a, **kw):
+        with clock:
+            conc["cur"] += 1
+            conc["max"]  = max(conc["max"], conc["cur"])
+        time.sleep(0.05)   # hold the permit long enough for the burst to pile up
+        try:
+            return real_scrypt(*a, **kw)
+        finally:
+            with clock:
+                conc["cur"] -= 1
+
+    s.hashlib.scrypt = slow_scrypt
+    try:
+        results = []
+        rlock   = threading.Lock()
+
+        def attempt():
+            ok = s._check_password("hunter2", ph, psalt)
+            with rlock:
+                results.append(ok)
+
+        burst = [threading.Thread(target=attempt) for _ in range(12)]
+        for t in burst:
+            t.start()
+        for t in burst:
+            t.join()
+        check("A 12-thread burst never runs more than 4 hashes at once",
+              conc["max"] <= s._SCRYPT_MAX_CONCURRENT)
+        check("The semaphore admits real concurrency (max observed ≥ 2)",
+              conc["max"] >= 2)
+        check("All 12 legitimate logins succeed under load",
+              len(results) == 12 and all(results))
+    finally:
+        s.hashlib.scrypt = real_scrypt
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CERT TESTS

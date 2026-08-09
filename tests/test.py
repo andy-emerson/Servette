@@ -582,6 +582,25 @@ serve_dir = "b"
     check("/.well-known is exempt (absent file → 404, not 403)",
           path is None and status == 404)
 
+    # #51: the dotfile rule applies to the *resolved* target too, so a
+    # plain-named symlink inside serve_dir cannot be used to reach a hidden
+    # file. Build a real .git/config and a symlink to it whose own name passes
+    # the request-path check; before the resolved-path check this served the
+    # file (name passes, realpath stays within serve_dir).
+    _sd = os.path.realpath(s.config.sites[0].serve_dir)
+    os.makedirs(os.path.join(_sd, ".git"), exist_ok=True)
+    with open(os.path.join(_sd, ".git", "config"), "w") as f:
+        f.write("[core]\n")
+    os.symlink(os.path.join(_sd, ".git", "config"), os.path.join(_sd, "gitlink"))
+    path, status = s._resolve_request_path("/gitlink", s.config.sites[0].serve_dir)
+    check("Symlink to a hidden target → 403 (#51)", path is None and status == 403)
+    # Targeted, not blunt: a plain-named symlink to a non-hidden target still
+    # resolves, so ordinary symlinks inside serve_dir keep working.
+    os.symlink(os.path.join(_sd, "style.css"), os.path.join(_sd, "alias.css"))
+    path, status = s._resolve_request_path("/alias.css", s.config.sites[0].serve_dir)
+    check("Symlink to a non-hidden target still resolves (200)",
+          path is not None and status == 200)
+
     section("_serve_dir_exposes_secrets (#45)")
 
     _sbase = os.path.realpath(s.BASE_DIR)

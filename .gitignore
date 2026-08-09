@@ -5,6 +5,9 @@ servette.toml
 *.pem
 *.sig
 
+# Signed release assets staged by src/release.py
+dist/
+
 # Log files
 *.log
 

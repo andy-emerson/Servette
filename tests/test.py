@@ -676,6 +676,91 @@ serve_dir = "b"
     prot2  = _json.loads(unb64(_json.loads(c._sign("https://acme.example/a", None))["protected"]))
     check("kid replaces jwk once account known", "kid" in prot2 and "jwk" not in prot2)
 
+    section("release.py: signs matching artifacts, refuses everything else")
+
+    # Drive src/release.py's prepare() against a miniature fixture repo whose
+    # pinned public key is a test keypair's, so the happy path can actually sign.
+    import importlib.util
+    src_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+    spec = importlib.util.spec_from_file_location("release", os.path.join(src_dir, "release.py"))
+    release = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(release)
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as _EdPriv
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding as _Enc, PublicFormat as _PubF, PrivateFormat as _PrivF, NoEncryption as _NoEnc)
+    rkey     = _EdPriv.generate()
+    rpub_hex = rkey.public_key().public_bytes(_Enc.Raw, _PubF.Raw).hex()
+
+    fix = tempfile.mkdtemp()
+    os.makedirs(os.path.join(fix, "src"))
+    os.makedirs(os.path.join(fix, "site", "demo"))
+    fence = "```python"
+    init_md = (f"{fence}\n__version__ = \"9.9.9\"\n"
+               f"_SIGNING_PUBLIC_KEY = \"{rpub_hex}\"\n```\n")
+    with open(os.path.join(fix, "src", "INIT.md"), "w") as f:
+        f.write(init_md)
+    for name in ("SERVER.md", "SYSTEM.md", "SHELL.md", "MAIN.md"):
+        with open(os.path.join(fix, "src", name), "w") as f:
+            f.write(f"{fence}\n```\n")
+    import build as _build_mod
+    with open(os.path.join(fix, "servette.py"), "w") as f:
+        f.write(_build_mod.build(os.path.join(fix, "src")))
+    with open(os.path.join(fix, "site", "demo", "index.html"), "wb") as f:
+        f.write(b"<!doctype html><!-- servette:demo fixture -->page")
+    key_pem = os.path.join(fix, "key.pem")
+    with open(key_pem, "wb") as f:
+        f.write(rkey.private_bytes(_Enc.PEM, _PrivF.PKCS8, _NoEnc()))
+    out = os.path.join(fix, "dist")
+
+    version = release.prepare(fix, key_pem, out)
+    check("prepare returns the fixture version", version == "9.9.9")
+    check("dist holds all four assets",
+          all(os.path.isfile(os.path.join(out, n)) for n in
+              ("servette.py", "servette.py.sig", "demo.html", "demo.html.sig")))
+    sig_ok = True
+    try:
+        for n in ("servette.py", "demo.html"):
+            rkey.public_key().verify(open(os.path.join(out, n + ".sig"), "rb").read(),
+                                     open(os.path.join(out, n), "rb").read())
+    except Exception:
+        sig_ok = False
+    check("Both signatures verify against the pinned key", sig_ok)
+
+    with open(os.path.join(fix, "servette.py"), "a") as f:
+        f.write("# drift\n")
+    try:
+        release.prepare(fix, key_pem, out)
+        refused = ""
+    except SystemExit as e:
+        refused = str(e)
+    check("Drifted servette.py is refused", "drifted" in refused)
+    with open(os.path.join(fix, "servette.py"), "w") as f:
+        f.write(_build_mod.build(os.path.join(fix, "src")))
+
+    wrong_pem = os.path.join(fix, "wrong.pem")
+    with open(wrong_pem, "wb") as f:
+        f.write(_EdPriv.generate().private_bytes(_Enc.PEM, _PrivF.PKCS8, _NoEnc()))
+    try:
+        release.prepare(fix, wrong_pem, out)
+        refused = ""
+    except SystemExit as e:
+        refused = str(e)
+    check("A key that doesn't match the pinned public key is refused",
+          "does not match" in refused)
+
+    with open(os.path.join(fix, "site", "demo", "index.html"), "wb") as f:
+        f.write(b"<!doctype html>no marker")
+    try:
+        release.prepare(fix, key_pem, out)
+        refused = ""
+    except SystemExit as e:
+        refused = str(e)
+    check("A marker-less demo is refused", "marker" in refused)
+    shutil.rmtree(fix, ignore_errors=True)
+
 
 def run_dispatch_tests(s):
     # Covers two seams the live-server tests can't reach:

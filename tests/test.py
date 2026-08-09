@@ -858,6 +858,169 @@ def run_dispatch_tests(s):
             setattr(s, n, v)
         shutil.rmtree(rdir, ignore_errors=True)
 
+    section("Demo page: placeholder marker rules")
+
+    ddir   = tempfile.mkdtemp()
+    dindex = os.path.join(ddir, "index.html")
+    marked = b"<!doctype html>\n<!-- servette:demo test placeholder -->\nhello"
+    check("Missing index.html is not a placeholder", not s._demo_is_placeholder(dindex))
+    with open(dindex, "wb") as f:
+        f.write(b"<!doctype html>my own site")
+    check("Operator page without marker is not a placeholder", not s._demo_is_placeholder(dindex))
+    check("Seed refuses to overwrite an operator page",
+          not s._seed_demo(ddir, page=marked))
+    check("Operator page untouched after refused seed",
+          open(dindex, "rb").read() == b"<!doctype html>my own site")
+    os.remove(dindex)
+    check("Seed writes into an empty folder", s._seed_demo(ddir, page=marked))
+    check("Seeded file matches the page bytes", open(dindex, "rb").read() == marked)
+    check("Seeded file is recognized as the placeholder", s._demo_is_placeholder(dindex))
+    check("Seed replaces a marked placeholder",
+          s._seed_demo(ddir, page=marked.replace(b"hello", b"v2")))
+    check("Replaced placeholder carries the new content",
+          b"v2" in open(dindex, "rb").read())
+    shutil.rmtree(ddir, ignore_errors=True)
+
+    section("Demo page: fetch verifies the release signature")
+
+    # Drive _fetch_demo against canned API/asset responses signed with a test
+    # keypair, the pinned public key patched to match — same seam the real
+    # release uses, no network.
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    dpriv    = Ed25519PrivateKey.generate()
+    dpub_hex = dpriv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+    dpage    = b"<!doctype html>\n<!-- servette:demo signed test page -->\nok"
+    dsig     = dpriv.sign(dpage)
+
+    class _FakeResp:
+        def __init__(self, data): self._d = data
+        def read(self, n=-1):     return self._d
+        def __enter__(self):      return self
+        def __exit__(self, *a):   return False
+
+    def _fake_urlopen_for(api_json, page_bytes, sig_bytes):
+        def fake(url, timeout=None, **kw):
+            u = url if isinstance(url, str) else url.full_url
+            if u == s.RELEASES_API_URL:
+                return _FakeResp(json.dumps(api_json).encode())
+            if u.endswith("demo.html"):
+                return _FakeResp(page_bytes)
+            if u.endswith("demo.html.sig"):
+                return _FakeResp(sig_bytes)
+            raise urllib.error.URLError("unexpected url " + u)
+        return fake
+
+    demo_api = {"tag_name": "v9.9.9", "assets": [
+        {"name": "demo.html",     "browser_download_url": "https://github.com/x/demo.html"},
+        {"name": "demo.html.sig", "browser_download_url": "https://github.com/x/demo.html.sig"},
+    ]}
+    saved_urlopen = s.urllib.request.urlopen
+    saved_pubkey  = s._SIGNING_PUBLIC_KEY
+    try:
+        s._SIGNING_PUBLIC_KEY = dpub_hex
+
+        s.urllib.request.urlopen = _fake_urlopen_for(demo_api, dpage, dsig)
+        with contextlib.redirect_stdout(io.StringIO()):
+            got = s._fetch_demo()
+        check("Correctly signed demo asset is returned", got == dpage)
+
+        s.urllib.request.urlopen = _fake_urlopen_for(demo_api, dpage, dpriv.sign(b"other"))
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            got = s._fetch_demo()
+        check("Tampered signature is refused", got is None and "signature" in buf.getvalue())
+
+        s.urllib.request.urlopen = _fake_urlopen_for({"tag_name": "v9.9.9", "assets": []}, dpage, dsig)
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            got = s._fetch_demo()
+        check("Release without demo assets degrades with a message",
+              got is None and "no demo.html" in buf.getvalue())
+
+        off_host = {"tag_name": "v9.9.9", "assets": [
+            {"name": "demo.html",     "browser_download_url": "https://evil.example/demo.html"},
+            {"name": "demo.html.sig", "browser_download_url": "https://evil.example/demo.html.sig"},
+        ]}
+        s.urllib.request.urlopen = _fake_urlopen_for(off_host, dpage, dsig)
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            got = s._fetch_demo()
+        check("Asset URL off github.com is refused", got is None and "github.com" in buf.getvalue())
+
+        unmarked     = b"<!doctype html>no marker here"
+        s.urllib.request.urlopen = _fake_urlopen_for(demo_api, unmarked, dpriv.sign(unmarked))
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            got = s._fetch_demo()
+        check("Validly signed page without the marker is refused",
+              got is None and "marker" in buf.getvalue())
+
+        section("Demo page: setup step seeds an empty serve_dir")
+
+        # Drive cmd_setup with cert/password/network stubbed: Step 1 must create
+        # the missing folder (inside BASE_DIR) and install the fetched demo.
+        setup_dir = os.path.join(s.BASE_DIR, "t2-setup-" + os.urandom(3).hex())
+        saved_setup = {n: getattr(s, n) for n in
+                       ("_config_cert", "_config_username", "_config_password", "_prompt")}
+        saved_serve_dir = s.config.sites[0].serve_dir
+        try:
+            s.urllib.request.urlopen = _fake_urlopen_for(demo_api, dpage, dsig)  # ipify raises → fallback
+            s.config.sites[0].serve_dir = setup_dir
+            s._config_cert     = lambda site: None
+            s._config_username = lambda site: None
+            s._config_password = lambda site: None
+            prompts = iter([True, False])            # fetch demo? yes; ready to start? no
+            s._prompt = lambda *a, **k: next(prompts, False)
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                s.cmd_setup()
+            check("Setup creates the missing serve_dir", os.path.isdir(setup_dir))
+            check("Setup installs the demo as index.html",
+                  open(os.path.join(setup_dir, "index.html"), "rb").read() == dpage)
+            check("Setup says what it installed", "installed as index.html" in buf.getvalue())
+
+            # Second run: the folder now has a marked placeholder — setup reports
+            # serving it without prompting to fetch (the file exists).
+            prompts2 = iter([False])                  # ready to start? no
+            s._prompt = lambda *a, **k: next(prompts2, False)
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                s.cmd_setup()
+            check("Setup with content in place reports serving it", "Serving" in buf.getvalue())
+        finally:
+            for n, v in saved_setup.items():
+                setattr(s, n, v)
+            s.config.sites[0].serve_dir = saved_serve_dir
+            shutil.rmtree(setup_dir, ignore_errors=True)
+
+        section("Demo page: post-update refreshes only marked placeholders")
+
+        pu_marked   = tempfile.mkdtemp(dir=s.BASE_DIR)
+        pu_owned    = tempfile.mkdtemp(dir=s.BASE_DIR)
+        with open(os.path.join(pu_marked, "index.html"), "wb") as f:
+            f.write(b"<!-- servette:demo old placeholder -->old")
+        with open(os.path.join(pu_owned, "index.html"), "wb") as f:
+            f.write(b"operator content")
+        saved_pu    = {n: getattr(s, n) for n in ("_service_file_exists",)}
+        saved_sites = [(site, site.serve_dir) for site in s.config.sites]
+        try:
+            s._service_file_exists = lambda: False
+            s.config.sites[0].serve_dir = pu_marked
+            two_sites = len(s.config.sites) > 1
+            if two_sites:
+                s.config.sites[1].serve_dir = pu_owned
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._apply_post_update()
+            check("Post-update refreshes the marked placeholder",
+                  open(os.path.join(pu_marked, "index.html"), "rb").read() == dpage)
+            check("Post-update leaves the operator page alone",
+                  open(os.path.join(pu_owned, "index.html"), "rb").read() == b"operator content")
+        finally:
+            for n, v in saved_pu.items():
+                setattr(s, n, v)
+            for site, sd in saved_sites:
+                site.serve_dir = sd
+            shutil.rmtree(pu_marked, ignore_errors=True)
+            shutil.rmtree(pu_owned, ignore_errors=True)
+    finally:
+        s.urllib.request.urlopen = saved_urlopen
+        s._SIGNING_PUBLIC_KEY    = saved_pubkey
+
     section("Site management (add/remove/select)")
 
     saved_sites7  = list(s.config.sites)  # a copy: add-site/remove-site mutate the
@@ -887,8 +1050,8 @@ def run_dispatch_tests(s):
 
         saved_input = builtins.input
         try:
-            # add-site: folder, domain (blank → self-signed), username (blank).
-            script = iter([site_test_dir, "", ""])
+            # add-site: folder, demo offer (n), domain (blank → self-signed), username (blank).
+            script = iter([site_test_dir, "n", "", ""])
             builtins.input = lambda prompt="": next(script, "")
             with contextlib.redirect_stdout(io.StringIO()) as buf:
                 s._config_add_site()
@@ -983,7 +1146,7 @@ def run_dispatch_tests(s):
         saved_input2 = builtins.input
         try:
             # Two self-signed sites added back to back must not collide.
-            script = iter([dirs2[0], "", "", dirs2[1], "", ""])
+            script = iter([dirs2[0], "n", "", "", dirs2[1], "n", "", ""])
             builtins.input = lambda prompt="": next(script, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -1009,7 +1172,7 @@ def run_dispatch_tests(s):
             check("Survivor kept its own cert file across the removal",
                   s.config.sites[1].cert_file == survivor_cert)
 
-            script2 = iter([dirs2[2], "", ""])
+            script2 = iter([dirs2[2], "n", "", ""])
             builtins.input = lambda prompt="": next(script2, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -1031,7 +1194,7 @@ def run_dispatch_tests(s):
         dir6 = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input3 = builtins.input
         try:
-            script3 = iter([dir6, "domain-test.example.com", ""])
+            script3 = iter([dir6, "n", "domain-test.example.com", ""])
             builtins.input = lambda prompt="": next(script3, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -1060,7 +1223,7 @@ def run_dispatch_tests(s):
         dir6c = tempfile.mkdtemp(dir=s.BASE_DIR)
         saved_input3c = builtins.input
         try:
-            script3c = iter([dir6c, "issued.example.com", ""])
+            script3c = iter([dir6c, "n", "issued.example.com", ""])
             builtins.input = lambda prompt="": next(script3c, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -1084,7 +1247,7 @@ def run_dispatch_tests(s):
         dir6b = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input3b = builtins.input
         try:
-            script3b = iter([dir6b, "unreachable.example.com", ""])
+            script3b = iter([dir6b, "n", "unreachable.example.com", ""])
             builtins.input = lambda prompt="": next(script3b, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -1106,7 +1269,7 @@ def run_dispatch_tests(s):
         dir7 = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input4 = builtins.input
         try:
-            script4 = iter([dir7, "taken.example.com", ""])
+            script4 = iter([dir7, "n", "taken.example.com", ""])
             builtins.input = lambda prompt="": next(script4, "")
             with contextlib.redirect_stdout(io.StringIO()) as buf:
                 s._config_add_site()

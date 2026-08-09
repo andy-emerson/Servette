@@ -32,9 +32,22 @@ def _resolve(path):
 > scrypt is memory-hard: each guess must hold that much RAM, denying an attacker
 > who steals the hash the cheap GPU parallelism that PBKDF2 (CPU-hard) allows.
 > ~16 MB and ~30 ms per check stays comfortable even on a Raspberry Pi.
+>
+> That same memory-hardness is a lever pointed back at the server: the per-IP
+> auth-fail limit bounds one address, but many distinct IPs each get a first
+> hash before their own limiter engages, and concurrent requests are otherwise
+> bounded only by `MAX_CONNECTIONS` — up to ~128 × 16 MB ≈ 2 GB transient, an
+> OOM on the 512 MB-class hosts Servette targets. `_SCRYPT_SLOTS` bounds the
+> spike: at most 4 verification hashes run at once (≤ 64 MB); requests past
+> that *block* rather than fail. The worst case is arithmetic, not luck — ~40
+> hashes/s drain against at most `MAX_CONNECTIONS` waiters is a ~3 s ceiling —
+> so an attack degrades login to slow, never to unavailable (a shed-with-503
+> design would hand attackers a deterministic denial of every legitimate login).
 
 ```python
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1
+_SCRYPT_MAX_CONCURRENT          = 4
+_SCRYPT_SLOTS                   = threading.BoundedSemaphore(_SCRYPT_MAX_CONCURRENT)
 
 
 def _hash_password(password):
@@ -46,13 +59,18 @@ def _hash_password(password):
 
 
 def _check_password(submitted, stored_hash, stored_salt):
-    """Return True if submitted matches the stored hash."""
+    """Return True if submitted matches the stored hash.
+
+    This is the request-time hash, so it acquires a _SCRYPT_SLOTS permit —
+    blocking, deliberately: see the note above. _hash_password stays outside
+    the semaphore; it runs only from the single-threaded interactive shell."""
     if not stored_hash or not stored_salt:
         return False
     try:
         salt = bytes.fromhex(stored_salt)
-        key  = hashlib.scrypt(submitted.encode("utf-8"), salt=salt,
-                              n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
+        with _SCRYPT_SLOTS:
+            key = hashlib.scrypt(submitted.encode("utf-8"), salt=salt,
+                                 n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
         return hmac.compare_digest(key.hex(), stored_hash)
     except Exception:
         return False

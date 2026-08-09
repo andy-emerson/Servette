@@ -46,13 +46,13 @@ Prefer understatement: `_production_issues()` is the model — it lists what is 
 
 ## How it works
 
-Servette is a single file (`servette.py`, ~3,770 lines) with three sections, each readable on its own, followed by a short `MAIN` block that instantiates the `Config` singleton and dispatches to the shell or `--serve`. Settings persist to `servette.toml` beside it. That single file is generated from the Markdown sources under `src/` — you edit those, not it (see [Building](#building)).
+Servette is a single file (`servette.py`, ~3,820 lines) with three sections, each readable on its own, followed by a short `MAIN` block that instantiates the `Config` singleton and dispatches to the shell or `--serve`. Settings persist to `servette.toml` beside it. That single file is generated from the Markdown sources under `src/` — you edit those, not it (see [Building](#building)).
 
 | Section | Lines | Responsibility |
 | - | - | - |
-| **Server** | ~1,090 | every incoming request: config, rate limiting, file cache, site selection, the request handler and the HTTP servers |
-| **System** | ~1,120 | the environment: bootstrap, server lifecycle, certificates (incl. the ACME client), systemd and host provisioning |
-| **Shell** | ~1,460 | the interactive terminal interface |
+| **Server** | ~1,150 | every incoming request: config, rate limiting, file cache, site selection, the request handler and the HTTP servers |
+| **System** | ~1,140 | the environment: bootstrap, server lifecycle, certificates (incl. the ACME client), systemd and host provisioning |
+| **Shell** | ~1,440 | the interactive terminal interface |
 
 ```mermaid
 graph LR
@@ -110,7 +110,7 @@ graph LR
 
 ### Server
 
-**Config.** A `Config` object reads and writes `servette.toml`; every field has a default. `reload_if_changed()` runs on every incoming request, so edits take effect without a restart. Passwords are hashed with scrypt (memory-hard; N=2¹⁴, r=8, p=1) and never stored in plaintext; plaintext `password` fields in old configs are migrated on first load. The file is written `0o600`.
+**Config.** A `Config` object reads and writes `servette.toml`; every field has a default. `reload_if_changed()` runs on every incoming request, so edits take effect without a restart. An edit that cannot be safely applied — unparseable TOML, or a `serve_dir` that would serve Servette's own config or TLS keys — is refused where the value takes effect: fatal at startup (fail closed), while on the request-path reload the last good configuration stays in force with one logged warning per edit, since a typo must never take the server down mid-flight. Validation happens before any live field mutates, so a refused reload can't leave a half-applied config. Passwords are hashed with scrypt (memory-hard; N=2¹⁴, r=8, p=1) and never stored in plaintext; plaintext `password` fields in old configs are migrated on first load. The file is written `0o600`.
 
 Settings live at exactly one of two levels, with no fallback lookup between them. **Host-level** fields sit on `Config` itself and apply to the whole box — port, rate limits, cache, TLS minimum and ciphers, security headers, ACME email. **Per-site** fields sit on a `Site` object, one per `[[site]]` table in the file: `domain`, `serve_dir`, `cert_file`/`key_file`, `username`/`password_hash`/`password_salt`, and `publish_url`/`publish_key`. A field appearing at both levels would mean a lookup order, and a lookup order is a thing to get wrong; there is exactly one place each value can be.
 

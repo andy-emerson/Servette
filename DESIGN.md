@@ -46,13 +46,13 @@ Prefer understatement: `_production_issues()` is the model — it lists what is 
 
 ## How it works
 
-Servette is a single file (`servette.py`, ~3,550 lines) with three sections, each readable on its own, followed by a short `MAIN` block that instantiates the `Config` singleton and dispatches to the shell or `--serve`. Settings persist to `servette.toml` beside it. That single file is generated from the Markdown sources under `src/` — you edit those, not it (see [Building](#building)).
+Servette is a single file (`servette.py`, ~3,770 lines) with three sections, each readable on its own, followed by a short `MAIN` block that instantiates the `Config` singleton and dispatches to the shell or `--serve`. Settings persist to `servette.toml` beside it. That single file is generated from the Markdown sources under `src/` — you edit those, not it (see [Building](#building)).
 
 | Section | Lines | Responsibility |
 | - | - | - |
-| **Server** | ~1,010 | every incoming request: config, rate limiting, file cache, site selection, the request handler and the HTTP servers |
+| **Server** | ~1,090 | every incoming request: config, rate limiting, file cache, site selection, the request handler and the HTTP servers |
 | **System** | ~1,120 | the environment: bootstrap, server lifecycle, certificates (incl. the ACME client), systemd and host provisioning |
-| **Shell** | ~1,330 | the interactive terminal interface |
+| **Shell** | ~1,460 | the interactive terminal interface |
 
 ```mermaid
 graph LR
@@ -148,7 +148,9 @@ Install also provisions two host-level defenses, born of a production post-morte
 
 **Self-update (`cmd_update` / `cmd_restore`).** Updates come from signed GitHub Releases, not raw `main`. `cmd_update` fetches the latest release's `servette.py` and `servette.py.sig`, verifies the signature against the pinned `_SIGNING_PUBLIC_KEY`, declines a release older than the running version (`update` only moves forward — `restore` is the deliberate way back), validates syntax, and swaps the file in atomically. Before swapping it copies the current file to `servette.py.bak` — a single-shot backup that `cmd_restore` rolls back to and consumes (one backup is ever kept). The signature is the trust anchor, and it is why distribution goes through releases at all: a release is verifiable, whereas `main` is whatever is currently there, signed by no one. Settings in `servette.toml` are never touched by an update.
 
-Unless a session-mode server is running in this very process (re-executing would kill it silently, so that case prints instructions instead), `cmd_update` then re-execs into the freshly swapped file via `os.execv` with a `--post-update` flag, so the shell is never left running stale code in memory. The fresh process's first action is `_apply_post_update()`: if the service was already enabled, it silently refreshes the unit files via `_write_unit_files()` — the same helper `cmd_enable` calls — and restarts the service, so a release that changes what the unit should contain (this release added the network watchdog timer) reaches an already-enabled host without a separate manual `enable`. `cmd_restore` does not re-exec; it keeps the existing prompt-based `_offer_restart`, since a downgrade changing the unit's shape deserves the operator's attention rather than a silent refresh.
+Unless a session-mode server is running in this very process (re-executing would kill it silently, so that case prints instructions instead), `cmd_update` then re-execs into the freshly swapped file via `os.execv` with a `--post-update` flag, so the shell is never left running stale code in memory. The fresh process's first action is `_apply_post_update()`: if the service was already enabled, it silently refreshes the unit files via `_write_unit_files()` — the same helper `cmd_enable` calls — and restarts the service, so a release that changes what the unit should contain (this release added the network watchdog timer) reaches an already-enabled host without a separate manual `enable`. It also refreshes any site whose `index.html` is still Servette's marked demo placeholder (below), with one fetch covering every such site. `cmd_restore` does not re-exec; it keeps the existing prompt-based `_offer_restart`, since a downgrade changing the unit's shape deserves the operator's attention rather than a silent refresh.
+
+**Demo page (`_fetch_demo` / `_seed_demo`).** Setup must never finish with nothing to serve: an empty `serve_dir` would 404 on the operator's own domain with no way to tell the server from the content. The demo page is the diagnostic for that moment — it verifies server, certificate, and redirect in the browser before the operator's own files enter the picture — and it arrives by the same trust chain as the code: `demo.html` and `demo.html.sig` are release assets, fetched from github.com only, size-capped before verification against the same pinned `_SIGNING_PUBLIC_KEY` (one trust domain with the code — deliberately not the per-site publish key, so neither key can forge the other's artifacts). `_seed_demo` writes the verified page as the site's `index.html`: directory requests already fall back to `index.html`, so the demo appears at the site root with no change to path resolution, and the operator's own page later replaces it with no cleanup step. The file carries a `servette:demo` marker comment, and that marker is the whole ownership protocol: a marked `index.html` is Servette's placeholder, refreshed on update; an unmarked one is the operator's and is never touched; deleting the marker adopts the page permanently. The rule is visible in the file itself, not hidden in state. A failed fetch degrades with its own message and never fails setup — "could not reach GitHub" is itself useful information.
 
 The release-publishing procedure (a maintainer task, since it needs the private key) is in the release procedure below.
 
@@ -164,7 +166,9 @@ The release-publishing procedure (a maintainer task, since it needs the private 
 
 The interactive REPL shown when running without `--serve`. Dispatches to `cmd_setup`, `cmd_config`, `cmd_enable`/`cmd_disable`, `cmd_start`/`cmd_stop`, `cmd_status`, `cmd_log`, `cmd_update`/`cmd_restore`, `cmd_pull`/`cmd_restore_site`. The `config` sub-shell writes each setting to `servette.toml` immediately. It contains only UI logic and is the only layer that writes to Config interactively.
 
-Commands that act on one site take an optional trailing site index, defaulting to site 0 — the same `[n]` convention as the top-level `log [n]`. That covers `dir`, `cert`, `username`, `password`, and `publish` in the `config` sub-shell, and `pull` and `restore-site` at the top level; `_config_site_arg()` resolves the argument once for all of them and prints its own error on a bad index. `sites` lists what is configured, `add-site` walks through folder, domain, and password for a new one, and `remove-site <n>` drops a site's configuration while leaving its files on disk. A box always keeps at least one site, so `remove-site` refuses to remove the last.
+Commands that act on one site take an optional trailing site index, defaulting to site 0 — the same `[n]` convention as the top-level `log [n]`. That covers `dir`, `cert`, `username`, `password`, and `publish` in the `config` sub-shell, and `pull` and `restore-site` at the top level; `_config_site_arg()` resolves the argument once for all of them and prints its own error on a bad index. `sites` lists what is configured, `add-site` walks through folder, domain, and password for a new one — offering the demo page when the folder has no `index.html`, through the same `_seed_demo` the setup step uses — and `remove-site <n>` drops a site's configuration while leaving its files on disk. A box always keeps at least one site, so `remove-site` refuses to remove the last.
+
+`cmd_setup` runs three steps: the site folder (created if missing — inside `BASE_DIR` only — with the demo offered when no `index.html` exists), the certificate, and the optional password, then offers to enable and start. Setup can no longer finish with nothing to serve; `add-site` makes the same guarantee for every later site.
 
 `add-site` generates a self-signed certificate for the new site *before* asking about a domain, and names it with random bytes rather than the site's list position. Both choices are defensive: a site whose `cert_file` points at a file that was saved to config but never written would make `start_server()`'s pre-flight check refuse to start the whole server — every site — on the next restart; and a position-based name would collide with a surviving site's live certificate after a `remove-site`/`add-site` sequence shifts indices.
 
@@ -208,7 +212,15 @@ python3 src/build.py            # regenerate servette.py from src/
 python3 src/build.py --check    # exit non-zero if servette.py has drifted from src/
 ```
 
-Edit `src/`, run the build, commit both. Never hand-edit `servette.py`: `build.py --check` fails when the two disagree — run it before committing, and it belongs in CI as a required check — and `build.py` refuses to emit a file that does not parse. The split is byte-preserving, so the generated `servette.py` is reviewed and signed as the release artifact exactly as before.
+Edit `src/`, run the build, commit both. Never hand-edit `servette.py`: `build.py --check` fails when the two disagree — run it before committing, and CI runs it as a required check — and `build.py` refuses to emit a file that does not parse. The split is byte-preserving, so the generated `servette.py` is reviewed and signed as the release artifact exactly as before.
+
+### The website (`site/`)
+
+`site/` is the source of the project's own website, and the default `serve_dir` — so a development checkout serves servette.org, which is also its production deployment (the box serving servette.org is a Servette running this repository). Users never receive this folder: a user copies `servette.py` alone, and setup fetches the demo page from the latest signed release.
+
+One principle shapes the layout: **one subdomain ↔ one self-contained `site/<name>/` directory, and every page is a directory holding an `index.html`.** What a page is for is said by its directory, never its file name, so a file's name can't diverge from how it is served. `404.html` at a serve_dir root is the standing exception — that name is the server's own convention for the custom error page. Self-containment is load-bearing, not stylistic: path resolution confines each site to its own `serve_dir` (symlinks out are refused), so a subdirectory served as its own site cannot reach a sibling's assets. Because the subdirectories sit inside the apex `serve_dir`, each property is also reachable as a path — `servette.org/demo/` works even where `demo.servette.org` isn't configured.
+
+`site/demo/index.html` is the demo page's canonical source — the file `release.py` signs, the release attaches as `demo.html`, and the verification workflow byte-matches against the release's commit. The rename happens exactly once, at the release boundary; on an operator's box the page is written back as `index.html`, the name it already has here.
 
 ### Tests
 
@@ -226,20 +238,14 @@ Remote: `git@github.com:andy-emerson/servette.git`. Development happens on one s
 
 ### Releasing (maintainer task)
 
-Servette updates itself from signed GitHub Releases, not from `main` — the signature is the trust anchor (a release is verifiable; `main` is whatever is currently there, signed by no one). A release is the one and only place `__version__` changes. Publishing requires the private signing key, so it is a maintainer task. Versions are date-based, UTC: `0.<yy>.<doy>` — two-digit year and day-of-year (e.g. `0.26.219`).
+Servette updates itself from signed GitHub Releases, not from `main` — the signature is the trust anchor (a release is verifiable; `main` is whatever is currently there, signed by no one). A release is the one and only place `__version__` changes. Publishing requires the private signing key, so it is a maintainer task; the key stays on the maintainer's machine, and CI only ever verifies. Versions are date-based, UTC: `0.<yy>.<doy>` — two-digit year and day-of-year (e.g. `0.26.219`).
+
+A release carries four assets — `servette.py`, `demo.html` (from `site/demo/index.html`), and their `.sig` files — and is published only after verification, so the update channel can never serve an unverified artifact:
 
 1. Bump `__version__` in `servette.py` via its own pull request, and merge it — the only change that ever touches the version.
-2. Sign the merged file with the Ed25519 private key (gitignored):
-   ```bash
-   .servette-env/bin/python3 -c "
-   from cryptography.hazmat.primitives.serialization import load_pem_private_key
-   sig_key = load_pem_private_key(open('servette_signing.pem','rb').read(), password=None)
-   open('servette.py.sig','wb').write(sig_key.sign(open('servette.py','rb').read()))
-   print('Signed.')
-   "
-   ```
-3. Create a GitHub release tagged with the version; the tag must point at the merged bump commit.
-4. Attach `servette.py` and `servette.py.sig` as release assets.
-5. Delete `servette.py.sig` locally — it is per-release, not a permanent artifact.
+2. Sign the assets: `.servette-env/bin/python3 src/release.py` (key defaults to `./servette_signing.pem`). It refuses a drifted `servette.py`, a demo without its `servette:demo` marker, and a key that doesn't match the pinned `_SIGNING_PUBLIC_KEY`, then stages all four assets in the gitignored `dist/`.
+3. **Draft** a GitHub release tagged with the version, the tag pointing at the merged bump commit, and attach the four files from `dist/`. A draft is invisible to users and to `cmd_update`.
+4. Run the **Verify Release** workflow against the draft (workflow_dispatch, passing the tag). It fails loudly when any asset is missing, mis-signed, drifted from the release's commit, out of sync with `src/`, or tagged with the wrong version. The same workflow re-runs automatically on publish, as a backstop for a skipped draft check.
+5. Publish only after the verification is green. Delete `dist/` locally — its contents are per-release, not permanent artifacts.
 
-The pinned public key is `_SIGNING_PUBLIC_KEY` in `servette.py`. The private key (`servette_signing.pem`) and all `*.sig` files are gitignored and must never be committed.
+The pinned public key is `_SIGNING_PUBLIC_KEY` in `servette.py`. The private key (`servette_signing.pem`), all `*.sig` files, and `dist/` are gitignored and must never be committed.

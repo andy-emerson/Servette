@@ -205,7 +205,7 @@ python3 src/build.py            # regenerate servette.py from src/
 python3 src/build.py --check    # exit non-zero if servette.py has drifted from src/
 ```
 
-Edit `src/`, run the build, commit both. Never hand-edit `servette.py`: `build.py --check` (wired into CI) fails a commit where the two disagree, and `build.py` refuses to emit a file that does not parse. The split is byte-preserving, so the generated `servette.py` is reviewed and signed as the release artifact exactly as before.
+Edit `src/`, run the build, commit both. Never hand-edit `servette.py`: `build.py --check` fails when the two disagree — run it before committing, and it belongs in CI as a required check — and `build.py` refuses to emit a file that does not parse. The split is byte-preserving, so the generated `servette.py` is reviewed and signed as the release artifact exactly as before.
 
 ### Tests
 

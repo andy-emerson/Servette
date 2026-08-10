@@ -1635,10 +1635,12 @@ function renderAgentLocal(){
  * catalog: every fetchable file with a description of what it holds), the
  * chat history, and the question. The model then either answers or replies
  * with a FETCH directive naming the documents it needs; the viewer resends
- * the same request with those documents included. The reader never sees the
- * directive — the bubble stays on "Thinking…" through fetch rounds. Which
- * file is open in the Navigator no longer matters to the assistant.
- * Two fetch rounds maximum, and a byte budget on what a round may carry —
+ * the same request with those documents included. Large documents arrive as
+ * excerpts; a MORE directive escalates one to its whole text when the
+ * excerpts fail. The reader never sees either directive — the bubble stays
+ * on "Thinking…" through fetch rounds. Which file is open in the Navigator
+ * no longer matters to the assistant.
+ * Two fetch rounds maximum (a MORE spends one), and a byte budget on a round —
  * the full corpus (~169 KB ≈ 41k tokens) can never fit the 32,768 window,
  * so over-asking degrades to an explicit omission note, never an overflow.
  * No example sentences anywhere (a small model parrots examples as answers);
@@ -1662,13 +1664,14 @@ function sysViewer(){
   }).join('\n');
   return [
     "You are Servette, a production static-site server written in one readable Python file, servette.py. The reader is browsing your source code and asking you questions. The code is you — answer as yourself, in the first person.",
-    "You start with no documents. These exist, and you may request any of them (line counts show what a request costs — reading is slow):",
+    "What you always know about yourself: you build on Python's standard-library http.server and add what the public internet demands — trusted HTTPS with automatic Let's Encrypt renewal, plain HTTP redirected up to HTTPS, security headers on every response, rate limiting, optional Basic Auth, live reload, and a hardened systemd service that survives reboots. You are ~3,000 lines of readable Python with no configuration language: copy the file to a server, run it, follow the interactive setup wizard. You were designed with the Raspberry Pi in mind. Your source is authored as literate markdown documents that compile into servette.py — those documents are what the reader is browsing.",
+    "These documents exist, and you may request any of them (line counts show what a request costs — reading is slow):",
     catalog,
-    "FIRST decide whether the message needs a document. Pure conversation — greetings, thanks, small talk — gets a direct reply with NO request; every fetch makes the reader wait. But ANY question about Servette needs its document: the catalog above only tells you WHICH document to request — it is never itself enough to answer from. If you have not been given the document that holds the answer, request it.",
+    "FIRST decide whether the message needs a document. Conversation and broad questions — greetings, thanks, what you are, what you offer, how you compare — get a direct reply from the background above, with NO request; every fetch makes the reader wait. But a question about HOW you work — specific code, behavior, or configuration — needs its document: the background and catalog are never enough to answer it from. If you have not been given the document that holds the answer, request it.",
     "When you do need documents, reply with ONLY one line and nothing else:",
     "FETCH: name, name",
     "The reader never sees that line; the same question comes back with those documents attached. Request only what the question needs.",
-    "Large documents arrive as EXCERPTS — the sections that match the question, with elisions marked. If the answer should be in the document but the excerpts do not show it, say the excerpts do not show it and suggest where to look — an elided section is never evidence a feature is missing.",
+    "Large documents arrive as EXCERPTS — the sections that match the question, with elisions marked. An elided section is never evidence a feature is missing: if the answer should be in the document but the excerpts do not show it, reply with ONLY one line — MORE: name — and the same question comes back with that whole document. Escalate only when the excerpts truly fail; the whole document is a slow read.",
     "Answer IN YOUR OWN WORDS — never repeat or continue a document's text. Documents are reference, not reply material; the only verbatim quoting allowed is a short ```python fence when specific code settles the question. Ground answers in what you were given; never state what you have not been shown.",
   ].join('\n');
 }
@@ -1690,6 +1693,14 @@ function parseFetch(text){
     })
     .filter(Boolean);
   return names.length ? [...new Set(names)] : null;
+}
+// A MORE directive — the model escalating from excerpts to the whole document
+// — or null. Same own-line rule as FETCH, but it names ONE document.
+function parseMore(text){
+  const m=/^[ \t]*MORE\s*:\s*([^\n]+)/mi.exec(text||'');
+  if(!m) return null;
+  const stem=(m[1].trim().split(/[,\s]+/)[0]||'').replace(/\.md$/i,'').toUpperCase();
+  return FETCHABLE.find(f=>f.replace(/\.md$/,'').toUpperCase()===stem)||null;
 }
 // Which documents does the reader's message NAME? Matched conservatively —
 // the uppercase stem (SYSTEM) or any case with the .md suffix — because bare
@@ -1731,9 +1742,9 @@ function cleanForModel(content){
     .replace(/<img[^>]*>/gi, '')
     .replace(/\n{3,}/g, '\n\n').trim();
 }
-function excerptDoc(name, content, question){
+function excerptDoc(name, content, question, forceWhole){
   content=cleanForModel(content);
-  if(content.length<=EXCERPT_WHOLE_MAX) return { name, content, excerpted:false };
+  if(forceWhole || content.length<=EXCERPT_WHOLE_MAX) return { name, content, excerpted:false };
   const cells=parse(content).cells;
   const terms=questionTerms(question);
   const scores=cells.map(c=>{ const t=c.code.toLowerCase(); return terms.reduce((s,w)=>s+(t.includes(w)?1:0),0); });
@@ -1761,13 +1772,14 @@ function excerptDoc(name, content, question){
   return { name, excerpted:true, content: out.join('\n\n') };
 }
 // Resolve requested names to (possibly excerpted) contents under an overall
-// byte budget: requested order wins, the rest is omitted by name.
-function resolveDocs(names, question){
+// byte budget: requested order wins, the rest is omitted by name. Names in
+// `whole` (a MORE escalation) bypass excerpting and arrive complete.
+function resolveDocs(names, question, whole){
   const BUDGET=90000; let used=0; const list=[], omitted=[];
   names.forEach(n=>{
     const content=docContent(n);
     if(content==null){ omitted.push(n+' (unavailable)'); return; }
-    const d=excerptDoc(n, content, question);
+    const d=excerptDoc(n, content, question, whole&&whole.has(n));
     if(used+d.content.length>BUDGET){ omitted.push(n); return; }
     used+=d.content.length; list.push(d);
   });
@@ -1910,7 +1922,7 @@ async function agentCancel(){
   renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
   const ta=$('#agent-input'); if(ta){ ta.value=c.text; ta.focus(); }
 }
-// One streamed completion. The reply shows live UNLESS it is a FETCH
+// One streamed completion. The reply shows live UNLESS it is a FETCH or MORE
 // directive — those are machinery, invisible to the reader; the bubble stays
 // on "Thinking…" through them. (Display is held for the first few characters
 // so a directive's prefix never flashes into view.)
@@ -1925,7 +1937,7 @@ async function streamOnce(system, messages, idx, myCancel){
     acc += (chunk&&chunk.choices&&chunk.choices[0]&&chunk.choices[0].delta&&chunk.choices[0].delta.content)||'';
     // The moment a directive line exists, this reply is machinery: pull any
     // already-streamed preamble back off the screen and sit on "Thinking…".
-    if(/^[ \t]*FETCH\s*:/mi.test(acc)){
+    if(/^[ \t]*(FETCH|MORE)\s*:/mi.test(acc)){
       if(agent.messages[idx].content){ agent.messages[idx].content=''; renderAgentMessages(); }
     } else if(acc.length>=8 || acc.includes('\n')){
       agent.messages[idx].content=acc;
@@ -1935,7 +1947,8 @@ async function streamOnce(system, messages, idx, myCancel){
   return acc;
 }
 // The fetch loop: ask with no documents; if the model replies FETCH, resend
-// the same question with the requested documents attached. Two rounds max.
+// the same question with the requested documents attached; if it replies
+// MORE, resend with that document whole. Two rounds max, shared.
 async function agentSendLocal(text, history, myCancel){
   if (myCancel.cancelled) return;
   agent.messages.push({role:'assistant',from:'Servette',content:''});
@@ -1944,7 +1957,8 @@ async function agentSendLocal(text, history, myCancel){
   const MAX_FETCH_ROUNDS=2;
   // Documents the reader named are attached up front — no judgment round.
   const named=namedDocs(text);
-  let docs=named.length ? resolveDocs(named, text) : null;
+  const whole=new Set();   // names escalated to whole documents via MORE
+  let docs=named.length ? resolveDocs(named, text, whole) : null;
   // The thinking clock: live seconds in the pending bubble (so a long prefill
   // is visibly not a freeze), the total stamped on the reply when it lands.
   // The expectation beside it is calibrated from THIS session's completed
@@ -1973,16 +1987,19 @@ async function agentSendLocal(text, history, myCancel){
       sentChars+=plannedChars;
       const reply=await streamOnce(system, messages, idx, myCancel);
       if (reply==null) return;   // cancelled
-      const req = round<MAX_FETCH_ROUNDS ? parseFetch(reply) : null;
-      if (!req){
-        finalText = /^[ \t]*FETCH\s*:/mi.test(reply)
+      const req  = round<MAX_FETCH_ROUNDS ? parseFetch(reply) : null;
+      const more = !req && round<MAX_FETCH_ROUNDS ? parseMore(reply) : null;
+      if (!req && !more){
+        finalText = /^[ \t]*(FETCH|MORE)\s*:/mi.test(reply)
           ? "I couldn't settle that within my document budget — try asking about one thing at a time."
           : reply;
         break;
       }
+      if (more) whole.add(more);
       // Merge with anything already attached (pre-attached named documents
-      // must survive a follow-up fetch); bubble stays on "Thinking…".
-      docs=resolveDocs([...new Set([...(docs?docs.list.map(d=>d.name):[]), ...req])], text);
+      // must survive a follow-up fetch; a MORE re-resolves its excerpt as the
+      // whole document); bubble stays on "Thinking…".
+      docs=resolveDocs([...new Set([...(docs?docs.list.map(d=>d.name):[]), ...(req||[]), ...(more?[more]:[])])], text, whole);
     }
     agent.messages[idx].content=finalText||'(empty response)';
     agent.messages[idx].secs=secsNow();
@@ -2039,6 +2056,11 @@ function runSelfTests(){
     ok('FETCH after preamble parses', !!f3 && f3.join(',')==='README.md');
     ok('FETCH inline in prose is an answer', parseFetch('I would FETCH: SERVER.md if I could.')===null);
     ok('FETCH unknown name → null', parseFetch('FETCH: nonsense')===null);
+    // the MORE escalation — one name, same own-line discipline
+    ok('MORE parses one name', parseMore('MORE: shell')==='SHELL.md');
+    ok('MORE after preamble parses', parseMore('The excerpts lack it.\nMORE: SERVER.md')==='SERVER.md');
+    ok('MORE inline in prose is an answer', parseMore('I would say MORE: SERVER.md matters.')===null);
+    ok('MORE unknown name → null', parseMore('MORE: nonsense')===null);
     // named-document pre-attach — conservative matching, like the old interceptor's
     ok('named: uppercase stem', namedDocs('What does SYSTEM do?').join(',')==='SYSTEM.md');
     ok('named: lowercase bare stem passes', namedDocs('what does the system do?').length===0);
@@ -2057,6 +2079,8 @@ function runSelfTests(){
     ok('excerpt: header orients', ex.content.includes('# HEAD'));
     ok('excerpt: no match → honest note', excerptDoc('BIG.md', big, 'zebra quantum').content.includes('matched the question'));
     ok('excerpt: small file goes whole', excerptDoc('S.md', '# tiny\n', 'anything').excerpted===false);
+    const esc=excerptDoc('BIG.md', big, 'why scrypt?', true);
+    ok('excerpt: MORE forces whole', esc.excerpted===false && !esc.content.includes('elided'));
     // model-noise stripping — the README's logo/badges block, observed echoed as an "answer"
     const dirty='<picture>\n<img src="x.svg">\n</picture>\n\n[![Tests](https://b.svg)](https://a)\n![Python](https://s.io/b.svg)\n\nReal prose stays.\n';
     const cleaned=cleanForModel(dirty);
@@ -2257,7 +2281,7 @@ async function boot(){
   initAgent();
   // expose for console / automation (the browser-verify run reads these; the
   // self-tests live here too — run NB.runSelfTests() in the console)
-  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight, parseFetch, resolveDocs,
+  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight, parseFetch, parseMore, resolveDocs,
                 get files(){return nb.files;}, get agent(){return agent;} };
 }
 boot();

@@ -1,0 +1,2296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Servette — Source</title>
+<!--
+  Servette source viewer — a read-only literate notebook over Servette's
+  authored Markdown sources. The whole app is one file, index.html. It fetches
+  src/*.md from the repository at render time (?ref= selects the git ref) and
+  projects them as notebook cells; there is no generated copy to go stale.
+
+  Grown from the notebook shell (andy-emerson/notebook, index.html) by
+  removing its target and its identity: the cartridge seam, runtime, agent,
+  editing, and persistence are gone; the doc model, markdown pipeline, cell
+  DOM, Outline, and pane machinery remain. Read-only by design — the
+  view/edit fork is resolved at authoring time, not exposed to readers.
+  The dress is servette.org's: its palette and data-theme mechanism replace
+  the shell's Paper × Ink engine.
+
+  ── Architecture ────────────────────────────────────────────────────────────
+  The src/*.md files (in build.py order) are the single source of truth.
+  The viewer is a projection over them (fenced code blocks = code cells with a
+  language; prose runs = markdown cells):
+
+      parse(md) -> cells      // per file; serialize() retained as the check
+
+  serialize(parse(x)) === x — the byte-exact round-trip is kept (and
+  self-tested) even though nothing here writes: it is the proof the viewer
+  shows the file, not a reformatting of it.
+
+  Every dependency degrades: no marked → the built-in renderer; no
+  CodeMirror → a plain <pre>; a failed file fetch → an inline error in that
+  file's slot while the rest of the document stands.
+
+  ── Contents ────────────────────────────────────────────────────────────────
+  <style>  CSS, numbered as in the shell (removed sections keep their gaps):
+    1 Base & reset   2 Theme variables   3 Layout   4 Topbar   5 Status bar
+    6 Notebook + cells   7 Panels (left pane)   8 Right pane (Preview)
+    9 Markdown output   10 Toast + welcome dialog
+  <script> JS:
+    0 Icons   1 Doc model (parse/serialize)   2 Markdown   3 Sources (fetch)
+    4 Theme   5 CodeMirror   6 Cell DOM   6c Preview
+    6b Navigator (file accordion + search)   6d Agent (WebLLM, sight-only)
+    6e Call map (arc diagram)   9 Self-tests   10 Wiring + boot
+  (Each section is marked by a ════ banner; this list is its table of contents.)
+-->
+
+<!-- marked.js for Markdown is loaded NON-blocking at boot (see loadMarked());
+     a built-in renderer is used until/if it arrives, so the UI never waits on a CDN. -->
+
+<!-- CodeMirror 6 — loaded on demand via dynamic import(); <pre> fallback if offline.
+     The editing packages (commands, autocomplete) are gone with the editing. -->
+<script type="importmap">
+{
+  "imports": {
+    "@codemirror/view":                "https://esm.sh/@codemirror/view@6",
+    "@codemirror/state":               "https://esm.sh/@codemirror/state@6",
+    "@codemirror/language":            "https://esm.sh/@codemirror/language@6",
+    "@codemirror/lang-python":         "https://esm.sh/@codemirror/lang-python@6",
+    "@lezer/highlight":                "https://esm.sh/@lezer/highlight@1"
+  }
+}
+</script>
+
+<script>
+  /* Set the palette before first paint so the page never flashes the wrong
+     one. Every visit starts on the SYSTEM theme — the viewer remembers no
+     preferences (the picker's choice lasts for the session only). */
+  (function () {
+    var dark = window.matchMedia
+      && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  })();
+</script>
+
+<style>
+/* ════════════════════════════════════════════════════════════════════════════
+ * 1. BASE & RESET
+ * ════════════════════════════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-medium); border-radius: 99px; }
+* { scrollbar-color: var(--border-medium) transparent; scrollbar-width: thin; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 2. THEME — servette.org's palette on the shell's token names.
+ *
+ *   The shell's Paper × Ink engine (sliders, OKLCH math, halo) is removed;
+ *   these are the same custom properties its components consume, now defined
+ *   statically from the front door's palette. Light is the default; dark is
+ *   the same tokens redefined under [data-theme="dark"], which the JS theme
+ *   toggle sets (system preference at boot, sticky manual override) — the
+ *   front door's mechanism, verbatim.
+ * ════════════════════════════════════════════════════════════════════════════ */
+:root {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --green-2:   #5A8466;   /* the logo's green — same in both themes, like the front door */
+  --acc-code:  #4d7358;   /* servette green — code accents (badges, dots) */
+  --acc-prose: #857f76;   /* warm gray — prose accents */
+  /* Functional colors — fixed hues (Tailwind-500 solids), named by hue. Each
+     -bg tint (18%) and -border ring (35%) is DERIVED from the solid via
+     color-mix. green=ok · amber=busy · red=error. */
+  --fn-green: #22c55e;  --fn-green-bg: color-mix(in srgb, var(--fn-green) 18%, transparent);
+                        --fn-green-border: color-mix(in srgb, var(--fn-green) 35%, transparent);
+  --fn-amber: #f59e0b;  --fn-amber-bg: color-mix(in srgb, var(--fn-amber) 18%, transparent);
+                        --fn-amber-border: color-mix(in srgb, var(--fn-amber) 35%, transparent);
+  --fn-red:   #ef4444;  --fn-red-bg:   color-mix(in srgb, var(--fn-red)   18%, transparent);
+                        --fn-red-border:   color-mix(in srgb, var(--fn-red)   35%, transparent);
+  --fn-blue:  #3b82f6;  --fn-blue-bg:  color-mix(in srgb, var(--fn-blue)  18%, transparent);
+                        --fn-blue-border:  color-mix(in srgb, var(--fn-blue)  35%, transparent);
+
+  --bg-primary:    #ffffff;   /* cells, panes (surface) */
+  --bg-secondary:  #f1efeb;   /* headers, chrome */
+  --bg-tertiary:   #faf9f7;   /* the page behind the cells */
+  --bg-info:       #f1efeb;
+  --text-primary:  #1c1b1a;
+  --text-secondary:#4a4845;
+  --text-tertiary: #857f76;
+  --border-faint:  rgba(28,27,26,.10);
+  --border-light:  rgba(28,27,26,.18);
+  --border-medium: rgba(28,27,26,.30);
+  --border-info:   #4d7358;
+  --syntax-keyword:  #7c5cbf;
+  --syntax-number:   #a86a3c;
+  --syntax-function: #2f5d8a;
+  --syntax-string:   #4d7358;
+  --syntax-operator: #4a4845;
+}
+[data-theme="dark"] {
+  --acc-code:  #7BA888;
+  --acc-prose: #6f6a63;
+
+  --bg-primary:    #161616;
+  --bg-secondary:  #131313;
+  --bg-tertiary:   #0e0e0e;
+  --bg-info:       #131313;
+  --text-primary:  #e8e8e8;
+  --text-secondary:#a8a49e;
+  --text-tertiary: #6f6a63;
+  --border-faint:  rgba(232,232,232,.10);
+  --border-light:  rgba(232,232,232,.18);
+  --border-medium: rgba(232,232,232,.30);
+  --border-info:   #7BA888;
+  --syntax-keyword:  #b39ddb;
+  --syntax-number:   #cf9058;
+  --syntax-function: #82aed6;
+  --syntax-string:   #9bc4a5;
+  --syntax-operator: #a8a49e;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 3. LAYOUT
+ * ════════════════════════════════════════════════════════════════════════════ */
+html, body { height: 100%; }
+body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var(--text-primary); transition: background .2s, color .2s; -webkit-font-smoothing: antialiased; }
+/* The grain the front door wears, at the same weight. Fixed and inert, so it
+   sits under everything without intercepting a single click. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  pointer-events: none;
+  opacity: 0.4;
+  z-index: 0;
+}
+body > * { position: relative; z-index: 1; }
+::selection { background: color-mix(in oklab, var(--border-info) 30%, transparent); }
+:focus-visible { outline: 2px solid var(--border-info); outline-offset: 2px; border-radius: 4px; }
+#app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+#main-area { display: flex; flex: 1; min-height: 0; }
+
+.activity-bar { width: 44px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; padding: 4px 0; background: var(--bg-secondary); z-index: 5; }
+#left-activity-bar { border-right: .5px solid var(--border-faint); }
+#right-activity-bar { border-left: .5px solid var(--border-faint); }
+.activity-bar-btn { width: 44px; height: 42px; display: flex; align-items: center; justify-content: center; background: none; border: none; cursor: pointer; color: var(--text-tertiary); border-right: 2px solid transparent; transition: color .12s; }
+#right-activity-bar .activity-bar-btn { border-right: none; border-left: 2px solid transparent; }
+.activity-bar-btn:hover { color: var(--text-primary); }
+.activity-bar-btn.active { color: var(--text-primary); border-right-color: var(--border-info); }
+#right-activity-bar .activity-bar-btn.active { border-left-color: var(--border-info); border-right-color: transparent; }
+.activity-bar-btn svg { width: 19px; height: 19px; }
+
+#left-pane { width: 248px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg-primary); overflow: hidden; transition: width .18s ease; }
+#left-pane.collapsed { width: 0 !important; }
+#right-pane { width: 460px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg-primary); overflow: hidden; transition: width .18s ease; }
+#right-pane.collapsed { width: 0 !important; }
+
+.pane-resizer { width: 9px; flex-shrink: 0; position: relative; cursor: col-resize; background: transparent; z-index: 10; }
+.pane-resizer::before { content: ''; position: absolute; top: 0; bottom: 0; left: 50%; width: .5px; background: var(--border-faint); transition: background .15s; }
+.pane-resizer:hover::before, .pane-resizer.dragging::before { background: var(--border-medium); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 4. TOPBAR
+ * ════════════════════════════════════════════════════════════════════════════ */
+.topbar { display: flex; align-items: center; gap: 6px; padding: 0 14px; background: var(--bg-primary); border-bottom: .5px solid var(--border-faint); flex-shrink: 0; height: 52px; }
+.topbar-logo { display: flex; align-items: center; gap: 10px; margin-right: 8px; user-select: none; }
+.topbar-logo a { text-decoration: none; }
+/* The front door's logo, verbatim: set in text so the cursor can blink and
+   both palettes are served by one mark. */
+.logo { font-family: var(--font-mono); font-weight: 500; letter-spacing: 0; line-height: 1; color: var(--text-primary); white-space: nowrap; font-size: 25px; }
+.logo .ette { color: var(--green-2); }
+.logo .cursor { color: inherit; animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .logo .cursor { animation: none; } }
+.topbar-logo .src-tag { font-family: var(--font-mono); font-size: 12px; color: var(--acc-code); background: none; border: 1px solid color-mix(in srgb, var(--acc-code) 35%, transparent); border-radius: 99px; padding: 2px 9px; cursor: pointer; }
+.topbar-logo .src-tag:hover { background: color-mix(in srgb, var(--acc-code) 12%, transparent); }
+.topbar-sep { flex: 1; }
+.tb-group { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.tb-group-btns { display: flex; align-items: center; gap: 2px; }
+.tb-group-label { font-size: 9px; color: var(--text-tertiary); letter-spacing: .06em; text-transform: uppercase; line-height: 1; padding-bottom: 3px; }
+.tb-divider { width: .5px; height: 28px; align-self: center; background: var(--border-faint); margin: 0 4px; }
+.tb-btn { background: none; border: .5px solid var(--border-light); border-radius: var(--radius-md); padding: 6px 10px; font-size: 12px; font-family: var(--font-sans); color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 5px; transition: background .12s, color .12s; white-space: nowrap; }
+.tb-btn:hover { background: var(--bg-secondary); color: var(--text-primary); }
+.tb-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+/* Theme picker — three icon radio buttons (sun / system / moon), LoveIDE's
+   control: distinct buttons rather than a fused segment, radios underneath so
+   the browser supplies grouping and arrow-key selection. */
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; clip-path: inset(50%); overflow: hidden; white-space: nowrap; }
+.theme-picker { display: flex; align-items: center; gap: 4px; margin: 0; padding: 0; border: none; background: none; }
+.theme-picker input { position: absolute; opacity: 0; pointer-events: none; }
+.theme-picker label { display: grid; place-items: center; width: 34px; height: 30px; border-radius: var(--radius-md); border: .5px solid var(--border-light); color: var(--text-tertiary); cursor: pointer; user-select: none; }
+.theme-picker label svg { width: 16px; height: 16px; }
+.theme-picker label:hover { color: var(--text-primary); background: var(--bg-secondary); }
+.theme-picker input:checked + label { color: var(--text-primary); border-color: var(--border-info); background: var(--bg-secondary); }
+/* The radios are visually hidden, so the focus ring has to be drawn on
+   the label they control or keyboard users get nothing. */
+.theme-picker input:focus-visible + label { outline: 2px solid var(--border-info); outline-offset: 1px; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 5. STATUS BAR
+ * ════════════════════════════════════════════════════════════════════════════ */
+.status-bar { display: flex; align-items: center; height: 26px; flex-shrink: 0; background: var(--bg-secondary); border-top: .5px solid var(--border-faint); padding: 0 10px; gap: 6px; font-size: 11px; user-select: none; }
+.status-item { display: flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 99px; color: var(--text-tertiary); background: var(--bg-primary); border: .5px solid var(--border-faint); white-space: nowrap; transition: color .15s, background .15s, border-color .15s; }
+.status-item.working { color: var(--fn-amber); background: var(--fn-amber-bg); border-color: var(--fn-amber-border); }
+.status-item.ready { color: var(--fn-green); background: var(--fn-green-bg); border-color: var(--fn-green-border); }
+.status-item.error { color: var(--fn-red); background: var(--fn-red-bg); border-color: var(--fn-red-border); }
+.status-spacer { flex: 1; }
+.status-link { cursor: pointer; }
+.status-link:hover { color: var(--text-primary); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 6. NOTEBOOK + CELLS
+ * ════════════════════════════════════════════════════════════════════════════ */
+#nb-body { flex: 1; min-width: 0; overflow-y: auto; }
+#nb-scroll { min-height: 100%; padding: 14px 0 40vh; max-width: 940px; margin: 0 auto; }
+
+/* The 26px bottom margin is the shell's inter-cell insert zone, kept as pure
+   breathing room — the insert affordance left with the editing. */
+.cell { margin: 0 16px 26px; position: relative; border-radius: var(--radius-lg); border: .5px solid var(--border-faint); background: var(--bg-primary); overflow: hidden; transition: border-color .15s; }
+.cell.focused { border-color: var(--border-info); }
+.cell-header { display: flex; align-items: center; gap: 7px; padding: 6px 11px; background: var(--bg-secondary); border-bottom: .5px solid var(--border-faint); position: relative; user-select: none; }
+.cell-header .ca-btn { cursor: pointer; }
+.cell-badge { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 99px; letter-spacing: .05em; text-transform: uppercase; display: flex; align-items: center; gap: 4px; flex-shrink: 0; border: 1px solid color-mix(in srgb, currentColor 30%, transparent); }
+.badge-code { background: color-mix(in srgb, var(--acc-code) 15%, transparent); color: var(--acc-code); }
+.badge-md { background: color-mix(in srgb, var(--acc-prose) 20%, transparent); color: var(--acc-prose); }
+.cell-title { font-size: 11px; color: var(--text-tertiary); font-family: var(--font-mono); margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cell-actions { display: flex; gap: 3px; opacity: 0; transition: opacity .15s; }
+.cell:hover .cell-actions, .cell.focused .cell-actions { opacity: 1; }
+.ca-btn { background: none; border: none; cursor: pointer; color: var(--text-secondary); padding: 3px 5px; border-radius: 5px; display: flex; align-items: center; transition: background .1s, color .1s; }
+.ca-btn:hover { background: var(--bg-primary); color: var(--text-primary); }
+.ca-btn svg { width: 16px; height: 16px; }
+/* Cell collapse is a disclosure triangle — the one collapse idiom used
+   everywhere in this app (Navigator accordion, Settings sections): chevron
+   points down when open, right when collapsed. */
+.ca-btn.collapse-btn svg { transition: transform .15s; transform: rotate(90deg); }
+.cell.collapsed .collapse-btn svg { transform: rotate(0deg); }
+
+.cell-editor .cm-editor { height: auto; }
+.cell-editor .cm-editor.cm-focused { outline: none; }
+.cell-editor .cm-scroller { overflow-x: auto; font-family: var(--font-mono); }
+/* Fallback code view when CodeMirror never arrives (offline / blocked CDN). */
+.cell-editor pre.code-plain { font-family: var(--font-mono); font-size: 13px; line-height: 1.65; padding: 11px 13px; margin: 0; overflow-x: auto; color: var(--text-primary); }
+
+/* collapse */
+.cell.collapsed .cell-editor, .cell.collapsed .cell-output { display: none; }
+.cell.collapsed .cell-header { border-bottom: none; }
+
+/* rendered prose */
+.cell-output { font-size: 14px; line-height: 1.7; }
+.cell-output.out-md { padding: 6px 16px; }
+
+/* file boundary — one slim row per src/*.md file, linking to the file on GitHub */
+.file-row { display: flex; align-items: baseline; gap: 10px; margin: 26px 16px 10px; padding: 0 2px 6px; border-bottom: .5px solid var(--border-light); }
+.file-row:first-child { margin-top: 6px; }
+.file-row .fname { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--text-primary); }
+.file-row a { margin-left: auto; font-size: 11px; color: var(--text-tertiary); text-decoration: none; flex-shrink: 0; }
+.file-row a:hover { color: var(--text-primary); text-decoration: underline; }
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 7. PANELS (left pane)
+ * ════════════════════════════════════════════════════════════════════════════ */
+.pane-header { flex-shrink: 0; padding: 9px 14px; font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .06em; border-bottom: .5px solid var(--border-faint); background: var(--bg-secondary); display: flex; align-items: center; justify-content: space-between; }
+.pane-header .mini { cursor: pointer; color: var(--text-tertiary); display: flex; }
+.pane-header .mini:hover { color: var(--text-primary); }
+.pane-header .mini svg { width: 14px; height: 14px; }
+.pane-panel { display: none; flex: 1 1 0; min-height: 60px; overflow-y: auto; flex-direction: column; }
+.pane-panel.active { display: flex; }
+/* Draggable divider between two open (stacked) left panels. */
+.lv-resizer { height: 7px; flex-shrink: 0; cursor: ns-resize; position: relative; }
+.lv-resizer::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: .5px; background: var(--border-faint); transition: background .15s; }
+.lv-resizer:hover::before, .lv-resizer.dragging::before { background: var(--border-medium); }
+/* Centered empty-state for a wholly empty panel/tab (ported from the oracle's .pane-placeholder). */
+.pane-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: 1; min-height: 140px; color: var(--text-tertiary); font-size: 12px; text-align: center; line-height: 1.6; padding: 20px 14px; }
+.pane-placeholder svg { width: 28px; height: 28px; opacity: 0.35; margin-bottom: 4px; }
+.pane-placeholder .pp-hint { font-size: 11px; opacity: 0.6; }
+/* Let a list-wrap fill its pane when it holds only an empty-state, so the placeholder centers vertically too. */
+#outline-list:has(> .pane-placeholder) { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.list-row { display: flex; align-items: center; gap: 8px; padding: 7px 14px; font-size: 12px; cursor: default; border-bottom: .5px solid var(--border-faint); }
+.list-row:hover { background: var(--bg-secondary); }
+.list-row .grow { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-row .mono { font-family: var(--font-mono); }
+.list-row .sub { color: var(--text-tertiary); font-size: 10px; }
+.list-row.clickable { cursor: pointer; }
+.list-row.file { font-weight: 700; border-bottom-color: var(--border-light); }
+.list-row.indent { padding-left: 26px; }
+
+/* nav search — the shell's .lib-add row */
+.nav-search { display: flex; gap: 6px; padding: 10px 12px; border-bottom: .5px solid var(--border-faint); }
+.nav-search input { flex: 1; min-width: 0; padding: 5px 8px; border: .5px solid var(--border-light); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); font-size: 12px; font-family: var(--font-mono); outline: none; }
+.nav-search input:focus { border-color: var(--border-info); }
+
+/* file accordion — the shell's Settings collapse convention: a chevron that
+   points right collapsed, down expanded. */
+.nav-chev { display: inline-flex; flex-shrink: 0; color: var(--text-tertiary); transition: transform .15s; }
+.nav-chev svg { width: 13px; height: 13px; }
+.list-row.file.expanded .nav-chev { transform: rotate(90deg); }
+
+.pane-note { font-size: 10px; color: var(--text-tertiary); font-style: italic; padding: 6px 14px; }
+
+/* settings panel — Preferences, Agentic Reading (ported back from the shell) */
+.settings-body { padding: 14px; display: flex; flex-direction: column; gap: 0; }   /* sections self-space via header padding + divider */
+.settings-section { border-top: .5px solid var(--border-faint); }
+.settings-section:first-child { border-top: none; }
+.settings-section-header { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-secondary); padding: 12px 0 10px; }
+.settings-section:first-child .settings-section-header { padding-top: 2px; }
+.settings-section-header:hover { color: var(--text-primary); }
+.settings-chev { display: inline-flex; flex-shrink: 0; color: var(--text-tertiary); transition: transform .15s; transform: rotate(90deg); }
+.settings-chev svg { width: 13px; height: 13px; }
+.settings-section.collapsed .settings-chev { transform: rotate(0deg); }
+.settings-section.collapsed .settings-section-body { display: none; }
+.settings-section-body { display: flex; flex-direction: column; gap: 16px; padding-bottom: 12px; }
+.setting-toggle { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-secondary); }
+/* Checkbox-as-switch — on/off shown by knob position plus a soft green ON state. */
+.setting-toggle input[type="checkbox"], input.switch { appearance: none; -webkit-appearance: none; margin: 0; position: relative; flex-shrink: 0; width: 34px; height: 18px; border-radius: 99px; background: var(--bg-tertiary); border: .5px solid var(--border-light); cursor: pointer; transition: background .15s, border-color .15s; }
+.setting-toggle input[type="checkbox"]::after, input.switch::after { content: ''; position: absolute; top: 50%; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--bg-primary); border: .5px solid var(--border-medium); transform: translateY(-50%); transition: left .15s, right .15s; }
+.setting-toggle input[type="checkbox"]:checked, input.switch:checked { background: var(--fn-green-bg); border-color: var(--fn-green-border); }
+.setting-toggle input[type="checkbox"]:checked::after, input.switch:checked::after { left: auto; right: 2px; }
+.setting-toggle input[type="checkbox"]:disabled, input.switch:disabled { opacity: .5; cursor: default; }
+.agent-field-label { font-size: 12px; color: var(--text-secondary); }
+.agent-row { display: flex; align-items: center; gap: 10px; }
+.agent-row-label { font-size: 12px; color: var(--text-secondary); flex-shrink: 0; }
+.agent-select { flex: 1; min-width: 0; padding: 5px 8px; border: .5px solid var(--border-light); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); font-size: 12px; cursor: pointer; }
+.agent-select:disabled { opacity: .55; cursor: default; }
+.kv-desc { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }
+.kv-btn { flex-shrink: 0; border: .5px solid var(--border-light); background: var(--bg-secondary); color: var(--text-secondary); border-radius: 5px; font-size: 11px; padding: 3px 8px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
+.kv-btn:hover { color: var(--text-primary); border-color: var(--border-info); }
+.kv-btn:disabled { opacity: .4; cursor: not-allowed; }
+.kv-btn.commit:hover { color: var(--fn-blue); border-color: var(--fn-blue-border); background: var(--fn-blue-bg); }
+.kv-btn svg { width: 12px; height: 12px; }
+
+/* VRAM allocation slider — dynamic width+color fill under a themed knob. */
+.vram-track { position: relative; display: flex; align-items: center; flex: 1; }
+.vram-track-bg { position: absolute; left: 8px; right: 8px; top: 50%; transform: translateY(-50%); height: 7px; border-radius: 6px; background: var(--bg-tertiary); pointer-events: none; }
+.vram-track-fill { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); height: 7px; border-radius: 6px; background: var(--fn-green); pointer-events: none; }
+.vram-track-fill.warn { background: var(--fn-amber); }
+.vram-track-fill.full { background: var(--fn-red); }
+.vram-range { -webkit-appearance: none; appearance: none; position: relative; z-index: 1; width: 100%; height: 20px; margin: 0; background: transparent; outline: none; cursor: pointer; }
+.vram-range::-webkit-slider-runnable-track { height: 7px; background: transparent; border: none; }
+.vram-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; margin-top: -5px; cursor: pointer; background: var(--bg-primary); border: 1px solid var(--border-medium); }
+.vram-range::-moz-range-track { height: 7px; background: transparent; border: none; }
+.vram-range::-moz-range-thumb { width: 15px; height: 15px; border-radius: 50%; cursor: pointer; background: var(--bg-primary); border: 1px solid var(--border-medium); }
+
+/* activity bar: push a button to the bottom (Settings) */
+.act-bottom { margin-top: auto; }
+
+/* assistant chat */
+.chat-msgs { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.chat-notice { font-size: 11px; font-style: italic; color: var(--text-tertiary); text-align: center; padding: 2px 10px 6px; border-bottom: .5px solid var(--border-faint); flex-shrink: 0; }
+.chat-meta { font-size: 10px; color: var(--text-tertiary); margin-top: 4px; }
+.chat-msg { font-size: 12px; line-height: 1.5; padding: 7px 9px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; max-width: 94%; }
+.chat-msg.user { background: var(--bg-tertiary); color: var(--text-primary); align-self: flex-end; }
+.chat-msg.bot { background: var(--bg-secondary); color: var(--text-primary); align-self: flex-start; }
+.chat-from { display: block; font-size: 10px; font-weight: 700; letter-spacing: .02em; opacity: .5; margin-bottom: 3px; }
+.chat-input { display: flex; gap: 5px; padding: 8px; }
+/* Draggable divider between the messages and the input — drag up to grow the field. */
+.chat-resizer { height: 7px; flex-shrink: 0; cursor: ns-resize; position: relative; }
+.chat-resizer::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: .5px; background: var(--border-faint); transition: background .15s; }
+.chat-resizer:hover::before, .chat-resizer.dragging::before { background: var(--border-medium); }
+.chat-input textarea { flex: 1; resize: none; font-family: inherit; font-size: 12px; line-height: 1.4; padding: 6px 8px; border-radius: 6px; border: .5px solid var(--border-light); background: var(--bg-secondary); color: var(--text-primary); outline: none; }
+.chat-input button { flex-shrink: 0; border: .5px solid var(--border-light); background: none; color: var(--text-secondary); border-radius: 6px; padding: 0 10px; cursor: pointer; display: flex; align-items: center; }
+.chat-input button:hover { background: var(--bg-secondary); color: var(--text-primary); }
+.chat-input button svg { width: 15px; height: 15px; }
+
+/* outline */
+.ol-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.ol-dot.code { background: var(--acc-code); }
+.ol-dot.md   { background: var(--acc-prose); }
+@keyframes cellflash { 0%,100% { box-shadow: 0 0 0 0 transparent; } 30% { box-shadow: 0 0 0 2px var(--border-info); } }
+.cell.flash { animation: cellflash .7s ease; }
+
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 8. RIGHT PANE — Preview: the sources rendered as one continuous document,
+ *    without cell chrome. Toggled by its activity-bar button.
+ * ════════════════════════════════════════════════════════════════════════════ */
+.right-panel { display: none; flex: 1 1 0; min-height: 60px; flex-direction: column; }
+.right-panel.active { display: flex; }
+.right-panel .rp-header { flex-shrink: 0; padding: 7px 12px; font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .06em; border-bottom: .5px solid var(--border-faint); background: var(--bg-secondary); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#preview-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 18px 40vh; }
+.preview-file + .preview-file { margin-top: 30px; border-top: .5px solid var(--border-light); padding-top: 22px; }
+/* call map — an arc diagram: defs listed in definition order, arcs caller→callee */
+#deps-body { flex: 1; min-height: 0; overflow: auto; padding: 10px 6px; }
+#deps-body svg { display: block; }
+#deps-body .dep-node { cursor: pointer; }
+#deps-body .dep-node text { font-family: var(--font-mono); font-size: 12px; fill: var(--text-primary); }
+#deps-body .dep-node:hover text { fill: var(--acc-code); }
+#deps-body .dep-node circle { fill: var(--acc-code); }
+#deps-body .dep-arc { fill: none; stroke: var(--border-medium); stroke-width: 1.2; }
+#deps-body .dep-arrow { fill: var(--border-medium); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 9. MARKDOWN OUTPUT  (ported from the oracle)
+ * ════════════════════════════════════════════════════════════════════════════ */
+.out-md { color: var(--text-primary); white-space: normal; }
+/* Headings in the mono face, the front door's convention (h1–h3 there are
+   --mono at weight 500). */
+.out-md h1, .out-md h2, .out-md h3 { font-family: var(--font-mono); font-weight: 500; letter-spacing: -0.02em; }
+.out-md h1 { font-size: 22px; margin: 4px 0 12px; border-bottom: .5px solid var(--border-faint); padding-bottom: .2em; }
+.out-md h2 { font-size: 17px; margin: 16px 0 7px; border-bottom: .5px solid var(--border-faint); padding-bottom: .2em; }
+.out-md h3 { font-size: 14px; margin: 13px 0 5px; }
+.out-md p { font-size: 14px; line-height: 1.7; margin-bottom: 9px; }
+.out-md ul, .out-md ol { padding-left: 22px; font-size: 14px; margin-bottom: 9px; }
+.out-md li { margin-bottom: 3px; line-height: 1.6; }
+.out-md code { font-family: var(--font-mono); font-size: 12px; background: var(--bg-secondary); padding: 1px 5px; border-radius: 4px; }
+.out-md pre { background: var(--bg-secondary); padding: 10px 12px; border-radius: var(--radius-md); overflow-x: auto; margin-bottom: 10px; position: relative; }
+.out-md pre code { background: none; padding: 0; }
+.code-copy-btn { position: absolute; top: 7px; right: 7px; opacity: 0; transition: opacity .15s; background: var(--bg-primary); border: .5px solid var(--border-light); border-radius: 6px; color: var(--text-tertiary); padding: 3px 6px; cursor: pointer; display: flex; align-items: center; }
+.out-md pre:hover .code-copy-btn { opacity: 1; }
+.code-copy-btn:hover { color: var(--text-primary); border-color: var(--border-medium); background: var(--bg-secondary); }
+.code-copy-btn svg { width: 13px; height: 13px; }
+/* Blockquotes in the sources are design-rationale notes — the literate payoff —
+ * so they read as callouts, not as quotes. */
+.out-md blockquote { border-left: 3px solid var(--border-info); background: var(--bg-secondary); padding: 8px 12px; border-radius: 0 var(--radius-md) var(--radius-md) 0; color: var(--text-secondary); margin-bottom: 9px; }
+.out-md blockquote p:last-child { margin-bottom: 0; }
+.out-md a { color: var(--acc-code); text-decoration: none; }
+.out-md a:hover { color: var(--text-primary); }
+.out-md hr { border: none; border-top: .5px solid var(--border-light); margin: 14px 0; }
+.out-md strong { font-weight: 600; }
+.out-md table { border-collapse: collapse; font-size: 13px; margin-bottom: 10px; }
+.out-md th, .out-md td { padding: 5px 10px; border: .5px solid var(--border-light); }
+.out-md th { background: var(--bg-secondary); font-weight: 600; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 10. TOAST + WELCOME DIALOG
+ * ════════════════════════════════════════════════════════════════════════════ */
+/* First-visit welcome — the front door's license dialog construction (a native
+   <dialog>, so focus trapping, Esc, and the backdrop come from the browser),
+   on the shell's tokens. Shown once; the src badge in the topbar reopens it. */
+.welcome-dialog { width: min(560px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--border-light); border-radius: 12px; background: var(--bg-primary); color: var(--text-primary); overflow: hidden; flex-direction: column; }
+.welcome-dialog[open] { display: flex; }
+.welcome-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.welcome-dialog__head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 20px; border-bottom: 1px solid var(--border-light); flex: none; }
+.welcome-dialog__head h2 { font-family: var(--font-mono); font-weight: 500; font-size: 16px; margin: 0; }
+.welcome-dialog__close { font: 500 12px/1 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); background: none; border: 1px solid var(--border-light); border-radius: 6px; padding: 7px 11px; cursor: pointer; }
+.welcome-dialog__close:hover { color: var(--text-primary); border-color: var(--border-medium); }
+.welcome-dialog__body { padding: 18px 20px; }
+.welcome-dialog__body p { font-size: 13.5px; line-height: 1.65; color: var(--text-secondary); margin: 0 0 12px; }
+.welcome-dialog__body p:last-child { margin-bottom: 0; }
+.welcome-dialog__body strong { color: var(--text-primary); font-weight: 600; }
+.toast { position: fixed; bottom: 38px; left: 50%; transform: translateX(-50%); background: var(--bg-primary); border: .5px solid var(--border-light); border-radius: var(--radius-md); padding: 8px 16px; font-size: 13px; color: var(--text-primary); box-shadow: 0 4px 16px rgba(0,0,0,.16); opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 200; white-space: nowrap; }
+.toast.show { opacity: 1; }
+.toast.err { color: var(--fn-red); border-color: var(--fn-red-border); }  /* failed actions read red; successes stay quiet/neutral */
+
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ───────────────────────── Topbar ───────────────────────── -->
+  <div class="topbar">
+    <div class="topbar-logo">
+      <a href="https://servette.org" aria-label="Servette — home"><span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span></a>
+      <button class="src-tag" id="about-open" title="About this viewer">src</button>
+    </div>
+    <div class="topbar-sep"></div>
+
+    <div class="tb-group">
+      <div class="tb-group-btns">
+        <button class="tb-btn" id="btn-collapse-all" data-ico="collapse">Collapse</button>
+      </div>
+      <div class="tb-group-label">Cells</div>
+    </div>
+    <div class="tb-divider"></div>
+
+    <div class="tb-group">
+      <div class="tb-group-btns">
+        <a class="tb-btn" id="ref-label" href="https://github.com/andy-emerson/Servette/tree/main/src" target="_blank" rel="noopener" data-ico="github" style="text-decoration:none"></a>
+      </div>
+      <div class="tb-group-label">Source</div>
+    </div>
+  </div>
+
+  <!-- ───────────────────────── Main area ───────────────────────── -->
+  <div id="main-area">
+
+    <!-- left activity bar. Every visit starts the same way: both panes
+         collapsed, INIT.md open, system theme, line numbers on — the viewer
+         deliberately remembers nothing about the user except the VRAM
+         measurement (a hardware fact) and that the welcome was shown. -->
+    <div id="left-activity-bar" class="activity-bar">
+      <button class="activity-bar-btn" data-tab="outline" title="Navigator" data-ico="list"></button>
+      <button class="activity-bar-btn" data-tab="assistant" title="AI assistant" data-ico="message-code"></button>
+      <button class="activity-bar-btn act-bottom" data-tab="settings" title="Settings" data-ico="settings"></button>
+    </div>
+
+    <!-- left pane — mutually-exclusive tabs, one panel at a time -->
+    <div id="left-pane" class="collapsed">
+      <div class="pane-panel" id="panel-outline" data-tab="outline">
+        <div class="pane-header">Navigator</div>
+        <div class="nav-search"><input id="nav-search" type="search" placeholder="Search src/*.md…" aria-label="Search the sources"></div>
+        <div id="outline-list" style="flex:1;overflow-y:auto"></div>
+      </div>
+      <div class="pane-panel" id="panel-assistant" data-tab="assistant">
+        <div class="pane-header">AI assistant <span style="display:flex;gap:8px"><span class="mini" role="button" id="chat-copy" title="Copy conversation" data-ico="copy"></span><span class="mini" role="button" id="chat-clear" title="Clear conversation" data-ico="trash"></span></span></div>
+        <div id="assistant-body" style="flex:1;min-height:0;display:flex;flex-direction:column"></div>
+      </div>
+      <div class="pane-panel" id="panel-settings" data-tab="settings">
+        <div class="pane-header">Settings</div>
+        <div class="settings-body">
+          <div class="settings-section" data-sec="appearance">
+            <div class="settings-section-header"><span class="settings-chev" data-ico="chevron"></span><span>Preferences</span></div>
+            <div class="settings-section-body">
+              <div class="setting-toggle">
+                <span>Theme</span>
+                <fieldset class="theme-picker">
+                  <legend class="visually-hidden">Theme</legend>
+                  <input type="radio" name="theme" id="theme-light"  value="light">
+                  <label for="theme-light"  title="Light theme" data-ico="sun"></label>
+                  <input type="radio" name="theme" id="theme-system" value="system">
+                  <label for="theme-system" title="Match system" data-ico="auto"></label>
+                  <input type="radio" name="theme" id="theme-dark"   value="dark">
+                  <label for="theme-dark"   title="Dark theme" data-ico="moon"></label>
+                </fieldset>
+              </div>
+              <label class="setting-toggle"><span>Line numbers</span><input type="checkbox" id="opt-linenums"></label>
+            </div>
+          </div>
+          <div class="settings-section" data-sec="agent">
+            <div class="settings-section-header"><span class="settings-chev" data-ico="chevron"></span><span>Agentic Reading</span></div>
+            <div class="settings-section-body">
+              <div id="agent-local"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane-resizer" id="left-resizer" style="display:none"></div>
+
+    <!-- notebook -->
+    <div id="nb-body"><div id="nb-scroll"></div></div>
+
+    <div class="pane-resizer" id="right-resizer" style="display:none"></div>
+
+    <!-- right pane — panels toggle independently and stack (unlike the
+         left's exclusive tabs) -->
+    <div id="right-pane" class="collapsed">
+      <div class="right-panel" id="rpanel-preview" data-right-tab="preview">
+        <div class="rp-header"><span>Preview</span></div>
+        <div id="preview-body"></div>
+      </div>
+      <div class="lv-resizer" id="rresizer-preview" style="display:none"></div>
+      <div class="right-panel" id="rpanel-deps" data-right-tab="deps">
+        <div class="rp-header"><span>Call Map</span></div>
+        <div id="deps-body"></div>
+      </div>
+    </div>
+
+    <!-- right activity bar -->
+    <div id="right-activity-bar" class="activity-bar">
+      <button class="activity-bar-btn" data-right-tab="preview" title="Preview" data-ico="md"></button>
+      <button class="activity-bar-btn" data-right-tab="deps" title="Call map" data-ico="graph"></button>
+    </div>
+  </div>
+
+  <!-- ───────────────────────── Status bar ───────────────────────── -->
+  <div class="status-bar">
+    <span class="status-spacer"></span>
+    <span class="status-item status-link" id="st-agent" title="AI assistant">Agent: idle</span>
+  </div>
+</div>
+
+<dialog class="welcome-dialog" id="welcome-dialog" aria-labelledby="welcome-title">
+  <div class="welcome-dialog__head">
+    <h2 id="welcome-title">About this viewer</h2>
+    <button class="welcome-dialog__close" type="button" id="welcome-close">Close</button>
+  </div>
+  <div class="welcome-dialog__body">
+    <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
+    <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files), the assistant, and Settings at the bottom — one panel at a time. On the right: the Preview pane (the open file as one plain rendered document) and the Call Map (the open file's functions and who calls whom — click a function to jump to it). Click an icon to open or close its panel. The viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
+    <p>There is also an optional <strong>reading assistant</strong> — Servette itself, answering for its own code. It runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine), and because the model is yours, the tokens are too: ask Servette about Servette as much as you like, with no accounts, no API keys, and no limits. Set it up in Settings → Agentic Reading; it reads whichever source files your question needs.</p>
+  </div>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+/* ════════════════════════════════════════════════════════════════════════════
+ * 0. ICONS (inline SVG — no CDN dependency, unlike the oracle's icon webfont)
+ * ════════════════════════════════════════════════════════════════════════════ */
+// Vendored from Tabler Icons (https://tabler.io/icons, MIT) @ v3.31.0, outline set,
+// inline so there's still no CDN/webfont dependency. svg() supplies the shared
+// wrapper (24x24, stroke=currentColor, fill=none). Key names differ from Tabler's
+// where noted (e.g. md=markdown, collapse=fold).
+const I = {
+  'check':'<path d="M5 12l5 5l10 -10" />',  // tabler check
+  'collapse':'<path d="M12 3v6l3 -3m-6 0l3 3" /><path d="M12 21v-6l3 3m-6 0l3 -3" /><path d="M4 12l1 0" /><path d="M9 12l1 0" /><path d="M14 12l1 0" /><path d="M19 12l1 0" />',  // tabler fold
+  'chevron':'<path d="M9 6l6 6l-6 6" />',  // tabler chevron-right
+  'code':'<path d="M7 8l-4 4l4 4" /><path d="M17 8l4 4l-4 4" /><path d="M14 4l-4 16" />',  // tabler code
+  'md':'<path d="M3 5m0 2a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2z" /><path d="M7 15v-6l2 2l2 -2v6" /><path d="M14 13l2 2l2 -2m-2 2v-6" />',  // tabler markdown
+  'sun':'<path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0" /><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7" />',  // tabler sun
+  'moon':'<path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />',  // tabler moon
+  'auto':'<path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0" /><path d="M12 17a5 5 0 0 0 0 -10v10" />',  // tabler contrast
+  'list':'<path d="M9 6l11 0" /><path d="M9 12l11 0" /><path d="M9 18l11 0" /><path d="M5 6l0 .01" /><path d="M5 12l0 .01" /><path d="M5 18l0 .01" />',  // tabler list
+  'copy':'<path d="M8 8m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z" /><path d="M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2" />',  // tabler copy
+  'search':'<path d="M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0" /><path d="M21 21l-6 -6" />',  // tabler search
+  'trash':'<path d="M4 7l16 0" /><path d="M10 11l0 6" /><path d="M14 11l0 6" /><path d="M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12" /><path d="M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3" />',  // tabler trash
+  'send':'<path d="M10 14l11 -11" /><path d="M21 3l-6.5 18a.55 .55 0 0 1 -1 0l-3.5 -7l-7 -3.5a.55 .55 0 0 1 0 -1l18 -6.5" />',  // tabler send
+  'stop':'<path d="M5 5m0 2a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2z" />',  // tabler player-stop
+  'settings':'<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z" /><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" />',  // tabler settings
+  'message-code':'<path d="M8 9h8" /><path d="M8 13h6" /><path d="M11.012 19.193l-3.012 1.807v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v6" /><path d="M20 21l2 -2l-2 -2" /><path d="M17 17l-2 2l2 2" />',  // tabler message-code
+  'graph':'<path d="M7 18m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M7 6m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M17 6m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M7 8v8" /><path d="M9 18h6a2 2 0 0 0 2 -2v-5" /><path d="M14 14l3 -3l3 3" />',  // tabler git-branch (as a call-graph mark)
+  'github':'<path d="M9 19c-4.3 1.4 -4.3 -2.5 -6 -3m12 5v-3.5c0 -1 .1 -1.4 -.5 -2c2.8 -.3 5.5 -1.4 5.5 -6a4.6 4.6 0 0 0 -1.3 -3.2a4.2 4.2 0 0 0 -.1 -3.2s-1.1 -.3 -3.5 1.3a12.3 12.3 0 0 0 -6.2 0c-2.4 -1.6 -3.5 -1.3 -3.5 -1.3a4.2 4.2 0 0 0 -.1 3.2a4.6 4.6 0 0 0 -1.3 3.2c0 4.6 2.7 5.7 5.5 6c-.6 .6 -.6 1.2 -.5 2v3.5" />',  // tabler brand-github
+};
+function svg(name, cls) {
+  return `<svg class="${cls||''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${I[name]||''}</svg>`;
+}
+function paintIcons(root=document) {
+  root.querySelectorAll('[data-ico]:not(.tb-btn)').forEach(el => { el.innerHTML = svg(el.dataset.ico); });
+  // buttons keep their text: prepend icon
+  root.querySelectorAll('.tb-btn[data-ico]').forEach(el => {
+    if (el.querySelector('svg')) return;
+    el.insertAdjacentHTML('afterbegin', svg(el.dataset.ico));
+  });
+}
+
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+function elem(tag, props={}, kids=[]) {
+  const n = document.createElement(tag);
+  for (const k in props) {
+    if (k === 'class') n.className = props[k];
+    else if (k === 'html') n.innerHTML = props[k];
+    else if (k === 'text') n.textContent = props[k];
+    else if (k.startsWith('on') && typeof props[k] === 'function') n.addEventListener(k.slice(2), props[k]);
+    else if (props[k] != null) n.setAttribute(k, props[k]);
+  }
+  // Icon-only controls carry a title everywhere; mirror it as the accessible
+  // name so screen readers announce them without a per-call-site ARIA pass.
+  if (props.title && !props['aria-label']) n.setAttribute('aria-label', props.title);
+  (Array.isArray(kids) ? kids : [kids]).forEach(c => c != null && n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+  return n;
+}
+let _uid = 0; const uid = () => ++_uid;
+// kind: '' (neutral success/info) or 'err' (red — a failed/rejected action).
+function toast(msg, kind) { const t = $('#toast'); t.textContent = msg; t.className = 'toast' + (kind ? ' ' + kind : ''); t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 1600); }
+// Centered empty-state node: faint icon + headline + optional dim hint. Used for
+// wholly empty tabs/panels (Variables, Tables, Outline, Assets, History, Agent).
+function panePlaceholder(icon, headline, hint) {
+  const kids = [ elem('span', { html: svg(icon) }), elem('div', { text: headline }) ];
+  if (hint) kids.push(elem('div', { class: 'pp-hint', text: hint }));
+  return elem('div', { class: 'pane-placeholder' }, kids);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 1. DOC MODEL — each src/*.md (a literate Markdown document) is the source of truth.
+ *
+ *   parse(md)        -> { cells:[{id,type,lang,code,level,before,collapsed}], trailing }
+ *   serialize(doc)   -> md
+ *
+ *   Markdown code fences (``` / ~~~) are `code` cells; the fence info-string is
+ *   the cell `lang`. Every non-fence run is an `md` (prose) cell. This is the
+ *   fence-depth rule the authored format relies on: only a top-level fence is
+ *   code; a fence nested inside a fenced block stays inside that block.
+ *
+ *   Byte-for-byte reversible: serialize(parse(x)) === x. Each cell keeps
+ *   verbatim glue (`before`) and verbatim fence lines (`_open`/`_close`).
+ *   Nothing here writes — serialize() is retained (and self-tested) as the
+ *   proof the viewer shows the file, not a reformatting of it.
+ * ════════════════════════════════════════════════════════════════════════════ */
+const FENCE_OPEN  = /^ {0,3}(`{3,}|~{3,})[ \t]*([^\n]*?)[ \t]*$/;   // tested on a line WITHOUT its trailing newline
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+// Split into lines each KEEPING its trailing "\n" so join('') === input — the
+// basis of byte-exact round-trip. The final entry lacks "\n" iff the source did.
+function _splitKeepNL(s){ const out=[]; let i=0; while(i<s.length){ const nl=s.indexOf('\n',i); if(nl<0){out.push(s.slice(i));break;} out.push(s.slice(i,nl+1)); i=nl+1; } return out; }
+const _bare    = raw => raw.replace(/\r?\n$/, '');
+const _isBlank = raw => /^[ \t\r]*\n?$/.test(raw);
+// An opening-fence line -> its match (lang in [2]), else null. Backtick fences
+// may not carry a backtick in the info string (CommonMark).
+function _fenceOpen(raw){ const m = FENCE_OPEN.exec(_bare(raw)); return (m && !(m[1][0]==='`' && m[2].indexOf('`')>=0)) ? m : null; }
+
+/** parse(md) -> doc, BYTE-EXACT: every source byte lands in exactly one cell's
+ *  `before` (verbatim glue), its verbatim fence lines (`_open`/`_close`) or
+ *  `code`, or doc.trailing — so serialize(parse(x)) === x. Fenced blocks are
+ *  `code` cells (lang = info string); other runs are `md` (prose) cells, whose
+ *  surrounding blank lines are peeled off into glue. Unterminated fence → prose. */
+function parse(src){
+  src = String(src == null ? '' : src);
+  const lines = _splitKeepNL(src);
+  const cells = []; let i = 0, pending = '';   // pending = glue carried to the next cell's `before`
+  while (i < lines.length){
+    const m = _fenceOpen(lines[i]);
+    if (m){
+      const char = m[1][0], len = m[1].length, lang = (m[2].split(/\s+/)[0] || '');
+      let j = i + 1; const inner = []; let closeRaw = null;
+      while (j < lines.length){
+        const cm = FENCE_CLOSE.exec(_bare(lines[j]));
+        if (cm && cm[1][0] === char && cm[1].length >= len){ closeRaw = lines[j]; break; }
+        inner.push(lines[j]); j++;
+      }
+      if (closeRaw === null){ pending += lines[i]; i++; continue; }   // unterminated → glue
+      cells.push({ id: uid(), type: 'code', lang, code: inner.join(''), level: 0, before: pending, collapsed: false, _open: lines[i], _close: closeRaw });
+      pending = ''; i = j + 1; continue;
+    }
+    // prose/blank run to the next fence-open (or EOF); peel leading/trailing
+    // blank lines off as glue so `code` holds just the prose.
+    let k = i; const buf = [];
+    while (k < lines.length && !_fenceOpen(lines[k])){ buf.push(lines[k]); k++; }
+    let s = 0; while (s < buf.length && _isBlank(buf[s])) s++;
+    let e = buf.length; while (e > s && _isBlank(buf[e-1])) e--;
+    if (e > s){ cells.push({ id: uid(), type: 'md', lang: '', code: buf.slice(s,e).join(''), level: 0, before: pending + buf.slice(0,s).join(''), collapsed: false }); pending = buf.slice(e).join(''); }
+    else pending += buf.join('');   // all blank → glue
+    i = k;
+  }
+  return { cells, trailing: pending };
+}
+/** Verbatim Markdown for one cell — exact fences as parsed. */
+function cellBody(c){
+  if (c.type !== 'code') return c.code;
+  if (c._open != null && c._close != null) return c._open + c.code + c._close;
+  return '```' + (c.lang || '') + '\n' + c.code.replace(/\n+$/, '') + '\n```';
+}
+/** serialize(doc) -> md. Byte-exact for a parsed doc. */
+function serialize(doc){
+  let out = '';
+  for (const c of doc.cells) out += (c.before || '') + cellBody(c);
+  return out + (doc.trailing || '');
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 2. MARKDOWN — marked.js when available, compact built-in fallback otherwise;
+ *    either way the output passes through the sanitizeHtml allowlist below.
+ * ════════════════════════════════════════════════════════════════════════════ */
+function escapeHtml(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function mdInline(s){
+  s = escapeHtml(s)
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g,'$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return s;
+}
+function fallbackMarkdown(src){
+  const lines = String(src).replace(/\r\n?/g,'\n').split('\n');
+  let html='', i=0;
+  const brk = l => /^\s*$/.test(l)||/^#{1,6}\s+/.test(l)||/^\s*```/.test(l)||/^\s*[-*+]\s+/.test(l)||/^\s*\d+\.\s+/.test(l)||/^\s*>/.test(l)||/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(l);
+  while (i<lines.length){
+    const line=lines[i];
+    if (/^\s*```/.test(line)){ i++; const buf=[]; while(i<lines.length&&!/^\s*```/.test(lines[i])){buf.push(lines[i]);i++;} i++; html+='<pre><code>'+escapeHtml(buf.join('\n'))+'</code></pre>'; continue; }
+    let h=/^(#{1,6})\s+(.*)$/.exec(line);
+    if (h){ const l=h[1].length; html+=`<h${l}>${mdInline(h[2])}</h${l}>`; i++; continue; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)){ html+='<hr>'; i++; continue; }
+    if (/^\s*>/.test(line)){ const buf=[]; while(i<lines.length&&/^\s*>/.test(lines[i])){buf.push(lines[i].replace(/^\s*>\s?/,''));i++;} html+='<blockquote>'+fallbackMarkdown(buf.join('\n'))+'</blockquote>'; continue; }
+    if (/^\s*[-*+]\s+/.test(line)){ const buf=[]; while(i<lines.length&&/^\s*[-*+]\s+/.test(lines[i])){buf.push('<li>'+mdInline(lines[i].replace(/^\s*[-*+]\s+/,''))+'</li>');i++;} html+='<ul>'+buf.join('')+'</ul>'; continue; }
+    if (/^\s*\d+\.\s+/.test(line)){ const buf=[]; while(i<lines.length&&/^\s*\d+\.\s+/.test(lines[i])){buf.push('<li>'+mdInline(lines[i].replace(/^\s*\d+\.\s+/,''))+'</li>');i++;} html+='<ol>'+buf.join('')+'</ol>'; continue; }
+    if (/^\s*$/.test(line)){ i++; continue; }
+    const buf=[]; while(i<lines.length&&!brk(lines[i])){buf.push(lines[i].replace(/\s+$/,''));i++;}
+    html+='<p>'+mdInline(buf.join(' '))+'</p>';
+  }
+  return html;
+}
+// ── Sanitizer — applied to ALL rendered markdown at this one seam, whichever
+//    engine produced it. marked deliberately does NOT sanitize (verified against
+//    the pinned 9.1.6: raw HTML, <script>, and javascript: hrefs pass straight
+//    through), and ?ref= renders any branch of the repository — including ones
+//    not yet reviewed. Allowlist model: keep the tags markdown legitimately produces,
+//    unwrap everything else (its text survives, its markup doesn't), strip all
+//    attributes but a small set, and gate href/src schemes. Parsing happens in a
+//    <template>, whose content is inert — nothing executes or loads during the walk.
+const MD_TAGS  = new Set('a b blockquote br code del div em h1 h2 h3 h4 h5 h6 hr i img li ol p pre span strong table tbody td th thead tr ul'.toUpperCase().split(' '));
+const MD_ATTRS = new Set(['href','title','src','alt','align']);
+// http(s)/mailto/#fragment/relative pass; any other explicit scheme (javascript:,
+// data:, vbscript:, …) is dropped — except data:image/* on <img>, which is inert.
+function mdSafeUrl(v, isImg){
+  v=String(v||'').trim();
+  if(/^(https?:|mailto:|#)/i.test(v)) return true;
+  if(isImg && /^data:image\//i.test(v)) return true;
+  return !/^[a-z][a-z0-9+.-]*:/i.test(v);
+}
+function sanitizeHtml(html){
+  const t=document.createElement('template'); t.innerHTML=String(html);
+  for(const el of [...t.content.querySelectorAll('*')]){
+    if(!MD_TAGS.has(el.tagName)){ el.replaceWith(...el.childNodes); continue; }
+    for(const a of [...el.attributes]){
+      const n=a.name.toLowerCase();
+      if(!MD_ATTRS.has(n) || (n==='href' && !mdSafeUrl(a.value,false)) || (n==='src' && !mdSafeUrl(a.value,true))) el.removeAttribute(a.name);
+    }
+    if(el.tagName==='A'){ el.setAttribute('target','_blank'); el.setAttribute('rel','noopener'); }
+  }
+  return t.innerHTML;
+}
+function renderMarkdownHTML(src){
+  if (window.marked && typeof marked.parse === 'function') {
+    try { return sanitizeHtml(marked.parse(src, { breaks: false, gfm: true })); } catch(e){}
+  }
+  return sanitizeHtml(fallbackMarkdown(src));
+}
+// Load marked.js without blocking render; re-render md cells once it arrives.
+function loadMarked(){
+  if (window.marked) return;
+  const s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js';
+  s.async = true;
+  s.onload = () => refreshMarkdownCells();
+  s.onerror = () => {};
+  document.head.appendChild(s);
+}
+function refreshMarkdownCells(){
+  $$('.cell').forEach(el => {
+    const c = allCells().find(x => x.id === +el.dataset.id);
+    if (c && c.type === 'md') renderMd(el, c);
+  });
+  if (rightIsOpen('preview')) renderPreview();
+}
+
+
+
+
+
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 3. SOURCES — the persistence layer's replacement. Nothing is stored: the
+ *    authored src/*.md are fetched from the repository at render time, so what
+ *    a reader sees is what is in the repository. ?ref= selects the git ref,
+ *    validated (path-safe charset, no '..' segment) and pinned to REPO so a
+ *    crafted link cannot fetch outside this repo's src/.
+ * ════════════════════════════════════════════════════════════════════════════ */
+const REPO  = 'andy-emerson/Servette';
+const FILES = ['INIT.md', 'SERVER.md', 'SYSTEM.md', 'SHELL.md', 'MAIN.md'];   // build.py order
+const _refParam = new URLSearchParams(location.search).get('ref') || 'main';
+const REF = /^[A-Za-z0-9._\/-]+$/.test(_refParam) && !_refParam.split('/').includes('..')
+  ? _refParam : 'main';
+const RAW = `https://raw.githubusercontent.com/${REPO}/${REF}/src/`;
+
+const nb = { files: [], cm: null, current: '', query: '', opts: { lineNumbers: false } };   // files: [{name, raw, doc, error}] in FILES order
+function allCells(){ return nb.files.flatMap(f => f.doc.cells); }
+function currentFile(){ return nb.files.find(f => f.name === nb.current) || null; }
+// The Navigator accordion is the file switcher: at most one file is expanded
+// (zero is allowed — everything folded), and ONLY the expanded file's cells
+// exist in the notebook DOM — five files' worth of live CodeMirror instances
+// is weight a reader never sees the benefit of.
+function expandFile(name, opts={}){
+  if(name !== '' && !nb.files.some(f => f.name === name)) return;
+  nb.current = name;   // session-only — every visit starts fresh at FILES[0]
+  renderNotebook(opts);
+  $('#nb-body').scrollTop = 0;
+}
+
+function lsGet(k,d){ try { const v=localStorage.getItem(k); return v==null?d:v; } catch(e){ return d; } }
+function lsSet(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
+
+// Fetch every file concurrently, plus the README (the assistant's general
+// context — not rendered). A failed file degrades to an inline error callout
+// in ITS slot — the rest of the document stands; there is no separate status
+// indicator, the callouts are the signal.
+async function fetchSources(){
+  const [files, readme] = await Promise.all([
+    Promise.all(FILES.map(async name => {
+      try {
+        const res = await fetch(RAW + name);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const raw = await res.text();
+        return { name, raw, doc: parse(raw) };
+      } catch(e){
+        return { name, raw: null, error: true,
+                 doc: parse('> **Could not load `src/' + name + '`** — ' + (e.message || e) +
+                            '. The rest of the document is unaffected.') };
+      }
+    })),
+    fetch(`https://raw.githubusercontent.com/${REPO}/${REF}/README.md`)
+      .then(r => r.ok ? r.text() : null).catch(() => null),
+  ]);
+  nb.files = files;
+  nb.readme = readme;
+  nb.current = FILES[0];
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 4. THEME — the front door's picker, ported: preference is one of
+ *    light / dark / system, session-only (the fresh-start rule — every
+ *    visit begins on SYSTEM); data-theme only ever gets the resolved
+ *    colour. Under "system" the page keeps listening, so a laptop
+ *    flipping to dark at sunset moves this page with it. The pre-paint
+ *    script in <head> applied the palette before first render; this takes
+ *    over from there. Replaces the shell's Paper × Ink engine — the tokens
+ *    it used to compute are now static CSS (see <style> §2).
+ * ════════════════════════════════════════════════════════════════════════════ */
+const _themeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+let _themePref = 'system';   // session-only — the viewer remembers no preferences
+function readThemePref(){ return _themePref; }
+function paintTheme(pref){
+  const dark = pref === 'dark' || (pref === 'system' && _themeMedia && _themeMedia.matches);
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+}
+function setThemePref(pref){ _themePref = pref; paintTheme(pref); }
+function wireThemePicker(){
+  const inputs = $$('.theme-picker input');
+  const initial = readThemePref();
+  inputs.forEach(input => {
+    input.checked = input.value === initial;
+    input.addEventListener('change', () => { if (input.checked) setThemePref(input.value); });
+  });
+  if (_themeMedia){
+    const onSystemChange = () => { if (readThemePref() === 'system') paintTheme('system'); };
+    if (_themeMedia.addEventListener) _themeMedia.addEventListener('change', onSystemChange);
+    else if (_themeMedia.addListener) _themeMedia.addListener(onSystemChange);
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 5. CODEMIRROR 6 — loaded on demand; a plain <pre> is the fallback. Read-only:
+ *    the editing extensions (history, brackets, keymaps) left with the editing.
+ * ════════════════════════════════════════════════════════════════════════════ */
+async function loadCM(){
+  if (nb.cm) return nb.cm;
+  if (nb.cm === false) return null;
+  try {
+    const [view,state,language,python,lezer] = await Promise.all([
+      import('@codemirror/view'), import('@codemirror/state'),
+      import('@codemirror/language'), import('@codemirror/lang-python'),
+      import('@lezer/highlight'),
+    ]);
+    const { EditorView } = view;
+    const { HighlightStyle, syntaxHighlighting } = language;
+    const { tags } = lezer;
+    const theme = EditorView.theme({
+      '&': { fontSize:'13px', fontFamily:'var(--font-mono)', lineHeight:'1.65', background:'var(--bg-primary)', color:'var(--text-primary)' },
+      '&.cm-focused': { outline:'none' },
+      '.cm-content': { padding:'11px 13px', fontFamily:'inherit' },
+      '.cm-scroller': { fontFamily:'inherit' },
+      '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { background:'var(--bg-tertiary)' },
+      '.cm-gutters': { background:'var(--bg-primary)', borderRight:'1px solid var(--border-faint)', color:'var(--text-tertiary)' },
+    });
+    const highlight = syntaxHighlighting(HighlightStyle.define([
+      { tag:[tags.keyword,tags.definitionKeyword,tags.controlKeyword,tags.operatorKeyword], color:'var(--syntax-keyword)' },
+      { tag:[tags.string,tags.special(tags.string)], color:'var(--syntax-string)' },
+      { tag:[tags.number,tags.bool,tags.atom], color:'var(--syntax-number)' },
+      { tag:[tags.operator,tags.punctuation], color:'var(--syntax-operator)' },
+      { tag:tags.comment, color:'var(--text-tertiary)', fontStyle:'italic' },
+      { tag:[tags.function(tags.variableName),tags.function(tags.propertyName)], color:'var(--syntax-function)' },
+      { tag:[tags.variableName,tags.propertyName], color:'var(--text-primary)' },
+    ]));
+    nb.cm = { view, state, language, python, theme, highlight };
+    return nb.cm;
+  } catch(e){
+    nb.cm = false;   // CodeMirror unavailable (offline?) — cells stay plain <pre>
+    return null;
+  }
+}
+async function upgradeCode(cellEl, cell){
+  const m = await loadCM();
+  if (!m) return;
+  const wrap = cellEl.querySelector('.cell-editor');
+  const pre = wrap && wrap.querySelector('pre.code-plain');
+  if (!pre) return;
+  const { EditorView } = m.view;
+  const { EditorState } = m.state;
+  new EditorView({
+    doc: cell.code,
+    extensions: [
+      m.theme, m.highlight,
+      cell.lang === 'python' ? m.python.python() : [],
+      nb.opts.lineNumbers ? m.view.lineNumbers() : [],
+      EditorState.readOnly.of(true), EditorView.editable.of(false),
+      EditorView.lineWrapping,
+    ],
+    parent: wrap,
+  });
+  pre.remove();
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 6. CELL DOM — read-only. Cells render once from the fetched doc; the only
+ *    cell affordance left is collapse.
+ * ════════════════════════════════════════════════════════════════════════════ */
+function badgeLabel(cell){ return cell.type === 'md' ? 'Markdown' : (cell.lang || 'code').toUpperCase(); }
+function firstLine(s){ const l=(s||'').split('\n').find(x=>x.trim()); return (l||'').trim().slice(0,60); }
+function renderMd(cellEl, cell){
+  const out=cellEl.querySelector('.cell-output');
+  out.className='cell-output out-md';
+  out.innerHTML = cell.code.trim()? renderMarkdownHTML(cell.code) : '';
+}
+function mkAction(ico,title,fn,cls){ const b=elem('button',{class:'ca-btn'+(cls?' '+cls:''),title,html:svg(ico)}); b.onclick=fn; return b; }
+function createCellEl(cell){
+  const badge=elem('span',{class:'cell-badge badge-'+cell.type,text:badgeLabel(cell)});
+  const label = cell.type==='md' ? firstLine(cell.code).replace(/^#+\s*/,'') : firstLine(cell.code);
+  const title=elem('span',{class:'cell-title',text:label});
+  const actions=elem('div',{class:'cell-actions'},[
+    mkAction('chevron','Collapse',()=>toggleCollapse(cell.id),'collapse-btn'),
+  ]);
+  const header=elem('div',{class:'cell-header'},[badge,title,actions]);
+  const body=elem('div',{class:'cell-editor'});
+  const out=elem('div',{class:'cell-output'});
+  const cellEl=elem('div',{class:'cell','data-id':cell.id},[header,body,out]);
+  if (cell.collapsed) cellEl.classList.add('collapsed');
+  if (cell.type==='code'){
+    body.appendChild(elem('pre',{class:'code-plain',text:cell.code}));
+    setTimeout(()=>upgradeCode(cellEl,cell),0);
+  } else {
+    renderMd(cellEl,cell);
+  }
+  return cellEl;
+}
+function toggleCollapse(id){
+  const c=allCells().find(x=>x.id===id); if(!c)return;
+  c.collapsed=!c.collapsed;
+  const el=$(`.cell[data-id="${id}"]`); if(el) el.classList.toggle('collapsed',c.collapsed);
+}
+function collapseAll(){
+  const f=currentFile(); if(!f) return;
+  const cells=f.doc.cells;   // only the rendered file — state and DOM stay in step
+  const anyOpen=cells.some(c=>!c.collapsed);
+  cells.forEach(c=>c.collapsed=anyOpen);
+  $$('.cell').forEach(el=>el.classList.toggle('collapsed',anyOpen));
+}
+// One slim boundary row per file, linking to the authored file at this ref.
+function fileRow(f){
+  return elem('div',{class:'file-row','data-file':f.name},[
+    elem('span',{class:'fname',text:'src/'+f.name}),
+    elem('a',{href:`https://github.com/${REPO}/blob/${REF}/src/${f.name}`,target:'_blank',rel:'noopener',text:'view on GitHub →'}),
+  ]);
+}
+// Render the CURRENT file — once per fetch or file switch. No structural ops.
+function renderNotebook(opts={}){
+  const scroll=$('#nb-scroll'); scroll.innerHTML='';
+  const f=currentFile();
+  if(f){
+    scroll.appendChild(fileRow(f));
+    f.doc.cells.forEach(cell=>scroll.appendChild(createCellEl(cell)));
+  } else {
+    scroll.appendChild(panePlaceholder('list','All files folded','Expand one in the Navigator'));
+  }
+  if(!opts.skipOutline) renderOutline();
+  if(rightIsOpen('preview')) renderPreview();
+  if(rightIsOpen('deps')) renderDeps();
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 6c. RIGHT PANE — Preview: the CURRENT file's markdown rendered whole, with
+ *    no cell chrome. The cells are the structural view; this is the reading
+ *    view of the same bytes — and it tracks the Navigator: what's expanded
+ *    there (and only that) is what renders here.
+ * ════════════════════════════════════════════════════════════════════════════ */
+const RIGHT_ORDER = ['preview','deps'];
+let rightOpen = new Set();   // fresh start: nothing open
+function rightIsOpen(tab){ return rightOpen.has(tab) && !$('#right-pane').classList.contains('collapsed'); }
+function renderPreview(){
+  const body=$('#preview-body'); if(!body) return; body.innerHTML='';
+  if(!nb.files.length){ body.appendChild(panePlaceholder('md','Nothing loaded yet','Fetching src/*.md …')); return; }
+  const f=currentFile();
+  if(!f){ body.appendChild(panePlaceholder('md','All files folded','Expand one in the Navigator')); return; }
+  body.appendChild(elem('div',{class:'preview-file out-md',html:renderMarkdownHTML(f.raw != null ? f.raw : serialize(f.doc))}));
+}
+function nextRightAfter(tab){
+  for (let i=RIGHT_ORDER.indexOf(tab)+1; i<RIGHT_ORDER.length; i++) if (rightOpen.has(RIGHT_ORDER[i])) return RIGHT_ORDER[i];
+  return null;
+}
+function layoutRightPane(){
+  RIGHT_ORDER.forEach(tab=>{
+    const p=$('#rpanel-'+tab); if(!p) return;
+    p.classList.toggle('active', rightOpen.has(tab));
+    p.style.flex='';
+  });
+  $$('#right-activity-bar .activity-bar-btn').forEach(b=>b.classList.toggle('active', rightOpen.has(b.dataset.rightTab)));
+  const r=$('#rresizer-preview');
+  if(r) r.style.display = (rightOpen.has('preview') && nextRightAfter('preview')) ? '' : 'none';
+}
+function toggleRightTab(tab){
+  rightOpen.has(tab) ? rightOpen.delete(tab) : rightOpen.add(tab);
+  if (rightOpen.size===0) PANES.right.collapse();
+  else if (PANES.right.isCollapsed()) PANES.right.expand();
+  layoutRightPane();
+  if (rightOpen.has(tab)){
+    if (tab==='preview') renderPreview();
+    if (tab==='deps') renderDeps();
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 6e. CALL MAP — an arc diagram of the open file's functions: every `def` is
+ *    a node, listed in definition order (meaningful order in a literate
+ *    file); an arc from A to B means A's body textually references B(. This
+ *    is regex over the authored fences, not an AST — calls through variables
+ *    or same-named methods will fool it, and the panel says so. Hand-rolled
+ *    SVG on the theme tokens; clicking a node flashes the defining cell.
+ * ════════════════════════════════════════════════════════════════════════════ */
+// Extract defs and textual call edges from one file's code cells. Pure —
+// self-tested. A def's body runs until the next `def` at the same or
+// shallower indent; edges are \bname( occurrences in another def's body.
+function extractCallMap(doc){
+  const defs=[];   // {name, indent, start, cellId}
+  let src=''; const cellAt=[];   // cellAt[i] = cell id owning src position i
+  doc.cells.forEach(c=>{
+    if(c.type!=='code') return;
+    const base=src.length;
+    src+=c.code+'\n';
+    for(let i=base;i<src.length;i++) cellAt[i]=c.id;
+  });
+  const defRe=/^([ \t]*)def\s+([A-Za-z_]\w*)\s*\(/gm; let m;
+  while((m=defRe.exec(src))) defs.push({ name:m[2], indent:m[1].length, start:m.index, cellId:cellAt[m.index] });
+  defs.forEach((d,i)=>{
+    let end=src.length;
+    for(let j=i+1;j<defs.length;j++) if(defs[j].indent<=d.indent){ end=defs[j].start; break; }
+    d.body=src.slice(src.indexOf('\n',d.start)+1, end);
+  });
+  const edges=[];   // [fromIdx, toIdx]
+  const firstByName=new Map();
+  defs.forEach((d,i)=>{ if(!firstByName.has(d.name)) firstByName.set(d.name,i); });
+  defs.forEach((d,i)=>{
+    firstByName.forEach((j,name)=>{
+      if(j===i) return;
+      if(new RegExp('\\b'+name+'\\s*\\(').test(d.body)) edges.push([i,j]);
+    });
+  });
+  return { defs, edges };
+}
+function renderDeps(){
+  const body=$('#deps-body'); if(!body) return; body.innerHTML='';
+  const f=currentFile();
+  if(!f){ body.appendChild(panePlaceholder('graph','All files folded','Expand one in the Navigator')); return; }
+  const { defs, edges }=extractCallMap(f.doc);
+  if(!defs.length){ body.appendChild(panePlaceholder('graph','No function definitions','src/'+f.name+' defines no functions')); return; }
+  const rowH=26, padY=14, dotX=14;
+  const labelW=Math.max(...defs.map(d=>d.name.length))*7.3+dotX+22;
+  const H=defs.length*rowH+padY*2;
+  const maxBulge=130;
+  const W=Math.ceil(labelW+maxBulge+20);
+  const y=i=>padY+i*rowH+rowH/2;
+  const svgEl=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svgEl.setAttribute('viewBox','0 0 '+W+' '+H);
+  // Natural size, not width:100% — stretching the viewBox to the panel scales
+  // the 12px labels into headlines. Overflow scrolls instead.
+  svgEl.setAttribute('width',W); svgEl.setAttribute('height',H);
+  let inner='<defs><marker id="dep-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="dep-arrow" d="M0 0L8 4L0 8z"/></marker></defs>';
+  edges.forEach(([a,b])=>{
+    const ya=y(a), yb=y(b);
+    const bulge=Math.min(maxBulge, 26+Math.abs(yb-ya)*0.28);
+    inner+='<path class="dep-arc" marker-end="url(#dep-arrow)" d="M'+labelW+' '+ya+' C '+(labelW+bulge)+' '+ya+', '+(labelW+bulge)+' '+yb+', '+(labelW+2)+' '+yb+'"><title>'+escapeHtml(defs[a].name+' → '+defs[b].name)+'</title></path>';
+  });
+  defs.forEach((d,i)=>{
+    inner+='<g class="dep-node" data-cell="'+d.cellId+'"><circle cx="'+dotX+'" cy="'+y(i)+'" r="3.5"/><text x="'+(dotX+10)+'" y="'+(y(i)+4)+'">'+escapeHtml(d.name)+'</text><title>Defined in this file — click to jump to its cell</title></g>';
+  });
+  svgEl.innerHTML=inner;
+  svgEl.querySelectorAll('.dep-node').forEach(g=>{
+    g.addEventListener('click',()=>gotoCell(f.name, +g.dataset.cell));
+  });
+  body.appendChild(svgEl);
+  body.appendChild(elem('div',{class:'pane-note',text:defs.length+' functions · '+edges.length+' call references — textual (regex over the fences), approximate by design.'}));
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 6b. ACTIVITY-BAR PANELS — Navigator: a file accordion (exactly one file
+ *    expanded; its cells listed beneath, and only its cells in the notebook
+ *    DOM — see expandFile) with search across ALL files layered on top. A
+ *    query of 2+ characters swaps the accordion for grouped results; clearing
+ *    it swaps back.
+ * ════════════════════════════════════════════════════════════════════════════ */
+function flashCell(el){
+  if(!el) return;
+  el.scrollIntoView({behavior:'smooth',block:'center'});
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+}
+function cellRowLabel(c){
+  return c.type==='md' ? (firstLine(c.code).replace(/^#+\s*/,'')||'Markdown') : (firstLine(c.code)||'(empty)');
+}
+function cellRow(fileName, c, label){
+  const row=elem('div',{class:'list-row clickable indent',title:label},[
+    elem('span',{class:'ol-dot '+c.type}),
+    elem('span',{class:'grow mono',text:label}),
+  ]);
+  row.onclick=()=>gotoCell(fileName, c.id);
+  return row;
+}
+// Navigate to a cell wherever it lives: switch the expanded file first if
+// needed (skipOutline keeps search results on screen), then flash it.
+function gotoCell(fileName, id){
+  if(nb.current!==fileName) expandFile(fileName,{skipOutline: !!nb.query.trim()});
+  requestAnimationFrame(()=>flashCell($(`.cell[data-id="${id}"]`)));
+}
+function renderOutline(){
+  const wrap=$('#outline-list'); if(!wrap) return; wrap.innerHTML='';
+  if(!nb.files.length){ wrap.appendChild(panePlaceholder('list','Nothing loaded yet','Fetching src/*.md …')); return; }
+  const q=nb.query.trim().toLowerCase();
+  if(q.length>=2){ renderSearchResults(wrap,q); return; }
+  nb.files.forEach(f=>{
+    const expanded=f.name===nb.current;
+    const frow=elem('div',{class:'list-row file clickable'+(expanded?' expanded':''),title:'src/'+f.name},[
+      elem('span',{class:'nav-chev',html:svg('chevron')}),
+      elem('span',{class:'grow mono',text:f.name}),
+      elem('span',{class:'sub',text:f.doc.cells.length}),
+    ]);
+    frow.onclick=()=>expandFile(expanded ? '' : f.name);   // clicking the expanded file folds it — zero expanded is a real state
+    wrap.appendChild(frow);
+    if(expanded) f.doc.cells.forEach(c=>wrap.appendChild(cellRow(f.name, c, cellRowLabel(c))));
+  });
+}
+// Case-insensitive substring search over every cell of every file — all the
+// data is already in memory. One row per matching cell, showing the first
+// matching line; grouped under non-collapsible file headers.
+function renderSearchResults(wrap,q){
+  let total=0;
+  nb.files.forEach(f=>{
+    const hits=f.doc.cells.map(c=>{
+      if(!c.code.toLowerCase().includes(q)) return null;
+      const line=(c.code.split('\n').find(l=>l.toLowerCase().includes(q))||'').trim().slice(0,70);
+      return {c, line};
+    }).filter(Boolean);
+    if(!hits.length) return;
+    wrap.appendChild(elem('div',{class:'list-row file',title:'src/'+f.name},[
+      elem('span',{class:'grow mono',text:f.name}),
+      elem('span',{class:'sub',text:hits.length}),
+    ]));
+    hits.forEach(h=>{ wrap.appendChild(cellRow(f.name, h.c, h.line||cellRowLabel(h.c))); total++; });
+  });
+  if(!total) wrap.appendChild(panePlaceholder('search','No matches','Case-insensitive, across all five files'));
+}
+function wireSearch(){
+  const inp=$('#nav-search'); if(!inp) return;
+  inp.addEventListener('input',()=>{ nb.query=inp.value; renderOutline(); });
+  inp.addEventListener('keydown',e=>{ if(e.key==='Escape'){ inp.value=''; nb.query=''; renderOutline(); } });
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 6d. AGENT — local WebLLM (in-browser model manager + streaming chat), the
+ *    shell's §6c with its remote-API half removed. It answers in the first
+ *    person, as Servette itself, fetching the documents each question needs
+ *    via the FETCH protocol (see the sight block); it edits and navigates
+ *    nothing. Models are labeled by tier (Fast / Balanced / Expert). WebGPU
+ *    + CDN required; without them the section explains itself and stays
+ *    disabled.
+ * ════════════════════════════════════════════════════════════════════════════ */
+/* Models: the shell's three Qwen2.5-Coder sizes (q4f16_1). One shared
+ * MLCEngine holds one model at a time. Setup (GPU + install/activate) lives
+ * in Settings → Agentic Reading; the AI assistant panel is the chat. */
+const WEBLLM_CDN = 'https://esm.run/@mlc-ai/web-llm';
+const AGENT_MODELS = [
+  // diskMB = download/cache size (shown in the dropdown); vramMB = memory to RUN
+  // (used for the GPU fit check). They differ: running needs more than the weights.
+  { id:'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC', family:'Qwen 2.5', tier:'Fast',     diskMB:800,  vramMB:1630 },
+  { id:'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC',   family:'Qwen 2.5', tier:'Balanced', diskMB:1600, vramMB:2505 },
+  { id:'Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC',   family:'Qwen 2.5', tier:'Expert',   diskMB:4300, vramMB:5107 },
+];
+const agent = { gpu:null, llm:null, engine:null, installed:new Set(), installedChecked:false, activeId:null, activeWindowSize:0, busyId:null, op:'', progress:'', generating:false, error:'', messages:[], cancel:null, vram:{testing:false,testedMB:0,resultMB:null,error:''} };
+function agentErr(e){ return (e&&e.message)?e.message:String(e); }
+function agentBusyText(){ const OP={disk:'Downloading… ',activate:'Loading… ',deactivate:'Unloading… '}; return (OP[agent.op]||'Working… ')+(agent.progress||''); }
+
+async function detectWebGPU(){
+  if (!('gpu' in navigator) || !navigator.gpu) return { supported:false, reason:'WebGPU not available in this browser' };
+  let adapter; try { adapter=await navigator.gpu.requestAdapter(); } catch(e){ return { supported:false, reason:'requestAdapter() failed: '+agentErr(e) }; }
+  if (!adapter) return { supported:false, reason:'No compatible GPU adapter (unavailable, blocked, or software-only)' };
+  let info={}; try { info=adapter.info||(adapter.requestAdapterInfo?await adapter.requestAdapterInfo():{})||{}; } catch(e){}
+  const lim=adapter.limits||{};
+  return { supported:true, vendor:info.vendor||'', maxBufferSize:lim.maxBufferSize||0 };
+}
+function agentModelFits(m){ const g=agent.gpu; if(!g||!g.supported) return false; const lim=g.maxBufferSize||0; if(!lim) return true; return m.vramMB*1048576<=lim; }
+async function agentEnsureModule(){ if(!agent.llm) agent.llm=await import(WEBLLM_CDN); return agent.llm; }
+async function agentEnsureEngine(){ await agentEnsureModule(); if(!agent.engine) agent.engine=new agent.llm.MLCEngine(); return agent.engine; }
+// THE single Cache API enumerator — one walk returns the set of installed
+// model ids (model weight URLs contain the id). Pass purgeKeep to ALSO delete
+// every model entry except that id ('' = purge all models) in the same pass.
+async function cacheWalk(purgeKeep){
+  const out={ installed:new Set() };
+  if(!('caches' in window)) return out;
+  try {
+    for(const name of await caches.keys()){
+      const c=await caches.open(name);
+      for(const req of await c.keys()){
+        const m=AGENT_MODELS.find(x=>req.url.includes(x.id));
+        if(!m) continue;
+        if(purgeKeep!==undefined && m.id!==purgeKeep){ await c.delete(req); continue; }
+        out.installed.add(m.id);
+      }
+    }
+  } catch(e){ console.error('[agent] cache walk failed',e); }
+  return out;
+}
+async function agentRefreshInstalled(){
+  agent.installed = (await cacheWalk()).installed;
+  agent.installedChecked=true; renderAgentLocal();
+}
+// Show only a clean percentage — WebLLM's p.text is verbose. Progress fires
+// many times per second: update the one status text node, don't rebuild the
+// whole settings panel per tick.
+function agentOnProgress(p){ agent.progress=(p&&p.progress!=null)?Math.round(p.progress*100)+'%':''; syncAgentStatusLine(); }
+function syncAgentStatusLine(){
+  const s=$('#agent-status-line'); if(!s || !agent.busyId) return;
+  s.textContent=agentBusyText();
+}
+// Set which model is on disk (the cache). '' = None. Enforces one-at-a-time:
+// unloads VRAM, purges every other cached model, then downloads the chosen one.
+// NEVER while a reply is streaming: unload() under a live WebGPU workload is a
+// device-loss crash (reported: switching tiers mid-reply took the browser
+// down) — the controls are disabled then, and this guard is the backstop.
+async function agentSetDisk(id){
+  if(agent.generating){ toast('Stop the current reply first','err'); return; }
+  if(agent.busyId) return;
+  agent.busyId=id||'none'; agent.op='disk'; agent.error=''; agent.progress=''; renderAgentLocal();
+  try {
+    if(agent.activeId){ try{ if(agent.engine) await agent.engine.unload(); }catch(e){} agent.activeId=null; }
+    await cacheWalk(id);
+    if(id){ const eng=await agentEnsureEngine(); eng.setInitProgressCallback(agentOnProgress); await eng.reload(id); await eng.unload(); }
+  } catch(e){ agent.error=agentErr(e); console.error('[WebLLM] set-disk failed',e); }
+  agent.installed=(await cacheWalk()).installed;
+  agent.busyId=null; agent.op=''; agent.progress=''; renderAgentLocal(); renderAgentTab();
+}
+// Picks context_window_size for a reload by scaling the saved VRAM allocation
+// against this tier's published vramMB cost (its cost AT a VRAM_FIGURES_CTX
+// window). An approximation backed by a probe/retry: a failed reload can take
+// the GPU device down with it, so every attempt gets a fresh engine. NO flat
+// fallback by design: if every attempt fails, the measurement has gone stale
+// and the honest move is to say so.
+async function agentPickContextWindow(id){
+  const freshReload=async(windowSize)=>{
+    agent.engine=null;
+    const eng=await agentEnsureEngine();
+    eng.setInitProgressCallback(agentOnProgress);
+    await eng.reload(id, { context_window_size: windowSize });
+  };
+  const allocMB=parseInt(lsGet('servette-src:qwenVramMB',''),10);
+  const tier=AGENT_MODELS.find(m=>m.id===id);
+  if(!allocMB || !tier || !tier.vramMB) throw new Error('No VRAM allocation — run Measure VRAM in Settings → Agentic Reading first.');
+  let candidate=Math.max(2048, Math.min(QWEN_MAX_CTX, Math.round(VRAM_FIGURES_CTX*allocMB/tier.vramMB)));
+  for(let attempt=0; attempt<4 && candidate>=2048; attempt++){
+    try{ await freshReload(candidate); return candidate; }
+    catch(e){ console.error('[WebLLM] context_window_size='+candidate+' failed, backing off',e); candidate=Math.floor(candidate*0.7); }
+  }
+  throw new Error('Could not fit a context window into your '+allocMB+' MB allocation — the VRAM measurement may be stale. Re-measure in Settings → Agentic Reading.');
+}
+// Load/unload the on-disk model into VRAM (the toggle). A successful
+// activation opens the assistant panel itself — the setup flow should end in
+// the chat, not in a settings row the reader has to know to leave.
+async function agentToggleVram(on){
+  if(agent.generating){ toast('Stop the current reply first','err'); return; }
+  if(agent.busyId) return;
+  const id=[...agent.installed][0]; if(on && !id) return;
+  agent.busyId=id||'vram'; agent.op=on?'activate':'deactivate'; agent.error=''; agent.progress=''; renderAgentLocal();
+  try {
+    if(on){
+      const windowSize=await agentPickContextWindow(id);
+      agent.activeId=id; agent.activeWindowSize=windowSize;
+    } else {
+      const eng=await agentEnsureEngine();
+      try{ await eng.unload(); }catch(e){}
+      agent.activeId=null; agent.activeWindowSize=0;
+    }
+  } catch(e){ agent.error=agentErr(e); console.error('[WebLLM] vram-toggle failed',e); }
+  agent.busyId=null; agent.op=''; agent.progress=''; renderAgentLocal(); renderAgentTab();
+  if(on && agent.activeId){ openTab('assistant'); toast('Servette is ready — ask it anything about the source'); }
+}
+// Empirically measures free VRAM by filling GPU buffers in chunks (the
+// documented pushErrorScope('out-of-memory') pattern) until one fails, then
+// frees them all. There is no WebGPU API to query free VRAM directly; this is
+// a snapshot, not a guarantee.
+async function measureVram(){
+  if(agent.vram.testing || agent.busyId) return;
+  if(agent.generating){ toast('Stop the current reply first','err'); return; }
+  if(!confirm("This intentionally fills your GPU's memory until it fails, to measure how much is free.\n\nClose other GPU-heavy tabs or apps first — this can slow or briefly freeze them while the test runs. On some systems the GPU context can be lost, which may require reloading this page.\n\nContinue?")) return;
+  if(agent.activeId) await agentToggleVram(false);
+  agent.vram={testing:true,testedMB:0,resultMB:null,error:''}; renderAgentLocal();
+  const chunkBytes=Math.min(128*1048576, Math.floor(((agent.gpu&&agent.gpu.maxBufferSize)||128*1048576)/2));
+  const MAX_CHUNKS=512;
+  let device=null; const buffers=[];
+  try {
+    const adapter=await navigator.gpu.requestAdapter();
+    if(!adapter) throw new Error('No compatible GPU adapter');
+    device=await adapter.requestDevice();
+    for(let i=0;i<MAX_CHUNKS;i++){
+      let buf, err;
+      try {
+        device.pushErrorScope('out-of-memory');
+        buf=device.createBuffer({ size:chunkBytes, usage:GPUBufferUsage.COPY_DST });
+        err=await device.popErrorScope();
+      } catch(e){ err=e; }
+      if(err){ if(buf){ try{ buf.destroy(); }catch(e){} } break; }
+      buffers.push(buf);
+      agent.vram.testedMB+=Math.round(chunkBytes/1048576);
+      const t=$('#vram-result-text'); if(t) t.textContent=agent.vram.testedMB+' MB filled so far…';
+    }
+    agent.vram.resultMB=agent.vram.testedMB;
+    lsSet('servette-src:qwenVramMeasuredMB', String(agent.vram.resultMB));
+    lsSet('servette-src:qwenVramMeasuredAt', String(Date.now()));
+  } catch(e){ agent.vram.error=agentErr(e); console.error('[VRAM test] failed',e); }
+  buffers.forEach(b=>{ try{ b.destroy(); }catch(e){} });
+  try{ device&&device.destroy(); }catch(e){}
+  agent.vram.testing=false; renderAgentLocal();
+}
+function vramAgeText(){
+  const at=parseInt(lsGet('servette-src:qwenVramMeasuredAt',''),10);
+  if(!at) return 'measured just now';
+  const mins=Math.round((Date.now()-at)/60000);
+  if(mins<2)   return 'measured just now';
+  if(mins<120) return 'measured '+mins+' min ago';
+  const hrs=Math.round(mins/60);
+  if(hrs<48)   return 'measured '+hrs+' h ago';
+  return 'measured '+Math.round(hrs/24)+' days ago';
+}
+function agentFailText(e){
+  const msg=agentErr(e);
+  if(e && e.name==='ContextWindowSizeExceededError')
+    return msg.split('\n')[0]+' Raise the VRAM allocation in Settings → Agentic Reading, or Clear this chat.';
+  return msg;
+}
+function syncAgentPill(){
+  if (agent.generating||agent.busyId) setAgent('loading');
+  else if (agent.activeId) setAgent('ready');
+  else if (agent.error) setAgent('error');
+  else setAgent('idle');
+}
+function setAgent(state){ setPill($('#st-agent'), state, 'Agent: '+(state==='loading'?'thinking':state)); }
+
+// The context_window_size WebLLM's published vram_required_MB figures are
+// computed at; purely the anchor for scaling an allocation into a window size.
+const VRAM_FIGURES_CTX = 4096;
+// Qwen2.5's architectural maximum window. Both the reload clamp and the
+// slider's token readout use it — on a large GPU the linear estimate can pass
+// this long before the allocation runs out, and a readout that kept counting
+// (~91k tokens on a 64 GB card) would promise a window the model cannot have.
+const QWEN_MAX_CTX = 32768;
+// Upper-end slider reserves, in absolute MB — what they protect (browser/OS
+// variance) costs roughly fixed MB regardless of GPU size.
+const VRAM_RESERVE_WARN   = 512;  // leave less free than this → yellow
+const VRAM_RESERVE_REJECT = 256;  // leave less free than this → red, Set disabled
+function vramZone(mb, maxMB, tier){
+  if(tier && tier.vramMB){ if(mb<tier.vramMB) return 'full'; if(mb<2*tier.vramMB) return 'warn'; }
+  if(maxMB-mb<VRAM_RESERVE_REJECT) return 'full';
+  if(maxMB-mb<VRAM_RESERVE_WARN) return 'warn';
+  return '';
+}
+
+function gpuStatusHTML(){
+  const g=agent.gpu;
+  if(!g) return '<span style="color:var(--text-tertiary)">Checking GPU…</span>';
+  if(g.supported){
+    const mb=g.maxBufferSize?('max buffer '+(g.maxBufferSize/1048576).toFixed(0)+' MB'):'GPU detected';
+    return '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px">'+
+      '<span style="color:var(--fn-green);font-weight:600;flex-shrink:0">● WebGPU available</span>'+
+      '<span style="color:var(--text-tertiary);font-size:11px;text-align:right">'+escapeHtml(mb)+'</span></div>';
+  }
+  return '<span style="color:var(--fn-amber);font-weight:600">○ WebGPU unavailable</span><div style="color:var(--text-tertiary);font-size:11px;margin-top:3px">'+escapeHtml(g.reason||'')+'</div><div style="color:var(--text-tertiary);font-size:11px;margin-top:3px">In-browser models are disabled.</div>';
+}
+// Settings → Agentic Reading: GPU status + on-disk model (dropdown) + VRAM
+// toggle + VRAM budget — the shell's local-model block, minus its API-agents
+// sibling.
+let _agentInfoOpen=false;
+function renderAgentLocal(){
+  const el=$('#agent-local'); if(!el) return;
+  el.innerHTML='';
+  const infoBtn=elem('button',{class:'kv-btn',style:'min-width:0;padding:1px 8px',text:'?',title:'Model requirements'});
+  infoBtn.onclick=()=>{ _agentInfoOpen=!_agentInfoOpen; renderAgentLocal(); };
+  el.appendChild(elem('div',{style:'display:flex;align-items:center;justify-content:space-between'},[
+    elem('div',{class:'agent-field-label',text:'WebLLM Agents'}), infoBtn ]));
+  if(_agentInfoOpen){
+    const tRow=(a,b,c,head)=>elem('div',{style:'display:flex;gap:8px;justify-content:space-between'+(head?';font-weight:600;color:var(--text-tertiary);text-transform:uppercase;font-size:10px;letter-spacing:.05em;margin-bottom:3px':'')},[
+      elem('span',{style:'flex:1',text:a}), elem('span',{style:'width:84px;text-align:right',text:b}), elem('span',{style:'width:84px;text-align:right',text:c}) ]);
+    const tbl=elem('div',{style:'margin:6px 0 8px;font-size:11px;color:var(--text-secondary);border:.5px solid var(--border-faint);border-radius:var(--radius-md);padding:8px 10px'});
+    tbl.appendChild(tRow('Model','Min cache','Min VRAM',true));
+    AGENT_MODELS.forEach(m=>{
+      const size=(m.id.match(/-(\d+(?:\.\d+)?B)-/)||[])[1]||'';
+      tbl.appendChild(tRow(size+' ('+m.tier+')', (m.diskMB>=1000?(m.diskMB/1000).toFixed(1)+' GB':m.diskMB+' MB'), m.vramMB+' MB'));
+    });
+    tbl.appendChild(elem('div',{class:'kv-desc',style:'margin-top:5px',text:'Min VRAM is the cost at a 4,096-token context window; a larger allocation buys a larger window.'}));
+    el.appendChild(tbl);
+  }
+  el.appendChild(elem('div',{style:'margin:7px 0 10px;font-size:12px;line-height:1.45;color:var(--text-secondary)',html:gpuStatusHTML()}));
+
+  const gpuOk=!!(agent.gpu&&agent.gpu.supported);
+  if(!gpuOk){ syncAgentPill(); return; }   // the status block above already says why nothing follows
+  if(agent.vram.resultMB==null && !agent.vram.testing){
+    const savedMeas=parseInt(lsGet('servette-src:qwenVramMeasuredMB',''),10);
+    if(savedMeas>0) agent.vram.resultMB=savedMeas;
+  }
+  const measured=agent.vram.resultMB!=null;
+  const onDisk=[...agent.installed][0]||'';
+  const active=!!agent.activeId, busy=!!agent.busyId;
+  if(agent.error) el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin:0 0 8px;word-break:break-word',text:agent.error}));
+
+  // The setup is LINEAR — four numbered steps, each enabled by the one
+  // before it, ending in the chat (activation opens it): measure → allocate
+  // → model → activate. No prose needed; the gating is the explanation.
+  // Everything is also disabled while a reply streams (see agentSetDisk).
+  const gen=agent.generating;
+  const step=(n,label)=>elem('div',{class:'agent-field-label',style:'margin-top:14px',text:n+' · '+label});
+
+  // 1 · Measure VRAM — see measureVram() for why this is an empirical test.
+  {
+    const v=agent.vram;
+    el.appendChild(step(1,'Measure VRAM'));
+    const measureBtn=elem('button',{class:'kv-btn',text:v.testing?'Measuring…':(measured?'Re-measure':'Measure VRAM')});
+    measureBtn.disabled=v.testing||busy||gen;
+    measureBtn.onclick=measureVram;
+    let resultText='';
+    if(v.testing) resultText=v.testedMB+' MB filled so far…';
+    else if(v.resultMB!=null) resultText='~'+v.resultMB+' MB free ('+vramAgeText()+')';
+    else resultText='Start here — nothing below unlocks without it.';
+    el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[measureBtn, elem('span',{class:'kv-desc',id:'vram-result-text',text:resultText})]));
+    if(v.error) el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin-top:4px;word-break:break-word',text:v.error}));
+  }
+
+  // 2 · Allocate (only exists once measured) — slider block appended below.
+  // 3 · Model on disk
+  const sel=elem('select',{class:'agent-select','aria-label':'On-disk model'}); sel.disabled=busy||!measured||gen;
+  sel.appendChild(elem('option',{value:'',text:'None'}));
+  AGENT_MODELS.forEach(m=>{
+    const fits=agentModelFits(m);
+    const o=elem('option',{value:m.id,text:m.tier+' ('+(m.diskMB/1000).toFixed(1)+' GB'+(fits?'':' · too large')+')'});
+    if(!fits && m.id!==onDisk) o.disabled=true;
+    sel.appendChild(o);
+  });
+  sel.value=onDisk;
+  sel.onchange=()=>agentSetDisk(sel.value);
+  // 4 · Activate
+  const cb=elem('input',{type:'checkbox',class:'switch',title:gen?'Stop the current reply first':(measured?'Load into VRAM':'Measure VRAM first')}); cb.checked=active; cb.disabled=busy||!onDisk||!measured||gen;
+  cb.onchange=()=>agentToggleVram(cb.checked);
+
+  {
+    const v=agent.vram;
+    if(v.resultMB!=null && !v.testing){
+      const savedMB=parseInt(lsGet('servette-src:qwenVramMB',''),10);
+      const maxMB=Math.max(512, v.resultMB);
+      const tierOnDisk=AGENT_MODELS.find(m=>m.id===onDisk)||null;
+      const zoneOf=mb=>vramZone(mb, maxMB, tierOnDisk);
+      let defaultMB=Math.round(maxMB*0.85);
+      if(tierOnDisk){
+        const gLo=2*tierOnDisk.vramMB, gHi=maxMB-VRAM_RESERVE_WARN;
+        if(gLo<=gHi) defaultMB=Math.max(gLo, Math.min(gHi, defaultMB));
+      }
+      const startMB=(savedMB && savedMB<=maxMB) ? savedMB : defaultMB;
+
+      const track=elem('div',{class:'vram-track'});
+      const bg=elem('div',{class:'vram-track-bg'});
+      const fill=elem('div',{class:'vram-track-fill'});
+      const slider=elem('input',{type:'range',class:'vram-range',min:'0',max:String(maxMB),step:'128','aria-label':'VRAM allocated to the local model (MB)'});
+      slider.value=startMB;
+      track.appendChild(bg); track.appendChild(fill); track.appendChild(slider);
+
+      const label=elem('span',{class:'kv-desc',style:'min-width:110px;text-align:right'});
+      const pctEl=elem('span');
+      const setBtn=elem('button',{class:'kv-btn commit',style:'min-width:72px;justify-content:center'});
+      // Fill width is a CSS calc() correcting for the knob's 8px travel inset;
+      // re-evaluated live by the browser so it can't go stale.
+      const sync=()=>{
+        const val=parseInt(slider.value,10);
+        const zone=zoneOf(val);
+        const pct=maxMB?Math.min(1,val/maxMB):0;
+        fill.style.width='calc('+(pct*100)+'% - '+(pct*16)+'px)';
+        fill.className='vram-track-fill'+(zone?' '+zone:'');
+        pctEl.textContent=Math.round(pct*100)+'%';
+        if(tierOnDisk){
+          const est=Math.round(VRAM_FIGURES_CTX*val/tierOnDisk.vramMB);
+          label.textContent = est>=QWEN_MAX_CTX ? '~'+QWEN_MAX_CTX.toLocaleString()+' tokens (model max)'
+                                                : '~'+est.toLocaleString()+' tokens';
+        } else label.textContent=val+' MB';
+        const isSaved=(val===parseInt(lsGet('servette-src:qwenVramMB',''),10));
+        setBtn.disabled=(zone==='full')||isSaved;
+        setBtn.innerHTML=isSaved?(svg('check')+'Saved'):'Set';
+      };
+      slider.oninput=sync;
+      setBtn.onclick=()=>{ lsSet('servette-src:qwenVramMB', slider.value); toast('VRAM budget set to '+slider.value+' MB'); sync(); };
+      sync();
+      if(startMB!==savedMB) lsSet('servette-src:qwenVramMB', String(startMB));
+      el.appendChild(elem('div',{class:'agent-field-label',style:'margin-top:14px;display:flex;justify-content:space-between'},[
+        elem('span',{text:'2 · Allocate to the model'}), pctEl ]));
+      el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[track,label,setBtn]));
+      if(tierOnDisk){
+        const anyGreen =(2*tierOnDisk.vramMB)<=(maxMB-VRAM_RESERVE_WARN);
+        const anySafe  =tierOnDisk.vramMB<=(maxMB-VRAM_RESERVE_REJECT);
+        if(!anySafe)       el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin-top:5px',text:'No workable allocation — this model does not fit on this machine alongside anything else.'}));
+        else if(!anyGreen) el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-amber);margin-top:5px',text:'No fully safe allocation on this GPU for this model — every position trades context room against headroom.'}));
+      }
+    }
+  }
+
+  // 3 · Model on disk — enabled by the measurement; selecting downloads.
+  el.appendChild(step(3,'Model on disk'));
+  el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[ elem('span',{class:'agent-row-label',text:'Model'}), sel ]));
+
+  // 4 · Activate — enabled once a model is on disk; success opens the chat.
+  el.appendChild(step(4,'Activate'));
+  el.appendChild(elem('div',{class:'setting-toggle',style:'margin-top:7px'},[ elem('span',{text:'Load into VRAM and start chatting'}), cb ]));
+
+  {
+    let status, col='var(--text-tertiary)';
+    if(busy){ status=agentBusyText(); }
+    else if(active){ status='Active — ready to chat ('+agent.activeWindowSize+'-token context)'; col='var(--fn-green)'; }
+    else if(onDisk) status='On disk · flip Activate to load it';
+    else if(measured) status='Pick a model to download';
+    else status='Measure VRAM to begin';
+    el.appendChild(elem('div',{class:'kv-desc',id:'agent-status-line',style:'margin-top:10px;color:'+col,text:status}));
+  }
+  if(active){
+    const openBtn=elem('button',{class:'kv-btn commit',style:'margin-top:8px',text:'Open the assistant →'});
+    openBtn.onclick=()=>openTab('assistant');
+    el.appendChild(openBtn);
+  }
+  syncAgentPill();
+}
+
+/* ── Sight: fetch-on-demand ────────────────────────────────────────────────
+ * A request starts with NO documents — just instructions (which carry the
+ * catalog: every fetchable file with a description of what it holds), the
+ * chat history, and the question. The model then either answers or replies
+ * with a FETCH directive naming the documents it needs; the viewer resends
+ * the same request with those documents included. Large documents arrive as
+ * excerpts; a MORE directive escalates one to its whole text when the
+ * excerpts fail. The reader never sees either directive — the bubble stays
+ * on "Thinking…" through fetch rounds. Which file is open in the Navigator
+ * no longer matters to the assistant.
+ * Two fetch rounds maximum (a MORE spends one), and a byte budget on a round —
+ * the full corpus (~169 KB ≈ 41k tokens) can never fit the 32,768 window,
+ * so over-asking degrades to an explicit omission note, never an overflow.
+ * No example sentences anywhere (a small model parrots examples as answers);
+ * the FETCH format line is the one deliberate exception — it is the tool. */
+const FILE_DESC = {
+  'README.md': 'what Servette is: features, security posture, comparisons, quick start',
+  'INIT.md':   'the docstring, imports, version, module-level constants',
+  'SERVER.md': 'request handling: config and sites, scrypt auth, rate limiting, the file cache, the request handler, security headers, the HTTP(S) servers',
+  'SYSTEM.md': 'the environment: venv bootstrap, server lifecycle, certificates and the ACME client, systemd provisioning',
+  'SHELL.md':  'the interactive terminal interface: menus, config wizard, status displays',
+  'MAIN.md':   'the entry point',
+};
+function docContent(n){ return n==='README.md' ? nb.readme : (nb.files.find(f=>f.name===n)||{}).raw; }
+function locOf(n){ const c=docContent(n); return c ? c.split('\n').length : null; }
+// Built per request (not a constant) so the catalog can carry live line
+// counts — the model's basis for judging what a fetch will cost the reader.
+function sysViewer(){
+  const catalog=Object.keys(FILE_DESC).map(n=>{
+    const loc=locOf(n);
+    return '- '+n+(loc?' ('+loc.toLocaleString()+' lines)':'')+' — '+FILE_DESC[n];
+  }).join('\n');
+  return [
+    "You are Servette, a production static-site server written in one readable Python file, servette.py. The reader is browsing your source code and asking you questions. The code is you — answer as yourself, in the first person.",
+    "What you always know about yourself: you build on Python's standard-library http.server and add what the public internet demands — trusted HTTPS with automatic Let's Encrypt renewal, plain HTTP redirected up to HTTPS, security headers on every response, rate limiting, optional Basic Auth, live reload, and a hardened systemd service that survives reboots. You require Python 3.11 or newer and have exactly one dependency, the cryptography package, which you install for yourself into a private virtualenv on first run. You are ~3,000 lines of readable Python with no configuration language: copy the file to a server, run it, follow the interactive setup wizard. You were designed with the Raspberry Pi in mind. Your source is authored as literate markdown documents that compile into servette.py — those documents are what the reader is browsing.",
+    "These documents exist, and you may request any of them (line counts show what a request costs — reading is slow):",
+    catalog,
+    "FIRST decide whether the message needs a document. Conversation, and any question the background above already answers, gets a direct reply with NO request — every fetch makes the reader wait. Any factual question the background does NOT answer needs its document: the catalog only tells you WHICH document to request, never enough to answer from. Never fill a gap with a guess — if the background does not state it and no document you were given shows it, request the document.",
+    "When you do need documents, reply with ONLY one line and nothing else:",
+    "FETCH: name, name",
+    "The reader never sees that line; the same question comes back with those documents attached. Request only what the question needs.",
+    "Large documents arrive as EXCERPTS — the sections that match the question, with elisions marked. An elided section is never evidence a feature is missing: if the answer should be in the document but the excerpts do not show it, reply with ONLY one line — MORE: name — and the same question comes back with that whole document. Escalate only when the excerpts truly fail; the whole document is a slow read.",
+    "Answer IN YOUR OWN WORDS — never repeat or continue a document's text. Documents are reference, not reply material; the only verbatim quoting allowed is a short ```python fence when specific code settles the question. Ground answers in what you were given; never state what you have not been shown.",
+  ].join('\n');
+}
+const FETCHABLE = ['README.md', ...FILES];
+// A FETCH directive, or null. The directive counts when it stands on its OWN
+// LINE anywhere in the reply — small models wrap it in politeness ("I need to
+// access the README. Please fetch it:\nFETCH: README.md" was observed in the
+// field), and a begins-with rule left that dangling as a dead answer. A line
+// must still START with FETCH:, so prose that mentions fetching inline
+// ("I would FETCH: X") stays an answer.
+function parseFetch(text){
+  const m=/^[ \t]*FETCH\s*:\s*([^\n]+)/mi.exec(text||'');
+  if(!m) return null;
+  const names=m[1]
+    .split(/[,\s]+/).map(s=>s.trim()).filter(Boolean)
+    .map(s=>{
+      const stem=s.replace(/\.md$/i,'').toUpperCase();
+      return FETCHABLE.find(f=>f.replace(/\.md$/,'').toUpperCase()===stem)||null;
+    })
+    .filter(Boolean);
+  return names.length ? [...new Set(names)] : null;
+}
+// A MORE directive — the model escalating from excerpts to the whole document
+// — or null. Same own-line rule as FETCH, but it names ONE document.
+function parseMore(text){
+  const m=/^[ \t]*MORE\s*:\s*([^\n]+)/mi.exec(text||'');
+  if(!m) return null;
+  const stem=(m[1].trim().split(/[,\s]+/)[0]||'').replace(/\.md$/i,'').toUpperCase();
+  return FETCHABLE.find(f=>f.replace(/\.md$/,'').toUpperCase()===stem)||null;
+}
+// Which documents does the reader's message NAME? Matched conservatively —
+// the uppercase stem (SYSTEM) or any case with the .md suffix — because bare
+// lowercase "server"/"shell"/"main" are ordinary English. A named document is
+// pre-attached to round 1 mechanically: the field showed the model answering
+// "What does SYSTEM do?" from the catalog line instead of fetching, and no
+// judgment is needed when the reader already said which file they mean.
+function namedDocs(text){
+  return FETCHABLE.filter(n=>{
+    const stem=n.replace(/\.md$/,'');
+    return new RegExp('\\b'+stem+'\\b').test(text) || new RegExp('\\b'+stem+'\\.md\\b','i').test(text);
+  });
+}
+/* ── Cell-level retrieval ──────────────────────────────────────────────────
+ * A large document is never sent whole: the viewer scores each of its cells
+ * against the question's terms and sends the matching cells plus their
+ * neighbors (a prose cell explains the code cell beside it), the file's
+ * header cell for orientation, and explicit elision markers for everything
+ * skipped. SHELL.md's ~15k tokens become ~3–6k — minutes become one. Small
+ * documents go whole; a question whose terms match nothing gets the header
+ * plus an honest none-matched note (no silent guessing material). */
+const EXCERPT_WHOLE_MAX = 16000;   // at or under this many chars, send the whole file
+const EXCERPT_CAP       = 24000;   // per-file excerpt budget (chars ≈ 6k tokens)
+const STOP = new Set(('the a an and or but of to in on for from is are was were be been do does did what how why '+
+  'where when which who whom with about without tell show me my you your it its this that these those there here '+
+  'they them their we our us i he she his her will would can could should shall may might must not no yes if then '+
+  'than as at by so such very more most less least into over under out up down off just also only even').split(' '));
+function questionTerms(q){
+  return [...new Set(((q||'').toLowerCase().match(/[a-z_][a-z0-9_]{2,}/g)||[]).filter(w=>!STOP.has(w)))];
+}
+// Strip markup that is noise to a language model — the README opens with a
+// <picture> logo and a row of CI badges, and the field showed the model
+// echoing exactly that block back as its "answer". Images, badge lines, and
+// raw HTML tags carry no meaning it can use; prose and code stay.
+function cleanForModel(content){
+  return content
+    .replace(/<picture>[\s\S]*?<\/picture>/gi, '')
+    .replace(/^\s*\[?!\[[^\]]*\]\([^)]*\)\]?(\([^)]*\))?\s*$/gm, '')
+    .replace(/<img[^>]*>/gi, '')
+    .replace(/\n{3,}/g, '\n\n').trim();
+}
+function excerptDoc(name, content, question, forceWhole){
+  content=cleanForModel(content);
+  if(forceWhole || content.length<=EXCERPT_WHOLE_MAX) return { name, content, excerpted:false };
+  const cells=parse(content).cells;
+  const terms=questionTerms(question);
+  const scores=cells.map(c=>{ const t=c.code.toLowerCase(); return terms.reduce((s,w)=>s+(t.includes(w)?1:0),0); });
+  if(!scores.some(s=>s>0)){
+    const head=cells.slice(0,2).map(cellBody).join('\n\n');
+    return { name, excerpted:true,
+             content: head+'\n\n… (none of '+name+'’s sections matched the question’s terms — the rest is elided; suggest more specific wording) …' };
+  }
+  const picked=new Set([0]);   // the header cell orients every excerpt
+  cells.forEach((c,i)=>{ if(scores[i]>0){ picked.add(i); if(i>0) picked.add(i-1); if(i<cells.length-1) picked.add(i+1); } });
+  const idx=[...picked].sort((a,b)=>a-b);
+  const size=i=>cellBody(cells[i]).length;
+  let total=idx.reduce((s,i)=>s+size(i),0);
+  while(total>EXCERPT_CAP && idx.length>1){
+    // shed lowest-score cells first (zero-score neighbors go before matches), later-in-file first on ties
+    const r=idx.filter(i=>i!==0).sort((a,b)=>(scores[a]-scores[b])||(b-a))[0];
+    idx.splice(idx.indexOf(r),1); total-=size(r);
+  }
+  const out=[]; let last=-1;
+  idx.forEach(i=>{
+    if(i>last+1) out.push('… (cells '+(last+2)+'–'+i+' of '+cells.length+' elided) …');
+    out.push(cellBody(cells[i])); last=i;
+  });
+  if(last<cells.length-1) out.push('… (cells '+(last+2)+'–'+cells.length+' elided) …');
+  return { name, excerpted:true, content: out.join('\n\n') };
+}
+// Resolve requested names to (possibly excerpted) contents under an overall
+// byte budget: requested order wins, the rest is omitted by name. Names in
+// `whole` (a MORE escalation) bypass excerpting and arrive complete.
+function resolveDocs(names, question, whole){
+  const BUDGET=90000; let used=0; const list=[], omitted=[];
+  names.forEach(n=>{
+    const content=docContent(n);
+    if(content==null){ omitted.push(n+' (unavailable)'); return; }
+    const d=excerptDoc(n, content, question, whole&&whole.has(n));
+    if(used+d.content.length>BUDGET){ omitted.push(n); return; }
+    used+=d.content.length; list.push(d);
+  });
+  return {list, omitted};
+}
+function assembleSight(text, history, docs, fetchesLeft){
+  docs=docs||{list:[],omitted:[]};
+  let system=sysViewer();
+  if(docs.list.length) system+='\n\nDocuments provided at your request (at ref '+REF+'):\n\n'+
+    docs.list.map(d=>'── '+d.name+(d.excerpted?' (excerpts)':'')+' ──\n\n'+d.content).join('\n\n');
+  if(docs.omitted.length) system+='\n\nOmitted for size: '+docs.omitted.join(', ')+' — request fewer documents at once.';
+  if(fetchesLeft<=0) system+='\n\nNo more documents can be provided for this reply — answer with what you have.';
+  return { system, messages:[...(history||[]), {role:'user',content:text}] };
+}
+
+/* ── Chat (the shell's assistant panel, local-only) ── */
+function decorateCodeBlocks(container){
+  container.querySelectorAll('pre').forEach(pre=>{
+    const code=pre.querySelector('code'); if(!code) return;
+    const raw=code.textContent;
+    const btn=elem('button',{class:'code-copy-btn',html:svg('copy'),title:'Copy'});
+    btn.onclick=()=>{ navigator.clipboard.writeText(raw).then(()=>toast('Copied')).catch(()=>toast('Copy failed','err')); };
+    pre.appendChild(btn);
+  });
+}
+function clearChat(){
+  if (agent.generating) return;
+  agent.messages=[]; renderAgentMessages();
+}
+function copyChat(){
+  if (!agent.messages.length){ toast('Conversation is empty'); return; }
+  const text=agent.messages.map(m=>(m.from||m.role)+': '+m.content).join('\n\n');
+  navigator.clipboard.writeText(text).then(()=>toast('Conversation copied')).catch(()=>toast('Copy failed','err'));
+}
+function fillBotBody(bodyEl, content){
+  bodyEl.innerHTML = content ? renderMarkdownHTML(content)
+    : '<span style="opacity:.55">Thinking…</span>';
+  decorateCodeBlocks(bodyEl);
+}
+// Seconds → "45s" / "4m 24s" / "1h 3m" — a thinking clock that only counts
+// seconds stops being informative right when the wait gets serious.
+function fmtDur(s){
+  if(s<60) return s+'s';
+  const m=Math.floor(s/60), sec=s%60;
+  if(m<60) return m+'m'+(sec?' '+sec+'s':'');
+  const h=Math.floor(m/60), min=m%60;
+  return h+'h'+(min?' '+min+'m':'');
+}
+// The thinking clock's expectation suffix. Calibrated from THIS session's
+// completed replies (chars sent / seconds taken) — silent until there is
+// data, since a made-up rate would just be a different kind of lie. And once
+// the clock passes the estimate it stops being a prediction: "about 2m
+// expected" showing at 3m is a lie too, so the label turns into the honest
+// observation instead.
+function estLabel(perf, plannedChars, elapsedSecs){
+  if(!perf || perf.secs<5) return '';
+  const est=Math.round(plannedChars/(perf.chars/perf.secs));
+  if(est<8) return '';
+  return elapsedSecs<=est ? ' · about '+fmtDur(est)+' expected' : ' · longer than expected';
+}
+function chatMsgEl(m){
+  const el=elem('div',{class:'chat-msg '+(m.role==='user'?'user':'bot')});
+  if(m.role==='assistant' && m.from) el.appendChild(elem('div',{class:'chat-from',text:m.from}));
+  const bodyEl=elem('div',{class:'out-md'});
+  if(m.role==='user') bodyEl.textContent=m.content;
+  else fillBotBody(bodyEl, m.content);
+  el.appendChild(bodyEl);
+  // Every reply carries its cost: how long it took, and which documents it
+  // fetched to answer — the honest account of why some answers are slow.
+  if(m.role==='assistant' && m.secs!=null)
+    el.appendChild(elem('div',{class:'chat-meta',text:fmtDur(m.secs)+(m.fetched&&m.fetched.length?' · read '+m.fetched.join(', '):'')}));
+  return el;
+}
+function renderAgentMessages(){
+  const box=$('#agent-messages'); if(!box) return;
+  if(_streamRaf){ cancelAnimationFrame(_streamRaf); _streamRaf=0; }
+  box.innerHTML='';
+  // The first thing in the window is always the meta notice — from the
+  // viewer, not from Servette or the reader.
+  box.appendChild(elem('div',{class:'chat-notice',text:'Servette’s assistant is a small AI model running in your browser. It can make mistakes — check important answers against the source — and reading a large source file on your GPU can take minutes; the clock under each reply shows where the time went.'}));
+  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about itself','It reads the files it needs to answer — on your GPU, as much as you like.')); return; }
+  agent.messages.forEach(m=>box.appendChild(chatMsgEl(m)));
+  box.scrollTop=box.scrollHeight;
+}
+// Streaming: repaint ONLY the last bubble, coalesced to one render per frame.
+let _streamRaf=0;
+function updateStreamingMessage(){
+  if(_streamRaf) return;
+  _streamRaf=requestAnimationFrame(()=>{
+    _streamRaf=0;
+    const box=$('#agent-messages'); if(!box) return;
+    const last=box.lastElementChild, m=agent.messages[agent.messages.length-1];
+    if(!last || !m || m.role!=='assistant') return;
+    const nearBottom=(box.scrollHeight-box.scrollTop-box.clientHeight)<40;
+    const body=last.querySelector('.out-md'); if(body) fillBotBody(body, m.content);
+    if(nearBottom) box.scrollTop=box.scrollHeight;
+  });
+}
+function renderAgentTab(){
+  const body=$('#assistant-body'); if(!body) return;
+  if(!agent.activeId){
+    const loading=!!agent.busyId;
+    body.innerHTML='';
+    body.appendChild(panePlaceholder('message-code', loading?'Loading model…':'No agent active', loading?'See Settings → Agentic Reading':'Activate a model in Settings → Agentic Reading'));
+    return;
+  }
+  body.innerHTML='';
+  const msgs=elem('div',{class:'chat-msgs',id:'agent-messages',role:'log','aria-live':'polite','aria-label':'Conversation'});
+  const ta=elem('textarea',{rows:'1',placeholder:'Ask Servette about its source…',id:'agent-input','aria-label':'Message Servette'});
+  const send=elem('button',{html:svg(agent.generating?'stop':'send'),title:agent.generating?'Stop':'Send',id:'agent-send'});
+  const submit=()=>{ if(!agent.generating){ agentSend(ta.value); ta.value=''; } };
+  send.onclick=()=>{ if(agent.generating) agentCancel(); else submit(); };
+  ta.addEventListener('keydown',e=>{
+    if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); submit(); }
+    else if(e.key==='Escape'&&agent.generating){ e.preventDefault(); agentCancel(); }
+  });
+  const resizer=elem('div',{class:'chat-resizer',title:'Drag to resize'});
+  let dy0=0, h0=0, floorH=0;
+  const onMove=e=>{ ta.style.height=Math.max(floorH, Math.min(body.offsetHeight*0.5, h0+(dy0-e.clientY)))+'px'; };
+  const onUp=()=>{ resizer.classList.remove('dragging'); document.body.style.cursor=''; document.body.style.userSelect=''; document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp); };
+  resizer.addEventListener('mousedown',e=>{ if(!floorH) floorH=ta.offsetHeight||34; dy0=e.clientY; h0=ta.offsetHeight; resizer.classList.add('dragging'); document.body.style.cursor='ns-resize'; document.body.style.userSelect='none'; document.addEventListener('mousemove',onMove); document.addEventListener('mouseup',onUp); e.preventDefault(); });
+  body.appendChild(msgs); body.appendChild(resizer); body.appendChild(elem('div',{class:'chat-input'},[ta,send]));
+  renderAgentMessages();
+}
+function syncSendButton(){
+  const b=$('#agent-send'); if(!b) return;
+  b.innerHTML=svg(agent.generating?'stop':'send'); b.title=agent.generating?'Stop':'Send';
+}
+async function agentSend(text){
+  text=(text||'').trim();
+  if(!text || agent.generating) return;
+  if(!agent.activeId || !agent.engine) return;
+  // Full chat history rides along — it is cheap now that documents are
+  // fetched on demand rather than sent up front. Clear is the reader's lever.
+  const history=agent.messages.filter(m=>(m.role==='user'||m.role==='assistant')&&m.content)
+    .map(m=>({role:m.role,content:m.content}));
+  const myCancel=agent.cancel={ turnStart:agent.messages.length, text, cancelled:false };
+  agent.messages.push({role:'user',from:'user',content:text});
+  agent.generating=true; renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
+  try { await agentSendLocal(text, history, myCancel); }
+  catch(e){ if(!myCancel.cancelled) console.error('[agent] send failed',e); }
+  if (agent.cancel===myCancel){ agent.generating=false; agent.cancel=null; syncAgentPill(); syncSendButton(); renderAgentLocal(); }
+}
+// "Pulled back" cancel: the whole turn is dropped as if it never happened and
+// the typed text goes back in the input for editing.
+async function agentCancel(){
+  const c=agent.cancel; if(!c || c.cancelled) return;
+  c.cancelled=true;
+  if (agent.engine) agent.engine.interruptGenerate().catch(()=>{});
+  agent.messages.length=c.turnStart;
+  agent.generating=false;
+  renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
+  const ta=$('#agent-input'); if(ta){ ta.value=c.text; ta.focus(); }
+}
+// One streamed completion. The reply shows live UNLESS it is a FETCH or MORE
+// directive — those are machinery, invisible to the reader; the bubble stays
+// on "Thinking…" through them. (Display is held for the first few characters
+// so a directive's prefix never flashes into view.)
+async function streamOnce(system, messages, idx, myCancel){
+  const convo=[{role:'system',content:system}, ...messages];
+  // max_tokens caps decode time — on a slow GPU an uncapped ramble is the
+  // difference between 30 seconds and 3 minutes. ~500 words of answer.
+  const chunks=await agent.engine.chat.completions.create({ messages:convo, stream:true, max_tokens:768 });
+  let acc='';
+  for await (const chunk of chunks){
+    if (myCancel.cancelled) return null;
+    acc += (chunk&&chunk.choices&&chunk.choices[0]&&chunk.choices[0].delta&&chunk.choices[0].delta.content)||'';
+    // The moment a directive line exists, this reply is machinery: pull any
+    // already-streamed preamble back off the screen and sit on "Thinking…".
+    if(/^[ \t]*(FETCH|MORE)\s*:/mi.test(acc)){
+      if(agent.messages[idx].content){ agent.messages[idx].content=''; renderAgentMessages(); }
+    } else if(acc.length>=8 || acc.includes('\n')){
+      agent.messages[idx].content=acc;
+      updateStreamingMessage();
+    }
+  }
+  return acc;
+}
+// The fetch loop: ask with no documents; if the model replies FETCH, resend
+// the same question with the requested documents attached; if it replies
+// MORE, resend with that document whole. Two rounds max, shared.
+async function agentSendLocal(text, history, myCancel){
+  if (myCancel.cancelled) return;
+  agent.messages.push({role:'assistant',from:'Servette',content:''});
+  const idx=agent.messages.length-1;
+  renderAgentMessages();
+  const MAX_FETCH_ROUNDS=2;
+  // Documents the reader named are attached up front — no judgment round.
+  const named=namedDocs(text);
+  const whole=new Set();   // names escalated to whole documents via MORE
+  let docs=named.length ? resolveDocs(named, text, whole) : null;
+  // The thinking clock: live seconds in the pending bubble (so a long prefill
+  // is visibly not a freeze), the total stamped on the reply when it lands.
+  const t0=performance.now();
+  const secsNow=()=>Math.round((performance.now()-t0)/1000);
+  let plannedChars=0, sentChars=0;
+  const tick=setInterval(()=>{
+    const m=agent.messages[idx];
+    if(!m || m.content){ return; }
+    const box=$('#agent-messages'); const last=box&&box.lastElementChild;
+    const span=last&&last.querySelector('.out-md span');
+    if(span) span.textContent='Thinking… '+fmtDur(secsNow())+estLabel(agent.perf, plannedChars, secsNow());
+  },1000);
+  try {
+    let finalText='';
+    for(let round=0;;round++){
+      const { system, messages } = assembleSight(text, history, docs, MAX_FETCH_ROUNDS-round);
+      plannedChars=system.length+messages.reduce((s,m)=>s+m.content.length,0);
+      sentChars+=plannedChars;
+      const reply=await streamOnce(system, messages, idx, myCancel);
+      if (reply==null) return;   // cancelled
+      const req  = round<MAX_FETCH_ROUNDS ? parseFetch(reply) : null;
+      const more = !req && round<MAX_FETCH_ROUNDS ? parseMore(reply) : null;
+      if (!req && !more){
+        finalText = /^[ \t]*(FETCH|MORE)\s*:/mi.test(reply)
+          ? "I couldn't settle that within my document budget — try asking about one thing at a time."
+          : reply;
+        break;
+      }
+      if (more) whole.add(more);
+      // Merge with anything already attached (pre-attached named documents
+      // must survive a follow-up fetch; a MORE re-resolves its excerpt as the
+      // whole document); bubble stays on "Thinking…".
+      docs=resolveDocs([...new Set([...(docs?docs.list.map(d=>d.name):[]), ...(req||[]), ...(more?[more]:[])])], text, whole);
+    }
+    agent.messages[idx].content=finalText||'(empty response)';
+    agent.messages[idx].secs=secsNow();
+    agent.messages[idx].fetched=docs?docs.list.map(d=>d.name+(d.excerpted?' (parts)':'')):[];
+    renderAgentMessages();
+  } catch(e){ if(!myCancel.cancelled){ agent.messages[idx].content='⚠️ '+agentFailText(e); agent.messages[idx].secs=secsNow(); console.error('[WebLLM] generate failed',e); renderAgentMessages(); } }
+  finally {
+    clearInterval(tick);
+    agent.perf=agent.perf||{chars:0,secs:0};
+    agent.perf.chars+=sentChars; agent.perf.secs+=Math.max(1,secsNow());
+  }
+}
+async function initAgent(){
+  renderAgentTab();
+  agent.gpu = await detectWebGPU();
+  renderAgentLocal();
+  if(agent.gpu && agent.gpu.supported) agentRefreshInstalled();
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 9. SELF-TESTS — doc-model byte-exactness and cell classification, plus a
+ *    live check: every successfully fetched file round-trips byte-exact
+ *    (serialize(doc) === the bytes fetched). Results toast; details go to the
+ *    browser console (the shell's Console panel left with the runtime).
+ * ════════════════════════════════════════════════════════════════════════════ */
+function runSelfTests(){
+  const res=[]; let pass=0;
+  const ok=(n,cond,note)=>{ res.push({n,ok:!!cond,note:cond?'':(note||'')}); if(cond)pass++; };
+  // parse→serialize is BYTE-EXACT: serialize(parse(x)) === x (whitespace-stressed)
+  [ '', '# H\n\ntext\n', '```python\na = 1\n```\n',
+    '\n\n# leading blanks\n\n\n```css\nb{}\n```\n\n\ntrailing prose\n\n',
+    '```html\n<b>hi</b>\n```\n\n~~~js\nx\n~~~\n', 'no final newline',
+    'text\n```js\nunterminated\n', '```js\n\n```\n' ].forEach((src,i)=>{
+    try{ const out=serialize(parse(src)); ok('byte-exact #'+i, out===src, 'serialize(parse(x)) !== x'); }
+    catch(e){ ok('byte-exact #'+i,false,'threw '+e.message); }
+  });
+  // cell classification: fences → code cells (with lang), prose → md cells
+  try { const d=parse('# hi\n\n```python\n1\n```\n\n```css\na{}\n```');
+    ok('classifies cells', d.cells.length===3 && d.cells[0].type==='md' && d.cells[1].type==='code' && d.cells[1].lang==='python' && d.cells[2].lang==='css'); }
+  catch(e){ ok('classify',false,e.message); }
+  // the live documents round-trip — the viewer shows the file, byte for byte
+  nb.files.filter(f=>!f.error).forEach(f=>{
+    try{ ok('round-trip src/'+f.name, serialize(f.doc)===f.raw, 'serialize(doc) !== fetched bytes'); }
+    catch(e){ ok('round-trip src/'+f.name,false,'threw '+e.message); }
+  });
+  // the FETCH directive parser (the assistant's retrieval protocol)
+  try {
+    const f1=parseFetch('FETCH: SERVER.md, README.md');
+    ok('FETCH parses', !!f1 && f1.join(',')==='SERVER.md,README.md');
+    const f2=parseFetch('  fetch: shell');
+    ok('FETCH normalizes case and suffix', !!f2 && f2.join(',')==='SHELL.md');
+    // observed in the field: the directive wrapped in politeness, on its own line
+    const f3=parseFetch('To answer accurately, I need the README. Please fetch it:\nFETCH: README.md');
+    ok('FETCH after preamble parses', !!f3 && f3.join(',')==='README.md');
+    ok('FETCH inline in prose is an answer', parseFetch('I would FETCH: SERVER.md if I could.')===null);
+    ok('FETCH unknown name → null', parseFetch('FETCH: nonsense')===null);
+    // the MORE escalation — one name, same own-line discipline
+    ok('MORE parses one name', parseMore('MORE: shell')==='SHELL.md');
+    ok('MORE after preamble parses', parseMore('The excerpts lack it.\nMORE: SERVER.md')==='SERVER.md');
+    ok('MORE inline in prose is an answer', parseMore('I would say MORE: SERVER.md matters.')===null);
+    ok('MORE unknown name → null', parseMore('MORE: nonsense')===null);
+    // named-document pre-attach — conservative matching, like the old interceptor's
+    ok('named: uppercase stem', namedDocs('What does SYSTEM do?').join(',')==='SYSTEM.md');
+    ok('named: lowercase bare stem passes', namedDocs('what does the system do?').length===0);
+    ok('named: .md any case', namedDocs('is shell.md big?').join(',')==='SHELL.md');
+    // the thinking clock's formatter
+    ok('duration format', fmtDur(59)==='59s' && fmtDur(61)==='1m 1s' && fmtDur(264)==='4m 24s' && fmtDur(3600)==='1h' && fmtDur(3780)==='1h 3m');
+    // …and its expectation suffix: silent without data, a prediction while it
+    // holds, the honest observation once the clock passes it
+    const perf={chars:6000,secs:60};   // 100 chars/s → 3000 chars ≈ 30s
+    ok('estimate: silent without data', estLabel(null,3000,5)==='' && estLabel({chars:100,secs:2},3000,5)==='');
+    ok('estimate: prediction while under', estLabel(perf,3000,10)===' · about 30s expected');
+    ok('estimate: honest once exceeded', estLabel(perf,3000,31)===' · longer than expected');
+    ok('estimate: tiny reads stay quiet', estLabel(perf,300,1)==='');
+  } catch(e){ ok('FETCH parser',false,e.message); }
+  // cell-level excerpting — pure functions over a synthetic oversized doc
+  try {
+    ok('terms drop stopwords', questionTerms('Why is the scrypt limiter here?').join(',')==='scrypt,limiter');
+    const pad='```python\n'+'# filler line to pad the synthetic document past the threshold\n'.repeat(8)+'```\n\n';
+    const big='# HEAD\n\nintro prose\n\n'+pad.repeat(30)+'```python\ndef scrypt_check():\n    pass\n```\n\n'+pad.repeat(30);
+    const ex=excerptDoc('BIG.md', big, 'why scrypt?');
+    ok('excerpt: oversized file excerpts', ex.excerpted===true && ex.content.length<big.length);
+    ok('excerpt: match kept, elisions marked', ex.content.includes('scrypt_check') && ex.content.includes('elided'));
+    ok('excerpt: header orients', ex.content.includes('# HEAD'));
+    ok('excerpt: no match → honest note', excerptDoc('BIG.md', big, 'zebra quantum').content.includes('matched the question'));
+    ok('excerpt: small file goes whole', excerptDoc('S.md', '# tiny\n', 'anything').excerpted===false);
+    const esc=excerptDoc('BIG.md', big, 'why scrypt?', true);
+    ok('excerpt: MORE forces whole', esc.excerpted===false && !esc.content.includes('elided'));
+    // model-noise stripping — the README's logo/badges block, observed echoed as an "answer"
+    const dirty='<picture>\n<img src="x.svg">\n</picture>\n\n[![Tests](https://b.svg)](https://a)\n![Python](https://s.io/b.svg)\n\nReal prose stays.\n';
+    const cleaned=cleanForModel(dirty);
+    ok('clean: images and badges stripped, prose kept', !cleaned.includes('picture') && !cleaned.includes('b.svg') && cleaned.includes('Real prose stays.'));
+  } catch(e){ ok('excerpting',false,e.message); }
+  // the call-map extractor — pure function over a synthetic literate doc
+  try {
+    const d=parse('prose\n\n```python\ndef alpha():\n    return beta() + 1\n\ndef beta():\n    return 2\n\ndef gamma():\n    x = "beta"   # a name in a string, not a call\n    return alpha()\n```\n');
+    const cm=extractCallMap(d);
+    const names=cm.defs.map(x=>x.name);
+    const has=(a,b)=>cm.edges.some(([i,j])=>cm.defs[i].name===a&&cm.defs[j].name===b);
+    ok('call map: three defs', names.join(',')==='alpha,beta,gamma');
+    ok('call map: alpha→beta, gamma→alpha', has('alpha','beta') && has('gamma','alpha') && !has('beta','alpha'));
+  } catch(e){ ok('call map',false,e.message); }
+  res.forEach(r=>console[r.ok?'log':'error']((r.ok?'✓ ':'✗ ')+r.n+(r.note?' — '+r.note:'')));
+  toast(pass===res.length?('All '+res.length+' tests passed'):(res.length-pass)+' test(s) failed — see browser console', pass===res.length?'':'err');
+  return pass===res.length;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 10. WIRING + BOOT
+ * ════════════════════════════════════════════════════════════════════════════ */
+/* Left panels are mutually-exclusive tabs (LoveIDE's discipline — the
+ * stacked experiment confused more than it helped): one panel shows at a
+ * time, clicking the active button collapses the pane. The right side keeps
+ * its independent stacking (Preview + Call Map). */
+function switchTab(name){
+  $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
+  $$('#left-pane .pane-panel').forEach(p=>p.classList.toggle('active',p.dataset.tab===name));
+}
+function leftTabHooks(tab){
+  if (tab==='settings'){ renderAgentLocal(); if(!agent.installedChecked && agent.gpu && agent.gpu.supported) agentRefreshInstalled(); }
+  if (tab==='assistant') renderAgentTab();
+}
+function toggleLeftTab(tab){
+  const btn=$('#left-activity-bar .activity-bar-btn[data-tab="'+tab+'"]');
+  if (!PANES.left.isCollapsed() && btn.classList.contains('active')){
+    PANES.left.collapse();
+    $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.remove('active'));
+  } else {
+    switchTab(tab);
+    if (PANES.left.isCollapsed()) PANES.left.expand();
+    leftTabHooks(tab);
+  }
+}
+// Ensure a panel is open (status-pill link, activation auto-open).
+function openTab(name){
+  const btn=$('#left-activity-bar .activity-bar-btn[data-tab="'+name+'"]');
+  if (!PANES.left.isCollapsed() && btn.classList.contains('active')) return;
+  switchTab(name);
+  if (PANES.left.isCollapsed()) PANES.left.expand();
+  leftTabHooks(name);
+}
+// Drag the divider between the panel at `afterTab` and the next open one
+// below it. Resolved fresh on mousedown since the open set can change.
+// `prefix` and `nextFn` make the same machinery serve both sides.
+function wirePaneResizer(id, afterTab, prefix, nextFn){
+  const r=$('#'+id); if(!r) return;
+  let drag=false, sy=0, ha=0, hb=0, above=null, below=null;
+  r.addEventListener('mousedown', e=>{
+    const belowTab=nextFn(afterTab);
+    above=$('#'+prefix+afterTab); below=belowTab && $('#'+prefix+belowTab);
+    if (!above || !below) return;
+    drag=true; sy=e.clientY; ha=above.offsetHeight; hb=below.offsetHeight;
+    r.classList.add('dragging'); document.body.style.cursor='ns-resize'; document.body.style.userSelect='none';
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', e=>{
+    if (!drag) return;
+    const min=60, total=ha+hb, na=Math.max(min, Math.min(total-min, ha+(e.clientY-sy)));
+    above.style.flex='0 0 '+na+'px'; below.style.flex='0 0 '+(total-na)+'px';
+  });
+  window.addEventListener('mouseup', ()=>{ if(!drag) return; drag=false; r.classList.remove('dragging'); document.body.style.cursor=''; document.body.style.userSelect=''; });
+}
+
+/* ── Panes ─────────────────────────────────────────────────────────────────
+ * Left: fixed bounds (190–520), opens at its maximum; width memory is
+ * session-only. Right: proportional — its size is a RATIO of the space that
+ * remains after the left pane and the activity bars (88), capped at half of
+ * it, so it holds its share as the left pane opens, closes, or resizes (and
+ * on window resize). It opens at the left pane's maximum, 520, when the cap
+ * allows. ── */
+const PANES = {};
+const LEFT_MAX = 520;
+function leftLogicalWidth(){
+  const p=$('#left-pane');
+  return p.classList.contains('collapsed') ? 0 : (parseInt(p.style.width,10) || p.offsetWidth);
+}
+function rightAvail(){ return Math.max(300, window.innerWidth - 88 - leftLogicalWidth()); }
+function syncRightWidth(){ if (PANES.right && !PANES.right.isCollapsed()) PANES.right.apply(); }
+function setupLeftPane(){
+  const pane=$('#left-pane'), resizer=$('#left-resizer');
+  const MIN=190;
+  const clamp=w=>Math.max(MIN, Math.min(LEFT_MAX, w));
+  let saved=null;   // session-only; first open = the maximum
+  const isCollapsed=()=>pane.classList.contains('collapsed');
+  function collapse(){ if(isCollapsed())return; saved=pane.offsetWidth; pane.classList.add('collapsed'); resizer.style.display='none'; syncRightWidth(); }
+  function expand(){ pane.classList.remove('collapsed'); pane.style.width=clamp(saved==null?LEFT_MAX:saved)+'px'; resizer.style.display=''; syncRightWidth(); }
+  let drag=false, sx=0, sw=0;
+  resizer.addEventListener('mousedown',e=>{ if(isCollapsed())return; drag=true; sx=e.clientX; sw=pane.offsetWidth; resizer.classList.add('dragging'); pane.style.transition='none'; document.body.style.cursor='col-resize'; document.body.style.userSelect='none'; e.preventDefault(); });
+  window.addEventListener('mousemove',e=>{ if(!drag)return; pane.style.width=clamp(sw+(e.clientX-sx))+'px'; syncRightWidth(); });
+  window.addEventListener('mouseup',()=>{ if(!drag)return; drag=false; resizer.classList.remove('dragging'); pane.style.transition=''; document.body.style.cursor=''; document.body.style.userSelect=''; saved=pane.offsetWidth; syncRightWidth(); });
+  PANES.left={collapse,expand,isCollapsed};
+}
+function setupRightPane(){
+  const pane=$('#right-pane'), resizer=$('#right-resizer');
+  const MIN=300;
+  const maxW=()=>Math.round(rightAvail()/2);
+  const clamp=w=>Math.max(MIN, Math.min(maxW(), w));
+  let ratio=null;   // share of the available space; session-only
+  const isCollapsed=()=>pane.classList.contains('collapsed');
+  function apply(){
+    if(isCollapsed()) return;
+    const w=clamp(ratio==null ? Math.min(LEFT_MAX, maxW()) : Math.round(ratio*rightAvail()));
+    pane.style.width=w+'px';
+  }
+  function collapse(){ if(isCollapsed())return; ratio=pane.offsetWidth/rightAvail(); pane.classList.add('collapsed'); resizer.style.display='none'; }
+  function expand(){
+    pane.classList.remove('collapsed');
+    apply();
+    if(ratio==null) ratio=(parseInt(pane.style.width,10)||MIN)/rightAvail();
+    resizer.style.display='';
+  }
+  let drag=false, sx=0, sw=0;
+  resizer.addEventListener('mousedown',e=>{ if(isCollapsed())return; drag=true; sx=e.clientX; sw=pane.offsetWidth; resizer.classList.add('dragging'); pane.style.transition='none'; document.body.style.cursor='col-resize'; document.body.style.userSelect='none'; e.preventDefault(); });
+  window.addEventListener('mousemove',e=>{ if(!drag)return; pane.style.width=clamp(sw+(sx-e.clientX))+'px'; });
+  window.addEventListener('mouseup',()=>{ if(!drag)return; drag=false; resizer.classList.remove('dragging'); pane.style.transition=''; document.body.style.cursor=''; document.body.style.userSelect=''; ratio=pane.offsetWidth/rightAvail(); });
+  PANES.right={collapse,expand,isCollapsed,apply};
+}
+window.addEventListener('resize', syncRightWidth);
+function wireActivityBars(){
+  $$('#left-activity-bar .activity-bar-btn').forEach(btn=>{
+    btn.onclick=()=>toggleLeftTab(btn.dataset.tab);
+  });
+}
+// Collapsible Settings sections — header click toggles. Session-only: the
+// shell persisted this per-section, but here it is window state and the
+// fresh-start rule applies — every visit opens with both sections expanded.
+function initSettingsSections(){
+  $$('#panel-settings .settings-section').forEach(sec=>{
+    const head=sec.querySelector('.settings-section-header'); if(!head) return;
+    head.onclick=()=>sec.classList.toggle('collapsed');
+  });
+}
+// Status pill (kept from the shell's runtime chrome): idle (gray) ·
+// loading (amber) · ready (green) · error (red).
+function setPill(el, state, label){
+  if (!el) return;
+  const cls = state==='loading' ? ' working' : (state==='running'||state==='ready') ? ' ready' : state==='error' ? ' error' : '';
+  el.className = 'status-item' + (el.classList.contains('status-link')?' status-link':'') + cls;
+  el.textContent = label;
+}
+// First-visit welcome (and the src badge reopens it). showModal() supplies
+// the focus trap, Esc, and the backdrop; the close event — however reached —
+// records the visit, so it shows itself only once.
+function wireWelcome(){
+  const dlg=$('#welcome-dialog'); if(!dlg || !dlg.showModal) return;
+  $('#about-open').onclick=()=>dlg.showModal();
+  $('#welcome-close').onclick=()=>dlg.close();
+  dlg.addEventListener('click',e=>{ if(e.target===dlg) dlg.close(); });
+  dlg.addEventListener('close',()=>lsSet('servette-src:welcomed','1'));
+  if(lsGet('servette-src:welcomed','0')!=='1') dlg.showModal();
+}
+function wire(){
+  $('#btn-collapse-all').onclick=collapseAll;
+  wireThemePicker();
+  wireSearch();
+  $('#chat-clear').onclick=clearChat;
+  $('#chat-copy').onclick=copyChat;
+  $('#st-agent').onclick=()=>openTab('assistant');
+  const ln=$('#opt-linenums'); ln.checked=nb.opts.lineNumbers;
+  ln.onchange=()=>{ nb.opts.lineNumbers=ln.checked; renderNotebook(); };   // session-only
+  setupLeftPane(); setupRightPane(); wireActivityBars();
+  layoutRightPane();
+  $$('#right-activity-bar .activity-bar-btn').forEach(btn=>{
+    btn.onclick=()=>toggleRightTab(btn.dataset.rightTab);
+  });
+  wirePaneResizer('rresizer-preview','preview','rpanel-',nextRightAfter);
+}
+
+async function boot(){
+  wireWelcome();   // first — nothing that could fail later may eat the welcome
+  nb.opts.lineNumbers = true;   // the default; session-only, like every preference here
+  const ref=$('#ref-label');
+  ref.textContent='src @ '+REF;
+  ref.href=`https://github.com/${REPO}/tree/${REF}/src`;
+  paintIcons();
+  // Static icon-only controls: mirror title → accessible name (elem() does the
+  // same for dynamically created ones).
+  $$('[title]:not([aria-label])').forEach(el=>el.setAttribute('aria-label', el.title));
+  wire();
+  initSettingsSections();
+  setAgent('idle');
+  await fetchSources();
+  renderNotebook();
+  loadMarked();
+  initAgent();
+  // expose for console / automation (the browser-verify run reads these; the
+  // self-tests live here too — run NB.runSelfTests() in the console)
+  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight, parseFetch, parseMore, resolveDocs,
+                get files(){return nb.files;}, get agent(){return agent;} };
+}
+boot();
+</script>
+</body>
+</html>

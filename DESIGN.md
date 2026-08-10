@@ -222,6 +222,10 @@ One principle shapes the layout: **one subdomain ↔ one self-contained `site/<n
 
 `site/demo/index.html` is the demo page's canonical source — the file `release.py` signs, the release attaches as `demo.html`, and the verification workflow byte-matches against the release's commit. The rename happens exactly once, at the release boundary; on an operator's box the page is written back as `index.html`, the name it already has here.
 
+`site/source/index.html` is a read-only literate view of `src/*.md`, fetched from this repository at render time — a `?ref=` parameter (charset-validated, no `..` segments, pinned to this repo) selects the branch or tag, so the page always shows real authored bytes, never a copy that can drift. It was grown from the notebook interface Servette was written in ([andy-emerson/notebook](https://github.com/andy-emerson/notebook)) by removing everything that edits. Its optional reading assistant is local-only by design: a WebLLM model running over WebGPU in the visitor's browser, answering as Servette in the first person and requesting the source documents each question needs — there is no server-side inference, and nothing typed reaches the network. The page persists nothing about a visitor except the measured VRAM (a hardware fact) and that the welcome dialog was shown; every other piece of state — open file, pane layout, theme, preferences — resets on every visit.
+
+`site/publish/` is reserved for the client-side publish tool planned in [#42](https://github.com/andy-emerson/Servette/issues/42); nothing is served or linked yet. Its README records the two constraints already settled: dependency-free (the page will handle the operator's signing key, so no third-party script), and signing-only (every capability must reduce to "produce a signed artifact the operator chooses to pull").
+
 ### Tests
 
 ```bash

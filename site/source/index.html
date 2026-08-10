@@ -41,7 +41,7 @@
   <script> JS:
     0 Icons   1 Doc model (parse/serialize)   2 Markdown   3 Sources (fetch)
     4 Theme   5 CodeMirror   6 Cell DOM   6c Preview
-    6b Navigator (file accordion + search)   6d Agent (WebLLM, sight + GOTO)
+    6b Navigator (file accordion + search)   6d Agent (WebLLM, sight-only)
     9 Self-tests   10 Wiring + boot
   (Each section is marked by a ════ banner; this list is its table of contents.)
 -->
@@ -224,15 +224,16 @@ body > * { position: relative; z-index: 1; }
 .tb-btn.icon-only svg { width: 15px; height: 15px; }
 .tb-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
-/* The front door's theme picker — a segmented control built from radios —
-   ported onto the shell's tokens (surface→bg-primary, border→border-light,
-   muted→text-tertiary, green→border-info). */
+/* Theme picker — three icon radio buttons (sun / system / moon), LoveIDE's
+   control: distinct buttons rather than a fused segment, radios underneath so
+   the browser supplies grouping and arrow-key selection. */
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; clip-path: inset(50%); overflow: hidden; white-space: nowrap; }
-.theme-picker { display: flex; align-items: center; gap: 2px; margin: 0; padding: 2px; border: 1px solid var(--border-light); border-radius: 9px; background: var(--bg-secondary); }
+.theme-picker { display: flex; align-items: center; gap: 4px; margin: 0; padding: 0; border: none; background: none; }
 .theme-picker input { position: absolute; opacity: 0; pointer-events: none; }
-.theme-picker label { display: grid; place-items: center; width: 30px; height: 26px; border-radius: 7px; border: 1px solid transparent; color: var(--text-tertiary); cursor: pointer; font: 400 13px/1 var(--font-mono); user-select: none; }
-.theme-picker label:hover { color: var(--text-primary); }
-.theme-picker input:checked + label { background: var(--bg-primary); border-color: var(--border-light); color: var(--text-primary); }
+.theme-picker label { display: grid; place-items: center; width: 34px; height: 30px; border-radius: var(--radius-md); border: .5px solid var(--border-light); color: var(--text-tertiary); cursor: pointer; user-select: none; }
+.theme-picker label svg { width: 16px; height: 16px; }
+.theme-picker label:hover { color: var(--text-primary); background: var(--bg-secondary); }
+.theme-picker input:checked + label { color: var(--text-primary); border-color: var(--border-info); background: var(--bg-secondary); }
 /* The radios are visually hidden, so the focus ring has to be drawn on
    the label they control or keyboard users get nothing. */
 .theme-picker input:focus-visible + label { outline: 2px solid var(--border-info); outline-offset: 1px; }
@@ -498,15 +499,17 @@ body > * { position: relative; z-index: 1; }
   <!-- ───────────────────────── Main area ───────────────────────── -->
   <div id="main-area">
 
-    <!-- left activity bar -->
+    <!-- left activity bar. Every visit starts the same way: both panes
+         collapsed, INIT.md open — the viewer deliberately remembers no
+         window state (only preferences: theme, line numbers). -->
     <div id="left-activity-bar" class="activity-bar">
-      <button class="activity-bar-btn active" data-tab="outline" title="Navigator" data-ico="list"></button>
+      <button class="activity-bar-btn" data-tab="outline" title="Navigator" data-ico="list"></button>
       <button class="activity-bar-btn" data-tab="assistant" title="AI assistant" data-ico="message-code"></button>
       <button class="activity-bar-btn act-bottom" data-tab="settings" title="Settings" data-ico="settings"></button>
     </div>
 
     <!-- left pane -->
-    <div id="left-pane">
+    <div id="left-pane" class="collapsed">
       <div class="pane-panel active" id="panel-outline" data-tab="outline">
         <div class="pane-header">Navigator</div>
         <div class="nav-search"><input id="nav-search" type="search" placeholder="Search src/*.md…" aria-label="Search the sources"></div>
@@ -527,11 +530,11 @@ body > * { position: relative; z-index: 1; }
                 <fieldset class="theme-picker">
                   <legend class="visually-hidden">Theme</legend>
                   <input type="radio" name="theme" id="theme-light"  value="light">
-                  <label for="theme-light"  title="Light theme"><span aria-hidden="true">☀</span><span class="visually-hidden">Light</span></label>
+                  <label for="theme-light"  title="Light theme" data-ico="sun"></label>
                   <input type="radio" name="theme" id="theme-system" value="system">
-                  <label for="theme-system" title="Match system"><span aria-hidden="true">◐</span><span class="visually-hidden">Match system</span></label>
+                  <label for="theme-system" title="Match system" data-ico="auto"></label>
                   <input type="radio" name="theme" id="theme-dark"   value="dark">
-                  <label for="theme-dark"   title="Dark theme"><span aria-hidden="true">☾</span><span class="visually-hidden">Dark</span></label>
+                  <label for="theme-dark"   title="Dark theme" data-ico="moon"></label>
                 </fieldset>
               </div>
               <div>
@@ -550,15 +553,15 @@ body > * { position: relative; z-index: 1; }
       </div>
     </div>
 
-    <div class="pane-resizer" id="left-resizer"></div>
+    <div class="pane-resizer" id="left-resizer" style="display:none"></div>
 
     <!-- notebook -->
     <div id="nb-body"><div id="nb-scroll"></div></div>
 
-    <div class="pane-resizer" id="right-resizer"></div>
+    <div class="pane-resizer" id="right-resizer" style="display:none"></div>
 
     <!-- right pane: the rendered document, without cell chrome -->
-    <div id="right-pane">
+    <div id="right-pane" class="collapsed">
       <div class="right-panel" id="rpanel-preview">
         <div class="rp-header"><span>Preview</span></div>
         <div id="preview-body"></div>
@@ -567,7 +570,7 @@ body > * { position: relative; z-index: 1; }
 
     <!-- right activity bar -->
     <div id="right-activity-bar" class="activity-bar">
-      <button class="activity-bar-btn active" data-right-tab="preview" title="Preview" data-ico="md"></button>
+      <button class="activity-bar-btn" data-right-tab="preview" title="Preview" data-ico="md"></button>
     </div>
   </div>
 
@@ -584,8 +587,9 @@ body > * { position: relative; z-index: 1; }
     <button class="welcome-dialog__close" type="button" id="welcome-close">Close</button>
   </div>
   <div class="welcome-dialog__body">
-    <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted. Pick a file in the Navigator, read it as cells here or as a plain document in the Preview pane, and search across all five files from the Navigator's search box.</p>
-    <p>There is also an optional <strong>reading assistant</strong> that runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine). Once you set it up in Settings → Agentic Reading, it can see the file you have open, answer questions about it, and jump you to the exact cell it is talking about.</p>
+    <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
+    <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files), the assistant, and Settings at the bottom. On the right: the Preview pane, which shows the open file as one plain rendered document. Click an icon to open or close its panel — the viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
+    <p>There is also an optional <strong>reading assistant</strong> that runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine). Once you set it up in Settings → Agentic Reading, it sees the file you have open and answers questions about it.</p>
   </div>
 </dialog>
 
@@ -608,6 +612,7 @@ const I = {
   'md':'<path d="M3 5m0 2a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2z" /><path d="M7 15v-6l2 2l2 -2v6" /><path d="M14 13l2 2l2 -2m-2 2v-6" />',  // tabler markdown
   'sun':'<path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0" /><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7" />',  // tabler sun
   'moon':'<path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />',  // tabler moon
+  'auto':'<path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0" /><path d="M12 17a5 5 0 0 0 0 -10v10" />',  // tabler contrast
   'list':'<path d="M9 6l11 0" /><path d="M9 12l11 0" /><path d="M9 18l11 0" /><path d="M5 6l0 .01" /><path d="M5 12l0 .01" /><path d="M5 18l0 .01" />',  // tabler list
   'copy':'<path d="M8 8m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z" /><path d="M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2" />',  // tabler copy
   'search':'<path d="M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0" /><path d="M21 21l-6 -6" />',  // tabler search
@@ -849,7 +854,7 @@ function currentFile(){ return nb.files.find(f => f.name === nb.current) || null
 // is weight a reader never sees the benefit of.
 function expandFile(name, opts={}){
   if(name !== '' && !nb.files.some(f => f.name === name)) return;
-  nb.current = name; lsSet('servette-src:file', name);
+  nb.current = name;   // session-only — every visit starts fresh at FILES[0]
   renderNotebook(opts);
   $('#nb-body').scrollTop = 0;
 }
@@ -873,10 +878,7 @@ async function fetchSources(){
                           '. The rest of the document is unaffected.') };
     }
   }));
-  // '' is a real saved state (all files folded); only an absent or invalid
-  // value falls back to the first file.
-  const saved = lsGet('servette-src:file', null);
-  nb.current = saved === '' ? '' : (nb.files.some(f => f.name === saved) ? saved : FILES[0]);
+  nb.current = FILES[0];
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -1058,10 +1060,8 @@ function toggleRightPane(){
   const btn=$('#right-activity-bar .activity-bar-btn');
   if (rightOpen()){
     PANES.right.collapse(); btn.classList.remove('active');
-    lsSet('servette-src:rightOpen','');
   } else {
     PANES.right.expand(); btn.classList.add('active');
-    lsSet('servette-src:rightOpen','1');
     renderPreview();
   }
 }
@@ -1140,11 +1140,12 @@ function wireSearch(){
 
 /* ════════════════════════════════════════════════════════════════════════════
  * 6d. AGENT — local WebLLM (in-browser model manager + streaming chat), the
- *    shell's §6c with its remote-API half removed. Sight is the five authored
- *    src/*.md files; the only Hands is NAVIGATION — the model can emit a
- *    `GOTO <FILE.md> <cell>` line and the viewer takes the reader there. It
- *    answers questions about the sources; it edits nothing. WebGPU + CDN
- *    required; without them the section explains itself and stays disabled.
+ *    shell's §6c with its remote-API half removed. Sight-only: it sees the
+ *    file the reader has open (see assembleSight) and answers questions about
+ *    it; it edits and navigates nothing. Presented to the reader as
+ *    "Servette"; the underlying models are labeled by tier (Fast / Balanced /
+ *    Expert). WebGPU + CDN required; without them the section explains
+ *    itself and stays disabled.
  * ════════════════════════════════════════════════════════════════════════════ */
 /* Models: the shell's three Qwen2.5-Coder sizes (q4f16_1). One shared
  * MLCEngine holds one model at a time. Setup (GPU + install/activate) lives
@@ -1205,7 +1206,11 @@ function syncAgentStatusLine(){
 }
 // Set which model is on disk (the cache). '' = None. Enforces one-at-a-time:
 // unloads VRAM, purges every other cached model, then downloads the chosen one.
+// NEVER while a reply is streaming: unload() under a live WebGPU workload is a
+// device-loss crash (reported: switching tiers mid-reply took the browser
+// down) — the controls are disabled then, and this guard is the backstop.
 async function agentSetDisk(id){
+  if(agent.generating){ toast('Stop the current reply first','err'); return; }
   if(agent.busyId) return;
   agent.busyId=id||'none'; agent.op='disk'; agent.error=''; agent.progress=''; renderAgentLocal();
   try {
@@ -1243,6 +1248,7 @@ async function agentPickContextWindow(id){
 // activation opens the assistant panel itself — the setup flow should end in
 // the chat, not in a settings row the reader has to know to leave.
 async function agentToggleVram(on){
+  if(agent.generating){ toast('Stop the current reply first','err'); return; }
   if(agent.busyId) return;
   const id=[...agent.installed][0]; if(on && !id) return;
   agent.busyId=id||'vram'; agent.op=on?'activate':'deactivate'; agent.error=''; agent.progress=''; renderAgentLocal();
@@ -1257,7 +1263,7 @@ async function agentToggleVram(on){
     }
   } catch(e){ agent.error=agentErr(e); console.error('[WebLLM] vram-toggle failed',e); }
   agent.busyId=null; agent.op=''; agent.progress=''; renderAgentLocal(); renderAgentTab();
-  if(on && agent.activeId){ openTab('assistant'); toast('Qwen is active — ask it about the sources'); }
+  if(on && agent.activeId){ openTab('assistant'); toast('Servette is ready — ask about the open file'); }
 }
 // Empirically measures free VRAM by filling GPU buffers in chunks (the
 // documented pushErrorScope('out-of-memory') pattern) until one fails, then
@@ -1265,6 +1271,7 @@ async function agentToggleVram(on){
 // a snapshot, not a guarantee.
 async function measureVram(){
   if(agent.vram.testing || agent.busyId) return;
+  if(agent.generating){ toast('Stop the current reply first','err'); return; }
   if(!confirm("This intentionally fills your GPU's memory until it fails, to measure how much is free.\n\nClose other GPU-heavy tabs or apps first — this can slow or briefly freeze them while the test runs. On some systems the GPU context can be lost, which may require reloading this page.\n\nContinue?")) return;
   if(agent.activeId) await agentToggleVram(false);
   agent.vram={testing:true,testedMB:0,resultMB:null,error:''}; renderAgentLocal();
@@ -1388,6 +1395,8 @@ function renderAgentLocal(){
   // The setup is LINEAR — four numbered steps, each enabled by the one
   // before it, ending in the chat (activation opens it): measure → allocate
   // → model → activate. No prose needed; the gating is the explanation.
+  // Everything is also disabled while a reply streams (see agentSetDisk).
+  const gen=agent.generating;
   const step=(n,label)=>elem('div',{class:'agent-field-label',style:'margin-top:14px',text:n+' · '+label});
 
   // 1 · Measure VRAM — see measureVram() for why this is an empirical test.
@@ -1395,7 +1404,7 @@ function renderAgentLocal(){
     const v=agent.vram;
     el.appendChild(step(1,'Measure VRAM'));
     const measureBtn=elem('button',{class:'kv-btn',text:v.testing?'Measuring…':(measured?'Re-measure':'Measure VRAM')});
-    measureBtn.disabled=v.testing||busy;
+    measureBtn.disabled=v.testing||busy||gen;
     measureBtn.onclick=measureVram;
     let resultText='';
     if(v.testing) resultText=v.testedMB+' MB filled so far…';
@@ -1407,7 +1416,7 @@ function renderAgentLocal(){
 
   // 2 · Allocate (only exists once measured) — slider block appended below.
   // 3 · Model on disk
-  const sel=elem('select',{class:'agent-select','aria-label':'On-disk model'}); sel.disabled=busy||!measured;
+  const sel=elem('select',{class:'agent-select','aria-label':'On-disk model'}); sel.disabled=busy||!measured||gen;
   sel.appendChild(elem('option',{value:'',text:'None'}));
   AGENT_MODELS.forEach(m=>{
     const fits=agentModelFits(m);
@@ -1418,7 +1427,7 @@ function renderAgentLocal(){
   sel.value=onDisk;
   sel.onchange=()=>agentSetDisk(sel.value);
   // 4 · Activate
-  const cb=elem('input',{type:'checkbox',class:'switch',title:measured?'Load into VRAM':'Measure VRAM first'}); cb.checked=active; cb.disabled=busy||!onDisk||!measured;
+  const cb=elem('input',{type:'checkbox',class:'switch',title:gen?'Stop the current reply first':(measured?'Load into VRAM':'Measure VRAM first')}); cb.checked=active; cb.disabled=busy||!onDisk||!measured||gen;
   cb.onchange=()=>agentToggleVram(cb.checked);
 
   {
@@ -1468,7 +1477,7 @@ function renderAgentLocal(){
       sync();
       if(startMB!==savedMB) lsSet('servette-src:qwenVramMB', String(startMB));
       el.appendChild(elem('div',{class:'agent-field-label',style:'margin-top:14px;display:flex;justify-content:space-between'},[
-        elem('span',{text:'2 · Allocate to Qwen'}), pctEl ]));
+        elem('span',{text:'2 · Allocate to the model'}), pctEl ]));
       el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[track,label,setBtn]));
       if(tierOnDisk){
         const anyGreen =(2*tierOnDisk.vramMB)<=(maxMB-VRAM_RESERVE_WARN);
@@ -1481,7 +1490,7 @@ function renderAgentLocal(){
 
   // 3 · Model on disk — enabled by the measurement; selecting downloads.
   el.appendChild(step(3,'Model on disk'));
-  el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[ elem('span',{class:'agent-row-label',text:'Qwen 2.5'}), sel ]));
+  el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[ elem('span',{class:'agent-row-label',text:'Model'}), sel ]));
 
   // 4 · Activate — enabled once a model is on disk; success opens the chat.
   el.appendChild(step(4,'Activate'));
@@ -1504,27 +1513,21 @@ function renderAgentLocal(){
   syncAgentPill();
 }
 
-/* ── Sight + Hands ─────────────────────────────────────────────────────────
+/* ── Sight ─────────────────────────────────────────────────────────────────
  * Sight is the EXPANDED file — the same rule the notebook DOM and Preview
  * follow: the agent sees what the reader sees. The full corpus can never be
- * sight: the five files total ~169 KB ≈ 41k tokens, past even Qwen's 32,768
- * maximum window (measured: the first question overflowed at 40,998 prompt
- * tokens). The other four files appear only as the compact cell map (titles
- * and first lines), enough to know WHERE things are; a GOTO both takes the
- * reader there and — because it expands that file — switches the agent's own
- * sight to it on the next turn. The only Hands is navigation, via a reply
- * protocol rather than tool-calling: WebLLM's completions API has no tool
- * channel, so the model emits a bare `GOTO <FILE.md> <cell>` line and the
- * viewer executes and strips it. Sight rides the system message, before
- * history (the shell's sight-only ordering — stable per file, so it caches
- * until the reader switches files). */
+ * sight: the five files total ~169 KB ≈ 41k tokens, past even the model's
+ * 32,768 maximum window (measured: the first question overflowed at 40,998
+ * prompt tokens). The other four files appear only as the compact cell map
+ * (titles and first lines) — enough to say WHERE something lives and point
+ * the reader at the Navigator. No Hands at all: with single-file sight the
+ * agent has nothing to act on, so it is a pure reading companion. Sight
+ * rides the system message, before history (the shell's sight-only ordering
+ * — stable per file, so it caches until the reader switches files). */
 const SYS_VIEWER = [
-  "You are the reading assistant for Servette's source viewer — a read-only literate notebook over the five authored Markdown files (src/*.md) that generate servette.py.",
-  "You see ONE file in full — the one the reader currently has open — plus a cell map of all five files (each cell's number, kind, and first line). Ground every answer in what you can see; if the answer lives in a file you only see in the map, say which file and offer to take the reader there instead of guessing its contents. Quote code in ```python fences.",
-  "You cannot edit anything. Your ONE action: to take the reader to a place in the sources, put a line of exactly this form on its own line in your reply:",
-  "GOTO <FILE.md> <cell number>",
-  "for example: GOTO SERVER.md 12",
-  "The viewer navigates there, and because that opens the file, you will see it in full on your next turn. Use at most one GOTO per reply, and only when the reader asks to be shown or taken to something (or agrees to be).",
+  "You are Servette, the reading assistant for Servette's source viewer — a read-only literate notebook over the five authored Markdown files (src/*.md) that generate servette.py.",
+  "You see ONE file in full — the one the reader currently has open — plus a cell map of all five files (each cell's number, kind, and first line). Ground every answer in what you can see; if the answer lives in a file you only see in the map, say which file it is in and suggest opening it from the Navigator panel — never guess its contents. Quote code in ```python fences.",
+  "You cannot edit or navigate anything — you are a reading companion.",
 ].join('\n');
 function cellMapAll(){
   return nb.files.map(f=>f.name+':\n'+f.doc.cells.map((c,i)=>{
@@ -1536,31 +1539,9 @@ function assembleSight(priorHistory, text){
   const f=currentFile();
   const open = f
     ? 'The file the reader has open — src/'+f.name+' (at ref '+REF+'), in full:\n\n'+(f.raw!=null?f.raw:'(this file failed to load)')
-    : 'The reader has no file open right now — every file is folded. You still have the cell map; offer a GOTO to open one.';
+    : 'The reader has no file open right now — every file is folded. You still have the cell map; suggest which file to open in the Navigator.';
   const state='\n\n'+open+'\n\nCell map — all five files, numbered as the viewer displays them:\n'+cellMapAll();
   return { system: SYS_VIEWER+state, messages:[...priorHistory, {role:'user',content:text}] };
-}
-// GOTO protocol: find a directive line, return it parsed with the text minus
-// that line. Pure — self-tested.
-function parseGoto(text){
-  const m=/^\s*GOTO\s+(\S+\.md)\s+(\d+)\s*$/m.exec(text||'');
-  if(!m) return null;
-  return { file:m[1], n:parseInt(m[2],10), stripped:text.replace(m[0],'').replace(/\n{3,}/g,'\n\n').trim() };
-}
-function gotoCellNumber(file, n){
-  const f=nb.files.find(x=>x.name===file); if(!f) return false;
-  const c=f.doc.cells[n-1]; if(!c) return false;
-  gotoCell(file, c.id);
-  return true;
-}
-// After a reply completes: execute at most one GOTO, strip it from the bubble.
-function applyGoto(idx){
-  const m=agent.messages[idx]; if(!m) return;
-  const g=parseGoto(m.content); if(!g) return;
-  m.content=g.stripped||('Taking you to '+g.file+' · cell '+g.n+'.');
-  renderAgentMessages();
-  if(gotoCellNumber(g.file,g.n)) toast('Navigated to '+g.file+' · cell '+g.n);
-  else toast('Agent pointed at '+g.file+' cell '+g.n+', which does not exist','err');
 }
 
 /* ── Chat (the shell's assistant panel, local-only) ── */
@@ -1583,7 +1564,10 @@ function copyChat(){
   navigator.clipboard.writeText(text).then(()=>toast('Conversation copied')).catch(()=>toast('Copy failed','err'));
 }
 function fillBotBody(bodyEl, content){
-  bodyEl.innerHTML = content ? renderMarkdownHTML(content) : '<span style="opacity:.5">…</span>';
+  // The empty state is the whole prefill wait — on a long file the first word
+  // can take a while, and a bare "…" reads as a hang. Say what's happening.
+  bodyEl.innerHTML = content ? renderMarkdownHTML(content)
+    : '<span style="opacity:.55">Reading '+(currentFile()?'src/'+currentFile().name:'the sources')+' — a long file can take a while before the first word…</span>';
   decorateCodeBlocks(bodyEl);
 }
 function chatMsgEl(m){
@@ -1599,7 +1583,7 @@ function renderAgentMessages(){
   const box=$('#agent-messages'); if(!box) return;
   if(_streamRaf){ cancelAnimationFrame(_streamRaf); _streamRaf=0; }
   box.innerHTML='';
-  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask about the sources','It can see all five src/*.md files and take you to any cell')); return; }
+  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about the open file','It sees the file you have open, and knows where things live in the other four')); return; }
   agent.messages.forEach(m=>box.appendChild(chatMsgEl(m)));
   box.scrollTop=box.scrollHeight;
 }
@@ -1627,7 +1611,7 @@ function renderAgentTab(){
   }
   body.innerHTML='';
   const msgs=elem('div',{class:'chat-msgs',id:'agent-messages',role:'log','aria-live':'polite','aria-label':'Conversation'});
-  const ta=elem('textarea',{rows:'1',placeholder:'Ask Qwen about the sources…',id:'agent-input','aria-label':'Message Qwen'});
+  const ta=elem('textarea',{rows:'1',placeholder:'Ask Servette about the open file…',id:'agent-input','aria-label':'Message Servette'});
   const send=elem('button',{html:svg(agent.generating?'stop':'send'),title:agent.generating?'Stop':'Send',id:'agent-send'});
   const submit=()=>{ if(!agent.generating){ agentSend(ta.value); ta.value=''; } };
   send.onclick=()=>{ if(agent.generating) agentCancel(); else submit(); };
@@ -1654,11 +1638,11 @@ async function agentSend(text){
   const history=agent.messages.filter(m=>m.role==='user'||m.role==='assistant').map(m=>({role:m.role,content:m.content}));
   const myCancel=agent.cancel={ turnStart:agent.messages.length, text, cancelled:false };
   agent.messages.push({role:'user',from:'user',content:text});
-  agent.generating=true; renderAgentMessages(); syncAgentPill(); syncSendButton();
+  agent.generating=true; renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
   const { system, messages } = assembleSight(history, text);
   try { await agentSendLocal(system, messages, myCancel); }
   catch(e){ if(!myCancel.cancelled) console.error('[agent] send failed',e); }
-  if (agent.cancel===myCancel){ agent.generating=false; agent.cancel=null; syncAgentPill(); syncSendButton(); }
+  if (agent.cancel===myCancel){ agent.generating=false; agent.cancel=null; syncAgentPill(); syncSendButton(); renderAgentLocal(); }
 }
 // "Pulled back" cancel: the whole turn is dropped as if it never happened and
 // the typed text goes back in the input — every turn resends the full history,
@@ -1669,12 +1653,12 @@ async function agentCancel(){
   if (agent.engine) agent.engine.interruptGenerate().catch(()=>{});
   agent.messages.length=c.turnStart;
   agent.generating=false;
-  renderAgentMessages(); syncAgentPill(); syncSendButton();
+  renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
   const ta=$('#agent-input'); if(ta){ ta.value=c.text; ta.focus(); }
 }
 async function agentSendLocal(system, messages, myCancel){
   if (myCancel.cancelled) return;
-  agent.messages.push({role:'assistant',from:'Qwen',content:''});
+  agent.messages.push({role:'assistant',from:'Servette',content:''});
   const idx=agent.messages.length-1;
   renderAgentMessages();
   try {
@@ -1686,7 +1670,7 @@ async function agentSendLocal(system, messages, myCancel){
       acc += (chunk&&chunk.choices&&chunk.choices[0]&&chunk.choices[0].delta&&chunk.choices[0].delta.content)||''; agent.messages[idx].content=acc;
       updateStreamingMessage();
     }
-    applyGoto(idx);   // the one Hand: execute a GOTO directive, strip it from the bubble
+    renderAgentMessages();
   } catch(e){ if(!myCancel.cancelled){ agent.messages[idx].content='⚠️ '+agentFailText(e); console.error('[WebLLM] generate failed',e); renderAgentMessages(); } }
 }
 async function initAgent(){
@@ -1722,12 +1706,6 @@ function runSelfTests(){
     try{ ok('round-trip src/'+f.name, serialize(f.doc)===f.raw, 'serialize(doc) !== fetched bytes'); }
     catch(e){ ok('round-trip src/'+f.name,false,'threw '+e.message); }
   });
-  // the GOTO protocol parser (the agent's one Hand) — pure function
-  try {
-    const g=parseGoto('Sure — the rate limiter lives here.\nGOTO SERVER.md 12\nSee the callout above it.');
-    ok('GOTO parses', g && g.file==='SERVER.md' && g.n===12 && !g.stripped.includes('GOTO'));
-    ok('GOTO absent → null', parseGoto('No directive here, not even GOTO inline SERVER.md 3 mid-sentence.')===null);
-  } catch(e){ ok('GOTO parser',false,e.message); }
   res.forEach(r=>console[r.ok?'log':'error']((r.ok?'✓ ':'✗ ')+r.n+(r.note?' — '+r.note:'')));
   toast(pass===res.length?('All '+res.length+' tests passed'):(res.length-pass)+' test(s) failed — see browser console', pass===res.length?'':'err');
   return pass===res.length;
@@ -1741,7 +1719,7 @@ function switchTab(name){
   $$('#left-pane .pane-panel').forEach(p=>p.classList.toggle('active',p.dataset.tab===name));
 }
 // Open a left tab and ensure the pane is expanded.
-function openTab(name){ switchTab(name); if(PANES.left && PANES.left.isCollapsed()) PANES.left.expand(); lsSet('servette-src:leftTab',name); }
+function openTab(name){ switchTab(name); if(PANES.left && PANES.left.isCollapsed()) PANES.left.expand(); }
 
 /* ── Panes — oracle-style: drag to resize (clamped + persisted), and the
  *    activity-bar buttons collapse/expand the pane. ── */
@@ -1750,19 +1728,18 @@ function setupPane(side){
   const isLeft = side==='left';
   const pane = $('#'+(isLeft?'left-pane':'right-pane'));
   const resizer = $('#'+(isLeft?'left-resizer':'right-resizer'));
-  const KEY = 'servette-src:'+side+'Width';
   const MIN = isLeft ? 190 : 300;
   const maxW = () => isLeft ? 520 : Math.max(MIN, window.innerWidth - $('#left-pane').offsetWidth - 88 - 320);
   const clamp = w => Math.max(MIN, Math.min(maxW(), w));
-  let saved = clamp(parseInt(lsGet(KEY,''),10) || (isLeft?248:460));
+  let saved = isLeft ? 248 : 460;   // width memory is session-only, like all window state here
   if (!pane.classList.contains('collapsed')) pane.style.width = saved+'px';
   const isCollapsed = () => pane.classList.contains('collapsed');
-  function collapse(){ if(isCollapsed())return; saved=pane.offsetWidth; lsSet(KEY,saved); pane.classList.add('collapsed'); resizer.style.display='none'; }
+  function collapse(){ if(isCollapsed())return; saved=pane.offsetWidth; pane.classList.add('collapsed'); resizer.style.display='none'; }
   function expand(){ pane.classList.remove('collapsed'); pane.style.width=clamp(saved)+'px'; resizer.style.display=''; }
   let drag=false, sx=0, sw=0;
   resizer.addEventListener('mousedown',e=>{ if(isCollapsed())return; drag=true; sx=e.clientX; sw=pane.offsetWidth; resizer.classList.add('dragging'); pane.style.transition='none'; document.body.style.cursor='col-resize'; document.body.style.userSelect='none'; e.preventDefault(); });
   window.addEventListener('mousemove',e=>{ if(!drag)return; const dx=isLeft?(e.clientX-sx):(sx-e.clientX); pane.style.width=clamp(sw+dx)+'px'; });
-  window.addEventListener('mouseup',()=>{ if(!drag)return; drag=false; resizer.classList.remove('dragging'); pane.style.transition=''; document.body.style.cursor=''; document.body.style.userSelect=''; saved=pane.offsetWidth; lsSet(KEY,saved); });
+  window.addEventListener('mouseup',()=>{ if(!drag)return; drag=false; resizer.classList.remove('dragging'); pane.style.transition=''; document.body.style.cursor=''; document.body.style.userSelect=''; saved=pane.offsetWidth; });
   return PANES[side]={collapse,expand,isCollapsed};
 }
 function wireActivityBars(){
@@ -1772,11 +1749,9 @@ function wireActivityBars(){
       if (!PANES.left.isCollapsed() && btn.classList.contains('active')){
         PANES.left.collapse();
         $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.remove('active'));
-        lsSet('servette-src:leftTab','');
       } else {
         switchTab(tab);
         if (PANES.left.isCollapsed()) PANES.left.expand();
-        lsSet('servette-src:leftTab',tab);
         if (tab==='settings'){ renderAgentLocal(); if(!agent.installedChecked && agent.gpu && agent.gpu.supported) agentRefreshInstalled(); }
         if (tab==='assistant') renderAgentTab();
       }
@@ -1792,15 +1767,6 @@ function initSettingsSections(){
     if(lsGet(key,'0')==='1') sec.classList.add('collapsed');
     head.onclick=()=>{ const c=sec.classList.toggle('collapsed'); lsSet(key, c?'1':'0'); };
   });
-}
-function restorePanes(){
-  const lt=lsGet('servette-src:leftTab', undefined);
-  if (lt===''){ PANES.left.collapse(); $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.remove('active')); }
-  else if (lt){ switchTab(lt); }   // settings/assistant panels render from boot's initAgent
-  if (lsGet('servette-src:rightOpen','1')===''){   // Preview open by default
-    PANES.right.collapse();
-    $('#right-activity-bar .activity-bar-btn').classList.remove('active');
-  }
 }
 // Status pill (kept from the shell's runtime chrome): idle (gray) ·
 // loading (amber) · ready (green) · error (red).
@@ -1823,7 +1789,6 @@ function wireWelcome(){
 }
 function wire(){
   $('#btn-collapse-all').onclick=collapseAll;
-  wireWelcome();
   wireThemePicker();
   wireSearch();
   $('#chat-clear').onclick=clearChat;
@@ -1836,6 +1801,7 @@ function wire(){
 }
 
 async function boot(){
+  wireWelcome();   // first — nothing that could fail later may eat the welcome
   nb.opts.lineNumbers = lsGet('servette-src:linenums','0')==='1';
   const ref=$('#ref-label');
   ref.textContent='src @ '+REF;
@@ -1846,7 +1812,6 @@ async function boot(){
   $$('[title]:not([aria-label])').forEach(el=>el.setAttribute('aria-label', el.title));
   wire();
   initSettingsSections();
-  restorePanes();
   setAgent('idle');
   await fetchSources();
   renderNotebook();
@@ -1854,7 +1819,7 @@ async function boot(){
   initAgent();
   // expose for console / automation (the browser-verify run reads these; the
   // self-tests live here too — run NB.runSelfTests() in the console)
-  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, parseGoto, gotoCellNumber, assembleSight,
+  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight,
                 get files(){return nb.files;}, get agent(){return agent;} };
 }
 boot();

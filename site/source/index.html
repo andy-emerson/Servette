@@ -271,6 +271,11 @@ body > * { position: relative; z-index: 1; }
 .ca-btn { background: none; border: none; cursor: pointer; color: var(--text-secondary); padding: 3px 5px; border-radius: 5px; display: flex; align-items: center; transition: background .1s, color .1s; }
 .ca-btn:hover { background: var(--bg-primary); color: var(--text-primary); }
 .ca-btn svg { width: 16px; height: 16px; }
+/* Cell collapse is a disclosure triangle — the one collapse idiom used
+   everywhere in this app (Navigator accordion, Settings sections): chevron
+   points down when open, right when collapsed. */
+.ca-btn.collapse-btn svg { transition: transform .15s; transform: rotate(90deg); }
+.cell.collapsed .collapse-btn svg { transform: rotate(0deg); }
 
 .cell-editor .cm-editor { height: auto; }
 .cell-editor .cm-editor.cm-focused { outline: none; }
@@ -302,8 +307,12 @@ body > * { position: relative; z-index: 1; }
 .pane-header .mini { cursor: pointer; color: var(--text-tertiary); display: flex; }
 .pane-header .mini:hover { color: var(--text-primary); }
 .pane-header .mini svg { width: 14px; height: 14px; }
-.pane-panel { display: none; flex: 1; overflow-y: auto; flex-direction: column; }
+.pane-panel { display: none; flex: 1 1 0; min-height: 60px; overflow-y: auto; flex-direction: column; }
 .pane-panel.active { display: flex; }
+/* Draggable divider between two open (stacked) left panels. */
+.lv-resizer { height: 7px; flex-shrink: 0; cursor: ns-resize; position: relative; }
+.lv-resizer::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: .5px; background: var(--border-faint); transition: background .15s; }
+.lv-resizer:hover::before, .lv-resizer.dragging::before { background: var(--border-medium); }
 .pane-empty { color: var(--text-tertiary); font-size: 12px; font-style: italic; padding: 12px 14px; }
 /* Centered empty-state for a wholly empty panel/tab (ported from the oracle's .pane-placeholder). */
 .pane-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: 1; min-height: 140px; color: var(--text-tertiary); font-size: 12px; text-align: center; line-height: 1.6; padding: 20px 14px; }
@@ -508,25 +517,29 @@ body > * { position: relative; z-index: 1; }
       <button class="activity-bar-btn act-bottom" data-tab="settings" title="Settings" data-ico="settings"></button>
     </div>
 
-    <!-- left pane -->
+    <!-- left pane — panels toggle independently and stack top-to-bottom in
+         activity-bar order (the shell's right-pane discipline), so the reader
+         can navigate and chat at the same time -->
     <div id="left-pane" class="collapsed">
-      <div class="pane-panel active" id="panel-outline" data-tab="outline">
+      <div class="pane-panel" id="panel-outline" data-tab="outline">
         <div class="pane-header">Navigator</div>
         <div class="nav-search"><input id="nav-search" type="search" placeholder="Search src/*.md…" aria-label="Search the sources"></div>
         <div id="outline-list" style="flex:1;overflow-y:auto"></div>
       </div>
+      <div class="lv-resizer" id="lresizer-outline" style="display:none"></div>
       <div class="pane-panel" id="panel-assistant" data-tab="assistant">
         <div class="pane-header">AI assistant <span style="display:flex;gap:8px"><span class="mini" role="button" id="chat-copy" title="Copy conversation" data-ico="copy"></span><span class="mini" role="button" id="chat-clear" title="Clear conversation" data-ico="trash"></span></span></div>
         <div id="assistant-body" style="flex:1;min-height:0;display:flex;flex-direction:column"></div>
       </div>
+      <div class="lv-resizer" id="lresizer-assistant" style="display:none"></div>
       <div class="pane-panel" id="panel-settings" data-tab="settings">
         <div class="pane-header">Settings</div>
         <div class="settings-body">
           <div class="settings-section" data-sec="appearance">
             <div class="settings-section-header"><span class="settings-chev" data-ico="chevron"></span><span>Preferences</span></div>
             <div class="settings-section-body">
-              <div>
-                <div class="settings-label">Theme</div>
+              <div class="setting-toggle">
+                <span>Theme</span>
                 <fieldset class="theme-picker">
                   <legend class="visually-hidden">Theme</legend>
                   <input type="radio" name="theme" id="theme-light"  value="light">
@@ -537,10 +550,7 @@ body > * { position: relative; z-index: 1; }
                   <label for="theme-dark"   title="Dark theme" data-ico="moon"></label>
                 </fieldset>
               </div>
-              <div>
-                <div class="settings-label">Cells</div>
-                <label class="setting-toggle"><span>Line numbers</span><input type="checkbox" id="opt-linenums"></label>
-              </div>
+              <label class="setting-toggle"><span>Line numbers</span><input type="checkbox" id="opt-linenums"></label>
             </div>
           </div>
           <div class="settings-section" data-sec="agent">
@@ -589,7 +599,7 @@ body > * { position: relative; z-index: 1; }
   <div class="welcome-dialog__body">
     <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
     <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files), the assistant, and Settings at the bottom. On the right: the Preview pane, which shows the open file as one plain rendered document. Click an icon to open or close its panel — the viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
-    <p>There is also an optional <strong>reading assistant</strong> that runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine). Once you set it up in Settings → Agentic Reading, it sees the file you have open and answers questions about it.</p>
+    <p>There is also an optional <strong>reading assistant</strong> — Servette itself, answering for its own code. It runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine), and because the model is yours, the tokens are too: ask Servette about Servette as much as you like, with no accounts, no API keys, and no limits. Set it up in Settings → Agentic Reading; it sees the file you have open and answers questions about it.</p>
   </div>
 </dialog>
 
@@ -862,22 +872,29 @@ function expandFile(name, opts={}){
 function lsGet(k,d){ try { const v=localStorage.getItem(k); return v==null?d:v; } catch(e){ return d; } }
 function lsSet(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
 
-// Fetch every file concurrently. A failed file degrades to an inline error
-// callout in ITS slot — the rest of the document stands; there is no separate
-// status indicator, the callouts are the signal.
+// Fetch every file concurrently, plus the README (the assistant's general
+// context — not rendered). A failed file degrades to an inline error callout
+// in ITS slot — the rest of the document stands; there is no separate status
+// indicator, the callouts are the signal.
 async function fetchSources(){
-  nb.files = await Promise.all(FILES.map(async name => {
-    try {
-      const res = await fetch(RAW + name);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const raw = await res.text();
-      return { name, raw, doc: parse(raw) };
-    } catch(e){
-      return { name, raw: null, error: true,
-               doc: parse('> **Could not load `src/' + name + '`** — ' + (e.message || e) +
-                          '. The rest of the document is unaffected.') };
-    }
-  }));
+  const [files, readme] = await Promise.all([
+    Promise.all(FILES.map(async name => {
+      try {
+        const res = await fetch(RAW + name);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const raw = await res.text();
+        return { name, raw, doc: parse(raw) };
+      } catch(e){
+        return { name, raw: null, error: true,
+                 doc: parse('> **Could not load `src/' + name + '`** — ' + (e.message || e) +
+                            '. The rest of the document is unaffected.') };
+      }
+    })),
+    fetch(`https://raw.githubusercontent.com/${REPO}/${REF}/README.md`)
+      .then(r => r.ok ? r.text() : null).catch(() => null),
+  ]);
+  nb.files = files;
+  nb.readme = readme;
   nb.current = FILES[0];
 }
 
@@ -1140,12 +1157,12 @@ function wireSearch(){
 
 /* ════════════════════════════════════════════════════════════════════════════
  * 6d. AGENT — local WebLLM (in-browser model manager + streaming chat), the
- *    shell's §6c with its remote-API half removed. Sight-only: it sees the
- *    file the reader has open (see assembleSight) and answers questions about
- *    it; it edits and navigates nothing. Presented to the reader as
- *    "Servette"; the underlying models are labeled by tier (Fast / Balanced /
- *    Expert). WebGPU + CDN required; without them the section explains
- *    itself and stays disabled.
+ *    shell's §6c with its remote-API half removed. Sight-only: it sees its
+ *    README and the file the reader has open (see assembleSight) and answers
+ *    in the first person, as Servette itself; it edits and navigates
+ *    nothing. Models are labeled by tier (Fast / Balanced / Expert). WebGPU
+ *    + CDN required; without them the section explains itself and stays
+ *    disabled.
  * ════════════════════════════════════════════════════════════════════════════ */
 /* Models: the shell's three Qwen2.5-Coder sizes (q4f16_1). One shared
  * MLCEngine holds one model at a time. Setup (GPU + install/activate) lives
@@ -1514,34 +1531,28 @@ function renderAgentLocal(){
 }
 
 /* ── Sight ─────────────────────────────────────────────────────────────────
- * Sight is the EXPANDED file — the same rule the notebook DOM and Preview
- * follow: the agent sees what the reader sees. The full corpus can never be
- * sight: the five files total ~169 KB ≈ 41k tokens, past even the model's
- * 32,768 maximum window (measured: the first question overflowed at 40,998
- * prompt tokens). The other four files appear only as the compact cell map
- * (titles and first lines) — enough to say WHERE something lives and point
- * the reader at the Navigator. No Hands at all: with single-file sight the
- * agent has nothing to act on, so it is a pure reading companion. Sight
- * rides the system message, before history (the shell's sight-only ordering
- * — stable per file, so it caches until the reader switches files). */
+ * A request is exactly four things — instructions, README, the open file,
+ * and the reader's newest message. Nothing else: no chat history (the
+ * transcript on screen is for the reader; each request stands alone), no
+ * cell maps, no digests. That is the whole token budget, and it is why it
+ * fits: the corpus at once (~169 KB ≈ 41k tokens) can never fit the model's
+ * 32,768 window — measured, the first question overflowed at 40,998 —
+ * while README (~3k tokens) + the largest file (~15k) leaves half the
+ * window free. Sight is the EXPANDED file, the same rule the notebook DOM
+ * and Preview follow: the assistant sees what the reader sees. */
 const SYS_VIEWER = [
-  "You are Servette, the reading assistant for Servette's source viewer — a read-only literate notebook over the five authored Markdown files (src/*.md) that generate servette.py.",
-  "You see ONE file in full — the one the reader currently has open — plus a cell map of all five files (each cell's number, kind, and first line). Ground every answer in what you can see; if the answer lives in a file you only see in the map, say which file it is in and suggest opening it from the Navigator panel — never guess its contents. Quote code in ```python fences.",
-  "You cannot edit or navigate anything — you are a reading companion.",
+  "You are Servette — the Simple, Secure, Static-Site Server. servette.py, servette.org, and this assistant are one and the same: answer questions about Servette in the FIRST PERSON ('I redirect HTTP up to HTTPS', 'my rate limiter closes connections rather than queueing them').",
+  "You are speaking inside your source viewer — a read-only literate notebook over the five authored Markdown files that generate servette.py: INIT.md (docstring, imports, constants), SERVER.md (request handling), SYSTEM.md (bootstrap, certificates, service), SHELL.md (the terminal interface), MAIN.md (the entry point).",
+  "You can see exactly two documents, provided below: your README, and the ONE source file the reader currently has open. Be honest about that boundary — if an answer lives in a file you cannot see, say so plainly and ask the reader to open that file in the Navigator so you can read it. Never guess the contents of what you cannot see.",
+  "Ground every answer in what you can see, and quote code in ```python fences.",
 ].join('\n');
-function cellMapAll(){
-  return nb.files.map(f=>f.name+':\n'+f.doc.cells.map((c,i)=>{
-    const first=(c.code.split('\n').find(l=>l.trim())||'').trim();
-    return '  '+(i+1)+'. '+(c.type==='md'?'markdown':(c.lang||'code'))+' — '+(first?(first.length>60?first.slice(0,57)+'…':first):'(empty cell)');
-  }).join('\n')).join('\n');
-}
-function assembleSight(priorHistory, text){
+function assembleSight(text){
   const f=currentFile();
   const open = f
     ? 'The file the reader has open — src/'+f.name+' (at ref '+REF+'), in full:\n\n'+(f.raw!=null?f.raw:'(this file failed to load)')
-    : 'The reader has no file open right now — every file is folded. You still have the cell map; suggest which file to open in the Navigator.';
-  const state='\n\n'+open+'\n\nCell map — all five files, numbered as the viewer displays them:\n'+cellMapAll();
-  return { system: SYS_VIEWER+state, messages:[...priorHistory, {role:'user',content:text}] };
+    : 'The reader has no file open right now — every file is folded. Ask them to open one in the Navigator.';
+  const readme = nb.readme ? 'Your README:\n\n'+nb.readme : '(Your README failed to load this session.)';
+  return { system: SYS_VIEWER+'\n\n'+readme+'\n\n'+open, messages:[{role:'user',content:text}] };
 }
 
 /* ── Chat (the shell's assistant panel, local-only) ── */
@@ -1583,7 +1594,7 @@ function renderAgentMessages(){
   const box=$('#agent-messages'); if(!box) return;
   if(_streamRaf){ cancelAnimationFrame(_streamRaf); _streamRaf=0; }
   box.innerHTML='';
-  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about the open file','It sees the file you have open, and knows where things live in the other four')); return; }
+  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about itself','It sees its README and the file you have open — as much as you like, on your GPU')); return; }
   agent.messages.forEach(m=>box.appendChild(chatMsgEl(m)));
   box.scrollTop=box.scrollHeight;
 }
@@ -1635,18 +1646,18 @@ async function agentSend(text){
   text=(text||'').trim();
   if(!text || agent.generating) return;
   if(!agent.activeId || !agent.engine) return;
-  const history=agent.messages.filter(m=>m.role==='user'||m.role==='assistant').map(m=>({role:m.role,content:m.content}));
   const myCancel=agent.cancel={ turnStart:agent.messages.length, text, cancelled:false };
   agent.messages.push({role:'user',from:'user',content:text});
   agent.generating=true; renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
-  const { system, messages } = assembleSight(history, text);
+  // Each request stands alone — instructions + README + open file + this
+  // message. The on-screen transcript is for the reader, not the model.
+  const { system, messages } = assembleSight(text);
   try { await agentSendLocal(system, messages, myCancel); }
   catch(e){ if(!myCancel.cancelled) console.error('[agent] send failed',e); }
   if (agent.cancel===myCancel){ agent.generating=false; agent.cancel=null; syncAgentPill(); syncSendButton(); renderAgentLocal(); }
 }
 // "Pulled back" cancel: the whole turn is dropped as if it never happened and
-// the typed text goes back in the input — every turn resends the full history,
-// so an abandoned turn left in the transcript would cost tokens forever.
+// the typed text goes back in the input for editing.
 async function agentCancel(){
   const c=agent.cancel; if(!c || c.cancelled) return;
   c.cancelled=true;
@@ -1714,12 +1725,64 @@ function runSelfTests(){
 /* ════════════════════════════════════════════════════════════════════════════
  * 10. WIRING + BOOT
  * ════════════════════════════════════════════════════════════════════════════ */
-function switchTab(name){
-  $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
-  $$('#left-pane .pane-panel').forEach(p=>p.classList.toggle('active',p.dataset.tab===name));
+/* Left panels aren't mutually-exclusive tabs — each activity-bar button
+ * toggles its panel independently open/closed (the shell's right-pane
+ * discipline): 0 open collapses the pane, 2+ open stack top-to-bottom in
+ * activity-bar order, so the reader can navigate and chat at once. */
+const LEFT_ORDER = ['outline','assistant','settings'];
+let leftOpen = new Set();   // fresh start: nothing open
+function nextOpenAfter(tab){
+  for (let i=LEFT_ORDER.indexOf(tab)+1; i<LEFT_ORDER.length; i++) if (leftOpen.has(LEFT_ORDER[i])) return LEFT_ORDER[i];
+  return null;
 }
-// Open a left tab and ensure the pane is expanded.
-function openTab(name){ switchTab(name); if(PANES.left && PANES.left.isCollapsed()) PANES.left.expand(); }
+// Applies `leftOpen` to the DOM: which panels show, which resizers between
+// them show, button active-states. A manual resizer drag resets to an equal
+// split whenever the open set changes.
+function layoutLeftPane(){
+  LEFT_ORDER.forEach(tab=>{
+    const p=$('#panel-'+tab); if(!p) return;
+    p.classList.toggle('active', leftOpen.has(tab));
+    p.style.flex='';
+  });
+  $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.toggle('active', leftOpen.has(b.dataset.tab)));
+  ['outline','assistant'].forEach(tab=>{
+    const r=$('#lresizer-'+tab); if(!r) return;
+    r.style.display = (leftOpen.has(tab) && nextOpenAfter(tab)) ? '' : 'none';
+  });
+}
+function toggleLeftTab(tab){
+  leftOpen.has(tab) ? leftOpen.delete(tab) : leftOpen.add(tab);
+  if (leftOpen.size===0) PANES.left.collapse();
+  else if (PANES.left.isCollapsed()) PANES.left.expand();
+  layoutLeftPane();
+  if (leftOpen.has(tab)){
+    if (tab==='settings'){ renderAgentLocal(); if(!agent.installedChecked && agent.gpu && agent.gpu.supported) agentRefreshInstalled(); }
+    if (tab==='assistant') renderAgentTab();
+  }
+}
+// Ensure a panel is open (status-pill link, activation auto-open).
+function openTab(name){ if(!leftOpen.has(name)) toggleLeftTab(name); else if(PANES.left.isCollapsed()) PANES.left.expand(); }
+// Drag the divider between the panel at `afterTab` and the next open one
+// below it. Resolved fresh on mousedown since the open set can change.
+function wireLeftResizer(id, afterTab){
+  const r=$('#'+id); if(!r) return;
+  let drag=false, sy=0, ha=0, hb=0, above=null, below=null;
+  r.addEventListener('mousedown', e=>{
+    const belowTab=nextOpenAfter(afterTab);
+    above=$('#panel-'+afterTab); below=belowTab && $('#panel-'+belowTab);
+    if (!above || !below) return;
+    drag=true; sy=e.clientY; ha=above.offsetHeight; hb=below.offsetHeight;
+    r.classList.add('dragging'); document.body.style.cursor='ns-resize'; document.body.style.userSelect='none';
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', e=>{
+    if (!drag) return;
+    const min=60, total=ha+hb, na=Math.max(min, Math.min(total-min, ha+(e.clientY-sy)));
+    above.style.flex='0 0 '+na+'px'; below.style.flex='0 0 '+(total-na)+'px';
+  });
+  window.addEventListener('mouseup', ()=>{ if(!drag) return; drag=false; r.classList.remove('dragging'); document.body.style.cursor=''; document.body.style.userSelect=''; });
+}
+function wireLeftResizers(){ ['outline','assistant'].forEach(t=>wireLeftResizer('lresizer-'+t, t)); }
 
 /* ── Panes — oracle-style: drag to resize (clamped + persisted), and the
  *    activity-bar buttons collapse/expand the pane. ── */
@@ -1744,18 +1807,7 @@ function setupPane(side){
 }
 function wireActivityBars(){
   $$('#left-activity-bar .activity-bar-btn').forEach(btn=>{
-    btn.onclick=()=>{
-      const tab=btn.dataset.tab;
-      if (!PANES.left.isCollapsed() && btn.classList.contains('active')){
-        PANES.left.collapse();
-        $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.remove('active'));
-      } else {
-        switchTab(tab);
-        if (PANES.left.isCollapsed()) PANES.left.expand();
-        if (tab==='settings'){ renderAgentLocal(); if(!agent.installedChecked && agent.gpu && agent.gpu.supported) agentRefreshInstalled(); }
-        if (tab==='assistant') renderAgentTab();
-      }
-    };
+    btn.onclick=()=>toggleLeftTab(btn.dataset.tab);
   });
 }
 // Collapsible Settings sections — header click toggles; collapsed state
@@ -1796,7 +1848,8 @@ function wire(){
   $('#st-agent').onclick=()=>openTab('assistant');
   const ln=$('#opt-linenums'); ln.checked=nb.opts.lineNumbers;
   ln.onchange=()=>{ nb.opts.lineNumbers=ln.checked; lsSet('servette-src:linenums', ln.checked?'1':'0'); renderNotebook(); };
-  setupPane('left'); setupPane('right'); wireActivityBars();
+  setupPane('left'); setupPane('right'); wireActivityBars(); wireLeftResizers();
+  layoutLeftPane();
   $('#right-activity-bar .activity-bar-btn').onclick=toggleRightPane;
 }
 

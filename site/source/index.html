@@ -1735,6 +1735,15 @@ function fillBotBody(bodyEl, content){
     : '<span style="opacity:.55">Thinking…</span>';
   decorateCodeBlocks(bodyEl);
 }
+// Seconds → "45s" / "4m 24s" / "1h 3m" — a thinking clock that only counts
+// seconds stops being informative right when the wait gets serious.
+function fmtDur(s){
+  if(s<60) return s+'s';
+  const m=Math.floor(s/60), sec=s%60;
+  if(m<60) return m+'m'+(sec?' '+sec+'s':'');
+  const h=Math.floor(m/60), min=m%60;
+  return h+'h'+(min?' '+min+'m':'');
+}
 function chatMsgEl(m){
   const el=elem('div',{class:'chat-msg '+(m.role==='user'?'user':'bot')});
   if(m.role==='assistant' && m.from) el.appendChild(elem('div',{class:'chat-from',text:m.from}));
@@ -1745,7 +1754,7 @@ function chatMsgEl(m){
   // Every reply carries its cost: how long it took, and which documents it
   // fetched to answer — the honest account of why some answers are slow.
   if(m.role==='assistant' && m.secs!=null)
-    el.appendChild(elem('div',{class:'chat-meta',text:m.secs+'s'+(m.fetched&&m.fetched.length?' · read '+m.fetched.join(', '):'')}));
+    el.appendChild(elem('div',{class:'chat-meta',text:fmtDur(m.secs)+(m.fetched&&m.fetched.length?' · read '+m.fetched.join(', '):'')}));
   return el;
 }
 function renderAgentMessages(){
@@ -1754,7 +1763,7 @@ function renderAgentMessages(){
   box.innerHTML='';
   // The first thing in the window is always the meta notice — from the
   // viewer, not from Servette or the reader.
-  box.appendChild(elem('div',{class:'chat-notice',text:'Servette’s assistant is a small AI model running in your browser. It can make mistakes — check important answers against the source.'}));
+  box.appendChild(elem('div',{class:'chat-notice',text:'Servette’s assistant is a small AI model running in your browser. It can make mistakes — check important answers against the source — and reading a large source file on your GPU can take minutes; the clock under each reply shows where the time went.'}));
   if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about itself','It reads the files it needs to answer — on your GPU, as much as you like.')); return; }
   agent.messages.forEach(m=>box.appendChild(chatMsgEl(m)));
   box.scrollTop=box.scrollHeight;
@@ -1873,7 +1882,7 @@ async function agentSendLocal(text, history, myCancel){
     if(!m || m.content){ return; }
     const box=$('#agent-messages'); const last=box&&box.lastElementChild;
     const span=last&&last.querySelector('.out-md span');
-    if(span) span.textContent='Thinking… '+secsNow()+'s';
+    if(span) span.textContent='Thinking… '+fmtDur(secsNow());
   },1000);
   try {
     let finalText='';
@@ -1947,6 +1956,8 @@ function runSelfTests(){
     ok('named: uppercase stem', namedDocs('What does SYSTEM do?').join(',')==='SYSTEM.md');
     ok('named: lowercase bare stem passes', namedDocs('what does the system do?').length===0);
     ok('named: .md any case', namedDocs('is shell.md big?').join(',')==='SHELL.md');
+    // the thinking clock's formatter
+    ok('duration format', fmtDur(59)==='59s' && fmtDur(61)==='1m 1s' && fmtDur(264)==='4m 24s' && fmtDur(3600)==='1h' && fmtDur(3780)==='1h 3m');
   } catch(e){ ok('FETCH parser',false,e.message); }
   // the call-map extractor — pure function over a synthetic literate doc
   try {

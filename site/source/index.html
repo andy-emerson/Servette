@@ -1540,11 +1540,14 @@ function renderAgentLocal(){
  * while README (~3k tokens) + the largest file (~15k) leaves half the
  * window free. Sight is the EXPANDED file, the same rule the notebook DOM
  * and Preview follow: the assistant sees what the reader sees. */
+// No example sentences anywhere in these instructions: a small model treats
+// in-context examples as answers — the first field test got my sample
+// first-person phrases parroted back verbatim as a "response".
 const SYS_VIEWER = [
-  "You are Servette — the Simple, Secure, Static-Site Server. servette.py, servette.org, and this assistant are one and the same: answer questions about Servette in the FIRST PERSON ('I redirect HTTP up to HTTPS', 'my rate limiter closes connections rather than queueing them').",
-  "You are speaking inside your source viewer — a read-only literate notebook over the five authored Markdown files that generate servette.py: INIT.md (docstring, imports, constants), SERVER.md (request handling), SYSTEM.md (bootstrap, certificates, service), SHELL.md (the terminal interface), MAIN.md (the entry point).",
-  "You can see exactly two documents, provided below: your README, and the ONE source file the reader currently has open. Be honest about that boundary — if an answer lives in a file you cannot see, say so plainly and ask the reader to open that file in the Navigator so you can read it. Never guess the contents of what you cannot see.",
-  "Ground every answer in what you can see, and quote code in ```python fences.",
+  "You are Servette, a production static-site server written in one readable Python file, servette.py. The reader is browsing your source code and asking you questions about it. The code is you — answer as yourself, in the first person.",
+  "Answer the question that was asked, directly and concretely. When code settles the question, quote the relevant lines in a ```python fence. Keep answers short unless the question calls for depth.",
+  "Below you have your README and the ONE source file the reader has open. The other source files exist but you cannot see them: INIT.md (docstring, imports, constants), SERVER.md (request handling), SYSTEM.md (bootstrap, certificates, service), SHELL.md (the terminal interface), MAIN.md (the entry point). If the answer is in a file you cannot see, say which file and ask the reader to open it in the Navigator; never guess unseen code.",
+  "Each message stands alone — you are not shown earlier turns, so answer from this message and the documents alone, and never refer to a previous answer.",
 ].join('\n');
 function assembleSight(text){
   const f=currentFile();
@@ -1574,11 +1577,20 @@ function copyChat(){
   const text=agent.messages.map(m=>(m.from||m.role)+': '+m.content).join('\n\n');
   navigator.clipboard.writeText(text).then(()=>toast('Conversation copied')).catch(()=>toast('Copy failed','err'));
 }
+// The empty bubble is the whole prefill wait. Its text is sized to the truth:
+// a long open file genuinely delays the first word, a short one doesn't —
+// saying "can take a while" over INIT.md's 4k tokens is just misleading.
+function pendingHint(){
+  const f=currentFile();
+  const chars=(nb.readme?nb.readme.length:0)+((f&&f.raw)?f.raw.length:0);
+  const kTokens=Math.round(chars/4/1000);
+  return (f && kTokens>=8)
+    ? 'Reading src/'+f.name+' (~'+kTokens+'k tokens) — the first word can take a while…'
+    : 'Thinking…';
+}
 function fillBotBody(bodyEl, content){
-  // The empty state is the whole prefill wait — on a long file the first word
-  // can take a while, and a bare "…" reads as a hang. Say what's happening.
   bodyEl.innerHTML = content ? renderMarkdownHTML(content)
-    : '<span style="opacity:.55">Reading '+(currentFile()?'src/'+currentFile().name:'the sources')+' — a long file can take a while before the first word…</span>';
+    : '<span style="opacity:.55">'+pendingHint()+'</span>';
   decorateCodeBlocks(bodyEl);
 }
 function chatMsgEl(m){
@@ -1594,7 +1606,7 @@ function renderAgentMessages(){
   const box=$('#agent-messages'); if(!box) return;
   if(_streamRaf){ cancelAnimationFrame(_streamRaf); _streamRaf=0; }
   box.innerHTML='';
-  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about itself','It sees its README and the file you have open — as much as you like, on your GPU')); return; }
+  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about itself','It sees its README and the open file. Each question stands alone — include the context you need.')); return; }
   agent.messages.forEach(m=>box.appendChild(chatMsgEl(m)));
   box.scrollTop=box.scrollHeight;
 }
@@ -1792,13 +1804,14 @@ function setupPane(side){
   const pane = $('#'+(isLeft?'left-pane':'right-pane'));
   const resizer = $('#'+(isLeft?'left-resizer':'right-resizer'));
   const MIN = isLeft ? 190 : 300;
-  const maxW = () => isLeft ? 520 : Math.max(MIN, window.innerWidth - $('#left-pane').offsetWidth - 88 - 320);
+  // Right cap: 45% of the window, and never squeezing the notebook below
+  // 320px (88 = the two activity bars). Left cap: 520.
+  const maxW = () => isLeft ? 520 : Math.max(MIN, Math.min(Math.round(window.innerWidth*0.45), window.innerWidth - $('#left-pane').offsetWidth - 88 - 320));
   const clamp = w => Math.max(MIN, Math.min(maxW(), w));
-  let saved = isLeft ? 248 : 460;   // width memory is session-only, like all window state here
-  if (!pane.classList.contains('collapsed')) pane.style.width = saved+'px';
+  let saved = null;   // no width chosen yet — the first expand opens at the maximum; memory is session-only
   const isCollapsed = () => pane.classList.contains('collapsed');
   function collapse(){ if(isCollapsed())return; saved=pane.offsetWidth; pane.classList.add('collapsed'); resizer.style.display='none'; }
-  function expand(){ pane.classList.remove('collapsed'); pane.style.width=clamp(saved)+'px'; resizer.style.display=''; }
+  function expand(){ pane.classList.remove('collapsed'); pane.style.width=clamp(saved==null?maxW():saved)+'px'; resizer.style.display=''; }
   let drag=false, sx=0, sw=0;
   resizer.addEventListener('mousedown',e=>{ if(isCollapsed())return; drag=true; sx=e.clientX; sw=pane.offsetWidth; resizer.classList.add('dragging'); pane.style.transition='none'; document.body.style.cursor='col-resize'; document.body.style.userSelect='none'; e.preventDefault(); });
   window.addEventListener('mousemove',e=>{ if(!drag)return; const dx=isLeft?(e.clientX-sx):(sx-e.clientX); pane.style.width=clamp(sw+dx)+'px'; });
@@ -1872,7 +1885,7 @@ async function boot(){
   initAgent();
   // expose for console / automation (the browser-verify run reads these; the
   // self-tests live here too — run NB.runSelfTests() in the console)
-  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight,
+  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight, pendingHint,
                 get files(){return nb.files;}, get agent(){return agent;} };
 }
 boot();

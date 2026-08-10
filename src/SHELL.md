@@ -1032,10 +1032,10 @@ def _extract_bundle(data, dest_dir):
     Every entry's resolved path is checked against dest_dir, every entry must
     be a plain file or directory (no symlinks/devices), and the total
     uncompressed size is capped — all validated before anything is written,
-    so a bad bundle leaves no partial extraction behind. filter='data' is
-    passed to extractall() too: defense in depth, not the only guard — it
-    independently enforces the same containment and rejects the same entry
-    types at the library level."""
+    so a bad bundle leaves no partial extraction behind. Where the interpreter
+    has it (3.11.4+), filter='data' is passed to extractall() too: defense in
+    depth, not the only guard — it independently enforces the same containment
+    and rejects the same entry types at the library level."""
     os.makedirs(dest_dir)
     dest_real = os.path.realpath(dest_dir)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
@@ -1050,7 +1050,13 @@ def _extract_bundle(data, dest_dir):
             total += m.size
             if total > _MAX_BUNDLE_BYTES:
                 raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
-        tf.extractall(dest_dir, members=members, filter="data")
+        # The PEP 706 feature probe: data_filter exists exactly when
+        # extractall() accepts filter=. Debian 12's 3.11.2 predates the
+        # backport — there the checks above are the (sufficient) guard.
+        if hasattr(tarfile, "data_filter"):
+            tf.extractall(dest_dir, members=members, filter="data")
+        else:
+            tf.extractall(dest_dir, members=members)
 
 
 def _swap_site_content(new_dir, serve_dir):

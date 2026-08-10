@@ -1643,21 +1643,35 @@ function renderAgentLocal(){
  * so over-asking degrades to an explicit omission note, never an overflow.
  * No example sentences anywhere (a small model parrots examples as answers);
  * the FETCH format line is the one deliberate exception — it is the tool. */
-const SYS_VIEWER = [
-  "You are Servette, a production static-site server written in one readable Python file, servette.py. The reader is browsing your source code and asking you questions. The code is you — answer as yourself, in the first person.",
-  "You start with no documents. These exist, and you may request any of them:",
-  "- README.md — what Servette is: features, security posture, comparisons, quick start",
-  "- INIT.md — the docstring, imports, version, module-level constants",
-  "- SERVER.md — request handling: config and sites, scrypt auth, rate limiting, the file cache, the request handler, security headers, the HTTP(S) servers",
-  "- SYSTEM.md — the environment: venv bootstrap, server lifecycle, certificates and the ACME client, systemd provisioning",
-  "- SHELL.md — the interactive terminal interface: menus, config wizard, status displays",
-  "- MAIN.md — the entry point",
-  "FIRST decide whether the message needs a document. Pure conversation — greetings, thanks, small talk — gets a direct reply with NO request; every fetch makes the reader wait. But ANY question about Servette needs its document: the catalog above only tells you WHICH document to request — it is never itself enough to answer from. If you have not been given the document that holds the answer, request it.",
-  "When you do need documents, reply with ONLY one line and nothing else:",
-  "FETCH: name, name",
-  "The reader never sees that line; the same question comes back with those documents attached. Request only what the question needs.",
-  "Answer directly and concretely; quote code in ```python fences. Ground answers in documents you were given; never state what is in a document you have not been given — request it instead.",
-].join('\n');
+const FILE_DESC = {
+  'README.md': 'what Servette is: features, security posture, comparisons, quick start',
+  'INIT.md':   'the docstring, imports, version, module-level constants',
+  'SERVER.md': 'request handling: config and sites, scrypt auth, rate limiting, the file cache, the request handler, security headers, the HTTP(S) servers',
+  'SYSTEM.md': 'the environment: venv bootstrap, server lifecycle, certificates and the ACME client, systemd provisioning',
+  'SHELL.md':  'the interactive terminal interface: menus, config wizard, status displays',
+  'MAIN.md':   'the entry point',
+};
+function docContent(n){ return n==='README.md' ? nb.readme : (nb.files.find(f=>f.name===n)||{}).raw; }
+function locOf(n){ const c=docContent(n); return c ? c.split('\n').length : null; }
+// Built per request (not a constant) so the catalog can carry live line
+// counts — the model's basis for judging what a fetch will cost the reader.
+function sysViewer(){
+  const catalog=Object.keys(FILE_DESC).map(n=>{
+    const loc=locOf(n);
+    return '- '+n+(loc?' ('+loc.toLocaleString()+' lines)':'')+' — '+FILE_DESC[n];
+  }).join('\n');
+  return [
+    "You are Servette, a production static-site server written in one readable Python file, servette.py. The reader is browsing your source code and asking you questions. The code is you — answer as yourself, in the first person.",
+    "You start with no documents. These exist, and you may request any of them (line counts show what a request costs — reading is slow):",
+    catalog,
+    "FIRST decide whether the message needs a document. Pure conversation — greetings, thanks, small talk — gets a direct reply with NO request; every fetch makes the reader wait. But ANY question about Servette needs its document: the catalog above only tells you WHICH document to request — it is never itself enough to answer from. If you have not been given the document that holds the answer, request it.",
+    "When you do need documents, reply with ONLY one line and nothing else:",
+    "FETCH: name, name",
+    "The reader never sees that line; the same question comes back with those documents attached. Request only what the question needs.",
+    "Large documents arrive as EXCERPTS — the sections that match the question, with elisions marked. If the answer should be in the document but the excerpts do not show it, say the excerpts do not show it and suggest where to look — an elided section is never evidence a feature is missing.",
+    "Answer directly and concretely; quote code in ```python fences. Ground answers in what you were given; never state what you have not been shown.",
+  ].join('\n');
+}
 const FETCHABLE = ['README.md', ...FILES];
 // A FETCH directive, or null. The directive counts when it stands on its OWN
 // LINE anywhere in the reply — small models wrap it in politeness ("I need to
@@ -1689,23 +1703,69 @@ function namedDocs(text){
     return new RegExp('\\b'+stem+'\\b').test(text) || new RegExp('\\b'+stem+'\\.md\\b','i').test(text);
   });
 }
-// Resolve requested names to contents under a byte budget (~22k tokens):
-// requested order wins, the rest is omitted by name so the model knows.
-function resolveDocs(names){
+/* ── Cell-level retrieval ──────────────────────────────────────────────────
+ * A large document is never sent whole: the viewer scores each of its cells
+ * against the question's terms and sends the matching cells plus their
+ * neighbors (a prose cell explains the code cell beside it), the file's
+ * header cell for orientation, and explicit elision markers for everything
+ * skipped. SHELL.md's ~15k tokens become ~3–6k — minutes become one. Small
+ * documents go whole; a question whose terms match nothing gets the header
+ * plus an honest none-matched note (no silent guessing material). */
+const EXCERPT_WHOLE_MAX = 16000;   // at or under this many chars, send the whole file
+const EXCERPT_CAP       = 24000;   // per-file excerpt budget (chars ≈ 6k tokens)
+const STOP = new Set(('the a an and or but of to in on for from is are was were be been do does did what how why '+
+  'where when which who whom with about without tell show me my you your it its this that these those there here '+
+  'they them their we our us i he she his her will would can could should shall may might must not no yes if then '+
+  'than as at by so such very more most less least into over under out up down off just also only even').split(' '));
+function questionTerms(q){
+  return [...new Set(((q||'').toLowerCase().match(/[a-z_][a-z0-9_]{2,}/g)||[]).filter(w=>!STOP.has(w)))];
+}
+function excerptDoc(name, content, question){
+  if(content.length<=EXCERPT_WHOLE_MAX) return { name, content, excerpted:false };
+  const cells=parse(content).cells;
+  const terms=questionTerms(question);
+  const scores=cells.map(c=>{ const t=c.code.toLowerCase(); return terms.reduce((s,w)=>s+(t.includes(w)?1:0),0); });
+  if(!scores.some(s=>s>0)){
+    const head=cells.slice(0,2).map(cellBody).join('\n\n');
+    return { name, excerpted:true,
+             content: head+'\n\n… (none of '+name+'’s sections matched the question’s terms — the rest is elided; suggest more specific wording) …' };
+  }
+  const picked=new Set([0]);   // the header cell orients every excerpt
+  cells.forEach((c,i)=>{ if(scores[i]>0){ picked.add(i); if(i>0) picked.add(i-1); if(i<cells.length-1) picked.add(i+1); } });
+  const idx=[...picked].sort((a,b)=>a-b);
+  const size=i=>cellBody(cells[i]).length;
+  let total=idx.reduce((s,i)=>s+size(i),0);
+  while(total>EXCERPT_CAP && idx.length>1){
+    // shed lowest-score cells first (zero-score neighbors go before matches), later-in-file first on ties
+    const r=idx.filter(i=>i!==0).sort((a,b)=>(scores[a]-scores[b])||(b-a))[0];
+    idx.splice(idx.indexOf(r),1); total-=size(r);
+  }
+  const out=[]; let last=-1;
+  idx.forEach(i=>{
+    if(i>last+1) out.push('… (cells '+(last+2)+'–'+i+' of '+cells.length+' elided) …');
+    out.push(cellBody(cells[i])); last=i;
+  });
+  if(last<cells.length-1) out.push('… (cells '+(last+2)+'–'+cells.length+' elided) …');
+  return { name, excerpted:true, content: out.join('\n\n') };
+}
+// Resolve requested names to (possibly excerpted) contents under an overall
+// byte budget: requested order wins, the rest is omitted by name.
+function resolveDocs(names, question){
   const BUDGET=90000; let used=0; const list=[], omitted=[];
   names.forEach(n=>{
-    const content = n==='README.md' ? nb.readme : (nb.files.find(f=>f.name===n)||{}).raw;
+    const content=docContent(n);
     if(content==null){ omitted.push(n+' (unavailable)'); return; }
-    if(used+content.length>BUDGET){ omitted.push(n); return; }
-    used+=content.length; list.push({name:n, content});
+    const d=excerptDoc(n, content, question);
+    if(used+d.content.length>BUDGET){ omitted.push(n); return; }
+    used+=d.content.length; list.push(d);
   });
   return {list, omitted};
 }
 function assembleSight(text, history, docs, fetchesLeft){
   docs=docs||{list:[],omitted:[]};
-  let system=SYS_VIEWER;
+  let system=sysViewer();
   if(docs.list.length) system+='\n\nDocuments provided at your request (at ref '+REF+'):\n\n'+
-    docs.list.map(d=>'── '+d.name+' ──\n\n'+d.content).join('\n\n');
+    docs.list.map(d=>'── '+d.name+(d.excerpted?' (excerpts)':'')+' ──\n\n'+d.content).join('\n\n');
   if(docs.omitted.length) system+='\n\nOmitted for size: '+docs.omitted.join(', ')+' — request fewer documents at once.';
   if(fetchesLeft<=0) system+='\n\nNo more documents can be provided for this reply — answer with what you have.';
   return { system, messages:[...(history||[]), {role:'user',content:text}] };
@@ -1872,22 +1932,33 @@ async function agentSendLocal(text, history, myCancel){
   const MAX_FETCH_ROUNDS=2;
   // Documents the reader named are attached up front — no judgment round.
   const named=namedDocs(text);
-  let docs=named.length ? resolveDocs(named) : null;
+  let docs=named.length ? resolveDocs(named, text) : null;
   // The thinking clock: live seconds in the pending bubble (so a long prefill
   // is visibly not a freeze), the total stamped on the reply when it lands.
+  // The expectation beside it is calibrated from THIS session's completed
+  // replies (chars sent / seconds taken) — silent until there is data, since
+  // a made-up rate would just be a different kind of lie.
   const t0=performance.now();
   const secsNow=()=>Math.round((performance.now()-t0)/1000);
+  let plannedChars=0, sentChars=0;
+  const estText=()=>{
+    if(!agent.perf || agent.perf.secs<5) return '';
+    const est=Math.round(plannedChars/(agent.perf.chars/agent.perf.secs));
+    return est>=8 ? ' (≈'+fmtDur(est)+' expected)' : '';
+  };
   const tick=setInterval(()=>{
     const m=agent.messages[idx];
     if(!m || m.content){ return; }
     const box=$('#agent-messages'); const last=box&&box.lastElementChild;
     const span=last&&last.querySelector('.out-md span');
-    if(span) span.textContent='Thinking… '+fmtDur(secsNow());
+    if(span) span.textContent='Thinking… '+fmtDur(secsNow())+estText();
   },1000);
   try {
     let finalText='';
     for(let round=0;;round++){
       const { system, messages } = assembleSight(text, history, docs, MAX_FETCH_ROUNDS-round);
+      plannedChars=system.length+messages.reduce((s,m)=>s+m.content.length,0);
+      sentChars+=plannedChars;
       const reply=await streamOnce(system, messages, idx, myCancel);
       if (reply==null) return;   // cancelled
       const req = round<MAX_FETCH_ROUNDS ? parseFetch(reply) : null;
@@ -1899,14 +1970,18 @@ async function agentSendLocal(text, history, myCancel){
       }
       // Merge with anything already attached (pre-attached named documents
       // must survive a follow-up fetch); bubble stays on "Thinking…".
-      docs=resolveDocs([...new Set([...(docs?docs.list.map(d=>d.name):[]), ...req])]);
+      docs=resolveDocs([...new Set([...(docs?docs.list.map(d=>d.name):[]), ...req])], text);
     }
     agent.messages[idx].content=finalText||'(empty response)';
     agent.messages[idx].secs=secsNow();
-    agent.messages[idx].fetched=docs?docs.list.map(d=>d.name):[];
+    agent.messages[idx].fetched=docs?docs.list.map(d=>d.name+(d.excerpted?' (parts)':'')):[];
     renderAgentMessages();
   } catch(e){ if(!myCancel.cancelled){ agent.messages[idx].content='⚠️ '+agentFailText(e); agent.messages[idx].secs=secsNow(); console.error('[WebLLM] generate failed',e); renderAgentMessages(); } }
-  finally { clearInterval(tick); }
+  finally {
+    clearInterval(tick);
+    agent.perf=agent.perf||{chars:0,secs:0};
+    agent.perf.chars+=sentChars; agent.perf.secs+=Math.max(1,secsNow());
+  }
 }
 async function initAgent(){
   renderAgentTab();
@@ -1959,6 +2034,18 @@ function runSelfTests(){
     // the thinking clock's formatter
     ok('duration format', fmtDur(59)==='59s' && fmtDur(61)==='1m 1s' && fmtDur(264)==='4m 24s' && fmtDur(3600)==='1h' && fmtDur(3780)==='1h 3m');
   } catch(e){ ok('FETCH parser',false,e.message); }
+  // cell-level excerpting — pure functions over a synthetic oversized doc
+  try {
+    ok('terms drop stopwords', questionTerms('Why is the scrypt limiter here?').join(',')==='scrypt,limiter');
+    const pad='```python\n'+'# filler line to pad the synthetic document past the threshold\n'.repeat(8)+'```\n\n';
+    const big='# HEAD\n\nintro prose\n\n'+pad.repeat(30)+'```python\ndef scrypt_check():\n    pass\n```\n\n'+pad.repeat(30);
+    const ex=excerptDoc('BIG.md', big, 'why scrypt?');
+    ok('excerpt: oversized file excerpts', ex.excerpted===true && ex.content.length<big.length);
+    ok('excerpt: match kept, elisions marked', ex.content.includes('scrypt_check') && ex.content.includes('elided'));
+    ok('excerpt: header orients', ex.content.includes('# HEAD'));
+    ok('excerpt: no match → honest note', excerptDoc('BIG.md', big, 'zebra quantum').content.includes('matched the question'));
+    ok('excerpt: small file goes whole', excerptDoc('S.md', '# tiny\n', 'anything').excerpted===false);
+  } catch(e){ ok('excerpting',false,e.message); }
   // the call-map extractor — pure function over a synthetic literate doc
   try {
     const d=parse('prose\n\n```python\ndef alpha():\n    return beta() + 1\n\ndef beta():\n    return 2\n\ndef gamma():\n    x = "beta"   # a name in a string, not a call\n    return alpha()\n```\n');

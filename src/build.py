@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build servette.py from the Markdown sources in this directory.
 
-servette.py is authored as four literate Markdown files — INIT.md, SERVER.md,
-SYSTEM.md, SHELL.md. Each interleaves three things:
+servette.py is authored as five literate Markdown files — INIT.md, SERVER.md,
+SYSTEM.md, SHELL.md, MAIN.md. Each interleaves three things:
 
   * fenced ```python blocks — the code, emitted verbatim;
   * blockquotes (`> ...`) — the module's own comment prose, lifted out of the

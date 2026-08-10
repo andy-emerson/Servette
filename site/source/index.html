@@ -987,7 +987,7 @@ async function upgradeCode(cellEl, cell){
   const { EditorView } = m.view;
   const { EditorState } = m.state;
   new EditorView({
-    doc: cell.code,
+    doc: cell.code.replace(/^\n+/,''),   // display-only trim — see createCellEl
     extensions: [
       m.theme, m.highlight,
       cell.lang === 'python' ? m.python.python() : [],
@@ -1006,6 +1006,10 @@ async function upgradeCode(cellEl, cell){
  * ════════════════════════════════════════════════════════════════════════════ */
 function badgeLabel(cell){ return cell.type === 'md' ? 'Markdown' : (cell.lang || 'code').toUpperCase(); }
 function firstLine(s){ const l=(s||'').split('\n').find(x=>x.trim()); return (l||'').trim().slice(0,60); }
+// A code cell's label: its first line, with a leading comment marker
+// stripped — the literate style opens every fence with a one-line `# Name`
+// comment, and the name reads better than the marker (shebangs keep theirs).
+function codeLabel(code){ return firstLine(code).replace(/^#(?!!)\s*/,''); }
 function renderMd(cellEl, cell){
   const out=cellEl.querySelector('.cell-output');
   out.className='cell-output out-md';
@@ -1014,7 +1018,7 @@ function renderMd(cellEl, cell){
 function mkAction(ico,title,fn,cls){ const b=elem('button',{class:'ca-btn'+(cls?' '+cls:''),title,html:svg(ico)}); b.onclick=fn; return b; }
 function createCellEl(cell){
   const badge=elem('span',{class:'cell-badge badge-'+cell.type,text:badgeLabel(cell)});
-  const label = cell.type==='md' ? firstLine(cell.code).replace(/^#+\s*/,'') : firstLine(cell.code);
+  const label = cell.type==='md' ? firstLine(cell.code).replace(/^#+\s*/,'') : codeLabel(cell.code);
   const title=elem('span',{class:'cell-title',text:label});
   const actions=elem('div',{class:'cell-actions'},[
     mkAction('chevron','Collapse',()=>toggleCollapse(cell.id),'collapse-btn'),
@@ -1025,7 +1029,10 @@ function createCellEl(cell){
   const cellEl=elem('div',{class:'cell','data-id':cell.id},[header,body,out]);
   if (cell.collapsed) cellEl.classList.add('collapsed');
   if (cell.type==='code'){
-    body.appendChild(elem('pre',{class:'code-plain',text:cell.code}));
+    // Display-only trim of leading blank lines (the literate style opens a
+    // fence with one when a rationale block precedes it, purely for
+    // servette.py's spacing); the doc model keeps the exact bytes.
+    body.appendChild(elem('pre',{class:'code-plain',text:cell.code.replace(/^\n+/,'')}));
     setTimeout(()=>upgradeCode(cellEl,cell),0);
   } else {
     renderMd(cellEl,cell);
@@ -1192,7 +1199,7 @@ function flashCell(el){
   el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
 }
 function cellRowLabel(c){
-  return c.type==='md' ? (firstLine(c.code).replace(/^#+\s*/,'')||'Markdown') : (firstLine(c.code)||'(empty)');
+  return c.type==='md' ? (firstLine(c.code).replace(/^#+\s*/,'')||'Markdown') : (codeLabel(c.code)||'(empty)');
 }
 function cellRow(fileName, c, label){
   const row=elem('div',{class:'list-row clickable indent',title:label},[
@@ -2065,6 +2072,12 @@ function runSelfTests(){
     ok('named: uppercase stem', namedDocs('What does SYSTEM do?').join(',')==='SYSTEM.md');
     ok('named: lowercase bare stem passes', namedDocs('what does the system do?').length===0);
     ok('named: .md any case', namedDocs('is shell.md big?').join(',')==='SHELL.md');
+    // the code-cell label: name-line comment stripped of its marker
+    ok('code label strips the name marker',
+       codeLabel('# The config singleton\nconfig = Config()')==='The config singleton'
+       && codeLabel('\n# Named after a leading blank\nx=1')==='Named after a leading blank'
+       && codeLabel('#!/usr/bin/env python3\nx=1')==='#!/usr/bin/env python3'
+       && codeLabel('config = Config()')==='config = Config()');
     // the thinking clock's formatter
     ok('duration format', fmtDur(59)==='59s' && fmtDur(61)==='1m 1s' && fmtDur(264)==='4m 24s' && fmtDur(3600)==='1h' && fmtDur(3780)==='1h 3m');
     // …and its expectation suffix: silent without data, a prediction while it

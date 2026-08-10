@@ -1,6 +1,7 @@
 # GENERATED FILE — do not edit. servette.py is built from the Markdown
 # sources in src/ by src/build.py; edit those and rebuild. Hand edits here
 # are overwritten by the next build and fail CI's `build.py --check`.
+# The docstring and version
 """
 servette.py — The Simple Secure Static Site Server
 
@@ -17,6 +18,7 @@ Architecture:
 
 __version__ = "0.26.219"
 
+# Imports — standard library only
 import base64
 import collections
 import datetime
@@ -44,7 +46,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-
+# Paths
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 _VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
 _VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
@@ -56,6 +58,8 @@ ACME_WEBROOT  = "/var/lib/letsencrypt/webroot"
 # The closed-system TLS fallback: presented for connections whose SNI matches no
 # configured site (absent, unrecognized, or direct-IP access) when no site is
 # itself domainless. Tied to no site's identity, generated once and reused.
+
+# The default-certificate paths
 _DEFAULT_CERT_DIR  = os.path.join(BASE_DIR, "certs", "_default")
 _DEFAULT_CERT_FILE = os.path.join(_DEFAULT_CERT_DIR, "cert.pem")
 _DEFAULT_KEY_FILE  = os.path.join(_DEFAULT_CERT_DIR, "key.pem")
@@ -3801,8 +3805,11 @@ def shell():
 # but the stdlib request handlers have fixed signatures and cannot accept
 # extra arguments. In a single-file server that is always run as a process,
 # the global is the right call.
+
+# The config singleton
 config = Config()
 
+# The entry point
 if __name__ == "__main__":
     _bootstrap()  # no-op if already in venv; otherwise re-execs into venv
 

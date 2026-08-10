@@ -11,6 +11,8 @@
 
 ```
 
+One `Config` for the whole process, created here at the bottom of the file rather than beside its class.
+
 > Config is a module-level singleton, instantiated here (not at its class
 > definition, near the top) because migrating a pre-multi-site flat config
 > calls _domain_from_cert() to backfill the migrated site's domain, and that
@@ -21,8 +23,16 @@
 > the global is the right call.
 
 ```python
+
+# The config singleton
 config = Config()
 
+```
+
+Three ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. A completed self-update relaunches with `--post-update`: apply what the new version needs, then hand over to the shell. A person just runs the file — and gets the shell.
+
+```python
+# The entry point
 if __name__ == "__main__":
     _bootstrap()  # no-op if already in venv; otherwise re-execs into venv
 

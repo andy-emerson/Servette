@@ -527,21 +527,17 @@ body > * { position: relative; z-index: 1; }
       <button class="activity-bar-btn act-bottom" data-tab="settings" title="Settings" data-ico="settings"></button>
     </div>
 
-    <!-- left pane — panels toggle independently and stack top-to-bottom in
-         activity-bar order (the shell's right-pane discipline), so the reader
-         can navigate and chat at the same time -->
+    <!-- left pane — mutually-exclusive tabs, one panel at a time -->
     <div id="left-pane" class="collapsed">
       <div class="pane-panel" id="panel-outline" data-tab="outline">
         <div class="pane-header">Navigator</div>
         <div class="nav-search"><input id="nav-search" type="search" placeholder="Search src/*.md…" aria-label="Search the sources"></div>
         <div id="outline-list" style="flex:1;overflow-y:auto"></div>
       </div>
-      <div class="lv-resizer" id="lresizer-outline" style="display:none"></div>
       <div class="pane-panel" id="panel-assistant" data-tab="assistant">
         <div class="pane-header">AI assistant <span style="display:flex;gap:8px"><span class="mini" role="button" id="chat-copy" title="Copy conversation" data-ico="copy"></span><span class="mini" role="button" id="chat-clear" title="Clear conversation" data-ico="trash"></span></span></div>
         <div id="assistant-body" style="flex:1;min-height:0;display:flex;flex-direction:column"></div>
       </div>
-      <div class="lv-resizer" id="lresizer-assistant" style="display:none"></div>
       <div class="pane-panel" id="panel-settings" data-tab="settings">
         <div class="pane-header">Settings</div>
         <div class="settings-body">
@@ -614,7 +610,7 @@ body > * { position: relative; z-index: 1; }
   </div>
   <div class="welcome-dialog__body">
     <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
-    <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files), the assistant, and Settings at the bottom. On the right: the Preview pane (the open file as one plain rendered document) and the Call Map (the open file's functions and who calls whom — click a function to jump to it). Click an icon to open or close its panel; open panels stack. The viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
+    <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files), the assistant, and Settings at the bottom — one panel at a time. On the right: the Preview pane (the open file as one plain rendered document) and the Call Map (the open file's functions and who calls whom — click a function to jump to it). Click an icon to open or close its panel. The viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
     <p>There is also an optional <strong>reading assistant</strong> — Servette itself, answering for its own code. It runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine), and because the model is yours, the tokens are too: ask Servette about Servette as much as you like, with no accounts, no API keys, and no limits. Set it up in Settings → Agentic Reading; it sees the file you have open and answers questions about it.</p>
   </div>
 </dialog>
@@ -1688,20 +1684,9 @@ function copyChat(){
   const text=agent.messages.map(m=>(m.from||m.role)+': '+m.content).join('\n\n');
   navigator.clipboard.writeText(text).then(()=>toast('Conversation copied')).catch(()=>toast('Copy failed','err'));
 }
-// The empty bubble is the whole prefill wait. Its text is sized to the truth:
-// a long open file genuinely delays the first word, a short one doesn't —
-// saying "can take a while" over INIT.md's 4k tokens is just misleading.
-function pendingHint(){
-  const f=currentFile();
-  const chars=(nb.readme?nb.readme.length:0)+((f&&f.raw)?f.raw.length:0);
-  const kTokens=Math.round(chars/4/1000);
-  return (f && kTokens>=8)
-    ? 'Reading src/'+f.name+' (~'+kTokens+'k tokens) — the first word can take a while…'
-    : 'Thinking…';
-}
 function fillBotBody(bodyEl, content){
   bodyEl.innerHTML = content ? renderMarkdownHTML(content)
-    : '<span style="opacity:.55">'+pendingHint()+'</span>';
+    : '<span style="opacity:.55">Thinking…</span>';
   decorateCodeBlocks(bodyEl);
 }
 function chatMsgEl(m){
@@ -1901,43 +1886,37 @@ function runSelfTests(){
 /* ════════════════════════════════════════════════════════════════════════════
  * 10. WIRING + BOOT
  * ════════════════════════════════════════════════════════════════════════════ */
-/* Left panels aren't mutually-exclusive tabs — each activity-bar button
- * toggles its panel independently open/closed (the shell's right-pane
- * discipline): 0 open collapses the pane, 2+ open stack top-to-bottom in
- * activity-bar order, so the reader can navigate and chat at once. */
-const LEFT_ORDER = ['outline','assistant','settings'];
-let leftOpen = new Set();   // fresh start: nothing open
-function nextOpenAfter(tab){
-  for (let i=LEFT_ORDER.indexOf(tab)+1; i<LEFT_ORDER.length; i++) if (leftOpen.has(LEFT_ORDER[i])) return LEFT_ORDER[i];
-  return null;
+/* Left panels are mutually-exclusive tabs (LoveIDE's discipline — the
+ * stacked experiment confused more than it helped): one panel shows at a
+ * time, clicking the active button collapses the pane. The right side keeps
+ * its independent stacking (Preview + Call Map). */
+function switchTab(name){
+  $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
+  $$('#left-pane .pane-panel').forEach(p=>p.classList.toggle('active',p.dataset.tab===name));
 }
-// Applies `leftOpen` to the DOM: which panels show, which resizers between
-// them show, button active-states. A manual resizer drag resets to an equal
-// split whenever the open set changes.
-function layoutLeftPane(){
-  LEFT_ORDER.forEach(tab=>{
-    const p=$('#panel-'+tab); if(!p) return;
-    p.classList.toggle('active', leftOpen.has(tab));
-    p.style.flex='';
-  });
-  $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.toggle('active', leftOpen.has(b.dataset.tab)));
-  ['outline','assistant'].forEach(tab=>{
-    const r=$('#lresizer-'+tab); if(!r) return;
-    r.style.display = (leftOpen.has(tab) && nextOpenAfter(tab)) ? '' : 'none';
-  });
+function leftTabHooks(tab){
+  if (tab==='settings'){ renderAgentLocal(); if(!agent.installedChecked && agent.gpu && agent.gpu.supported) agentRefreshInstalled(); }
+  if (tab==='assistant') renderAgentTab();
 }
 function toggleLeftTab(tab){
-  leftOpen.has(tab) ? leftOpen.delete(tab) : leftOpen.add(tab);
-  if (leftOpen.size===0) PANES.left.collapse();
-  else if (PANES.left.isCollapsed()) PANES.left.expand();
-  layoutLeftPane();
-  if (leftOpen.has(tab)){
-    if (tab==='settings'){ renderAgentLocal(); if(!agent.installedChecked && agent.gpu && agent.gpu.supported) agentRefreshInstalled(); }
-    if (tab==='assistant') renderAgentTab();
+  const btn=$('#left-activity-bar .activity-bar-btn[data-tab="'+tab+'"]');
+  if (!PANES.left.isCollapsed() && btn.classList.contains('active')){
+    PANES.left.collapse();
+    $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.remove('active'));
+  } else {
+    switchTab(tab);
+    if (PANES.left.isCollapsed()) PANES.left.expand();
+    leftTabHooks(tab);
   }
 }
 // Ensure a panel is open (status-pill link, activation auto-open).
-function openTab(name){ if(!leftOpen.has(name)) toggleLeftTab(name); else if(PANES.left.isCollapsed()) PANES.left.expand(); }
+function openTab(name){
+  const btn=$('#left-activity-bar .activity-bar-btn[data-tab="'+name+'"]');
+  if (!PANES.left.isCollapsed() && btn.classList.contains('active')) return;
+  switchTab(name);
+  if (PANES.left.isCollapsed()) PANES.left.expand();
+  leftTabHooks(name);
+}
 // Drag the divider between the panel at `afterTab` and the next open one
 // below it. Resolved fresh on mousedown since the open set can change.
 // `prefix` and `nextFn` make the same machinery serve both sides.
@@ -1959,31 +1938,62 @@ function wirePaneResizer(id, afterTab, prefix, nextFn){
   });
   window.addEventListener('mouseup', ()=>{ if(!drag) return; drag=false; r.classList.remove('dragging'); document.body.style.cursor=''; document.body.style.userSelect=''; });
 }
-function wireLeftResizers(){ ['outline','assistant'].forEach(t=>wirePaneResizer('lresizer-'+t, t, 'panel-', nextOpenAfter)); }
 
-/* ── Panes — oracle-style: drag to resize (clamped + persisted), and the
- *    activity-bar buttons collapse/expand the pane. ── */
+/* ── Panes ─────────────────────────────────────────────────────────────────
+ * Left: fixed bounds (190–520), opens at its maximum; width memory is
+ * session-only. Right: proportional — its size is a RATIO of the space that
+ * remains after the left pane and the activity bars (88), capped at half of
+ * it, so it holds its share as the left pane opens, closes, or resizes (and
+ * on window resize). It opens at the left pane's maximum, 520, when the cap
+ * allows. ── */
 const PANES = {};
-function setupPane(side){
-  const isLeft = side==='left';
-  const pane = $('#'+(isLeft?'left-pane':'right-pane'));
-  const resizer = $('#'+(isLeft?'left-resizer':'right-resizer'));
-  const MIN = isLeft ? 190 : 300;
-  // Left cap: 520. Right cap: half of what remains after the left pane's
-  // maximum and the two activity bars (88) are reserved — so on any monitor
-  // the notebook keeps at least as much room as the right pane takes.
-  const maxW = () => isLeft ? 520 : Math.max(MIN, Math.round((window.innerWidth - 88 - 520) / 2));
-  const clamp = w => Math.max(MIN, Math.min(maxW(), w));
-  let saved = null;   // no width chosen yet — the first expand opens at the maximum; memory is session-only
-  const isCollapsed = () => pane.classList.contains('collapsed');
-  function collapse(){ if(isCollapsed())return; saved=pane.offsetWidth; pane.classList.add('collapsed'); resizer.style.display='none'; }
-  function expand(){ pane.classList.remove('collapsed'); pane.style.width=clamp(saved==null?maxW():saved)+'px'; resizer.style.display=''; }
+const LEFT_MAX = 520;
+function leftLogicalWidth(){
+  const p=$('#left-pane');
+  return p.classList.contains('collapsed') ? 0 : (parseInt(p.style.width,10) || p.offsetWidth);
+}
+function rightAvail(){ return Math.max(300, window.innerWidth - 88 - leftLogicalWidth()); }
+function syncRightWidth(){ if (PANES.right && !PANES.right.isCollapsed()) PANES.right.apply(); }
+function setupLeftPane(){
+  const pane=$('#left-pane'), resizer=$('#left-resizer');
+  const MIN=190;
+  const clamp=w=>Math.max(MIN, Math.min(LEFT_MAX, w));
+  let saved=null;   // session-only; first open = the maximum
+  const isCollapsed=()=>pane.classList.contains('collapsed');
+  function collapse(){ if(isCollapsed())return; saved=pane.offsetWidth; pane.classList.add('collapsed'); resizer.style.display='none'; syncRightWidth(); }
+  function expand(){ pane.classList.remove('collapsed'); pane.style.width=clamp(saved==null?LEFT_MAX:saved)+'px'; resizer.style.display=''; syncRightWidth(); }
   let drag=false, sx=0, sw=0;
   resizer.addEventListener('mousedown',e=>{ if(isCollapsed())return; drag=true; sx=e.clientX; sw=pane.offsetWidth; resizer.classList.add('dragging'); pane.style.transition='none'; document.body.style.cursor='col-resize'; document.body.style.userSelect='none'; e.preventDefault(); });
-  window.addEventListener('mousemove',e=>{ if(!drag)return; const dx=isLeft?(e.clientX-sx):(sx-e.clientX); pane.style.width=clamp(sw+dx)+'px'; });
-  window.addEventListener('mouseup',()=>{ if(!drag)return; drag=false; resizer.classList.remove('dragging'); pane.style.transition=''; document.body.style.cursor=''; document.body.style.userSelect=''; saved=pane.offsetWidth; });
-  return PANES[side]={collapse,expand,isCollapsed};
+  window.addEventListener('mousemove',e=>{ if(!drag)return; pane.style.width=clamp(sw+(e.clientX-sx))+'px'; syncRightWidth(); });
+  window.addEventListener('mouseup',()=>{ if(!drag)return; drag=false; resizer.classList.remove('dragging'); pane.style.transition=''; document.body.style.cursor=''; document.body.style.userSelect=''; saved=pane.offsetWidth; syncRightWidth(); });
+  PANES.left={collapse,expand,isCollapsed};
 }
+function setupRightPane(){
+  const pane=$('#right-pane'), resizer=$('#right-resizer');
+  const MIN=300;
+  const maxW=()=>Math.round(rightAvail()/2);
+  const clamp=w=>Math.max(MIN, Math.min(maxW(), w));
+  let ratio=null;   // share of the available space; session-only
+  const isCollapsed=()=>pane.classList.contains('collapsed');
+  function apply(){
+    if(isCollapsed()) return;
+    const w=clamp(ratio==null ? Math.min(LEFT_MAX, maxW()) : Math.round(ratio*rightAvail()));
+    pane.style.width=w+'px';
+  }
+  function collapse(){ if(isCollapsed())return; ratio=pane.offsetWidth/rightAvail(); pane.classList.add('collapsed'); resizer.style.display='none'; }
+  function expand(){
+    pane.classList.remove('collapsed');
+    apply();
+    if(ratio==null) ratio=(parseInt(pane.style.width,10)||MIN)/rightAvail();
+    resizer.style.display='';
+  }
+  let drag=false, sx=0, sw=0;
+  resizer.addEventListener('mousedown',e=>{ if(isCollapsed())return; drag=true; sx=e.clientX; sw=pane.offsetWidth; resizer.classList.add('dragging'); pane.style.transition='none'; document.body.style.cursor='col-resize'; document.body.style.userSelect='none'; e.preventDefault(); });
+  window.addEventListener('mousemove',e=>{ if(!drag)return; pane.style.width=clamp(sw+(sx-e.clientX))+'px'; });
+  window.addEventListener('mouseup',()=>{ if(!drag)return; drag=false; resizer.classList.remove('dragging'); pane.style.transition=''; document.body.style.cursor=''; document.body.style.userSelect=''; ratio=pane.offsetWidth/rightAvail(); });
+  PANES.right={collapse,expand,isCollapsed,apply};
+}
+window.addEventListener('resize', syncRightWidth);
 function wireActivityBars(){
   $$('#left-activity-bar .activity-bar-btn').forEach(btn=>{
     btn.onclick=()=>toggleLeftTab(btn.dataset.tab);
@@ -2027,8 +2037,8 @@ function wire(){
   $('#st-agent').onclick=()=>openTab('assistant');
   const ln=$('#opt-linenums'); ln.checked=nb.opts.lineNumbers;
   ln.onchange=()=>{ nb.opts.lineNumbers=ln.checked; lsSet('servette-src:linenums', ln.checked?'1':'0'); renderNotebook(); };
-  setupPane('left'); setupPane('right'); wireActivityBars(); wireLeftResizers();
-  layoutLeftPane(); layoutRightPane();
+  setupLeftPane(); setupRightPane(); wireActivityBars();
+  layoutRightPane();
   $$('#right-activity-bar .activity-bar-btn').forEach(btn=>{
     btn.onclick=()=>toggleRightTab(btn.dataset.rightTab);
   });
@@ -2054,7 +2064,7 @@ async function boot(){
   initAgent();
   // expose for console / automation (the browser-verify run reads these; the
   // self-tests live here too — run NB.runSelfTests() in the console)
-  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight, pendingHint,
+  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight,
                 get files(){return nb.files;}, get agent(){return agent;} };
 }
 boot();

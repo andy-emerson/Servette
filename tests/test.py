@@ -11,6 +11,7 @@ Or, after first-run bootstrap:
 """
 
 import base64
+import contextlib
 import gzip
 import http.client
 import http.server
@@ -299,6 +300,70 @@ serve_dir = "b"
         check("Multi-site config loads all [[site]] blocks", len(c3.sites) == 2)
         check("Sites load in file order",
               [site.domain for site in c3.sites] == ["a.example.com", "b.example.com"])
+
+        # A hand-edit that breaks the file must not kill the reload: this runs
+        # on request threads, so the loaded config keeps serving and the miss
+        # is logged, not raised.
+        good_sites = [site.domain for site in c3.sites]
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write("port = [broken\n")
+        c3._mtime = None
+        c3.reload_if_changed()   # must neither raise nor exit
+        check("Invalid TOML on reload keeps the previous configuration",
+              [site.domain for site in c3.sites] == good_sites)
+        check("Bad reload stamps the mtime so it isn't re-parsed per request",
+              c3._mtime == os.path.getmtime(s.Config.CONFIG_FILE))
+
+        # Same keep-last-good when a reload would serve Servette's own secrets.
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write('[[site]]\nserve_dir = "."\n')
+        c3._mtime = None
+        c3.reload_if_changed()
+        check("Secret-exposing serve_dir on reload keeps the previous configuration",
+              [site.domain for site in c3.sites] == good_sites)
+
+        # At startup the same conditions are fatal — fail closed, matching the
+        # shell's edit-time refusal of these exact values.
+        raised = False
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                s.Config()
+        except SystemExit:
+            raised = True
+        check("Secret-exposing serve_dir at startup exits", raised)
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write("port = [broken\n")
+        raised = False
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                s.Config()
+        except SystemExit:
+            raised = True
+        check("Invalid TOML at startup exits", raised)
+
+        # Migration under a Python without cryptography must defer rather than
+        # persist an empty domain (which would demote the site to the
+        # domainless catch-all: no HSTS, no renewal). The venv re-exec re-runs
+        # the migration with cryptography available.
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write(f'serve_dir = "myserve"\ncert_file = "{cert_path}"\nkey_file = "{key_path}"\n')
+        saved_crypto = sys.modules.get("cryptography")
+        sys.modules["cryptography"] = None   # makes `import cryptography` raise
+        try:
+            c4 = s.Config()
+        finally:
+            if saved_crypto is not None:
+                sys.modules["cryptography"] = saved_crypto
+            else:
+                del sys.modules["cryptography"]
+        check("Migration without cryptography defers (file not rewritten)",
+              "[[site]]" not in open(s.Config.CONFIG_FILE).read())
+        check("Deferred migration still loads the legacy site in memory",
+              c4.sites[0].serve_dir == "myserve")
+        c5 = s.Config()
+        check("Re-run with cryptography completes the migration with the domain",
+              "[[site]]" in open(s.Config.CONFIG_FILE).read()
+              and c5.sites[0].domain == "legacy.example.com")
     finally:
         s.Config.CONFIG_FILE = saved_config_file
         shutil.rmtree(migrate_dir, ignore_errors=True)
@@ -676,6 +741,43 @@ serve_dir = "b"
     prot2  = _json.loads(unb64(_json.loads(c._sign("https://acme.example/a", None))["protected"]))
     check("kid replaces jwk once account known", "kid" in prot2 and "jwk" not in prot2)
 
+    section("Raising a rate limit takes effect for already-active IPs")
+
+    # A deque keeps the maxlen it was born with; without the rebuild, an IP
+    # tracked under the old limit could never accumulate enough entries to
+    # exceed a raised one — a permanent exemption for active attackers.
+    rl_tracker = {}
+    for _ in range(3):
+        s._rate_limit_exceeded(rl_tracker, "203.0.113.9", 2)
+    check("Over the old limit, the IP is throttled",
+          s._rate_limit_exceeded(rl_tracker, "203.0.113.9", 2, record=False))
+    check("Under a raised limit, the same IP is admitted again",
+          not s._rate_limit_exceeded(rl_tracker, "203.0.113.9", 10, record=False))
+    check("The deque is rebuilt at the new limit",
+          rl_tracker["203.0.113.9"].maxlen == 11)
+    for _ in range(9):
+        s._rate_limit_exceeded(rl_tracker, "203.0.113.9", 10)
+    check("The raised limit is enforceable, not a permanent exemption",
+          s._rate_limit_exceeded(rl_tracker, "203.0.113.9", 10, record=False))
+
+    section("Private keys are 0600 from creation")
+
+    kd = tempfile.mkdtemp()
+    saved_umask = os.umask(0o022)   # a permissive umask — the case the fix closes
+    try:
+        kp = os.path.join(kd, "k.pem")
+        s._write_private_key(kp, b"key material")
+        check("_write_private_key creates the file 0600",
+              os.stat(kp).st_mode & 0o777 == 0o600)
+        check("Key contents written intact", open(kp, "rb").read() == b"key material")
+        cert_p, key_p = os.path.join(kd, "c.pem"), os.path.join(kd, "k2.pem")
+        s._generate_self_signed_cert(cert_p, key_p)
+        check("Self-signed private key is 0600 from creation",
+              os.stat(key_p).st_mode & 0o777 == 0o600)
+    finally:
+        os.umask(saved_umask)
+        shutil.rmtree(kd, ignore_errors=True)
+
     section("release.py: signs matching artifacts, refuses everything else")
 
     # Drive src/release.py's prepare() against a miniature fixture repo whose
@@ -1019,7 +1121,7 @@ def run_dispatch_tests(s):
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             got = s._fetch_demo()
         check("Release without demo assets degrades with a message",
-              got is None and "no demo.html" in buf.getvalue())
+              got is None and "missing demo.html" in buf.getvalue())
 
         off_host = {"tag_name": "v9.9.9", "assets": [
             {"name": "demo.html",     "browser_download_url": "https://evil.example/demo.html"},
@@ -1029,7 +1131,7 @@ def run_dispatch_tests(s):
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             got = s._fetch_demo()
         check("Asset URL off the release host is refused",
-              got is None and "Demo page refused: asset URL" in buf.getvalue())
+              got is None and "asset URL is not on github.com" in buf.getvalue())
 
         unmarked     = b"<!doctype html>no marker here"
         s.urllib.request.urlopen = _fake_urlopen_for(demo_api, unmarked, dpriv.sign(unmarked))

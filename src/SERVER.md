@@ -97,6 +97,13 @@ class Site:
         self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
+class _ConfigInvalid(Exception):
+    """servette.toml cannot be safely applied — unparseable TOML, or a
+    serve_dir that would publish Servette's own secrets. At startup this is
+    fatal (fail closed); on the per-request reload the previous configuration
+    stays in force — see reload_if_changed."""
+
+
 class Config:
     """Holds all Servette settings and handles reading/writing servette.toml."""
 
@@ -104,9 +111,18 @@ class Config:
 
     def __init__(self):
         self._mtime = None
-        self._load()
+        try:
+            self._load()
+        except _ConfigInvalid as e:
+            print(f"Error: {e}.")
+            print(f"Fix or delete {self.CONFIG_FILE} and try again.")
+            sys.exit(1)
 
     def _load(self):
+        # Everything that can be refused is parsed and validated before any
+        # attribute of self changes: _load also runs against the LIVE config on
+        # the reload path, and raising after a partial mutation would leave the
+        # server on a config that never existed on disk.
         data = {}
         existed = os.path.exists(self.CONFIG_FILE)
         if existed:
@@ -114,14 +130,12 @@ class Config:
                 with open(self.CONFIG_FILE, "rb") as f:
                     data = tomllib.load(f)
             except tomllib.TOMLDecodeError as e:
-                print(f"Error: servette.toml is not valid TOML ({e}).")
-                print(f"Fix or delete {self.CONFIG_FILE} and try again.")
-                sys.exit(1)
+                raise _ConfigInvalid(f"servette.toml is not valid TOML ({e})")
 
         site_tables = data.get("site", [])
         migrating   = existed and not site_tables
         if site_tables:
-            self.sites = [Site(t) for t in site_tables]
+            sites = [Site(t) for t in site_tables]
         else:
             # No [[site]] tables: either a fresh install (data is empty, defaults
             # apply) or a pre-multi-site flat config being migrated in place —
@@ -146,8 +160,28 @@ class Config:
                 # file, after every function is defined) it's available.
                 cert_path = _resolve(legacy.cert_file)
                 if os.path.exists(cert_path):
-                    legacy.domain = _domain_from_cert(cert_path) or ""
-            self.sites = [legacy]
+                    try:
+                        import cryptography  # noqa — availability probe only
+                        legacy.domain = _domain_from_cert(cert_path) or ""
+                    except ImportError:
+                        # Running under the system Python, before _bootstrap()
+                        # re-execs into the venv: _domain_from_cert would return
+                        # None and the migration would persist an empty domain,
+                        # silently demoting the site to the domainless catch-all
+                        # (no HSTS, no renewal). Defer the migration entirely;
+                        # the re-exec'd process runs it with cryptography there.
+                        migrating = False
+            sites = [legacy]
+
+        # The shell refuses these serve_dirs at edit time, but the file is also
+        # hand-editable — enforce where the value actually takes effect, so a
+        # reload can never start serving the config file or the TLS keys.
+        for site in sites:
+            if _serve_dir_exposes_secrets(_resolve(site.serve_dir)):
+                raise _ConfigInvalid(
+                    f"serve_dir {site.serve_dir!r} holds Servette's own config or TLS keys — "
+                    "serving it would publish them")
+        self.sites = sites
 
         self.port            = data.get("port",            443)
         self.rate_limit      = data.get("rate_limit",      120)
@@ -179,11 +213,21 @@ class Config:
     def reload_if_changed(self):
         try:
             mtime = os.path.getmtime(self.CONFIG_FILE)
-            if mtime != self._mtime:
-                self._load()
-                log.info("Config reloaded from disk")
         except OSError:
-            pass
+            return
+        if mtime == self._mtime:
+            return
+        try:
+            self._load()
+            log.info("Config reloaded from disk")
+        except _ConfigInvalid as e:
+            # Keep serving on the last good configuration: this runs on request
+            # threads, where an escape would kill the request mid-flight and a
+            # process exit would take the whole server down over a typo. Stamp
+            # the mtime so the bad file isn't re-parsed — and the warning isn't
+            # repeated — on every request until the file changes again.
+            self._mtime = mtime
+            log.warning("Config NOT reloaded (%s) — still serving the previous configuration", e)
 
     def save(self):
         def s(v):
@@ -424,6 +468,14 @@ def _rate_limit_exceeded(tracker, ip, limit, record=True):
             # oldest keeps the deque at limit + 1 in-window entries, which is
             # still over the limit, so the verdict is unchanged.
             timestamps = collections.deque(maxlen=limit + 1)
+            tracker[ip] = timestamps
+        elif timestamps.maxlen != limit + 1:
+            # The limit was reconfigured while this IP was live. A deque keeps
+            # the maxlen it was born with, and a *raised* limit makes the old,
+            # smaller maxlen a permanent exemption: len can never reach the new
+            # limit + 1, so this IP would never be throttled again. Rebuild at
+            # the current limit, keeping the newest entries.
+            timestamps = collections.deque(timestamps, maxlen=limit + 1)
             tracker[ip] = timestamps
         while timestamps and timestamps[0] <= cutoff:
             timestamps.popleft()

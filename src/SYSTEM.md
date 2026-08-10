@@ -32,34 +32,44 @@ def _bootstrap():
     if not os.path.exists(_VENV_PY):
         print("Setting up Servette...")
 
-        try:
-            import venv as _venv_mod
-        except ImportError:
-            _venv_mod = None
+        def _create_venv():
+            """Create the venv, returning the failure instead of raising.
+            `import venv` succeeding proves nothing on its own: Debian/Ubuntu
+            ship the venv module in the stdlib but split ensurepip's wheels
+            into the python3-venv package, so create(with_pip=True) is what
+            actually fails on a minimal host — recovery must key on that."""
+            try:
+                import venv as _venv_mod
+                _venv_mod.create(_VENV_DIR, with_pip=True, clear=True)
+                return None
+            except Exception as e:
+                return e
 
-        if _venv_mod is None:
+        error = _create_venv()
+        if error is not None:
+            # Install the distro package that completes venv support, then try
+            # once more. Each manager gets its own argv — apk's subcommand is
+            # 'add' and it has no '-y' flag.
             pkg_managers = [
-                ("apt-get", f"python3.{sys.version_info.minor}-venv"),
-                ("dnf",     "python3-venv"),
-                ("apk",     "py3-venv"),
+                (("apt-get", "install", "-y"), f"python3.{sys.version_info.minor}-venv"),
+                (("dnf",     "install", "-y"), "python3-venv"),
+                (("apk",     "add"),           "py3-venv"),
             ]
-            for mgr, pkg in pkg_managers:
-                if shutil.which(mgr):
-                    result = subprocess.run([mgr, "install", "-y", pkg])
+            for argv, pkg in pkg_managers:
+                if shutil.which(argv[0]):
+                    result = subprocess.run([*argv, pkg])
                     if result.returncode != 0:
-                        print(f"  Error: failed to install {pkg} via {mgr}")
+                        print(f"  Error: failed to install {pkg} via {argv[0]}")
                         sys.exit(1)
                     break
             else:
-                print("  Error: no supported package manager found (tried apt-get, dnf, apk)")
+                print(f"  Error: failed to create virtual environment: {error}")
+                print("  No supported package manager found to fix it (tried apt-get, dnf, apk).")
                 sys.exit(1)
-            import venv as _venv_mod
-
-        try:
-            _venv_mod.create(_VENV_DIR, with_pip=True, clear=True)
-        except Exception as e:
-            print(f"  Error: failed to create virtual environment: {e}")
-            sys.exit(1)
+            error = _create_venv()
+            if error is not None:
+                print(f"  Error: failed to create virtual environment: {error}")
+                sys.exit(1)
 
         deps = ["cryptography>=41.0,<50.0"]
         result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
@@ -706,6 +716,17 @@ class _spinner:
         return False
 
 
+def _write_private_key(path, data):
+    """Write key material with 0600 set at file creation, not chmod'd after:
+    under a permissive umask, write-then-chmod leaves a window where another
+    local user can open the key (an open fd survives the chmod), and a crash
+    between the two leaves it world-readable permanently. Same pattern the
+    swapfile creation uses — the mode exists before the content does."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
 def _generate_self_signed_cert(cert_path, key_path):
     """Generate a self-signed certificate and write it to cert_path/key_path."""
     from cryptography import x509 as _x509
@@ -736,13 +757,11 @@ def _generate_self_signed_cert(cert_path, key_path):
         .sign(key, _hashes.SHA256())
     )
 
-    with open(key_path, "wb") as f:
-        f.write(key.private_bytes(
-            _serialization.Encoding.PEM,
-            _serialization.PrivateFormat.TraditionalOpenSSL,
-            _serialization.NoEncryption()
-        ))
-    os.chmod(key_path, 0o600)
+    _write_private_key(key_path, key.private_bytes(
+        _serialization.Encoding.PEM,
+        _serialization.PrivateFormat.TraditionalOpenSSL,
+        _serialization.NoEncryption()
+    ))
 
     with open(cert_path, "wb") as f:
         f.write(cert.public_bytes(_serialization.Encoding.PEM))
@@ -992,13 +1011,11 @@ def _obtain_trusted_cert(domain, site):
             account_key = _serialization.load_pem_private_key(f.read(), password=None)
     else:
         account_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        with open(ACCOUNT_KEY_FILE, "wb") as f:
-            f.write(account_key.private_bytes(
-                _serialization.Encoding.PEM,
-                _serialization.PrivateFormat.TraditionalOpenSSL,
-                _serialization.NoEncryption()
-            ))
-        os.chmod(ACCOUNT_KEY_FILE, 0o600)
+        _write_private_key(ACCOUNT_KEY_FILE, account_key.private_bytes(
+            _serialization.Encoding.PEM,
+            _serialization.PrivateFormat.TraditionalOpenSSL,
+            _serialization.NoEncryption()
+        ))
         _chown_servette(ACCOUNT_KEY_FILE)
 
     # Start a temporary HTTP listener on port 80 if the main server isn't running
@@ -1048,9 +1065,7 @@ def _obtain_trusted_cert(domain, site):
 
                     with open(cert_path, "w") as f:
                         f.write(fullchain)
-                    with open(key_path, "wb") as f:
-                        f.write(domain_key_pem)
-                    os.chmod(key_path, 0o600)
+                    _write_private_key(key_path, domain_key_pem)
                     _chown_servette(CERTS_DIR)
 
                 site.cert_file = cert_path

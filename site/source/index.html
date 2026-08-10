@@ -1828,6 +1828,18 @@ function fmtDur(s){
   const h=Math.floor(m/60), min=m%60;
   return h+'h'+(min?' '+min+'m':'');
 }
+// The thinking clock's expectation suffix. Calibrated from THIS session's
+// completed replies (chars sent / seconds taken) — silent until there is
+// data, since a made-up rate would just be a different kind of lie. And once
+// the clock passes the estimate it stops being a prediction: "about 2m
+// expected" showing at 3m is a lie too, so the label turns into the honest
+// observation instead.
+function estLabel(perf, plannedChars, elapsedSecs){
+  if(!perf || perf.secs<5) return '';
+  const est=Math.round(plannedChars/(perf.chars/perf.secs));
+  if(est<8) return '';
+  return elapsedSecs<=est ? ' · about '+fmtDur(est)+' expected' : ' · longer than expected';
+}
 function chatMsgEl(m){
   const el=elem('div',{class:'chat-msg '+(m.role==='user'?'user':'bot')});
   if(m.role==='assistant' && m.from) el.appendChild(elem('div',{class:'chat-from',text:m.from}));
@@ -1961,23 +1973,15 @@ async function agentSendLocal(text, history, myCancel){
   let docs=named.length ? resolveDocs(named, text, whole) : null;
   // The thinking clock: live seconds in the pending bubble (so a long prefill
   // is visibly not a freeze), the total stamped on the reply when it lands.
-  // The expectation beside it is calibrated from THIS session's completed
-  // replies (chars sent / seconds taken) — silent until there is data, since
-  // a made-up rate would just be a different kind of lie.
   const t0=performance.now();
   const secsNow=()=>Math.round((performance.now()-t0)/1000);
   let plannedChars=0, sentChars=0;
-  const estText=()=>{
-    if(!agent.perf || agent.perf.secs<5) return '';
-    const est=Math.round(plannedChars/(agent.perf.chars/agent.perf.secs));
-    return est>=8 ? ' (≈'+fmtDur(est)+' expected)' : '';
-  };
   const tick=setInterval(()=>{
     const m=agent.messages[idx];
     if(!m || m.content){ return; }
     const box=$('#agent-messages'); const last=box&&box.lastElementChild;
     const span=last&&last.querySelector('.out-md span');
-    if(span) span.textContent='Thinking… '+fmtDur(secsNow())+estText();
+    if(span) span.textContent='Thinking… '+fmtDur(secsNow())+estLabel(agent.perf, plannedChars, secsNow());
   },1000);
   try {
     let finalText='';
@@ -2067,6 +2071,13 @@ function runSelfTests(){
     ok('named: .md any case', namedDocs('is shell.md big?').join(',')==='SHELL.md');
     // the thinking clock's formatter
     ok('duration format', fmtDur(59)==='59s' && fmtDur(61)==='1m 1s' && fmtDur(264)==='4m 24s' && fmtDur(3600)==='1h' && fmtDur(3780)==='1h 3m');
+    // …and its expectation suffix: silent without data, a prediction while it
+    // holds, the honest observation once the clock passes it
+    const perf={chars:6000,secs:60};   // 100 chars/s → 3000 chars ≈ 30s
+    ok('estimate: silent without data', estLabel(null,3000,5)==='' && estLabel({chars:100,secs:2},3000,5)==='');
+    ok('estimate: prediction while under', estLabel(perf,3000,10)===' · about 30s expected');
+    ok('estimate: honest once exceeded', estLabel(perf,3000,31)===' · longer than expected');
+    ok('estimate: tiny reads stay quiet', estLabel(perf,300,1)==='');
   } catch(e){ ok('FETCH parser',false,e.message); }
   // cell-level excerpting — pure functions over a synthetic oversized doc
   try {

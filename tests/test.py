@@ -1617,6 +1617,36 @@ def run_dispatch_tests(s):
         check("Valid bundle extracts nested files",
               os.path.isfile(os.path.join(dest, "sub", "page.html")))
 
+        # Pre-PEP-706 interpreters (e.g. Debian 12's 3.11.2) have no
+        # extractall(filter=) — simulate one and prove both that extraction
+        # still works and that the hand-rolled guards still reject traversal
+        # without the library's help. The simulation is a proxy module that
+        # hides data_filter from servette's probe while delegating everything
+        # else — deleting the real attribute would break 3.14's extractall,
+        # whose default-filter path resolves the module global internally.
+        class _PrePEP706Tarfile:
+            def __getattr__(self, name):
+                if name == "data_filter":
+                    raise AttributeError(name)
+                return getattr(tarfile, name)
+        saved_mod = s.tarfile
+        s.tarfile = _PrePEP706Tarfile()
+        try:
+            dest_nf = os.path.join(extract_root, "nofilter")
+            s._extract_bundle(good, dest_nf)
+            check("Bundle extracts without tarfile.data_filter (old 3.11)",
+                  os.path.isfile(os.path.join(dest_nf, "sub", "page.html")))
+            raised = False
+            try:
+                s._extract_bundle(make_tar_gz([("../evil2.txt", "pwned")]),
+                                  os.path.join(extract_root, "nofilter-trav"))
+            except ValueError:
+                raised = True
+            check("Traversal still rejected without data_filter", raised and
+                  not os.path.exists(os.path.join(extract_root, "evil2.txt")))
+        finally:
+            s.tarfile = saved_mod
+
         traversal = make_tar_gz([("../evil.txt", "pwned")])
         dest2 = os.path.join(extract_root, "traversal")
         raised = False
@@ -2968,6 +2998,75 @@ def run_install_tests(s, tmpdir):
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
+def run_platform_tests(s):
+    # The macOS session-mode seam: every branch keyed on _IS_MACOS, exercised
+    # both ways by forcing the flag — these run identically on any host, so a
+    # green Linux CI actually covers the macOS branches.
+    import io, contextlib
+
+    section("Platform seam (_IS_MACOS)")
+    check("_IS_MACOS reflects sys.platform", s._IS_MACOS == sys.platform.startswith("darwin"))
+
+    saved_flag = s._IS_MACOS
+    try:
+        # _ensure_swap: inert on macOS even when RAM numbers would recommend swap
+        s._IS_MACOS = True
+        saved_meminfo = s._meminfo
+        s._meminfo = lambda: (512 * 1024, 100 * 1024, 0)   # small-RAM host: would offer swap on Linux
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s._ensure_swap()   # must return without prompting (any prompt would block/EOFError)
+            check("_ensure_swap is inert on macOS", buf.getvalue() == "")
+        finally:
+            s._meminfo = saved_meminfo
+
+        # cmd_log: macOS explains where the log lives instead of asking about systemd
+        saved_run = s.subprocess.run
+        def _raise_fnf(*a, **k): raise FileNotFoundError()
+        s.subprocess.run = _raise_fnf
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s.cmd_log()
+            check("cmd_log names the terminal on macOS", "No journal on macOS" in buf.getvalue())
+            s._IS_MACOS = False
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s.cmd_log()
+            check("cmd_log keeps the systemd question on Linux", "systemd" in buf.getvalue())
+        finally:
+            s.subprocess.run = saved_run
+
+        # cmd_start: macOS never offers the systemd-only service install
+        s._IS_MACOS = True
+        saved = (s._service_file_exists, s.start_server, s._server_running, s._prompt)
+        s._service_file_exists = lambda: False
+        s.start_server         = lambda: None
+        s._server_running      = lambda: True
+        s._prompt              = lambda *a: check("cmd_start must not prompt on macOS", False) or False
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s.cmd_start()
+            check("cmd_start explains session mode on macOS", "Linux-only" in buf.getvalue())
+        finally:
+            s._service_file_exists, s.start_server, s._server_running, s._prompt = saved
+
+        # _runtime_stats: the macOS memory row comes from ps and parses as MB
+        class _PsOut:
+            stdout = "51200\n"   # KB → 50.0 MB
+        saved_run = s.subprocess.run
+        s.subprocess.run = lambda *a, **k: _PsOut()
+        try:
+            rows = dict(s._runtime_stats(False))
+            check("_runtime_stats memory via ps on macOS", rows.get("Memory") == "50.0 MB")
+        finally:
+            s.subprocess.run = saved_run
+    finally:
+        s._IS_MACOS = saved_flag
+
+
 def main():
     print("\n──────────────────────────────────────────────────────")
     print("  Servette Test Suite")
@@ -2981,6 +3080,7 @@ def main():
         run_server_tests(s, serve_dir)
         run_cert_tests(s, tmpdir)
         run_install_tests(s, tmpdir)
+        run_platform_tests(s)
     finally:
         teardown(tmpdir, saved_config, config_path, s)
 

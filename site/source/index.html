@@ -987,7 +987,7 @@ async function upgradeCode(cellEl, cell){
   const { EditorView } = m.view;
   const { EditorState } = m.state;
   new EditorView({
-    doc: cell.code.replace(/^\n+/,''),   // display-only trim — see createCellEl
+    doc: cell.code.replace(/^\n+/,'').replace(/\n+$/,''),   // display-only trim — see createCellEl
     extensions: [
       m.theme, m.highlight,
       cell.lang === 'python' ? m.python.python() : [],
@@ -1029,10 +1029,10 @@ function createCellEl(cell){
   const cellEl=elem('div',{class:'cell','data-id':cell.id},[header,body,out]);
   if (cell.collapsed) cellEl.classList.add('collapsed');
   if (cell.type==='code'){
-    // Display-only trim of leading blank lines (the literate style opens a
-    // fence with one when a rationale block precedes it, purely for
-    // servette.py's spacing); the doc model keeps the exact bytes.
-    body.appendChild(elem('pre',{class:'code-plain',text:cell.code.replace(/^\n+/,'')}));
+    // Display-only trim of leading and trailing blank lines (the literate
+    // style carries them in fences purely for servette.py's spacing); the
+    // doc model keeps the exact bytes.
+    body.appendChild(elem('pre',{class:'code-plain',text:cell.code.replace(/^\n+/,'').replace(/\n+$/,'')}));
     setTimeout(()=>upgradeCode(cellEl,cell),0);
   } else {
     renderMd(cellEl,cell);
@@ -1201,6 +1201,11 @@ function flashCell(el){
 function cellRowLabel(c){
   return c.type==='md' ? (firstLine(c.code).replace(/^#+\s*/,'')||'Markdown') : (codeLabel(c.code)||'(empty)');
 }
+// Which cells are Navigator landmarks: every code cell (the literate style
+// names each one), but only md cells that open with a heading — the short
+// prose paragraphs between code cells are glue, and listing each one made
+// the Navigator unreadable.
+function navCell(c){ return c.type==='code' || /^#{1,6}\s/.test(firstLine(c.code)); }
 function cellRow(fileName, c, label){
   const row=elem('div',{class:'list-row clickable indent',title:label},[
     elem('span',{class:'ol-dot '+c.type}),
@@ -1222,14 +1227,15 @@ function renderOutline(){
   if(q.length>=2){ renderSearchResults(wrap,q); return; }
   nb.files.forEach(f=>{
     const expanded=f.name===nb.current;
+    const landmarks=f.doc.cells.filter(navCell);
     const frow=elem('div',{class:'list-row file clickable'+(expanded?' expanded':''),title:'src/'+f.name},[
       elem('span',{class:'nav-chev',html:svg('chevron')}),
       elem('span',{class:'grow mono',text:f.name}),
-      elem('span',{class:'sub',text:f.doc.cells.length}),
+      elem('span',{class:'sub',text:landmarks.length}),
     ]);
     frow.onclick=()=>expandFile(expanded ? '' : f.name);   // clicking the expanded file folds it — zero expanded is a real state
     wrap.appendChild(frow);
-    if(expanded) f.doc.cells.forEach(c=>wrap.appendChild(cellRow(f.name, c, cellRowLabel(c))));
+    if(expanded) landmarks.forEach(c=>wrap.appendChild(cellRow(f.name, c, cellRowLabel(c))));
   });
 }
 // Case-insensitive substring search over every cell of every file — all the
@@ -2072,6 +2078,10 @@ function runSelfTests(){
     ok('named: uppercase stem', namedDocs('What does SYSTEM do?').join(',')==='SYSTEM.md');
     ok('named: lowercase bare stem passes', namedDocs('what does the system do?').length===0);
     ok('named: .md any case', namedDocs('is shell.md big?').join(',')==='SHELL.md');
+    // Navigator landmarks: all code cells, only heading-led md cells
+    ok('nav: code cells are landmarks', navCell({type:'code',code:'x=1'})===true);
+    ok('nav: heading md cells are landmarks', navCell({type:'md',code:'## Config\n\nprose'})===true);
+    ok('nav: plain prose md cells are glue', navCell({type:'md',code:'Just a paragraph.'})===false);
     // the code-cell label: name-line comment stripped of its marker
     ok('code label strips the name marker',
        codeLabel('# The config singleton\nconfig = Config()')==='The config singleton'

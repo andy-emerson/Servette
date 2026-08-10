@@ -4,15 +4,13 @@
 
 *Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-```python
-# ─────────────────────────────────────────────────────────────────────────────
-# SHELL
-#
-# The interactive terminal interface. Contains only UI logic — all system work
-# is delegated to functions in the SYSTEM section.
-# ─────────────────────────────────────────────────────────────────────────────
-
-```
+> ─────────────────────────────────────────────────────────────────────────────
+> SHELL
+>
+> The interactive terminal interface. Contains only UI logic — all system work
+> is delegated to functions in the SYSTEM section.
+> ─────────────────────────────────────────────────────────────────────────────
+>
 
 > Menus are generated so the right-hand column always begins at the same place
 > (2-space indent + a 22-wide label) as the status and config displays.
@@ -652,7 +650,9 @@ def cmd_start():
         start_server()
         if _server_running():
             print("Running in session only — server will stop when you quit.")
-            if _prompt("Install as a permanent service?"):
+            if _IS_MACOS:
+                print("Service install is Linux-only; keep this session alive (tmux/screen) to stay up.")
+            elif _prompt("Install as a permanent service?"):
                 cmd_enable()
 
 
@@ -689,7 +689,10 @@ def cmd_log(n=20):
         output = result.stdout or result.stderr
         print(output, end="")
     except FileNotFoundError:
-        print("journalctl not found. Is this a systemd system?")
+        if _IS_MACOS:
+            print("No journal on macOS — in session mode the log is this terminal's own output.")
+        else:
+            print("journalctl not found. Is this a systemd system?")
 
 
 RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
@@ -1029,10 +1032,10 @@ def _extract_bundle(data, dest_dir):
     Every entry's resolved path is checked against dest_dir, every entry must
     be a plain file or directory (no symlinks/devices), and the total
     uncompressed size is capped — all validated before anything is written,
-    so a bad bundle leaves no partial extraction behind. filter='data' is
-    passed to extractall() too: defense in depth, not the only guard — it
-    independently enforces the same containment and rejects the same entry
-    types at the library level."""
+    so a bad bundle leaves no partial extraction behind. Where the interpreter
+    has it (3.11.4+), filter='data' is passed to extractall() too: defense in
+    depth, not the only guard — it independently enforces the same containment
+    and rejects the same entry types at the library level."""
     os.makedirs(dest_dir)
     dest_real = os.path.realpath(dest_dir)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
@@ -1047,7 +1050,13 @@ def _extract_bundle(data, dest_dir):
             total += m.size
             if total > _MAX_BUNDLE_BYTES:
                 raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
-        tf.extractall(dest_dir, members=members, filter="data")
+        # The PEP 706 feature probe: data_filter exists exactly when
+        # extractall() accepts filter=. Debian 12's 3.11.2 predates the
+        # backport — there the checks above are the (sufficient) guard.
+        if hasattr(tarfile, "data_filter"):
+            tf.extractall(dest_dir, members=members, filter="data")
+        else:
+            tf.extractall(dest_dir, members=members)
 
 
 def _swap_site_content(new_dir, serve_dir):
@@ -1295,11 +1304,16 @@ def _runtime_stats(service_active):
         if _server_start_time is not None:
             rows.append(("Uptime", _format_uptime(time.monotonic() - _server_start_time)))
         try:
-            with open("/proc/self/status") as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        rows.append(("Memory", f"{int(line.split()[1]) / 1024:.1f} MB"))
-                        break
+            if _IS_MACOS:
+                out = subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())],
+                                     capture_output=True, text=True).stdout.strip()
+                rows.append(("Memory", f"{int(out) / 1024:.1f} MB"))
+            else:
+                with open("/proc/self/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            rows.append(("Memory", f"{int(line.split()[1]) / 1024:.1f} MB"))
+                            break
         except Exception:
             pass
         rows.append(("PID", str(os.getpid())))

@@ -1170,7 +1170,9 @@ function renderDeps(){
   const y=i=>padY+i*rowH+rowH/2;
   const svgEl=document.createElementNS('http://www.w3.org/2000/svg','svg');
   svgEl.setAttribute('viewBox','0 0 '+W+' '+H);
-  svgEl.setAttribute('width','100%');
+  // Natural size, not width:100% — stretching the viewBox to the panel scales
+  // the 12px labels into headlines. Overflow scrolls instead.
+  svgEl.setAttribute('width',W); svgEl.setAttribute('height',H);
   let inner='<defs><marker id="dep-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="dep-arrow" d="M0 0L8 4L0 8z"/></marker></defs>';
   edges.forEach(([a,b])=>{
     const ya=y(a), yb=y(b);
@@ -1763,9 +1765,38 @@ function syncSendButton(){
   const b=$('#agent-send'); if(!b) return;
   b.innerHTML=svg(agent.generating?'stop':'send'); b.title=agent.generating?'Stop':'Send';
 }
+// Which CLOSED files does this message name? Matched conservatively — the
+// uppercase stem (SHELL) or any case with the .md suffix (shell.md) — because
+// bare lowercase "server"/"shell"/"main" are ordinary English and a false
+// positive here blocks a legitimate question.
+function closedFilesAsked(text){
+  const f=currentFile();
+  return FILES.filter(n=>{
+    if(f && n===f.name) return false;
+    const stem=n.replace(/\.md$/,'');
+    return new RegExp('\\b'+stem+'\\b').test(text) || new RegExp('\\b'+stem+'\\.md\\b','i').test(text);
+  });
+}
+function interceptReply(closed){
+  const many=closed.length>1;
+  return closed.map(n=>'src/'+n).join(' and ')+(many?' are':' is')+
+    " not open, so I can't see "+(many?'them':'it')+" — and I won't guess. Open "+
+    (many?'them':'it')+' in the Navigator and ask me again.';
+}
 async function agentSend(text){
   text=(text||'').trim();
   if(!text || agent.generating) return;
+  // Mechanical honesty: a question that names a closed file is answered by
+  // the VIEWER, not the model — no amount of model weakness can leak a guess
+  // past this. The canned exchange enters the transcript, so the one-exchange
+  // memory carries it into the follow-up once the reader opens the file.
+  const closed=closedFilesAsked(text);
+  if(closed.length){
+    agent.messages.push({role:'user',from:'user',content:text});
+    agent.messages.push({role:'assistant',from:'Servette',content:interceptReply(closed)});
+    renderAgentMessages();
+    return;
+  }
   if(!agent.activeId || !agent.engine) return;
   // One-exchange memory: the previous user+assistant pair rides along so a
   // follow-up ("ok, open it — now answer") has its antecedent, and so the
@@ -1843,6 +1874,16 @@ function runSelfTests(){
     try{ ok('round-trip src/'+f.name, serialize(f.doc)===f.raw, 'serialize(doc) !== fetched bytes'); }
     catch(e){ ok('round-trip src/'+f.name,false,'threw '+e.message); }
   });
+  // the closed-file interceptor, against the LIVE open-file state
+  try {
+    const f=currentFile();
+    if(f){
+      const closedName=FILES.find(n=>n!==f.name).replace(/\.md$/,'');
+      ok('intercept: uppercase closed stem', closedFilesAsked('What does the '+closedName+' do?').length===1);
+      ok('intercept: lowercase bare stem passes', closedFilesAsked('what does the '+closedName.toLowerCase()+' do?').length===0);
+      ok('intercept: open file passes', closedFilesAsked('Tell me about '+f.name).length===0);
+    }
+  } catch(e){ ok('intercept',false,e.message); }
   // the call-map extractor — pure function over a synthetic literate doc
   try {
     const d=parse('prose\n\n```python\ndef alpha():\n    return beta() + 1\n\ndef beta():\n    return 2\n\ndef gamma():\n    x = "beta"   # a name in a string, not a call\n    return alpha()\n```\n');
@@ -1928,9 +1969,10 @@ function setupPane(side){
   const pane = $('#'+(isLeft?'left-pane':'right-pane'));
   const resizer = $('#'+(isLeft?'left-resizer':'right-resizer'));
   const MIN = isLeft ? 190 : 300;
-  // Right cap: 45% of the window, and never squeezing the notebook below
-  // 320px (88 = the two activity bars). Left cap: 520.
-  const maxW = () => isLeft ? 520 : Math.max(MIN, Math.min(Math.round(window.innerWidth*0.45), window.innerWidth - $('#left-pane').offsetWidth - 88 - 320));
+  // Left cap: 520. Right cap: half of what remains after the left pane's
+  // maximum and the two activity bars (88) are reserved — so on any monitor
+  // the notebook keeps at least as much room as the right pane takes.
+  const maxW = () => isLeft ? 520 : Math.max(MIN, Math.round((window.innerWidth - 88 - 520) / 2));
   const clamp = w => Math.max(MIN, Math.min(maxW(), w));
   let saved = null;   // no width chosen yet — the first expand opens at the maximum; memory is session-only
   const isCollapsed = () => pane.classList.contains('collapsed');

@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Servette — Source</title>
+<!--
+  Servette source viewer — a read-only literate notebook over Servette's
+  authored Markdown sources. The whole app is one file, index.html. It fetches
+  src/*.md from the repository at render time (?ref= selects the git ref) and
+  projects them as notebook cells; there is no generated copy to go stale.
+
+  Grown from the notebook shell (andy-emerson/notebook, index.html) by
+  removing its target and its identity: the cartridge seam, runtime, agent,
+  editing, and persistence are gone; the doc model, markdown pipeline, cell
+  DOM, Outline, and pane machinery remain. Read-only by design — the
+  view/edit fork is resolved at authoring time, not exposed to readers.
+  The dress is servette.org's: its palette and data-theme mechanism replace
+  the shell's Paper × Ink engine.
+
+  ── Architecture ────────────────────────────────────────────────────────────
+  The src/*.md files (in build.py order) are the single source of truth.
+  The viewer is a projection over them (fenced code blocks = code cells with a
+  language; prose runs = markdown cells):
+
+      parse(md) -> cells      // per file; serialize() retained as the check
+
+  serialize(parse(x)) === x — the byte-exact round-trip is kept (and
+  self-tested) even though nothing here writes: it is the proof the viewer
+  shows the file, not a reformatting of it.
+
+  Every dependency degrades: no marked → the built-in renderer; no
+  CodeMirror → a plain <pre>; a failed file fetch → an inline error in that
+  file's slot while the rest of the document stands.
+
+  ── Contents ────────────────────────────────────────────────────────────────
+  <style>  CSS, numbered as in the shell (removed sections keep their gaps):
+    1 Base & reset   2 Theme variables   3 Layout   4 Topbar   5 Status bar
+    6 Notebook + cells   7 Panels (left pane)   9 Markdown output   10 Toast
+  <script> JS:
+    0 Icons   1 Doc model (parse/serialize)   2 Markdown   3 Sources (fetch)
+    4 Theme   5 CodeMirror   6 Cell DOM   6b Outline   9 Self-tests
+    10 Wiring + boot
+  (Each section is marked by a ════ banner; this list is its table of contents.)
+-->
+
+<!-- marked.js for Markdown is loaded NON-blocking at boot (see loadMarked());
+     a built-in renderer is used until/if it arrives, so the UI never waits on a CDN. -->
+
+<!-- CodeMirror 6 — loaded on demand via dynamic import(); <pre> fallback if offline.
+     The editing packages (commands, autocomplete) are gone with the editing. -->
+<script type="importmap">
+{
+  "imports": {
+    "@codemirror/view":                "https://esm.sh/@codemirror/view@6",
+    "@codemirror/state":               "https://esm.sh/@codemirror/state@6",
+    "@codemirror/language":            "https://esm.sh/@codemirror/language@6",
+    "@codemirror/lang-python":         "https://esm.sh/@codemirror/lang-python@6",
+    "@lezer/highlight":                "https://esm.sh/@lezer/highlight@1"
+  }
+}
+</script>
+
+<style>
+/* ════════════════════════════════════════════════════════════════════════════
+ * 1. BASE & RESET
+ * ════════════════════════════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-medium); border-radius: 99px; }
+* { scrollbar-color: var(--border-medium) transparent; scrollbar-width: thin; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 2. THEME — servette.org's palette on the shell's token names.
+ *
+ *   The shell's Paper × Ink engine (sliders, OKLCH math, halo) is removed;
+ *   these are the same custom properties its components consume, now defined
+ *   statically from the front door's palette. Light is the default; dark is
+ *   the same tokens redefined under [data-theme="dark"], which the JS theme
+ *   toggle sets (system preference at boot, sticky manual override) — the
+ *   front door's mechanism, verbatim.
+ * ════════════════════════════════════════════════════════════════════════════ */
+:root {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --acc-code:  #4d7358;   /* servette green — code accents (badges, dots) */
+  --acc-prose: #857f76;   /* warm gray — prose accents */
+  /* Functional colors — fixed hues (Tailwind-500 solids), named by hue. Each
+     -bg tint (18%) and -border ring (35%) is DERIVED from the solid via
+     color-mix. green=ok · amber=busy · red=error. */
+  --fn-green: #22c55e;  --fn-green-bg: color-mix(in srgb, var(--fn-green) 18%, transparent);
+                        --fn-green-border: color-mix(in srgb, var(--fn-green) 35%, transparent);
+  --fn-amber: #f59e0b;  --fn-amber-bg: color-mix(in srgb, var(--fn-amber) 18%, transparent);
+                        --fn-amber-border: color-mix(in srgb, var(--fn-amber) 35%, transparent);
+  --fn-red:   #ef4444;  --fn-red-bg:   color-mix(in srgb, var(--fn-red)   18%, transparent);
+                        --fn-red-border:   color-mix(in srgb, var(--fn-red)   35%, transparent);
+
+  --bg-primary:    #ffffff;   /* cells, panes (surface) */
+  --bg-secondary:  #f1efeb;   /* headers, chrome */
+  --bg-tertiary:   #faf9f7;   /* the page behind the cells */
+  --bg-info:       #f1efeb;
+  --text-primary:  #1c1b1a;
+  --text-secondary:#4a4845;
+  --text-tertiary: #857f76;
+  --border-faint:  rgba(28,27,26,.10);
+  --border-light:  rgba(28,27,26,.18);
+  --border-medium: rgba(28,27,26,.30);
+  --border-info:   #4d7358;
+  --syntax-keyword:  #7c5cbf;
+  --syntax-number:   #a86a3c;
+  --syntax-function: #2f5d8a;
+  --syntax-string:   #4d7358;
+  --syntax-operator: #4a4845;
+}
+[data-theme="dark"] {
+  --acc-code:  #7BA888;
+  --acc-prose: #6f6a63;
+
+  --bg-primary:    #161616;
+  --bg-secondary:  #131313;
+  --bg-tertiary:   #0e0e0e;
+  --bg-info:       #131313;
+  --text-primary:  #e8e8e8;
+  --text-secondary:#a8a49e;
+  --text-tertiary: #6f6a63;
+  --border-faint:  rgba(232,232,232,.10);
+  --border-light:  rgba(232,232,232,.18);
+  --border-medium: rgba(232,232,232,.30);
+  --border-info:   #7BA888;
+  --syntax-keyword:  #b39ddb;
+  --syntax-number:   #cf9058;
+  --syntax-function: #82aed6;
+  --syntax-string:   #9bc4a5;
+  --syntax-operator: #a8a49e;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 3. LAYOUT
+ * ════════════════════════════════════════════════════════════════════════════ */
+html, body { height: 100%; }
+body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var(--text-primary); transition: background .2s, color .2s; }
+#app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+#main-area { display: flex; flex: 1; min-height: 0; }
+
+.activity-bar { width: 44px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; padding: 4px 0; background: var(--bg-secondary); z-index: 5; }
+#left-activity-bar { border-right: .5px solid var(--border-faint); }
+.activity-bar-btn { width: 44px; height: 42px; display: flex; align-items: center; justify-content: center; background: none; border: none; cursor: pointer; color: var(--text-tertiary); border-right: 2px solid transparent; transition: color .12s; }
+.activity-bar-btn:hover { color: var(--text-primary); }
+.activity-bar-btn.active { color: var(--text-primary); border-right-color: var(--border-info); }
+.activity-bar-btn svg { width: 19px; height: 19px; }
+
+#left-pane { width: 248px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg-primary); overflow: hidden; transition: width .18s ease; }
+#left-pane.collapsed { width: 0 !important; }
+
+.pane-resizer { width: 9px; flex-shrink: 0; position: relative; cursor: col-resize; background: transparent; z-index: 10; }
+.pane-resizer::before { content: ''; position: absolute; top: 0; bottom: 0; left: 50%; width: .5px; background: var(--border-faint); transition: background .15s; }
+.pane-resizer:hover::before, .pane-resizer.dragging::before { background: var(--border-medium); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 4. TOPBAR
+ * ════════════════════════════════════════════════════════════════════════════ */
+.topbar { display: flex; align-items: center; gap: 6px; padding: 0 14px; background: var(--bg-primary); border-bottom: .5px solid var(--border-faint); flex-shrink: 0; height: 52px; }
+.topbar-logo { display: flex; align-items: center; gap: 8px; margin-right: 8px; user-select: none; }
+.topbar-logo .word { font-size: 24px; font-weight: 700; letter-spacing: .005em; line-height: 1; color: var(--text-primary); }
+.topbar-logo .word a { color: inherit; text-decoration: none; }
+.topbar-logo .src-tag { font-family: var(--font-mono); font-size: 12px; color: var(--acc-code); border: 1px solid color-mix(in srgb, var(--acc-code) 35%, transparent); border-radius: 99px; padding: 2px 9px; }
+.topbar-sep { flex: 1; }
+.tb-group { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.tb-group-btns { display: flex; align-items: center; gap: 2px; }
+.tb-group-label { font-size: 9px; color: var(--text-tertiary); letter-spacing: .06em; text-transform: uppercase; line-height: 1; padding-bottom: 3px; }
+.tb-divider { width: .5px; height: 28px; align-self: center; background: var(--border-faint); margin: 0 4px; }
+.tb-btn { background: none; border: .5px solid var(--border-light); border-radius: var(--radius-md); padding: 6px 10px; font-size: 12px; font-family: var(--font-sans); color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 5px; transition: background .12s, color .12s; white-space: nowrap; }
+.tb-btn:hover { background: var(--bg-secondary); color: var(--text-primary); }
+.tb-btn.icon-only { padding: 6px; }  /* no label inside — the word lives in the group caption below */
+.tb-btn.icon-only svg { width: 15px; height: 15px; }
+.tb-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 5. STATUS BAR
+ * ════════════════════════════════════════════════════════════════════════════ */
+.status-bar { display: flex; align-items: center; height: 26px; flex-shrink: 0; background: var(--bg-secondary); border-top: .5px solid var(--border-faint); padding: 0 10px; gap: 6px; font-size: 11px; user-select: none; }
+.status-item { display: flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 99px; color: var(--text-tertiary); background: var(--bg-primary); border: .5px solid var(--border-faint); white-space: nowrap; transition: color .15s, background .15s, border-color .15s; }
+.status-item.working { color: var(--fn-amber); background: var(--fn-amber-bg); border-color: var(--fn-amber-border); }
+.status-item.ready { color: var(--fn-green); background: var(--fn-green-bg); border-color: var(--fn-green-border); }
+.status-item.error { color: var(--fn-red); background: var(--fn-red-bg); border-color: var(--fn-red-border); }
+.status-spacer { flex: 1; }
+.status-link { cursor: pointer; }
+.status-link:hover { color: var(--text-primary); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 6. NOTEBOOK + CELLS
+ * ════════════════════════════════════════════════════════════════════════════ */
+#nb-body { flex: 1; min-width: 0; overflow-y: auto; }
+#nb-scroll { min-height: 100%; padding: 14px 0 40vh; max-width: 940px; margin: 0 auto; }
+
+.cell { margin: 0 16px; position: relative; border-radius: var(--radius-lg); border: .5px solid var(--border-faint); background: var(--bg-primary); overflow: hidden; transition: border-color .15s; }
+.cell.focused { border-color: var(--border-info); }
+.cell-header { display: flex; align-items: center; gap: 7px; padding: 6px 11px; background: var(--bg-secondary); border-bottom: .5px solid var(--border-faint); position: relative; user-select: none; }
+.cell-header .ca-btn { cursor: pointer; }
+.cell-badge { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 99px; letter-spacing: .05em; text-transform: uppercase; display: flex; align-items: center; gap: 4px; flex-shrink: 0; border: 1px solid color-mix(in srgb, currentColor 30%, transparent); }
+.badge-code { background: color-mix(in srgb, var(--acc-code) 15%, transparent); color: var(--acc-code); }
+.badge-md { background: color-mix(in srgb, var(--acc-prose) 20%, transparent); color: var(--acc-prose); }
+.cell-title { font-size: 11px; color: var(--text-tertiary); font-family: var(--font-mono); margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cell-actions { display: flex; gap: 3px; opacity: 0; transition: opacity .15s; }
+.cell:hover .cell-actions, .cell.focused .cell-actions { opacity: 1; }
+.ca-btn { background: none; border: none; cursor: pointer; color: var(--text-secondary); padding: 3px 5px; border-radius: 5px; display: flex; align-items: center; transition: background .1s, color .1s; }
+.ca-btn:hover { background: var(--bg-primary); color: var(--text-primary); }
+.ca-btn svg { width: 16px; height: 16px; }
+
+.cell-editor .cm-editor { height: auto; }
+.cell-editor .cm-editor.cm-focused { outline: none; }
+.cell-editor .cm-scroller { overflow-x: auto; font-family: var(--font-mono); }
+/* Fallback code view when CodeMirror never arrives (offline / blocked CDN). */
+.cell-editor pre.code-plain { font-family: var(--font-mono); font-size: 13px; line-height: 1.65; padding: 11px 13px; margin: 0; overflow-x: auto; color: var(--text-primary); }
+
+/* collapse */
+.cell.collapsed .cell-editor, .cell.collapsed .cell-output { display: none; }
+.cell.collapsed .cell-header { border-bottom: none; }
+
+/* rendered prose */
+.cell-output { font-size: 14px; line-height: 1.7; }
+.cell-output.out-md { padding: 6px 16px; }
+
+/* file boundary — one slim row per src/*.md file, linking to the file on GitHub */
+.file-row { display: flex; align-items: baseline; gap: 10px; margin: 26px 16px 10px; padding: 0 2px 6px; border-bottom: .5px solid var(--border-light); }
+.file-row:first-child { margin-top: 6px; }
+.file-row .fname { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--text-primary); }
+.file-row .fsub { font-size: 11px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row a { margin-left: auto; font-size: 11px; color: var(--text-tertiary); text-decoration: none; flex-shrink: 0; }
+.file-row a:hover { color: var(--text-primary); text-decoration: underline; }
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 7. PANELS (left pane)
+ * ════════════════════════════════════════════════════════════════════════════ */
+.pane-header { flex-shrink: 0; padding: 9px 14px; font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .06em; border-bottom: .5px solid var(--border-faint); background: var(--bg-secondary); display: flex; align-items: center; justify-content: space-between; }
+.pane-header .mini { cursor: pointer; color: var(--text-tertiary); display: flex; }
+.pane-header .mini:hover { color: var(--text-primary); }
+.pane-header .mini svg { width: 14px; height: 14px; }
+.pane-panel { display: none; flex: 1; overflow-y: auto; flex-direction: column; }
+.pane-panel.active { display: flex; }
+.pane-empty { color: var(--text-tertiary); font-size: 12px; font-style: italic; padding: 12px 14px; }
+/* Centered empty-state for a wholly empty panel/tab (ported from the oracle's .pane-placeholder). */
+.pane-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: 1; min-height: 140px; color: var(--text-tertiary); font-size: 12px; text-align: center; line-height: 1.6; padding: 20px 14px; }
+.pane-placeholder svg { width: 28px; height: 28px; opacity: 0.35; margin-bottom: 4px; }
+.pane-placeholder .pp-hint { font-size: 11px; opacity: 0.6; }
+/* Let a list-wrap fill its pane when it holds only an empty-state, so the placeholder centers vertically too. */
+#outline-list:has(> .pane-placeholder) { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.list-row { display: flex; align-items: center; gap: 8px; padding: 7px 14px; font-size: 12px; cursor: default; border-bottom: .5px solid var(--border-faint); }
+.list-row:hover { background: var(--bg-secondary); }
+.list-row .grow { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-row .mono { font-family: var(--font-mono); }
+.list-row .sub { color: var(--text-tertiary); font-size: 10px; }
+.list-row.clickable { cursor: pointer; }
+.list-row.file { font-weight: 700; border-bottom-color: var(--border-light); }
+.list-row.indent { padding-left: 26px; }
+
+/* outline */
+.ol-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.ol-dot.code { background: var(--acc-code); }
+.ol-dot.md   { background: var(--acc-prose); }
+@keyframes cellflash { 0%,100% { box-shadow: 0 0 0 0 transparent; } 30% { box-shadow: 0 0 0 2px var(--border-info); } }
+.cell.flash { animation: cellflash .7s ease; }
+
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 9. MARKDOWN OUTPUT  (ported from the oracle)
+ * ════════════════════════════════════════════════════════════════════════════ */
+.out-md { color: var(--text-primary); white-space: normal; }
+.out-md h1 { font-size: 22px; font-weight: 600; margin: 4px 0 12px; border-bottom: .5px solid var(--border-faint); padding-bottom: .2em; }
+.out-md h2 { font-size: 17px; font-weight: 600; margin: 16px 0 7px; border-bottom: .5px solid var(--border-faint); padding-bottom: .2em; }
+.out-md h3 { font-size: 14px; font-weight: 600; margin: 13px 0 5px; }
+.out-md p { font-size: 14px; line-height: 1.7; margin-bottom: 9px; }
+.out-md ul, .out-md ol { padding-left: 22px; font-size: 14px; margin-bottom: 9px; }
+.out-md li { margin-bottom: 3px; line-height: 1.6; }
+.out-md code { font-family: var(--font-mono); font-size: 12px; background: var(--bg-secondary); padding: 1px 5px; border-radius: 4px; }
+.out-md pre { background: var(--bg-secondary); padding: 10px 12px; border-radius: var(--radius-md); overflow-x: auto; margin-bottom: 10px; position: relative; }
+.out-md pre code { background: none; padding: 0; }
+.code-copy-btn { position: absolute; top: 7px; right: 7px; opacity: 0; transition: opacity .15s; background: var(--bg-primary); border: .5px solid var(--border-light); border-radius: 6px; color: var(--text-tertiary); padding: 3px 6px; cursor: pointer; display: flex; align-items: center; }
+.out-md pre:hover .code-copy-btn { opacity: 1; }
+.code-copy-btn:hover { color: var(--text-primary); border-color: var(--border-medium); background: var(--bg-secondary); }
+.code-copy-btn svg { width: 13px; height: 13px; }
+/* Blockquotes in the sources are design-rationale notes — the literate payoff —
+ * so they read as callouts, not as quotes. */
+.out-md blockquote { border-left: 3px solid var(--border-info); background: var(--bg-secondary); padding: 8px 12px; border-radius: 0 var(--radius-md) var(--radius-md) 0; color: var(--text-secondary); margin-bottom: 9px; }
+.out-md blockquote p:last-child { margin-bottom: 0; }
+.out-md a { color: inherit; text-decoration: underline; }
+.out-md hr { border: none; border-top: .5px solid var(--border-light); margin: 14px 0; }
+.out-md strong { font-weight: 600; }
+.out-md table { border-collapse: collapse; font-size: 13px; margin-bottom: 10px; }
+.out-md th, .out-md td { padding: 5px 10px; border: .5px solid var(--border-light); }
+.out-md th { background: var(--bg-secondary); font-weight: 600; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 10. TOAST
+ * ════════════════════════════════════════════════════════════════════════════ */
+.toast { position: fixed; bottom: 38px; left: 50%; transform: translateX(-50%); background: var(--bg-primary); border: .5px solid var(--border-light); border-radius: var(--radius-md); padding: 8px 16px; font-size: 13px; color: var(--text-primary); box-shadow: 0 4px 16px rgba(0,0,0,.16); opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 200; white-space: nowrap; }
+.toast.show { opacity: 1; }
+.toast.err { color: var(--fn-red); border-color: var(--fn-red-border); }  /* failed actions read red; successes stay quiet/neutral */
+
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ───────────────────────── Topbar ───────────────────────── -->
+  <div class="topbar">
+    <div class="topbar-logo">
+      <span class="word"><a href="https://servette.org">Servette</a></span>
+      <span class="src-tag">src</span>
+    </div>
+    <div class="topbar-sep"></div>
+
+    <div class="tb-group">
+      <div class="tb-group-btns">
+        <button class="tb-btn" id="btn-collapse-all" data-ico="collapse">Collapse</button>
+        <button class="tb-btn" id="btn-tests" data-ico="check">Tests</button>
+      </div>
+      <div class="tb-group-label">View</div>
+    </div>
+    <div class="tb-divider"></div>
+
+    <div class="tb-group">
+      <div class="tb-group-btns">
+        <a class="tb-btn" id="ref-label" href="https://github.com/andy-emerson/Servette/tree/main/src" target="_blank" rel="noopener" data-ico="github" style="text-decoration:none"></a>
+      </div>
+      <div class="tb-group-label">Source</div>
+    </div>
+    <div class="tb-divider"></div>
+
+    <div class="tb-group">
+      <div class="tb-group-btns">
+        <button class="tb-btn icon-only" id="btn-theme" data-ico="moon" title="Toggle theme"></button>
+      </div>
+      <div class="tb-group-label">Theme</div>
+    </div>
+  </div>
+
+  <!-- ───────────────────────── Main area ───────────────────────── -->
+  <div id="main-area">
+
+    <!-- left activity bar -->
+    <div id="left-activity-bar" class="activity-bar">
+      <button class="activity-bar-btn active" data-tab="outline" title="Outline" data-ico="list"></button>
+    </div>
+
+    <!-- left pane -->
+    <div id="left-pane">
+      <div class="pane-panel active" id="panel-outline" data-tab="outline">
+        <div class="pane-header">Outline</div>
+        <div id="outline-list" style="flex:1;overflow-y:auto"></div>
+      </div>
+    </div>
+
+    <div class="pane-resizer" id="left-resizer"></div>
+
+    <!-- notebook -->
+    <div id="nb-body"><div id="nb-scroll"></div></div>
+  </div>
+
+  <!-- ───────────────────────── Status bar ───────────────────────── -->
+  <div class="status-bar">
+    <span class="status-spacer"></span>
+    <span class="status-item" id="st-source">Source: loading…</span>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+/* ════════════════════════════════════════════════════════════════════════════
+ * 0. ICONS (inline SVG — no CDN dependency, unlike the oracle's icon webfont)
+ * ════════════════════════════════════════════════════════════════════════════ */
+// Vendored from Tabler Icons (https://tabler.io/icons, MIT) @ v3.31.0, outline set,
+// inline so there's still no CDN/webfont dependency. svg() supplies the shared
+// wrapper (24x24, stroke=currentColor, fill=none). Key names differ from Tabler's
+// where noted (e.g. md=markdown, collapse=fold).
+const I = {
+  'check':'<path d="M5 12l5 5l10 -10" />',  // tabler check
+  'collapse':'<path d="M12 3v6l3 -3m-6 0l3 3" /><path d="M12 21v-6l3 3m-6 0l3 -3" /><path d="M4 12l1 0" /><path d="M9 12l1 0" /><path d="M14 12l1 0" /><path d="M19 12l1 0" />',  // tabler fold
+  'chevron':'<path d="M9 6l6 6l-6 6" />',  // tabler chevron-right
+  'code':'<path d="M7 8l-4 4l4 4" /><path d="M17 8l4 4l-4 4" /><path d="M14 4l-4 16" />',  // tabler code
+  'md':'<path d="M3 5m0 2a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2z" /><path d="M7 15v-6l2 2l2 -2v6" /><path d="M14 13l2 2l2 -2m-2 2v-6" />',  // tabler markdown
+  'sun':'<path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0" /><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7" />',  // tabler sun
+  'moon':'<path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />',  // tabler moon
+  'list':'<path d="M9 6l11 0" /><path d="M9 12l11 0" /><path d="M9 18l11 0" /><path d="M5 6l0 .01" /><path d="M5 12l0 .01" /><path d="M5 18l0 .01" />',  // tabler list
+  'copy':'<path d="M8 8m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z" /><path d="M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2" />',  // tabler copy
+  'github':'<path d="M9 19c-4.3 1.4 -4.3 -2.5 -6 -3m12 5v-3.5c0 -1 .1 -1.4 -.5 -2c2.8 -.3 5.5 -1.4 5.5 -6a4.6 4.6 0 0 0 -1.3 -3.2a4.2 4.2 0 0 0 -.1 -3.2s-1.1 -.3 -3.5 1.3a12.3 12.3 0 0 0 -6.2 0c-2.4 -1.6 -3.5 -1.3 -3.5 -1.3a4.2 4.2 0 0 0 -.1 3.2a4.6 4.6 0 0 0 -1.3 3.2c0 4.6 2.7 5.7 5.5 6c-.6 .6 -.6 1.2 -.5 2v3.5" />',  // tabler brand-github
+};
+function svg(name, cls) {
+  return `<svg class="${cls||''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${I[name]||''}</svg>`;
+}
+function paintIcons(root=document) {
+  root.querySelectorAll('[data-ico]:not(.tb-btn)').forEach(el => { el.innerHTML = svg(el.dataset.ico); });
+  // buttons keep their text: prepend icon
+  root.querySelectorAll('.tb-btn[data-ico]').forEach(el => {
+    if (el.querySelector('svg')) return;
+    el.insertAdjacentHTML('afterbegin', svg(el.dataset.ico));
+  });
+}
+
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+function elem(tag, props={}, kids=[]) {
+  const n = document.createElement(tag);
+  for (const k in props) {
+    if (k === 'class') n.className = props[k];
+    else if (k === 'html') n.innerHTML = props[k];
+    else if (k === 'text') n.textContent = props[k];
+    else if (k.startsWith('on') && typeof props[k] === 'function') n.addEventListener(k.slice(2), props[k]);
+    else if (props[k] != null) n.setAttribute(k, props[k]);
+  }
+  // Icon-only controls carry a title everywhere; mirror it as the accessible
+  // name so screen readers announce them without a per-call-site ARIA pass.
+  if (props.title && !props['aria-label']) n.setAttribute('aria-label', props.title);
+  (Array.isArray(kids) ? kids : [kids]).forEach(c => c != null && n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+  return n;
+}
+let _uid = 0; const uid = () => ++_uid;
+// kind: '' (neutral success/info) or 'err' (red — a failed/rejected action).
+function toast(msg, kind) { const t = $('#toast'); t.textContent = msg; t.className = 'toast' + (kind ? ' ' + kind : ''); t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 1600); }
+// Centered empty-state node: faint icon + headline + optional dim hint. Used for
+// wholly empty tabs/panels (Variables, Tables, Outline, Assets, History, Agent).
+function panePlaceholder(icon, headline, hint) {
+  const kids = [ elem('span', { html: svg(icon) }), elem('div', { text: headline }) ];
+  if (hint) kids.push(elem('div', { class: 'pp-hint', text: hint }));
+  return elem('div', { class: 'pane-placeholder' }, kids);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 1. DOC MODEL — each src/*.md (a literate Markdown document) is the source of truth.
+ *
+ *   parse(md)        -> { cells:[{id,type,lang,code,level,before,collapsed}], trailing }
+ *   serialize(doc)   -> md
+ *
+ *   Markdown code fences (``` / ~~~) are `code` cells; the fence info-string is
+ *   the cell `lang`. Every non-fence run is an `md` (prose) cell. This is the
+ *   fence-depth rule the authored format relies on: only a top-level fence is
+ *   code; a fence nested inside a fenced block stays inside that block.
+ *
+ *   Byte-for-byte reversible: serialize(parse(x)) === x. Each cell keeps
+ *   verbatim glue (`before`) and verbatim fence lines (`_open`/`_close`).
+ *   Nothing here writes — serialize() is retained (and self-tested) as the
+ *   proof the viewer shows the file, not a reformatting of it.
+ * ════════════════════════════════════════════════════════════════════════════ */
+const FENCE_OPEN  = /^ {0,3}(`{3,}|~{3,})[ \t]*([^\n]*?)[ \t]*$/;   // tested on a line WITHOUT its trailing newline
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+// Split into lines each KEEPING its trailing "\n" so join('') === input — the
+// basis of byte-exact round-trip. The final entry lacks "\n" iff the source did.
+function _splitKeepNL(s){ const out=[]; let i=0; while(i<s.length){ const nl=s.indexOf('\n',i); if(nl<0){out.push(s.slice(i));break;} out.push(s.slice(i,nl+1)); i=nl+1; } return out; }
+const _bare    = raw => raw.replace(/\r?\n$/, '');
+const _isBlank = raw => /^[ \t\r]*\n?$/.test(raw);
+// An opening-fence line -> its match (lang in [2]), else null. Backtick fences
+// may not carry a backtick in the info string (CommonMark).
+function _fenceOpen(raw){ const m = FENCE_OPEN.exec(_bare(raw)); return (m && !(m[1][0]==='`' && m[2].indexOf('`')>=0)) ? m : null; }
+
+/** parse(md) -> doc, BYTE-EXACT: every source byte lands in exactly one cell's
+ *  `before` (verbatim glue), its verbatim fence lines (`_open`/`_close`) or
+ *  `code`, or doc.trailing — so serialize(parse(x)) === x. Fenced blocks are
+ *  `code` cells (lang = info string); other runs are `md` (prose) cells, whose
+ *  surrounding blank lines are peeled off into glue. Unterminated fence → prose. */
+function parse(src){
+  src = String(src == null ? '' : src);
+  const lines = _splitKeepNL(src);
+  const cells = []; let i = 0, pending = '';   // pending = glue carried to the next cell's `before`
+  while (i < lines.length){
+    const m = _fenceOpen(lines[i]);
+    if (m){
+      const char = m[1][0], len = m[1].length, lang = (m[2].split(/\s+/)[0] || '');
+      let j = i + 1; const inner = []; let closeRaw = null;
+      while (j < lines.length){
+        const cm = FENCE_CLOSE.exec(_bare(lines[j]));
+        if (cm && cm[1][0] === char && cm[1].length >= len){ closeRaw = lines[j]; break; }
+        inner.push(lines[j]); j++;
+      }
+      if (closeRaw === null){ pending += lines[i]; i++; continue; }   // unterminated → glue
+      cells.push({ id: uid(), type: 'code', lang, code: inner.join(''), level: 0, before: pending, collapsed: false, _open: lines[i], _close: closeRaw });
+      pending = ''; i = j + 1; continue;
+    }
+    // prose/blank run to the next fence-open (or EOF); peel leading/trailing
+    // blank lines off as glue so `code` holds just the prose.
+    let k = i; const buf = [];
+    while (k < lines.length && !_fenceOpen(lines[k])){ buf.push(lines[k]); k++; }
+    let s = 0; while (s < buf.length && _isBlank(buf[s])) s++;
+    let e = buf.length; while (e > s && _isBlank(buf[e-1])) e--;
+    if (e > s){ cells.push({ id: uid(), type: 'md', lang: '', code: buf.slice(s,e).join(''), level: 0, before: pending + buf.slice(0,s).join(''), collapsed: false }); pending = buf.slice(e).join(''); }
+    else pending += buf.join('');   // all blank → glue
+    i = k;
+  }
+  return { cells, trailing: pending };
+}
+/** Verbatim Markdown for one cell — exact fences as parsed. */
+function cellBody(c){
+  if (c.type !== 'code') return c.code;
+  if (c._open != null && c._close != null) return c._open + c.code + c._close;
+  return '```' + (c.lang || '') + '\n' + c.code.replace(/\n+$/, '') + '\n```';
+}
+/** serialize(doc) -> md. Byte-exact for a parsed doc. */
+function serialize(doc){
+  let out = '';
+  for (const c of doc.cells) out += (c.before || '') + cellBody(c);
+  return out + (doc.trailing || '');
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 2. MARKDOWN — marked.js when available, compact built-in fallback otherwise;
+ *    either way the output passes through the sanitizeHtml allowlist below.
+ * ════════════════════════════════════════════════════════════════════════════ */
+function escapeHtml(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function mdInline(s){
+  s = escapeHtml(s)
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g,'$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return s;
+}
+function fallbackMarkdown(src){
+  const lines = String(src).replace(/\r\n?/g,'\n').split('\n');
+  let html='', i=0;
+  const brk = l => /^\s*$/.test(l)||/^#{1,6}\s+/.test(l)||/^\s*```/.test(l)||/^\s*[-*+]\s+/.test(l)||/^\s*\d+\.\s+/.test(l)||/^\s*>/.test(l)||/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(l);
+  while (i<lines.length){
+    const line=lines[i];
+    if (/^\s*```/.test(line)){ i++; const buf=[]; while(i<lines.length&&!/^\s*```/.test(lines[i])){buf.push(lines[i]);i++;} i++; html+='<pre><code>'+escapeHtml(buf.join('\n'))+'</code></pre>'; continue; }
+    let h=/^(#{1,6})\s+(.*)$/.exec(line);
+    if (h){ const l=h[1].length; html+=`<h${l}>${mdInline(h[2])}</h${l}>`; i++; continue; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)){ html+='<hr>'; i++; continue; }
+    if (/^\s*>/.test(line)){ const buf=[]; while(i<lines.length&&/^\s*>/.test(lines[i])){buf.push(lines[i].replace(/^\s*>\s?/,''));i++;} html+='<blockquote>'+fallbackMarkdown(buf.join('\n'))+'</blockquote>'; continue; }
+    if (/^\s*[-*+]\s+/.test(line)){ const buf=[]; while(i<lines.length&&/^\s*[-*+]\s+/.test(lines[i])){buf.push('<li>'+mdInline(lines[i].replace(/^\s*[-*+]\s+/,''))+'</li>');i++;} html+='<ul>'+buf.join('')+'</ul>'; continue; }
+    if (/^\s*\d+\.\s+/.test(line)){ const buf=[]; while(i<lines.length&&/^\s*\d+\.\s+/.test(lines[i])){buf.push('<li>'+mdInline(lines[i].replace(/^\s*\d+\.\s+/,''))+'</li>');i++;} html+='<ol>'+buf.join('')+'</ol>'; continue; }
+    if (/^\s*$/.test(line)){ i++; continue; }
+    const buf=[]; while(i<lines.length&&!brk(lines[i])){buf.push(lines[i].replace(/\s+$/,''));i++;}
+    html+='<p>'+mdInline(buf.join(' '))+'</p>';
+  }
+  return html;
+}
+// ── Sanitizer — applied to ALL rendered markdown at this one seam, whichever
+//    engine produced it. marked deliberately does NOT sanitize (verified against
+//    the pinned 9.1.6: raw HTML, <script>, and javascript: hrefs pass straight
+//    through), and ?ref= renders any branch of the repository — including ones
+//    not yet reviewed. Allowlist model: keep the tags markdown legitimately produces,
+//    unwrap everything else (its text survives, its markup doesn't), strip all
+//    attributes but a small set, and gate href/src schemes. Parsing happens in a
+//    <template>, whose content is inert — nothing executes or loads during the walk.
+const MD_TAGS  = new Set('a b blockquote br code del div em h1 h2 h3 h4 h5 h6 hr i img li ol p pre span strong table tbody td th thead tr ul'.toUpperCase().split(' '));
+const MD_ATTRS = new Set(['href','title','src','alt','align']);
+// http(s)/mailto/#fragment/relative pass; any other explicit scheme (javascript:,
+// data:, vbscript:, …) is dropped — except data:image/* on <img>, which is inert.
+function mdSafeUrl(v, isImg){
+  v=String(v||'').trim();
+  if(/^(https?:|mailto:|#)/i.test(v)) return true;
+  if(isImg && /^data:image\//i.test(v)) return true;
+  return !/^[a-z][a-z0-9+.-]*:/i.test(v);
+}
+function sanitizeHtml(html){
+  const t=document.createElement('template'); t.innerHTML=String(html);
+  for(const el of [...t.content.querySelectorAll('*')]){
+    if(!MD_TAGS.has(el.tagName)){ el.replaceWith(...el.childNodes); continue; }
+    for(const a of [...el.attributes]){
+      const n=a.name.toLowerCase();
+      if(!MD_ATTRS.has(n) || (n==='href' && !mdSafeUrl(a.value,false)) || (n==='src' && !mdSafeUrl(a.value,true))) el.removeAttribute(a.name);
+    }
+    if(el.tagName==='A'){ el.setAttribute('target','_blank'); el.setAttribute('rel','noopener'); }
+  }
+  return t.innerHTML;
+}
+function renderMarkdownHTML(src){
+  if (window.marked && typeof marked.parse === 'function') {
+    try { return sanitizeHtml(marked.parse(src, { breaks: false, gfm: true })); } catch(e){}
+  }
+  return sanitizeHtml(fallbackMarkdown(src));
+}
+// Load marked.js without blocking render; re-render md cells once it arrives.
+function loadMarked(){
+  if (window.marked) return;
+  const s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js';
+  s.async = true;
+  s.onload = () => refreshMarkdownCells();
+  s.onerror = () => {};
+  document.head.appendChild(s);
+}
+function refreshMarkdownCells(){
+  $$('.cell').forEach(el => {
+    const c = allCells().find(x => x.id === +el.dataset.id);
+    if (c && c.type === 'md') renderMd(el, c);
+  });
+}
+
+
+
+
+
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 3. SOURCES — the persistence layer's replacement. Nothing is stored: the
+ *    authored src/*.md are fetched from the repository at render time, so what
+ *    a reader sees is what is in the repository. ?ref= selects the git ref,
+ *    validated (path-safe charset, no '..' segment) and pinned to REPO so a
+ *    crafted link cannot fetch outside this repo's src/.
+ * ════════════════════════════════════════════════════════════════════════════ */
+const REPO  = 'andy-emerson/Servette';
+const FILES = ['INIT.md', 'SERVER.md', 'SYSTEM.md', 'SHELL.md', 'MAIN.md'];   // build.py order
+const _refParam = new URLSearchParams(location.search).get('ref') || 'main';
+const REF = /^[A-Za-z0-9._\/-]+$/.test(_refParam) && !_refParam.split('/').includes('..')
+  ? _refParam : 'main';
+const RAW = `https://raw.githubusercontent.com/${REPO}/${REF}/src/`;
+
+const nb = { files: [], cm: null };   // files: [{name, raw, doc, error}] in FILES order
+function allCells(){ return nb.files.flatMap(f => f.doc.cells); }
+
+function lsGet(k,d){ try { const v=localStorage.getItem(k); return v==null?d:v; } catch(e){ return d; } }
+function lsSet(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
+
+// Fetch every file concurrently. A failed file degrades to an inline error
+// callout in ITS slot — the rest of the document stands.
+async function fetchSources(){
+  setSource('loading', 'Source: fetching ' + REF + ' …');
+  nb.files = await Promise.all(FILES.map(async name => {
+    try {
+      const res = await fetch(RAW + name);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const raw = await res.text();
+      return { name, raw, doc: parse(raw) };
+    } catch(e){
+      return { name, raw: null, error: true,
+               doc: parse('> **Could not load `src/' + name + '`** — ' + (e.message || e) +
+                          '. The rest of the document is unaffected.') };
+    }
+  }));
+  const bad = nb.files.filter(f => f.error).length;
+  if (bad === FILES.length) setSource('error', 'Source: ' + REF + ' unreachable');
+  else if (bad)            setSource('error', 'Source: ' + REF + ' · ' + bad + ' file(s) failed');
+  else                     setSource('ready', 'Source: ' + REF + ' · ' + FILES.length + ' files');
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 4. THEME — the front door's mechanism, verbatim: system preference at boot,
+ *    sticky manual override in localStorage. Replaces the shell's Paper × Ink
+ *    engine; the tokens it used to compute are now static CSS (see <style> §2).
+ * ════════════════════════════════════════════════════════════════════════════ */
+function applyTheme(t){
+  document.documentElement.setAttribute('data-theme', t);
+  lsSet('source-theme', t);
+  syncThemeIcon();
+}
+function initTheme(){
+  const saved = lsGet('source-theme', '');
+  const system = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', saved || system);
+}
+function syncThemeIcon(){
+  const b = $('#btn-theme'); if(!b) return;
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  b.innerHTML = svg(dark ? 'sun' : 'moon');
+  const t = dark ? 'Switch to light' : 'Switch to dark';
+  b.title = t; b.setAttribute('aria-label', t);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 5. CODEMIRROR 6 — loaded on demand; a plain <pre> is the fallback. Read-only:
+ *    the editing extensions (history, brackets, keymaps) left with the editing.
+ * ════════════════════════════════════════════════════════════════════════════ */
+async function loadCM(){
+  if (nb.cm) return nb.cm;
+  if (nb.cm === false) return null;
+  try {
+    const [view,state,language,python,lezer] = await Promise.all([
+      import('@codemirror/view'), import('@codemirror/state'),
+      import('@codemirror/language'), import('@codemirror/lang-python'),
+      import('@lezer/highlight'),
+    ]);
+    const { EditorView } = view;
+    const { HighlightStyle, syntaxHighlighting } = language;
+    const { tags } = lezer;
+    const theme = EditorView.theme({
+      '&': { fontSize:'13px', fontFamily:'var(--font-mono)', lineHeight:'1.65', background:'var(--bg-primary)', color:'var(--text-primary)' },
+      '&.cm-focused': { outline:'none' },
+      '.cm-content': { padding:'11px 13px', fontFamily:'inherit' },
+      '.cm-scroller': { fontFamily:'inherit' },
+      '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { background:'var(--bg-tertiary)' },
+    });
+    const highlight = syntaxHighlighting(HighlightStyle.define([
+      { tag:[tags.keyword,tags.definitionKeyword,tags.controlKeyword,tags.operatorKeyword], color:'var(--syntax-keyword)' },
+      { tag:[tags.string,tags.special(tags.string)], color:'var(--syntax-string)' },
+      { tag:[tags.number,tags.bool,tags.atom], color:'var(--syntax-number)' },
+      { tag:[tags.operator,tags.punctuation], color:'var(--syntax-operator)' },
+      { tag:tags.comment, color:'var(--text-tertiary)', fontStyle:'italic' },
+      { tag:[tags.function(tags.variableName),tags.function(tags.propertyName)], color:'var(--syntax-function)' },
+      { tag:[tags.variableName,tags.propertyName], color:'var(--text-primary)' },
+    ]));
+    nb.cm = { view, state, language, python, theme, highlight };
+    return nb.cm;
+  } catch(e){
+    nb.cm = false;   // CodeMirror unavailable (offline?) — cells stay plain <pre>
+    return null;
+  }
+}
+async function upgradeCode(cellEl, cell){
+  const m = await loadCM();
+  if (!m) return;
+  const wrap = cellEl.querySelector('.cell-editor');
+  const pre = wrap && wrap.querySelector('pre.code-plain');
+  if (!pre) return;
+  const { EditorView } = m.view;
+  const { EditorState } = m.state;
+  new EditorView({
+    doc: cell.code,
+    extensions: [
+      m.theme, m.highlight,
+      cell.lang === 'python' ? m.python.python() : [],
+      EditorState.readOnly.of(true), EditorView.editable.of(false),
+      EditorView.lineWrapping,
+    ],
+    parent: wrap,
+  });
+  pre.remove();
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 6. CELL DOM — read-only. Cells render once from the fetched doc; the only
+ *    cell affordance left is collapse.
+ * ════════════════════════════════════════════════════════════════════════════ */
+function badgeLabel(cell){ return cell.type === 'md' ? 'Markdown' : (cell.lang || 'code').toUpperCase(); }
+function firstLine(s){ const l=(s||'').split('\n').find(x=>x.trim()); return (l||'').trim().slice(0,60); }
+function renderMd(cellEl, cell){
+  const out=cellEl.querySelector('.cell-output');
+  out.className='cell-output out-md';
+  out.innerHTML = cell.code.trim()? renderMarkdownHTML(cell.code) : '';
+}
+function mkAction(ico,title,fn,cls){ const b=elem('button',{class:'ca-btn'+(cls?' '+cls:''),title,html:svg(ico)}); b.onclick=fn; return b; }
+function createCellEl(cell){
+  const badge=elem('span',{class:'cell-badge badge-'+cell.type,text:badgeLabel(cell)});
+  const label = cell.type==='md' ? firstLine(cell.code).replace(/^#+\s*/,'') : firstLine(cell.code);
+  const title=elem('span',{class:'cell-title',text:label});
+  const actions=elem('div',{class:'cell-actions'},[
+    mkAction('chevron','Collapse',()=>toggleCollapse(cell.id),'collapse-btn'),
+  ]);
+  const header=elem('div',{class:'cell-header'},[badge,title,actions]);
+  const body=elem('div',{class:'cell-editor'});
+  const out=elem('div',{class:'cell-output'});
+  const cellEl=elem('div',{class:'cell','data-id':cell.id},[header,body,out]);
+  if (cell.type==='code'){
+    body.appendChild(elem('pre',{class:'code-plain',text:cell.code}));
+    setTimeout(()=>upgradeCode(cellEl,cell),0);
+  } else {
+    renderMd(cellEl,cell);
+  }
+  return cellEl;
+}
+function toggleCollapse(id){
+  const c=allCells().find(x=>x.id===id); if(!c)return;
+  c.collapsed=!c.collapsed;
+  const el=$(`.cell[data-id="${id}"]`); if(el) el.classList.toggle('collapsed',c.collapsed);
+}
+function collapseAll(){
+  const cells=allCells();
+  const anyOpen=cells.some(c=>!c.collapsed);
+  cells.forEach(c=>c.collapsed=anyOpen);
+  $$('.cell').forEach(el=>el.classList.toggle('collapsed',anyOpen));
+}
+// One slim boundary row per file, linking to the authored file at this ref.
+function fileRow(f){
+  return elem('div',{class:'file-row','data-file':f.name},[
+    elem('span',{class:'fname',text:'src/'+f.name}),
+    elem('a',{href:`https://github.com/${REPO}/blob/${REF}/src/${f.name}`,target:'_blank',rel:'noopener',text:'view on GitHub →'}),
+  ]);
+}
+// Full render — once per fetch. No structural ops, no re-render paths.
+function renderNotebook(){
+  const scroll=$('#nb-scroll'); scroll.innerHTML='';
+  nb.files.forEach(f=>{
+    scroll.appendChild(fileRow(f));
+    f.doc.cells.forEach(cell=>scroll.appendChild(createCellEl(cell)));
+  });
+  renderOutline();
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 6b. ACTIVITY-BAR PANELS — Outline
+ * ════════════════════════════════════════════════════════════════════════════ */
+function flashCell(el){
+  if(!el) return;
+  el.scrollIntoView({behavior:'smooth',block:'center'});
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+}
+/* ── Outline / navigator — one bold row per file, one row per cell under it ── */
+function renderOutline(){
+  const wrap=$('#outline-list'); if(!wrap) return; wrap.innerHTML='';
+  if(!nb.files.length){ wrap.appendChild(panePlaceholder('list','Nothing loaded yet','Fetching src/*.md …')); return; }
+  nb.files.forEach(f=>{
+    const frow=elem('div',{class:'list-row file clickable',title:'src/'+f.name},[
+      elem('span',{class:'grow mono',text:f.name}),
+    ]);
+    frow.onclick=()=>{ const el=$(`.file-row[data-file="${f.name}"]`); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); };
+    wrap.appendChild(frow);
+    f.doc.cells.forEach(c=>{
+      const label = c.type==='md' ? (firstLine(c.code).replace(/^#+\s*/,'')||'Markdown') : (firstLine(c.code)||'(empty)');
+      const row=elem('div',{class:'list-row clickable indent',title:label},[
+        elem('span',{class:'ol-dot '+c.type}),
+        elem('span',{class:'grow mono',text:label}),
+      ]);
+      row.onclick=()=>flashCell($(`.cell[data-id="${c.id}"]`));
+      wrap.appendChild(row);
+    });
+  });
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 9. SELF-TESTS — doc-model byte-exactness and cell classification, plus a
+ *    live check: every successfully fetched file round-trips byte-exact
+ *    (serialize(doc) === the bytes fetched). Results toast; details go to the
+ *    browser console (the shell's Console panel left with the runtime).
+ * ════════════════════════════════════════════════════════════════════════════ */
+function runSelfTests(){
+  const res=[]; let pass=0;
+  const ok=(n,cond,note)=>{ res.push({n,ok:!!cond,note:cond?'':(note||'')}); if(cond)pass++; };
+  // parse→serialize is BYTE-EXACT: serialize(parse(x)) === x (whitespace-stressed)
+  [ '', '# H\n\ntext\n', '```python\na = 1\n```\n',
+    '\n\n# leading blanks\n\n\n```css\nb{}\n```\n\n\ntrailing prose\n\n',
+    '```html\n<b>hi</b>\n```\n\n~~~js\nx\n~~~\n', 'no final newline',
+    'text\n```js\nunterminated\n', '```js\n\n```\n' ].forEach((src,i)=>{
+    try{ const out=serialize(parse(src)); ok('byte-exact #'+i, out===src, 'serialize(parse(x)) !== x'); }
+    catch(e){ ok('byte-exact #'+i,false,'threw '+e.message); }
+  });
+  // cell classification: fences → code cells (with lang), prose → md cells
+  try { const d=parse('# hi\n\n```python\n1\n```\n\n```css\na{}\n```');
+    ok('classifies cells', d.cells.length===3 && d.cells[0].type==='md' && d.cells[1].type==='code' && d.cells[1].lang==='python' && d.cells[2].lang==='css'); }
+  catch(e){ ok('classify',false,e.message); }
+  // the live documents round-trip — the viewer shows the file, byte for byte
+  nb.files.filter(f=>!f.error).forEach(f=>{
+    try{ ok('round-trip src/'+f.name, serialize(f.doc)===f.raw, 'serialize(doc) !== fetched bytes'); }
+    catch(e){ ok('round-trip src/'+f.name,false,'threw '+e.message); }
+  });
+  res.forEach(r=>console[r.ok?'log':'error']((r.ok?'✓ ':'✗ ')+r.n+(r.note?' — '+r.note:'')));
+  toast(pass===res.length?('All '+res.length+' tests passed'):(res.length-pass)+' test(s) failed — see browser console', pass===res.length?'':'err');
+  return pass===res.length;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 10. WIRING + BOOT
+ * ════════════════════════════════════════════════════════════════════════════ */
+function switchTab(name){
+  $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
+  $$('#left-pane .pane-panel').forEach(p=>p.classList.toggle('active',p.dataset.tab===name));
+}
+// Open a left tab and ensure the pane is expanded.
+function openTab(name){ switchTab(name); if(PANES.left && PANES.left.isCollapsed()) PANES.left.expand(); lsSet('servette-src:leftTab',name); }
+
+/* ── Panes — oracle-style: drag to resize (clamped + persisted), and the
+ *    activity-bar buttons collapse/expand the pane. ── */
+const PANES = {};
+function setupPane(side){
+  const isLeft = side==='left';
+  const pane = $('#'+(isLeft?'left-pane':'right-pane'));
+  const resizer = $('#'+(isLeft?'left-resizer':'right-resizer'));
+  const KEY = 'servette-src:'+side+'Width';
+  const MIN = isLeft ? 190 : 300;
+  const maxW = () => isLeft ? 520 : Math.max(MIN, window.innerWidth - $('#left-pane').offsetWidth - 88 - 320);
+  const clamp = w => Math.max(MIN, Math.min(maxW(), w));
+  let saved = clamp(parseInt(lsGet(KEY,''),10) || (isLeft?248:460));
+  if (!pane.classList.contains('collapsed')) pane.style.width = saved+'px';
+  const isCollapsed = () => pane.classList.contains('collapsed');
+  function collapse(){ if(isCollapsed())return; saved=pane.offsetWidth; lsSet(KEY,saved); pane.classList.add('collapsed'); resizer.style.display='none'; }
+  function expand(){ pane.classList.remove('collapsed'); pane.style.width=clamp(saved)+'px'; resizer.style.display=''; }
+  let drag=false, sx=0, sw=0;
+  resizer.addEventListener('mousedown',e=>{ if(isCollapsed())return; drag=true; sx=e.clientX; sw=pane.offsetWidth; resizer.classList.add('dragging'); pane.style.transition='none'; document.body.style.cursor='col-resize'; document.body.style.userSelect='none'; e.preventDefault(); });
+  window.addEventListener('mousemove',e=>{ if(!drag)return; const dx=isLeft?(e.clientX-sx):(sx-e.clientX); pane.style.width=clamp(sw+dx)+'px'; });
+  window.addEventListener('mouseup',()=>{ if(!drag)return; drag=false; resizer.classList.remove('dragging'); pane.style.transition=''; document.body.style.cursor=''; document.body.style.userSelect=''; saved=pane.offsetWidth; lsSet(KEY,saved); });
+  return PANES[side]={collapse,expand,isCollapsed};
+}
+function wireActivityBars(){
+  $$('#left-activity-bar .activity-bar-btn').forEach(btn=>{
+    btn.onclick=()=>{
+      const tab=btn.dataset.tab;
+      if (!PANES.left.isCollapsed() && btn.classList.contains('active')){
+        PANES.left.collapse();
+        $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.remove('active'));
+        lsSet('servette-src:leftTab','');
+      } else {
+        switchTab(tab);
+        if (PANES.left.isCollapsed()) PANES.left.expand();
+        lsSet('servette-src:leftTab',tab);
+      }
+    };
+  });
+}
+function restorePanes(){
+  const lt=lsGet('servette-src:leftTab', undefined);
+  if (lt===''){ PANES.left.collapse(); $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.remove('active')); }
+  else if (lt){ switchTab(lt); }
+}
+// Status pill (kept from the shell's runtime chrome): idle (gray) ·
+// loading (amber) · ready (green) · error (red).
+function setPill(el, state, label){
+  if (!el) return;
+  const cls = state==='loading' ? ' working' : (state==='running'||state==='ready') ? ' ready' : state==='error' ? ' error' : '';
+  el.className = 'status-item' + (el.classList.contains('status-link')?' status-link':'') + cls;
+  el.textContent = label;
+}
+function setSource(state, label){ setPill($('#st-source'), state, label); }
+function wire(){
+  $('#btn-collapse-all').onclick=collapseAll;
+  $('#btn-tests').onclick=runSelfTests;
+  $('#btn-theme').onclick=()=>{ const cur=document.documentElement.getAttribute('data-theme'); applyTheme(cur==='dark'?'light':'dark'); };
+  setupPane('left'); wireActivityBars();
+}
+
+async function boot(){
+  initTheme();
+  const ref=$('#ref-label');
+  ref.textContent='src @ '+REF;
+  ref.href=`https://github.com/${REPO}/tree/${REF}/src`;
+  paintIcons();
+  // Static icon-only controls: mirror title → accessible name (elem() does the
+  // same for dynamically created ones).
+  $$('[title]:not([aria-label])').forEach(el=>el.setAttribute('aria-label', el.title));
+  syncThemeIcon();
+  wire();
+  restorePanes();
+  await fetchSources();
+  renderNotebook();
+  loadMarked();
+  // expose for console / automation (the browser-verify run reads these)
+  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, get files(){return nb.files;} };
+}
+boot();
+</script>
+</body>
+</html>

@@ -55,6 +55,9 @@ SERVICE_PATH  = "/etc/systemd/system/servette.service"
 NETWATCH_PATH = "/etc/systemd/system/servette-netwatch"  # + ".service" / ".timer"
 ACME_WEBROOT  = "/var/lib/letsencrypt/webroot"
 
+# The platform flag
+_IS_MACOS = sys.platform == "darwin"
+
 # The closed-system TLS fallback: presented for connections whose SNI matches no
 # configured site (absent, unrecognized, or direct-IP access) when no site is
 # itself domainless. Tied to no site's identity, generated once and reused.
@@ -1265,7 +1268,11 @@ def _bootstrap():
                     break
             else:
                 print(f"  Error: failed to create virtual environment: {error}")
-                print("  No supported package manager found to fix it (tried apt-get, dnf, apk).")
+                if _IS_MACOS:
+                    print("  This Python lacks venv/pip support. Install Python 3.11+ from")
+                    print("  python.org or Homebrew and run Servette with that python3.")
+                else:
+                    print("  No supported package manager found to fix it (tried apt-get, dnf, apk).")
                 sys.exit(1)
             error = _create_venv()
             if error is not None:
@@ -1672,6 +1679,8 @@ def _root_on_sd_card():
 
 def _ensure_swap():
     """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
+    if _IS_MACOS:
+        return  # macOS manages its own swap; mkswap/swapon/fallocate do not exist there
     mem_kb, avail_kb, swap_kb = _meminfo()
     rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
     rec_mb    = rec // (1024 * 1024) if rec else None
@@ -2980,7 +2989,9 @@ def cmd_start():
         start_server()
         if _server_running():
             print("Running in session only — server will stop when you quit.")
-            if _prompt("Install as a permanent service?"):
+            if _IS_MACOS:
+                print("Service install is Linux-only; keep this session alive (tmux/screen) to stay up.")
+            elif _prompt("Install as a permanent service?"):
                 cmd_enable()
 
 
@@ -3017,7 +3028,10 @@ def cmd_log(n=20):
         output = result.stdout or result.stderr
         print(output, end="")
     except FileNotFoundError:
-        print("journalctl not found. Is this a systemd system?")
+        if _IS_MACOS:
+            print("No journal on macOS — in session mode the log is this terminal's own output.")
+        else:
+            print("journalctl not found. Is this a systemd system?")
 
 
 RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
@@ -3614,11 +3628,16 @@ def _runtime_stats(service_active):
         if _server_start_time is not None:
             rows.append(("Uptime", _format_uptime(time.monotonic() - _server_start_time)))
         try:
-            with open("/proc/self/status") as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        rows.append(("Memory", f"{int(line.split()[1]) / 1024:.1f} MB"))
-                        break
+            if _IS_MACOS:
+                out = subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())],
+                                     capture_output=True, text=True).stdout.strip()
+                rows.append(("Memory", f"{int(out) / 1024:.1f} MB"))
+            else:
+                with open("/proc/self/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            rows.append(("Memory", f"{int(line.split()[1]) / 1024:.1f} MB"))
+                            break
         except Exception:
             pass
         rows.append(("PID", str(os.getpid())))

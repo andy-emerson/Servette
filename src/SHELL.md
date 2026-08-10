@@ -650,7 +650,9 @@ def cmd_start():
         start_server()
         if _server_running():
             print("Running in session only — server will stop when you quit.")
-            if _prompt("Install as a permanent service?"):
+            if _IS_MACOS:
+                print("Service install is Linux-only; keep this session alive (tmux/screen) to stay up.")
+            elif _prompt("Install as a permanent service?"):
                 cmd_enable()
 
 
@@ -687,7 +689,10 @@ def cmd_log(n=20):
         output = result.stdout or result.stderr
         print(output, end="")
     except FileNotFoundError:
-        print("journalctl not found. Is this a systemd system?")
+        if _IS_MACOS:
+            print("No journal on macOS — in session mode the log is this terminal's own output.")
+        else:
+            print("journalctl not found. Is this a systemd system?")
 
 
 RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
@@ -1293,11 +1298,16 @@ def _runtime_stats(service_active):
         if _server_start_time is not None:
             rows.append(("Uptime", _format_uptime(time.monotonic() - _server_start_time)))
         try:
-            with open("/proc/self/status") as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        rows.append(("Memory", f"{int(line.split()[1]) / 1024:.1f} MB"))
-                        break
+            if _IS_MACOS:
+                out = subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())],
+                                     capture_output=True, text=True).stdout.strip()
+                rows.append(("Memory", f"{int(out) / 1024:.1f} MB"))
+            else:
+                with open("/proc/self/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            rows.append(("Memory", f"{int(line.split()[1]) / 1024:.1f} MB"))
+                            break
         except Exception:
             pass
         rows.append(("PID", str(os.getpid())))

@@ -62,7 +62,11 @@ def _bootstrap():
                     break
             else:
                 print(f"  Error: failed to create virtual environment: {error}")
-                print("  No supported package manager found to fix it (tried apt-get, dnf, apk).")
+                if _IS_MACOS:
+                    print("  This Python lacks venv/pip support. Install Python 3.11+ from")
+                    print("  python.org or Homebrew and run Servette with that python3.")
+                else:
+                    print("  No supported package manager found to fix it (tried apt-get, dnf, apk).")
                 sys.exit(1)
             error = _create_venv()
             if error is not None:
@@ -483,6 +487,8 @@ def _root_on_sd_card():
 
 def _ensure_swap():
     """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
+    if _IS_MACOS:
+        return  # macOS manages its own swap; mkswap/swapon/fallocate do not exist there
     mem_kb, avail_kb, swap_kb = _meminfo()
     rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
     rec_mb    = rec // (1024 * 1024) if rec else None

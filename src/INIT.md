@@ -77,6 +77,14 @@ ACME_WEBROOT  = "/var/lib/letsencrypt/webroot"
 
 ```
 
+One platform question, asked once. Servette is Linux-first: on macOS it runs in session mode — serving, certificates, and the shell all work, while service installation (systemd) stays Linux-only — and the places that differ key off this flag.
+
+```python
+# The platform flag
+_IS_MACOS = sys.platform == "darwin"
+
+```
+
 The fallback certificate's home — in `certs/_default`, apart from the per-site certificates.
 
 > The closed-system TLS fallback: presented for connections whose SNI matches no

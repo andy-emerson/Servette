@@ -391,6 +391,7 @@ body > * { position: relative; z-index: 1; }
 
 /* assistant chat */
 .chat-msgs { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.chat-notice { font-size: 11px; font-style: italic; color: var(--text-tertiary); text-align: center; padding: 2px 10px 6px; border-bottom: .5px solid var(--border-faint); flex-shrink: 0; }
 .chat-msg { font-size: 12px; line-height: 1.5; padding: 7px 9px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; max-width: 94%; }
 .chat-msg.user { background: var(--bg-tertiary); color: var(--text-primary); align-self: flex-end; }
 .chat-msg.bot { background: var(--bg-secondary); color: var(--text-primary); align-self: flex-start; }
@@ -611,7 +612,7 @@ body > * { position: relative; z-index: 1; }
   <div class="welcome-dialog__body">
     <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
     <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files), the assistant, and Settings at the bottom — one panel at a time. On the right: the Preview pane (the open file as one plain rendered document) and the Call Map (the open file's functions and who calls whom — click a function to jump to it). Click an icon to open or close its panel. The viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
-    <p>There is also an optional <strong>reading assistant</strong> — Servette itself, answering for its own code. It runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine), and because the model is yours, the tokens are too: ask Servette about Servette as much as you like, with no accounts, no API keys, and no limits. Set it up in Settings → Agentic Reading; it sees the file you have open and answers questions about it.</p>
+    <p>There is also an optional <strong>reading assistant</strong> — Servette itself, answering for its own code. It runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine), and because the model is yours, the tokens are too: ask Servette about Servette as much as you like, with no accounts, no API keys, and no limits. Set it up in Settings → Agentic Reading; it reads whichever source files your question needs.</p>
   </div>
 </dialog>
 
@@ -1260,9 +1261,9 @@ function wireSearch(){
 
 /* ════════════════════════════════════════════════════════════════════════════
  * 6d. AGENT — local WebLLM (in-browser model manager + streaming chat), the
- *    shell's §6c with its remote-API half removed. Sight-only: it sees its
- *    README and the file the reader has open (see assembleSight) and answers
- *    in the first person, as Servette itself; it edits and navigates
+ *    shell's §6c with its remote-API half removed. It answers in the first
+ *    person, as Servette itself, fetching the documents each question needs
+ *    via the FETCH protocol (see the sight block); it edits and navigates
  *    nothing. Models are labeled by tier (Fast / Balanced / Expert). WebGPU
  *    + CDN required; without them the section explains itself and stays
  *    disabled.
@@ -1633,36 +1634,68 @@ function renderAgentLocal(){
   syncAgentPill();
 }
 
-/* ── Sight ─────────────────────────────────────────────────────────────────
- * A request is exactly four things — instructions, README, the open file,
- * and the reader's newest message. Nothing else: no chat history (the
- * transcript on screen is for the reader; each request stands alone), no
- * cell maps, no digests. That is the whole token budget, and it is why it
- * fits: the corpus at once (~169 KB ≈ 41k tokens) can never fit the model's
- * 32,768 window — measured, the first question overflowed at 40,998 —
- * while README (~3k tokens) + the largest file (~15k) leaves half the
- * window free. Sight is the EXPANDED file, the same rule the notebook DOM
- * and Preview follow: the assistant sees what the reader sees. */
-// No example sentences anywhere in these instructions: a small model treats
-// in-context examples as answers — the first field test got my sample
-// first-person phrases parroted back verbatim as a "response".
+/* ── Sight: fetch-on-demand ────────────────────────────────────────────────
+ * A request starts with NO documents — just instructions (which carry the
+ * catalog: every fetchable file with a description of what it holds), the
+ * chat history, and the question. The model then either answers or replies
+ * with a FETCH directive naming the documents it needs; the viewer resends
+ * the same request with those documents included. The reader never sees the
+ * directive — the bubble stays on "Thinking…" through fetch rounds. Which
+ * file is open in the Navigator no longer matters to the assistant.
+ * Two fetch rounds maximum, and a byte budget on what a round may carry —
+ * the full corpus (~169 KB ≈ 41k tokens) can never fit the 32,768 window,
+ * so over-asking degrades to an explicit omission note, never an overflow.
+ * No example sentences anywhere (a small model parrots examples as answers);
+ * the FETCH format line is the one deliberate exception — it is the tool. */
 const SYS_VIEWER = [
-  "You are Servette, a production static-site server written in one readable Python file, servette.py. The reader is browsing your source code and asking you questions about it. The code is you — answer as yourself, in the first person.",
-  "Answer the question that was asked, directly and concretely. When code settles the question, quote the relevant lines in a ```python fence. Keep answers short unless the question calls for depth.",
-  "Below you have your README and the ONE source file the reader has open. Your other source files exist but their contents are hidden from you: INIT.md (docstring, imports, constants), SERVER.md (request handling), SYSTEM.md (bootstrap, certificates, service), SHELL.md (the terminal interface), MAIN.md (the entry point). If the answer is in a hidden file, do NOT answer from memory or inference — say which file it is in and ask the reader to open it in the Navigator so you can read it.",
-  "You are shown only the immediately previous exchange, if there was one — older turns are gone.",
+  "You are Servette, a production static-site server written in one readable Python file, servette.py. The reader is browsing your source code and asking you questions. The code is you — answer as yourself, in the first person.",
+  "You start with no documents. These exist, and you may request any of them:",
+  "- README.md — what Servette is: features, security posture, comparisons, quick start",
+  "- INIT.md — the docstring, imports, version, module-level constants",
+  "- SERVER.md — request handling: config and sites, scrypt auth, rate limiting, the file cache, the request handler, security headers, the HTTP(S) servers",
+  "- SYSTEM.md — the environment: venv bootstrap, server lifecycle, certificates and the ACME client, systemd provisioning",
+  "- SHELL.md — the interactive terminal interface: menus, config wizard, status displays",
+  "- MAIN.md — the entry point",
+  "To request documents, reply with ONLY one line and nothing else:",
+  "FETCH: name, name",
+  "The reader never sees that line; the same question comes back with those documents attached. Request only what the question needs — documents are large and cost time.",
+  "Answer directly and concretely; quote code in ```python fences. Ground answers in documents you were given; never state what is in a document you have not been given — request it instead.",
 ].join('\n');
-// The FILE DESCRIPTIONS above are the routing table; the dynamic line below
-// names the boundary for THIS request so refusal is mechanical, not a memory.
-function assembleSight(text, lastExchange){
-  const f=currentFile();
-  const hidden=FILES.filter(n=>!f||n!==f.name).join(', ');
-  const open = f
-    ? 'Open right now, visible to you in full — src/'+f.name+' (at ref '+REF+'). Hidden from you: '+hidden+'.\n\n'+(f.raw!=null?f.raw:'(this file failed to load)')
-    : 'The reader has no file open right now — every file is folded and hidden from you: '+hidden+'. Ask them to open one in the Navigator.';
-  const readme = nb.readme ? 'Your README:\n\n'+nb.readme : '(Your README failed to load this session.)';
-  return { system: SYS_VIEWER+'\n\n'+readme+'\n\n'+open,
-           messages:[...(lastExchange||[]), {role:'user',content:text}] };
+const FETCHABLE = ['README.md', ...FILES];
+// A FETCH directive, or null. Only a reply that BEGINS with the directive
+// counts — prose that merely mentions fetching is an answer, not a request.
+function parseFetch(text){
+  const first=(text||'').trimStart();
+  if(!/^FETCH\s*:/i.test(first)) return null;
+  const names=first.split('\n')[0].replace(/^FETCH\s*:/i,'')
+    .split(/[,\s]+/).map(s=>s.trim()).filter(Boolean)
+    .map(s=>{
+      const stem=s.replace(/\.md$/i,'').toUpperCase();
+      return FETCHABLE.find(f=>f.replace(/\.md$/,'').toUpperCase()===stem)||null;
+    })
+    .filter(Boolean);
+  return names.length ? [...new Set(names)] : null;
+}
+// Resolve requested names to contents under a byte budget (~22k tokens):
+// requested order wins, the rest is omitted by name so the model knows.
+function resolveDocs(names){
+  const BUDGET=90000; let used=0; const list=[], omitted=[];
+  names.forEach(n=>{
+    const content = n==='README.md' ? nb.readme : (nb.files.find(f=>f.name===n)||{}).raw;
+    if(content==null){ omitted.push(n+' (unavailable)'); return; }
+    if(used+content.length>BUDGET){ omitted.push(n); return; }
+    used+=content.length; list.push({name:n, content});
+  });
+  return {list, omitted};
+}
+function assembleSight(text, history, docs, fetchesLeft){
+  docs=docs||{list:[],omitted:[]};
+  let system=SYS_VIEWER;
+  if(docs.list.length) system+='\n\nDocuments provided at your request (at ref '+REF+'):\n\n'+
+    docs.list.map(d=>'── '+d.name+' ──\n\n'+d.content).join('\n\n');
+  if(docs.omitted.length) system+='\n\nOmitted for size: '+docs.omitted.join(', ')+' — request fewer documents at once.';
+  if(fetchesLeft<=0) system+='\n\nNo more documents can be provided for this reply — answer with what you have.';
+  return { system, messages:[...(history||[]), {role:'user',content:text}] };
 }
 
 /* ── Chat (the shell's assistant panel, local-only) ── */
@@ -1702,7 +1735,10 @@ function renderAgentMessages(){
   const box=$('#agent-messages'); if(!box) return;
   if(_streamRaf){ cancelAnimationFrame(_streamRaf); _streamRaf=0; }
   box.innerHTML='';
-  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about itself','It sees its README, the open file, and the previous exchange — nothing older.')); return; }
+  // The first thing in the window is always the meta notice — from the
+  // viewer, not from Servette or the reader.
+  box.appendChild(elem('div',{class:'chat-notice',text:'Servette’s assistant is a small AI model running in your browser. It can make mistakes — check important answers against the source.'}));
+  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about itself','It reads the files it needs to answer — on your GPU, as much as you like.')); return; }
   agent.messages.forEach(m=>box.appendChild(chatMsgEl(m)));
   box.scrollTop=box.scrollHeight;
 }
@@ -1750,51 +1786,18 @@ function syncSendButton(){
   const b=$('#agent-send'); if(!b) return;
   b.innerHTML=svg(agent.generating?'stop':'send'); b.title=agent.generating?'Stop':'Send';
 }
-// Which CLOSED files does this message name? Matched conservatively — the
-// uppercase stem (SHELL) or any case with the .md suffix (shell.md) — because
-// bare lowercase "server"/"shell"/"main" are ordinary English and a false
-// positive here blocks a legitimate question.
-function closedFilesAsked(text){
-  const f=currentFile();
-  return FILES.filter(n=>{
-    if(f && n===f.name) return false;
-    const stem=n.replace(/\.md$/,'');
-    return new RegExp('\\b'+stem+'\\b').test(text) || new RegExp('\\b'+stem+'\\.md\\b','i').test(text);
-  });
-}
-function interceptReply(closed){
-  const many=closed.length>1;
-  return closed.map(n=>'src/'+n).join(' and ')+(many?' are':' is')+
-    " not open, so I can't see "+(many?'them':'it')+" — and I won't guess. Open "+
-    (many?'them':'it')+' in the Navigator and ask me again.';
-}
 async function agentSend(text){
   text=(text||'').trim();
   if(!text || agent.generating) return;
-  // Mechanical honesty: a question that names a closed file is answered by
-  // the VIEWER, not the model — no amount of model weakness can leak a guess
-  // past this. The canned exchange enters the transcript, so the one-exchange
-  // memory carries it into the follow-up once the reader opens the file.
-  const closed=closedFilesAsked(text);
-  if(closed.length){
-    agent.messages.push({role:'user',from:'user',content:text});
-    agent.messages.push({role:'assistant',from:'Servette',content:interceptReply(closed)});
-    renderAgentMessages();
-    return;
-  }
   if(!agent.activeId || !agent.engine) return;
-  // One-exchange memory: the previous user+assistant pair rides along so a
-  // follow-up ("ok, open it — now answer") has its antecedent, and so the
-  // model remembers WHY it asked for a file once the reader opens it. Older
-  // turns are gone — the on-screen transcript is for the reader.
-  const prior=agent.messages.filter(m=>(m.role==='user'||m.role==='assistant')&&m.content);
-  const lastExchange=(prior.length>=2 && prior[prior.length-1].role==='assistant')
-    ? prior.slice(-2).map(m=>({role:m.role,content:m.content})) : [];
+  // Full chat history rides along — it is cheap now that documents are
+  // fetched on demand rather than sent up front. Clear is the reader's lever.
+  const history=agent.messages.filter(m=>(m.role==='user'||m.role==='assistant')&&m.content)
+    .map(m=>({role:m.role,content:m.content}));
   const myCancel=agent.cancel={ turnStart:agent.messages.length, text, cancelled:false };
   agent.messages.push({role:'user',from:'user',content:text});
   agent.generating=true; renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
-  const { system, messages } = assembleSight(text, lastExchange);
-  try { await agentSendLocal(system, messages, myCancel); }
+  try { await agentSendLocal(text, history, myCancel); }
   catch(e){ if(!myCancel.cancelled) console.error('[agent] send failed',e); }
   if (agent.cancel===myCancel){ agent.generating=false; agent.cancel=null; syncAgentPill(); syncSendButton(); renderAgentLocal(); }
 }
@@ -1809,20 +1812,49 @@ async function agentCancel(){
   renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
   const ta=$('#agent-input'); if(ta){ ta.value=c.text; ta.focus(); }
 }
-async function agentSendLocal(system, messages, myCancel){
+// One streamed completion. The reply shows live UNLESS it is a FETCH
+// directive — those are machinery, invisible to the reader; the bubble stays
+// on "Thinking…" through them. (Display is held for the first few characters
+// so a directive's prefix never flashes into view.)
+async function streamOnce(system, messages, idx, myCancel){
+  const convo=[{role:'system',content:system}, ...messages];
+  const chunks=await agent.engine.chat.completions.create({ messages:convo, stream:true });
+  let acc='';
+  for await (const chunk of chunks){
+    if (myCancel.cancelled) return null;
+    acc += (chunk&&chunk.choices&&chunk.choices[0]&&chunk.choices[0].delta&&chunk.choices[0].delta.content)||'';
+    const looksFetch=/^\s*FETCH\b/i.test(acc);
+    if(!looksFetch && (acc.length>=8 || acc.includes('\n'))){
+      agent.messages[idx].content=acc;
+      updateStreamingMessage();
+    }
+  }
+  return acc;
+}
+// The fetch loop: ask with no documents; if the model replies FETCH, resend
+// the same question with the requested documents attached. Two rounds max.
+async function agentSendLocal(text, history, myCancel){
   if (myCancel.cancelled) return;
   agent.messages.push({role:'assistant',from:'Servette',content:''});
   const idx=agent.messages.length-1;
   renderAgentMessages();
+  const MAX_FETCH_ROUNDS=2;
   try {
-    const convo=[{role:'system',content:system}, ...messages];
-    const chunks=await agent.engine.chat.completions.create({ messages:convo, stream:true });
-    let acc='';
-    for await (const chunk of chunks){
-      if (myCancel.cancelled) return;
-      acc += (chunk&&chunk.choices&&chunk.choices[0]&&chunk.choices[0].delta&&chunk.choices[0].delta.content)||''; agent.messages[idx].content=acc;
-      updateStreamingMessage();
+    let docs=null, finalText='';
+    for(let round=0;;round++){
+      const { system, messages } = assembleSight(text, history, docs, MAX_FETCH_ROUNDS-round);
+      const reply=await streamOnce(system, messages, idx, myCancel);
+      if (reply==null) return;   // cancelled
+      const req = round<MAX_FETCH_ROUNDS ? parseFetch(reply) : null;
+      if (!req){
+        finalText = /^\s*FETCH\b/i.test(reply)
+          ? "I couldn't settle that within my document budget — try asking about one thing at a time."
+          : reply;
+        break;
+      }
+      docs=resolveDocs(req);   // bubble stays on "Thinking…"; go again with the documents
     }
+    agent.messages[idx].content=finalText||'(empty response)';
     renderAgentMessages();
   } catch(e){ if(!myCancel.cancelled){ agent.messages[idx].content='⚠️ '+agentFailText(e); console.error('[WebLLM] generate failed',e); renderAgentMessages(); } }
 }
@@ -1859,16 +1891,15 @@ function runSelfTests(){
     try{ ok('round-trip src/'+f.name, serialize(f.doc)===f.raw, 'serialize(doc) !== fetched bytes'); }
     catch(e){ ok('round-trip src/'+f.name,false,'threw '+e.message); }
   });
-  // the closed-file interceptor, against the LIVE open-file state
+  // the FETCH directive parser (the assistant's retrieval protocol)
   try {
-    const f=currentFile();
-    if(f){
-      const closedName=FILES.find(n=>n!==f.name).replace(/\.md$/,'');
-      ok('intercept: uppercase closed stem', closedFilesAsked('What does the '+closedName+' do?').length===1);
-      ok('intercept: lowercase bare stem passes', closedFilesAsked('what does the '+closedName.toLowerCase()+' do?').length===0);
-      ok('intercept: open file passes', closedFilesAsked('Tell me about '+f.name).length===0);
-    }
-  } catch(e){ ok('intercept',false,e.message); }
+    const f1=parseFetch('FETCH: SERVER.md, README.md');
+    ok('FETCH parses', !!f1 && f1.join(',')==='SERVER.md,README.md');
+    const f2=parseFetch('  fetch: shell');
+    ok('FETCH normalizes case and suffix', !!f2 && f2.join(',')==='SHELL.md');
+    ok('FETCH mid-prose is an answer', parseFetch('I would FETCH: SERVER.md if I could.')===null);
+    ok('FETCH unknown name → null', parseFetch('FETCH: nonsense')===null);
+  } catch(e){ ok('FETCH parser',false,e.message); }
   // the call-map extractor — pure function over a synthetic literate doc
   try {
     const d=parse('prose\n\n```python\ndef alpha():\n    return beta() + 1\n\ndef beta():\n    return 2\n\ndef gamma():\n    x = "beta"   # a name in a string, not a call\n    return alpha()\n```\n');
@@ -2064,7 +2095,7 @@ async function boot(){
   initAgent();
   // expose for console / automation (the browser-verify run reads these; the
   // self-tests live here too — run NB.runSelfTests() in the console)
-  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight,
+  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight, parseFetch, resolveDocs,
                 get files(){return nb.files;}, get agent(){return agent;} };
 }
 boot();

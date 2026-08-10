@@ -1669,7 +1669,7 @@ function sysViewer(){
     "FETCH: name, name",
     "The reader never sees that line; the same question comes back with those documents attached. Request only what the question needs.",
     "Large documents arrive as EXCERPTS — the sections that match the question, with elisions marked. If the answer should be in the document but the excerpts do not show it, say the excerpts do not show it and suggest where to look — an elided section is never evidence a feature is missing.",
-    "Answer directly and concretely; quote code in ```python fences. Ground answers in what you were given; never state what you have not been shown.",
+    "Answer IN YOUR OWN WORDS — never repeat or continue a document's text. Documents are reference, not reply material; the only verbatim quoting allowed is a short ```python fence when specific code settles the question. Ground answers in what you were given; never state what you have not been shown.",
   ].join('\n');
 }
 const FETCHABLE = ['README.md', ...FILES];
@@ -1720,7 +1720,19 @@ const STOP = new Set(('the a an and or but of to in on for from is are was were 
 function questionTerms(q){
   return [...new Set(((q||'').toLowerCase().match(/[a-z_][a-z0-9_]{2,}/g)||[]).filter(w=>!STOP.has(w)))];
 }
+// Strip markup that is noise to a language model — the README opens with a
+// <picture> logo and a row of CI badges, and the field showed the model
+// echoing exactly that block back as its "answer". Images, badge lines, and
+// raw HTML tags carry no meaning it can use; prose and code stay.
+function cleanForModel(content){
+  return content
+    .replace(/<picture>[\s\S]*?<\/picture>/gi, '')
+    .replace(/^\s*\[?!\[[^\]]*\]\([^)]*\)\]?(\([^)]*\))?\s*$/gm, '')
+    .replace(/<img[^>]*>/gi, '')
+    .replace(/\n{3,}/g, '\n\n').trim();
+}
 function excerptDoc(name, content, question){
+  content=cleanForModel(content);
   if(content.length<=EXCERPT_WHOLE_MAX) return { name, content, excerpted:false };
   const cells=parse(content).cells;
   const terms=questionTerms(question);
@@ -2045,6 +2057,10 @@ function runSelfTests(){
     ok('excerpt: header orients', ex.content.includes('# HEAD'));
     ok('excerpt: no match → honest note', excerptDoc('BIG.md', big, 'zebra quantum').content.includes('matched the question'));
     ok('excerpt: small file goes whole', excerptDoc('S.md', '# tiny\n', 'anything').excerpted===false);
+    // model-noise stripping — the README's logo/badges block, observed echoed as an "answer"
+    const dirty='<picture>\n<img src="x.svg">\n</picture>\n\n[![Tests](https://b.svg)](https://a)\n![Python](https://s.io/b.svg)\n\nReal prose stays.\n';
+    const cleaned=cleanForModel(dirty);
+    ok('clean: images and badges stripped, prose kept', !cleaned.includes('picture') && !cleaned.includes('b.svg') && cleaned.includes('Real prose stays.'));
   } catch(e){ ok('excerpting',false,e.message); }
   // the call-map extractor — pure function over a synthetic literate doc
   try {

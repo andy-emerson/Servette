@@ -36,11 +36,12 @@
   ── Contents ────────────────────────────────────────────────────────────────
   <style>  CSS, numbered as in the shell (removed sections keep their gaps):
     1 Base & reset   2 Theme variables   3 Layout   4 Topbar   5 Status bar
-    6 Notebook + cells   7 Panels (left pane)   9 Markdown output   10 Toast
+    6 Notebook + cells   7 Panels (left pane)   8 Right pane (Preview)
+    9 Markdown output   10 Toast
   <script> JS:
     0 Icons   1 Doc model (parse/serialize)   2 Markdown   3 Sources (fetch)
-    4 Theme   5 CodeMirror   6 Cell DOM   6b Outline   9 Self-tests
-    10 Wiring + boot
+    4 Theme   5 CodeMirror   6 Cell DOM   6c Preview   6b Outline
+    9 Self-tests   10 Wiring + boot
   (Each section is marked by a ════ banner; this list is its table of contents.)
 -->
 
@@ -59,6 +60,21 @@
     "@lezer/highlight":                "https://esm.sh/@lezer/highlight@1"
   }
 }
+</script>
+
+<script>
+  /* Set the palette before first paint so the page never flashes the wrong
+     one — the front door's script, verbatim, including its storage key, so
+     a theme chosen on servette.org carries into this page (same origin,
+     same preference). The picker in the topbar takes over from here. */
+  (function () {
+    var pref;
+    try { pref = localStorage.getItem("servette-theme"); } catch (e) {}
+    if (pref !== "light" && pref !== "dark") pref = "system";
+    var dark = pref === "dark" || (pref === "system" && window.matchMedia
+      && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  })();
 </script>
 
 <style>
@@ -82,10 +98,11 @@
  *   front door's mechanism, verbatim.
  * ════════════════════════════════════════════════════════════════════════════ */
 :root {
-  --font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --green-2:   #5A8466;   /* the logo's green — same in both themes, like the front door */
   --acc-code:  #4d7358;   /* servette green — code accents (badges, dots) */
   --acc-prose: #857f76;   /* warm gray — prose accents */
   /* Functional colors — fixed hues (Tailwind-500 solids), named by hue. Each
@@ -141,19 +158,38 @@
  * 3. LAYOUT
  * ════════════════════════════════════════════════════════════════════════════ */
 html, body { height: 100%; }
-body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var(--text-primary); transition: background .2s, color .2s; }
+body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var(--text-primary); transition: background .2s, color .2s; -webkit-font-smoothing: antialiased; }
+/* The grain the front door wears, at the same weight. Fixed and inert, so it
+   sits under everything without intercepting a single click. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  pointer-events: none;
+  opacity: 0.4;
+  z-index: 0;
+}
+body > * { position: relative; z-index: 1; }
+::selection { background: color-mix(in oklab, var(--border-info) 30%, transparent); }
+:focus-visible { outline: 2px solid var(--border-info); outline-offset: 2px; border-radius: 4px; }
 #app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 #main-area { display: flex; flex: 1; min-height: 0; }
 
 .activity-bar { width: 44px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; padding: 4px 0; background: var(--bg-secondary); z-index: 5; }
 #left-activity-bar { border-right: .5px solid var(--border-faint); }
+#right-activity-bar { border-left: .5px solid var(--border-faint); }
 .activity-bar-btn { width: 44px; height: 42px; display: flex; align-items: center; justify-content: center; background: none; border: none; cursor: pointer; color: var(--text-tertiary); border-right: 2px solid transparent; transition: color .12s; }
+#right-activity-bar .activity-bar-btn { border-right: none; border-left: 2px solid transparent; }
 .activity-bar-btn:hover { color: var(--text-primary); }
 .activity-bar-btn.active { color: var(--text-primary); border-right-color: var(--border-info); }
+#right-activity-bar .activity-bar-btn.active { border-left-color: var(--border-info); border-right-color: transparent; }
 .activity-bar-btn svg { width: 19px; height: 19px; }
 
 #left-pane { width: 248px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg-primary); overflow: hidden; transition: width .18s ease; }
 #left-pane.collapsed { width: 0 !important; }
+#right-pane { width: 460px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg-primary); overflow: hidden; transition: width .18s ease; }
+#right-pane.collapsed { width: 0 !important; }
 
 .pane-resizer { width: 9px; flex-shrink: 0; position: relative; cursor: col-resize; background: transparent; z-index: 10; }
 .pane-resizer::before { content: ''; position: absolute; top: 0; bottom: 0; left: 50%; width: .5px; background: var(--border-faint); transition: background .15s; }
@@ -163,9 +199,15 @@ body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var
  * 4. TOPBAR
  * ════════════════════════════════════════════════════════════════════════════ */
 .topbar { display: flex; align-items: center; gap: 6px; padding: 0 14px; background: var(--bg-primary); border-bottom: .5px solid var(--border-faint); flex-shrink: 0; height: 52px; }
-.topbar-logo { display: flex; align-items: center; gap: 8px; margin-right: 8px; user-select: none; }
-.topbar-logo .word { font-size: 24px; font-weight: 700; letter-spacing: .005em; line-height: 1; color: var(--text-primary); }
-.topbar-logo .word a { color: inherit; text-decoration: none; }
+.topbar-logo { display: flex; align-items: center; gap: 10px; margin-right: 8px; user-select: none; }
+.topbar-logo a { text-decoration: none; }
+/* The front door's logo, verbatim: set in text so the cursor can blink and
+   both palettes are served by one mark. */
+.logo { font-family: var(--font-mono); font-weight: 500; letter-spacing: 0; line-height: 1; color: var(--text-primary); white-space: nowrap; font-size: 25px; }
+.logo .ette { color: var(--green-2); }
+.logo .cursor { color: inherit; animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .logo .cursor { animation: none; } }
 .topbar-logo .src-tag { font-family: var(--font-mono); font-size: 12px; color: var(--acc-code); border: 1px solid color-mix(in srgb, var(--acc-code) 35%, transparent); border-radius: 99px; padding: 2px 9px; }
 .topbar-sep { flex: 1; }
 .tb-group { display: flex; flex-direction: column; align-items: center; gap: 2px; }
@@ -177,6 +219,19 @@ body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var
 .tb-btn.icon-only { padding: 6px; }  /* no label inside — the word lives in the group caption below */
 .tb-btn.icon-only svg { width: 15px; height: 15px; }
 .tb-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+/* The front door's theme picker — a segmented control built from radios —
+   ported onto the shell's tokens (surface→bg-primary, border→border-light,
+   muted→text-tertiary, green→border-info). */
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; clip-path: inset(50%); overflow: hidden; white-space: nowrap; }
+.theme-picker { display: flex; align-items: center; gap: 2px; margin: 0; padding: 2px; border: 1px solid var(--border-light); border-radius: 9px; background: var(--bg-secondary); }
+.theme-picker input { position: absolute; opacity: 0; pointer-events: none; }
+.theme-picker label { display: grid; place-items: center; width: 30px; height: 26px; border-radius: 7px; border: 1px solid transparent; color: var(--text-tertiary); cursor: pointer; font: 400 13px/1 var(--font-mono); user-select: none; }
+.theme-picker label:hover { color: var(--text-primary); }
+.theme-picker input:checked + label { background: var(--bg-primary); border-color: var(--border-light); color: var(--text-primary); }
+/* The radios are visually hidden, so the focus ring has to be drawn on
+   the label they control or keyboard users get nothing. */
+.theme-picker input:focus-visible + label { outline: 2px solid var(--border-info); outline-offset: 1px; }
 
 /* ════════════════════════════════════════════════════════════════════════════
  * 5. STATUS BAR
@@ -196,7 +251,9 @@ body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var
 #nb-body { flex: 1; min-width: 0; overflow-y: auto; }
 #nb-scroll { min-height: 100%; padding: 14px 0 40vh; max-width: 940px; margin: 0 auto; }
 
-.cell { margin: 0 16px; position: relative; border-radius: var(--radius-lg); border: .5px solid var(--border-faint); background: var(--bg-primary); overflow: hidden; transition: border-color .15s; }
+/* The 26px bottom margin is the shell's inter-cell insert zone, kept as pure
+   breathing room — the insert affordance left with the editing. */
+.cell { margin: 0 16px 26px; position: relative; border-radius: var(--radius-lg); border: .5px solid var(--border-faint); background: var(--bg-primary); overflow: hidden; transition: border-color .15s; }
 .cell.focused { border-color: var(--border-info); }
 .cell-header { display: flex; align-items: center; gap: 7px; padding: 6px 11px; background: var(--bg-secondary); border-bottom: .5px solid var(--border-faint); position: relative; user-select: none; }
 .cell-header .ca-btn { cursor: pointer; }
@@ -268,12 +325,24 @@ body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var
 
 
 /* ════════════════════════════════════════════════════════════════════════════
+ * 8. RIGHT PANE — Preview: the sources rendered as one continuous document,
+ *    without cell chrome. Toggled by its activity-bar button.
+ * ════════════════════════════════════════════════════════════════════════════ */
+.right-panel { display: flex; flex: 1 1 0; min-height: 60px; flex-direction: column; }
+.right-panel .rp-header { flex-shrink: 0; padding: 7px 12px; font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .06em; border-bottom: .5px solid var(--border-faint); background: var(--bg-secondary); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#preview-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 18px 40vh; }
+.preview-file + .preview-file { margin-top: 30px; border-top: .5px solid var(--border-light); padding-top: 22px; }
+
+/* ════════════════════════════════════════════════════════════════════════════
  * 9. MARKDOWN OUTPUT  (ported from the oracle)
  * ════════════════════════════════════════════════════════════════════════════ */
 .out-md { color: var(--text-primary); white-space: normal; }
-.out-md h1 { font-size: 22px; font-weight: 600; margin: 4px 0 12px; border-bottom: .5px solid var(--border-faint); padding-bottom: .2em; }
-.out-md h2 { font-size: 17px; font-weight: 600; margin: 16px 0 7px; border-bottom: .5px solid var(--border-faint); padding-bottom: .2em; }
-.out-md h3 { font-size: 14px; font-weight: 600; margin: 13px 0 5px; }
+/* Headings in the mono face, the front door's convention (h1–h3 there are
+   --mono at weight 500). */
+.out-md h1, .out-md h2, .out-md h3 { font-family: var(--font-mono); font-weight: 500; letter-spacing: -0.02em; }
+.out-md h1 { font-size: 22px; margin: 4px 0 12px; border-bottom: .5px solid var(--border-faint); padding-bottom: .2em; }
+.out-md h2 { font-size: 17px; margin: 16px 0 7px; border-bottom: .5px solid var(--border-faint); padding-bottom: .2em; }
+.out-md h3 { font-size: 14px; margin: 13px 0 5px; }
 .out-md p { font-size: 14px; line-height: 1.7; margin-bottom: 9px; }
 .out-md ul, .out-md ol { padding-left: 22px; font-size: 14px; margin-bottom: 9px; }
 .out-md li { margin-bottom: 3px; line-height: 1.6; }
@@ -288,7 +357,8 @@ body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var
  * so they read as callouts, not as quotes. */
 .out-md blockquote { border-left: 3px solid var(--border-info); background: var(--bg-secondary); padding: 8px 12px; border-radius: 0 var(--radius-md) var(--radius-md) 0; color: var(--text-secondary); margin-bottom: 9px; }
 .out-md blockquote p:last-child { margin-bottom: 0; }
-.out-md a { color: inherit; text-decoration: underline; }
+.out-md a { color: var(--acc-code); text-decoration: none; }
+.out-md a:hover { color: var(--text-primary); }
 .out-md hr { border: none; border-top: .5px solid var(--border-light); margin: 14px 0; }
 .out-md strong { font-weight: 600; }
 .out-md table { border-collapse: collapse; font-size: 13px; margin-bottom: 10px; }
@@ -310,7 +380,7 @@ body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var
   <!-- ───────────────────────── Topbar ───────────────────────── -->
   <div class="topbar">
     <div class="topbar-logo">
-      <span class="word"><a href="https://servette.org">Servette</a></span>
+      <a href="https://servette.org" aria-label="Servette — home"><span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span></a>
       <span class="src-tag">src</span>
     </div>
     <div class="topbar-sep"></div>
@@ -332,12 +402,17 @@ body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var
     </div>
     <div class="tb-divider"></div>
 
-    <div class="tb-group">
-      <div class="tb-group-btns">
-        <button class="tb-btn icon-only" id="btn-theme" data-ico="moon" title="Toggle theme"></button>
-      </div>
-      <div class="tb-group-label">Theme</div>
-    </div>
+    <!-- Radio inputs rather than buttons: the browser supplies the grouping,
+         the roving focus, and arrow-key selection (the front door's picker). -->
+    <fieldset class="theme-picker">
+      <legend class="visually-hidden">Theme</legend>
+      <input type="radio" name="theme" id="theme-light"  value="light">
+      <label for="theme-light"  title="Light theme"><span aria-hidden="true">☀</span><span class="visually-hidden">Light</span></label>
+      <input type="radio" name="theme" id="theme-system" value="system">
+      <label for="theme-system" title="Match system"><span aria-hidden="true">◐</span><span class="visually-hidden">Match system</span></label>
+      <input type="radio" name="theme" id="theme-dark"   value="dark">
+      <label for="theme-dark"   title="Dark theme"><span aria-hidden="true">☾</span><span class="visually-hidden">Dark</span></label>
+    </fieldset>
   </div>
 
   <!-- ───────────────────────── Main area ───────────────────────── -->
@@ -360,6 +435,21 @@ body { font-family: var(--font-sans); background: var(--bg-tertiary); color: var
 
     <!-- notebook -->
     <div id="nb-body"><div id="nb-scroll"></div></div>
+
+    <div class="pane-resizer" id="right-resizer"></div>
+
+    <!-- right pane: the rendered document, without cell chrome -->
+    <div id="right-pane">
+      <div class="right-panel" id="rpanel-preview">
+        <div class="rp-header"><span>Preview</span></div>
+        <div id="preview-body"></div>
+      </div>
+    </div>
+
+    <!-- right activity bar -->
+    <div id="right-activity-bar" class="activity-bar">
+      <button class="activity-bar-btn active" data-right-tab="preview" title="Preview" data-ico="md"></button>
+    </div>
   </div>
 
   <!-- ───────────────────────── Status bar ───────────────────────── -->
@@ -591,6 +681,7 @@ function refreshMarkdownCells(){
     const c = allCells().find(x => x.id === +el.dataset.id);
     if (c && c.type === 'md') renderMd(el, c);
   });
+  if (rightOpen()) renderPreview();
 }
 
 
@@ -642,26 +733,37 @@ async function fetchSources(){
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
- * 4. THEME — the front door's mechanism, verbatim: system preference at boot,
- *    sticky manual override in localStorage. Replaces the shell's Paper × Ink
- *    engine; the tokens it used to compute are now static CSS (see <style> §2).
+ * 4. THEME — the front door's picker, ported: preference is one of
+ *    light / dark / system (stored under the front door's own key, so the
+ *    choice is shared across servette.org); data-theme only ever gets the
+ *    resolved colour. Under "system" the page keeps listening, so a laptop
+ *    flipping to dark at sunset moves this page with it. The pre-paint
+ *    script in <head> applied the palette before first render; this takes
+ *    over from there. Replaces the shell's Paper × Ink engine — the tokens
+ *    it used to compute are now static CSS (see <style> §2).
  * ════════════════════════════════════════════════════════════════════════════ */
-function applyTheme(t){
-  document.documentElement.setAttribute('data-theme', t);
-  lsSet('source-theme', t);
-  syncThemeIcon();
+const _themeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+function readThemePref(){
+  const pref = lsGet('servette-theme', '');
+  return pref === 'light' || pref === 'dark' ? pref : 'system';
 }
-function initTheme(){
-  const saved = lsGet('source-theme', '');
-  const system = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  document.documentElement.setAttribute('data-theme', saved || system);
+function paintTheme(pref){
+  const dark = pref === 'dark' || (pref === 'system' && _themeMedia && _themeMedia.matches);
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
 }
-function syncThemeIcon(){
-  const b = $('#btn-theme'); if(!b) return;
-  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
-  b.innerHTML = svg(dark ? 'sun' : 'moon');
-  const t = dark ? 'Switch to light' : 'Switch to dark';
-  b.title = t; b.setAttribute('aria-label', t);
+function setThemePref(pref){ lsSet('servette-theme', pref); paintTheme(pref); }
+function wireThemePicker(){
+  const inputs = $$('.theme-picker input');
+  const initial = readThemePref();
+  inputs.forEach(input => {
+    input.checked = input.value === initial;
+    input.addEventListener('change', () => { if (input.checked) setThemePref(input.value); });
+  });
+  if (_themeMedia){
+    const onSystemChange = () => { if (readThemePref() === 'system') paintTheme('system'); };
+    if (_themeMedia.addEventListener) _themeMedia.addEventListener('change', onSystemChange);
+    else if (_themeMedia.addListener) _themeMedia.addListener(onSystemChange);
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -784,6 +886,31 @@ function renderNotebook(){
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
+ * 6c. RIGHT PANE — Preview: each file's markdown rendered whole, one
+ *    continuous document with no cell chrome. The cells are the structural
+ *    view; this is the reading view of the same bytes.
+ * ════════════════════════════════════════════════════════════════════════════ */
+function rightOpen(){ return !$('#right-pane').classList.contains('collapsed'); }
+function renderPreview(){
+  const body=$('#preview-body'); if(!body) return; body.innerHTML='';
+  if(!nb.files.length){ body.appendChild(panePlaceholder('md','Nothing loaded yet','Fetching src/*.md …')); return; }
+  nb.files.forEach(f=>{
+    body.appendChild(elem('div',{class:'preview-file out-md',html:renderMarkdownHTML(f.raw != null ? f.raw : serialize(f.doc))}));
+  });
+}
+function toggleRightPane(){
+  const btn=$('#right-activity-bar .activity-bar-btn');
+  if (rightOpen()){
+    PANES.right.collapse(); btn.classList.remove('active');
+    lsSet('servette-src:rightOpen','');
+  } else {
+    PANES.right.expand(); btn.classList.add('active');
+    lsSet('servette-src:rightOpen','1');
+    renderPreview();
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
  * 6b. ACTIVITY-BAR PANELS — Outline
  * ════════════════════════════════════════════════════════════════════════════ */
 function flashCell(el){
@@ -896,6 +1023,10 @@ function restorePanes(){
   const lt=lsGet('servette-src:leftTab', undefined);
   if (lt===''){ PANES.left.collapse(); $$('#left-activity-bar .activity-bar-btn').forEach(b=>b.classList.remove('active')); }
   else if (lt){ switchTab(lt); }
+  if (lsGet('servette-src:rightOpen','1')===''){   // Preview open by default
+    PANES.right.collapse();
+    $('#right-activity-bar .activity-bar-btn').classList.remove('active');
+  }
 }
 // Status pill (kept from the shell's runtime chrome): idle (gray) ·
 // loading (amber) · ready (green) · error (red).
@@ -909,12 +1040,12 @@ function setSource(state, label){ setPill($('#st-source'), state, label); }
 function wire(){
   $('#btn-collapse-all').onclick=collapseAll;
   $('#btn-tests').onclick=runSelfTests;
-  $('#btn-theme').onclick=()=>{ const cur=document.documentElement.getAttribute('data-theme'); applyTheme(cur==='dark'?'light':'dark'); };
-  setupPane('left'); wireActivityBars();
+  wireThemePicker();
+  setupPane('left'); setupPane('right'); wireActivityBars();
+  $('#right-activity-bar .activity-bar-btn').onclick=toggleRightPane;
 }
 
 async function boot(){
-  initTheme();
   const ref=$('#ref-label');
   ref.textContent='src @ '+REF;
   ref.href=`https://github.com/${REPO}/tree/${REF}/src`;
@@ -922,11 +1053,11 @@ async function boot(){
   // Static icon-only controls: mirror title → accessible name (elem() does the
   // same for dynamically created ones).
   $$('[title]:not([aria-label])').forEach(el=>el.setAttribute('aria-label', el.title));
-  syncThemeIcon();
   wire();
   restorePanes();
   await fetchSources();
   renderNotebook();
+  if (rightOpen()) renderPreview();
   loadMarked();
   // expose for console / automation (the browser-verify run reads these)
   window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, get files(){return nb.files;} };

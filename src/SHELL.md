@@ -4,14 +4,6 @@
 
 *Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-> ─────────────────────────────────────────────────────────────────────────────
-> SHELL
->
-> The interactive terminal interface. Contains only UI logic — all system work
-> is delegated to functions in the SYSTEM section.
-> ─────────────────────────────────────────────────────────────────────────────
->
-
 > Menus are generated so the right-hand column always begins at the same place
 > (2-space indent + a 22-wide label) as the status and config displays.
 

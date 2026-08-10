@@ -4,18 +4,9 @@
 
 *Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-> ─────────────────────────────────────────────────────────────────────────────
-> SYSTEM
->
-> Manages the server's environment: bootstrapping the Python runtime, server
-> lifecycle, certificate management, and systemd service integration.
-> ─────────────────────────────────────────────────────────────────────────────
-
 ## Bootstrap
 
 ```python
-
-
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 #
 # Every invocation from the system Python re-execs into the managed virtualenv.

@@ -42,7 +42,7 @@
     0 Icons   1 Doc model (parse/serialize)   2 Markdown   3 Sources (fetch)
     4 Theme   5 CodeMirror   6 Cell DOM   6c Preview
     6b Navigator (file accordion + search)   6d Agent (WebLLM, sight-only)
-    9 Self-tests   10 Wiring + boot
+    6e Call map (arc diagram)   9 Self-tests   10 Wiring + boot
   (Each section is marked by a ════ banner; this list is its table of contents.)
 -->
 
@@ -418,10 +418,20 @@ body > * { position: relative; z-index: 1; }
  * 8. RIGHT PANE — Preview: the sources rendered as one continuous document,
  *    without cell chrome. Toggled by its activity-bar button.
  * ════════════════════════════════════════════════════════════════════════════ */
-.right-panel { display: flex; flex: 1 1 0; min-height: 60px; flex-direction: column; }
+.right-panel { display: none; flex: 1 1 0; min-height: 60px; flex-direction: column; }
+.right-panel.active { display: flex; }
 .right-panel .rp-header { flex-shrink: 0; padding: 7px 12px; font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .06em; border-bottom: .5px solid var(--border-faint); background: var(--bg-secondary); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #preview-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 18px 40vh; }
 .preview-file + .preview-file { margin-top: 30px; border-top: .5px solid var(--border-light); padding-top: 22px; }
+/* call map — an arc diagram: defs listed in definition order, arcs caller→callee */
+#deps-body { flex: 1; min-height: 0; overflow: auto; padding: 10px 6px; }
+#deps-body svg { display: block; }
+#deps-body .dep-node { cursor: pointer; }
+#deps-body .dep-node text { font-family: var(--font-mono); font-size: 12px; fill: var(--text-primary); }
+#deps-body .dep-node:hover text { fill: var(--acc-code); }
+#deps-body .dep-node circle { fill: var(--acc-code); }
+#deps-body .dep-arc { fill: none; stroke: var(--border-medium); stroke-width: 1.2; }
+#deps-body .dep-arrow { fill: var(--border-medium); }
 
 /* ════════════════════════════════════════════════════════════════════════════
  * 9. MARKDOWN OUTPUT  (ported from the oracle)
@@ -570,17 +580,23 @@ body > * { position: relative; z-index: 1; }
 
     <div class="pane-resizer" id="right-resizer" style="display:none"></div>
 
-    <!-- right pane: the rendered document, without cell chrome -->
+    <!-- right pane — panels toggle independently and stack, like the left -->
     <div id="right-pane" class="collapsed">
-      <div class="right-panel" id="rpanel-preview">
+      <div class="right-panel" id="rpanel-preview" data-right-tab="preview">
         <div class="rp-header"><span>Preview</span></div>
         <div id="preview-body"></div>
+      </div>
+      <div class="lv-resizer" id="rresizer-preview" style="display:none"></div>
+      <div class="right-panel" id="rpanel-deps" data-right-tab="deps">
+        <div class="rp-header"><span>Call Map</span></div>
+        <div id="deps-body"></div>
       </div>
     </div>
 
     <!-- right activity bar -->
     <div id="right-activity-bar" class="activity-bar">
       <button class="activity-bar-btn" data-right-tab="preview" title="Preview" data-ico="md"></button>
+      <button class="activity-bar-btn" data-right-tab="deps" title="Call map" data-ico="graph"></button>
     </div>
   </div>
 
@@ -598,7 +614,7 @@ body > * { position: relative; z-index: 1; }
   </div>
   <div class="welcome-dialog__body">
     <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
-    <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files), the assistant, and Settings at the bottom. On the right: the Preview pane, which shows the open file as one plain rendered document. Click an icon to open or close its panel — the viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
+    <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files), the assistant, and Settings at the bottom. On the right: the Preview pane (the open file as one plain rendered document) and the Call Map (the open file's functions and who calls whom — click a function to jump to it). Click an icon to open or close its panel; open panels stack. The viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
     <p>There is also an optional <strong>reading assistant</strong> — Servette itself, answering for its own code. It runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine), and because the model is yours, the tokens are too: ask Servette about Servette as much as you like, with no accounts, no API keys, and no limits. Set it up in Settings → Agentic Reading; it sees the file you have open and answers questions about it.</p>
   </div>
 </dialog>
@@ -631,6 +647,7 @@ const I = {
   'stop':'<path d="M5 5m0 2a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2z" />',  // tabler player-stop
   'settings':'<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z" /><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" />',  // tabler settings
   'message-code':'<path d="M8 9h8" /><path d="M8 13h6" /><path d="M11.012 19.193l-3.012 1.807v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v6" /><path d="M20 21l2 -2l-2 -2" /><path d="M17 17l-2 2l2 2" />',  // tabler message-code
+  'graph':'<path d="M7 18m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M7 6m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M17 6m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M7 8v8" /><path d="M9 18h6a2 2 0 0 0 2 -2v-5" /><path d="M14 14l3 -3l3 3" />',  // tabler git-branch (as a call-graph mark)
   'github':'<path d="M9 19c-4.3 1.4 -4.3 -2.5 -6 -3m12 5v-3.5c0 -1 .1 -1.4 -.5 -2c2.8 -.3 5.5 -1.4 5.5 -6a4.6 4.6 0 0 0 -1.3 -3.2a4.2 4.2 0 0 0 -.1 -3.2s-1.1 -.3 -3.5 1.3a12.3 12.3 0 0 0 -6.2 0c-2.4 -1.6 -3.5 -1.3 -3.5 -1.3a4.2 4.2 0 0 0 -.1 3.2a4.6 4.6 0 0 0 -1.3 3.2c0 4.6 2.7 5.7 5.5 6c-.6 .6 -.6 1.2 -.5 2v3.5" />',  // tabler brand-github
 };
 function svg(name, cls) {
@@ -832,7 +849,7 @@ function refreshMarkdownCells(){
     const c = allCells().find(x => x.id === +el.dataset.id);
     if (c && c.type === 'md') renderMd(el, c);
   });
-  if (rightOpen()) renderPreview();
+  if (rightIsOpen('preview')) renderPreview();
 }
 
 
@@ -1056,7 +1073,8 @@ function renderNotebook(opts={}){
     scroll.appendChild(panePlaceholder('list','All files folded','Expand one in the Navigator'));
   }
   if(!opts.skipOutline) renderOutline();
-  if(rightOpen()) renderPreview();
+  if(rightIsOpen('preview')) renderPreview();
+  if(rightIsOpen('deps')) renderDeps();
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -1065,7 +1083,9 @@ function renderNotebook(opts={}){
  *    view of the same bytes — and it tracks the Navigator: what's expanded
  *    there (and only that) is what renders here.
  * ════════════════════════════════════════════════════════════════════════════ */
-function rightOpen(){ return !$('#right-pane').classList.contains('collapsed'); }
+const RIGHT_ORDER = ['preview','deps'];
+let rightOpen = new Set();   // fresh start: nothing open
+function rightIsOpen(tab){ return rightOpen.has(tab) && !$('#right-pane').classList.contains('collapsed'); }
 function renderPreview(){
   const body=$('#preview-body'); if(!body) return; body.innerHTML='';
   if(!nb.files.length){ body.appendChild(panePlaceholder('md','Nothing loaded yet','Fetching src/*.md …')); return; }
@@ -1073,14 +1093,99 @@ function renderPreview(){
   if(!f){ body.appendChild(panePlaceholder('md','All files folded','Expand one in the Navigator')); return; }
   body.appendChild(elem('div',{class:'preview-file out-md',html:renderMarkdownHTML(f.raw != null ? f.raw : serialize(f.doc))}));
 }
-function toggleRightPane(){
-  const btn=$('#right-activity-bar .activity-bar-btn');
-  if (rightOpen()){
-    PANES.right.collapse(); btn.classList.remove('active');
-  } else {
-    PANES.right.expand(); btn.classList.add('active');
-    renderPreview();
+function nextRightAfter(tab){
+  for (let i=RIGHT_ORDER.indexOf(tab)+1; i<RIGHT_ORDER.length; i++) if (rightOpen.has(RIGHT_ORDER[i])) return RIGHT_ORDER[i];
+  return null;
+}
+function layoutRightPane(){
+  RIGHT_ORDER.forEach(tab=>{
+    const p=$('#rpanel-'+tab); if(!p) return;
+    p.classList.toggle('active', rightOpen.has(tab));
+    p.style.flex='';
+  });
+  $$('#right-activity-bar .activity-bar-btn').forEach(b=>b.classList.toggle('active', rightOpen.has(b.dataset.rightTab)));
+  const r=$('#rresizer-preview');
+  if(r) r.style.display = (rightOpen.has('preview') && nextRightAfter('preview')) ? '' : 'none';
+}
+function toggleRightTab(tab){
+  rightOpen.has(tab) ? rightOpen.delete(tab) : rightOpen.add(tab);
+  if (rightOpen.size===0) PANES.right.collapse();
+  else if (PANES.right.isCollapsed()) PANES.right.expand();
+  layoutRightPane();
+  if (rightOpen.has(tab)){
+    if (tab==='preview') renderPreview();
+    if (tab==='deps') renderDeps();
   }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * 6e. CALL MAP — an arc diagram of the open file's functions: every `def` is
+ *    a node, listed in definition order (meaningful order in a literate
+ *    file); an arc from A to B means A's body textually references B(. This
+ *    is regex over the authored fences, not an AST — calls through variables
+ *    or same-named methods will fool it, and the panel says so. Hand-rolled
+ *    SVG on the theme tokens; clicking a node flashes the defining cell.
+ * ════════════════════════════════════════════════════════════════════════════ */
+// Extract defs and textual call edges from one file's code cells. Pure —
+// self-tested. A def's body runs until the next `def` at the same or
+// shallower indent; edges are \bname( occurrences in another def's body.
+function extractCallMap(doc){
+  const defs=[];   // {name, indent, start, cellId}
+  let src=''; const cellAt=[];   // cellAt[i] = cell id owning src position i
+  doc.cells.forEach(c=>{
+    if(c.type!=='code') return;
+    const base=src.length;
+    src+=c.code+'\n';
+    for(let i=base;i<src.length;i++) cellAt[i]=c.id;
+  });
+  const defRe=/^([ \t]*)def\s+([A-Za-z_]\w*)\s*\(/gm; let m;
+  while((m=defRe.exec(src))) defs.push({ name:m[2], indent:m[1].length, start:m.index, cellId:cellAt[m.index] });
+  defs.forEach((d,i)=>{
+    let end=src.length;
+    for(let j=i+1;j<defs.length;j++) if(defs[j].indent<=d.indent){ end=defs[j].start; break; }
+    d.body=src.slice(src.indexOf('\n',d.start)+1, end);
+  });
+  const edges=[];   // [fromIdx, toIdx]
+  const firstByName=new Map();
+  defs.forEach((d,i)=>{ if(!firstByName.has(d.name)) firstByName.set(d.name,i); });
+  defs.forEach((d,i)=>{
+    firstByName.forEach((j,name)=>{
+      if(j===i) return;
+      if(new RegExp('\\b'+name+'\\s*\\(').test(d.body)) edges.push([i,j]);
+    });
+  });
+  return { defs, edges };
+}
+function renderDeps(){
+  const body=$('#deps-body'); if(!body) return; body.innerHTML='';
+  const f=currentFile();
+  if(!f){ body.appendChild(panePlaceholder('graph','All files folded','Expand one in the Navigator')); return; }
+  const { defs, edges }=extractCallMap(f.doc);
+  if(!defs.length){ body.appendChild(panePlaceholder('graph','No function definitions','src/'+f.name+' defines no functions')); return; }
+  const rowH=26, padY=14, dotX=14;
+  const labelW=Math.max(...defs.map(d=>d.name.length))*7.3+dotX+22;
+  const H=defs.length*rowH+padY*2;
+  const maxBulge=130;
+  const W=Math.ceil(labelW+maxBulge+20);
+  const y=i=>padY+i*rowH+rowH/2;
+  const svgEl=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svgEl.setAttribute('viewBox','0 0 '+W+' '+H);
+  svgEl.setAttribute('width','100%');
+  let inner='<defs><marker id="dep-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="dep-arrow" d="M0 0L8 4L0 8z"/></marker></defs>';
+  edges.forEach(([a,b])=>{
+    const ya=y(a), yb=y(b);
+    const bulge=Math.min(maxBulge, 26+Math.abs(yb-ya)*0.28);
+    inner+='<path class="dep-arc" marker-end="url(#dep-arrow)" d="M'+labelW+' '+ya+' C '+(labelW+bulge)+' '+ya+', '+(labelW+bulge)+' '+yb+', '+(labelW+2)+' '+yb+'"><title>'+escapeHtml(defs[a].name+' → '+defs[b].name)+'</title></path>';
+  });
+  defs.forEach((d,i)=>{
+    inner+='<g class="dep-node" data-cell="'+d.cellId+'"><circle cx="'+dotX+'" cy="'+y(i)+'" r="3.5"/><text x="'+(dotX+10)+'" y="'+(y(i)+4)+'">'+escapeHtml(d.name)+'</text><title>Defined in this file — click to jump to its cell</title></g>';
+  });
+  svgEl.innerHTML=inner;
+  svgEl.querySelectorAll('.dep-node').forEach(g=>{
+    g.addEventListener('click',()=>gotoCell(f.name, +g.dataset.cell));
+  });
+  body.appendChild(svgEl);
+  body.appendChild(elem('div',{class:'pane-note',text:defs.length+' functions · '+edges.length+' call references — textual (regex over the fences), approximate by design.'}));
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -1546,16 +1651,20 @@ function renderAgentLocal(){
 const SYS_VIEWER = [
   "You are Servette, a production static-site server written in one readable Python file, servette.py. The reader is browsing your source code and asking you questions about it. The code is you — answer as yourself, in the first person.",
   "Answer the question that was asked, directly and concretely. When code settles the question, quote the relevant lines in a ```python fence. Keep answers short unless the question calls for depth.",
-  "Below you have your README and the ONE source file the reader has open. The other source files exist but you cannot see them: INIT.md (docstring, imports, constants), SERVER.md (request handling), SYSTEM.md (bootstrap, certificates, service), SHELL.md (the terminal interface), MAIN.md (the entry point). If the answer is in a file you cannot see, say which file and ask the reader to open it in the Navigator; never guess unseen code.",
-  "Each message stands alone — you are not shown earlier turns, so answer from this message and the documents alone, and never refer to a previous answer.",
+  "Below you have your README and the ONE source file the reader has open. Your other source files exist but their contents are hidden from you: INIT.md (docstring, imports, constants), SERVER.md (request handling), SYSTEM.md (bootstrap, certificates, service), SHELL.md (the terminal interface), MAIN.md (the entry point). If the answer is in a hidden file, do NOT answer from memory or inference — say which file it is in and ask the reader to open it in the Navigator so you can read it.",
+  "You are shown only the immediately previous exchange, if there was one — older turns are gone.",
 ].join('\n');
-function assembleSight(text){
+// The FILE DESCRIPTIONS above are the routing table; the dynamic line below
+// names the boundary for THIS request so refusal is mechanical, not a memory.
+function assembleSight(text, lastExchange){
   const f=currentFile();
+  const hidden=FILES.filter(n=>!f||n!==f.name).join(', ');
   const open = f
-    ? 'The file the reader has open — src/'+f.name+' (at ref '+REF+'), in full:\n\n'+(f.raw!=null?f.raw:'(this file failed to load)')
-    : 'The reader has no file open right now — every file is folded. Ask them to open one in the Navigator.';
+    ? 'Open right now, visible to you in full — src/'+f.name+' (at ref '+REF+'). Hidden from you: '+hidden+'.\n\n'+(f.raw!=null?f.raw:'(this file failed to load)')
+    : 'The reader has no file open right now — every file is folded and hidden from you: '+hidden+'. Ask them to open one in the Navigator.';
   const readme = nb.readme ? 'Your README:\n\n'+nb.readme : '(Your README failed to load this session.)';
-  return { system: SYS_VIEWER+'\n\n'+readme+'\n\n'+open, messages:[{role:'user',content:text}] };
+  return { system: SYS_VIEWER+'\n\n'+readme+'\n\n'+open,
+           messages:[...(lastExchange||[]), {role:'user',content:text}] };
 }
 
 /* ── Chat (the shell's assistant panel, local-only) ── */
@@ -1606,7 +1715,7 @@ function renderAgentMessages(){
   const box=$('#agent-messages'); if(!box) return;
   if(_streamRaf){ cancelAnimationFrame(_streamRaf); _streamRaf=0; }
   box.innerHTML='';
-  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about itself','It sees its README and the open file. Each question stands alone — include the context you need.')); return; }
+  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about itself','It sees its README, the open file, and the previous exchange — nothing older.')); return; }
   agent.messages.forEach(m=>box.appendChild(chatMsgEl(m)));
   box.scrollTop=box.scrollHeight;
 }
@@ -1658,12 +1767,17 @@ async function agentSend(text){
   text=(text||'').trim();
   if(!text || agent.generating) return;
   if(!agent.activeId || !agent.engine) return;
+  // One-exchange memory: the previous user+assistant pair rides along so a
+  // follow-up ("ok, open it — now answer") has its antecedent, and so the
+  // model remembers WHY it asked for a file once the reader opens it. Older
+  // turns are gone — the on-screen transcript is for the reader.
+  const prior=agent.messages.filter(m=>(m.role==='user'||m.role==='assistant')&&m.content);
+  const lastExchange=(prior.length>=2 && prior[prior.length-1].role==='assistant')
+    ? prior.slice(-2).map(m=>({role:m.role,content:m.content})) : [];
   const myCancel=agent.cancel={ turnStart:agent.messages.length, text, cancelled:false };
   agent.messages.push({role:'user',from:'user',content:text});
   agent.generating=true; renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
-  // Each request stands alone — instructions + README + open file + this
-  // message. The on-screen transcript is for the reader, not the model.
-  const { system, messages } = assembleSight(text);
+  const { system, messages } = assembleSight(text, lastExchange);
   try { await agentSendLocal(system, messages, myCancel); }
   catch(e){ if(!myCancel.cancelled) console.error('[agent] send failed',e); }
   if (agent.cancel===myCancel){ agent.generating=false; agent.cancel=null; syncAgentPill(); syncSendButton(); renderAgentLocal(); }
@@ -1729,6 +1843,15 @@ function runSelfTests(){
     try{ ok('round-trip src/'+f.name, serialize(f.doc)===f.raw, 'serialize(doc) !== fetched bytes'); }
     catch(e){ ok('round-trip src/'+f.name,false,'threw '+e.message); }
   });
+  // the call-map extractor — pure function over a synthetic literate doc
+  try {
+    const d=parse('prose\n\n```python\ndef alpha():\n    return beta() + 1\n\ndef beta():\n    return 2\n\ndef gamma():\n    x = "beta"   # a name in a string, not a call\n    return alpha()\n```\n');
+    const cm=extractCallMap(d);
+    const names=cm.defs.map(x=>x.name);
+    const has=(a,b)=>cm.edges.some(([i,j])=>cm.defs[i].name===a&&cm.defs[j].name===b);
+    ok('call map: three defs', names.join(',')==='alpha,beta,gamma');
+    ok('call map: alpha→beta, gamma→alpha', has('alpha','beta') && has('gamma','alpha') && !has('beta','alpha'));
+  } catch(e){ ok('call map',false,e.message); }
   res.forEach(r=>console[r.ok?'log':'error']((r.ok?'✓ ':'✗ ')+r.n+(r.note?' — '+r.note:'')));
   toast(pass===res.length?('All '+res.length+' tests passed'):(res.length-pass)+' test(s) failed — see browser console', pass===res.length?'':'err');
   return pass===res.length;
@@ -1776,12 +1899,13 @@ function toggleLeftTab(tab){
 function openTab(name){ if(!leftOpen.has(name)) toggleLeftTab(name); else if(PANES.left.isCollapsed()) PANES.left.expand(); }
 // Drag the divider between the panel at `afterTab` and the next open one
 // below it. Resolved fresh on mousedown since the open set can change.
-function wireLeftResizer(id, afterTab){
+// `prefix` and `nextFn` make the same machinery serve both sides.
+function wirePaneResizer(id, afterTab, prefix, nextFn){
   const r=$('#'+id); if(!r) return;
   let drag=false, sy=0, ha=0, hb=0, above=null, below=null;
   r.addEventListener('mousedown', e=>{
-    const belowTab=nextOpenAfter(afterTab);
-    above=$('#panel-'+afterTab); below=belowTab && $('#panel-'+belowTab);
+    const belowTab=nextFn(afterTab);
+    above=$('#'+prefix+afterTab); below=belowTab && $('#'+prefix+belowTab);
     if (!above || !below) return;
     drag=true; sy=e.clientY; ha=above.offsetHeight; hb=below.offsetHeight;
     r.classList.add('dragging'); document.body.style.cursor='ns-resize'; document.body.style.userSelect='none';
@@ -1794,7 +1918,7 @@ function wireLeftResizer(id, afterTab){
   });
   window.addEventListener('mouseup', ()=>{ if(!drag) return; drag=false; r.classList.remove('dragging'); document.body.style.cursor=''; document.body.style.userSelect=''; });
 }
-function wireLeftResizers(){ ['outline','assistant'].forEach(t=>wireLeftResizer('lresizer-'+t, t)); }
+function wireLeftResizers(){ ['outline','assistant'].forEach(t=>wirePaneResizer('lresizer-'+t, t, 'panel-', nextOpenAfter)); }
 
 /* ── Panes — oracle-style: drag to resize (clamped + persisted), and the
  *    activity-bar buttons collapse/expand the pane. ── */
@@ -1862,8 +1986,11 @@ function wire(){
   const ln=$('#opt-linenums'); ln.checked=nb.opts.lineNumbers;
   ln.onchange=()=>{ nb.opts.lineNumbers=ln.checked; lsSet('servette-src:linenums', ln.checked?'1':'0'); renderNotebook(); };
   setupPane('left'); setupPane('right'); wireActivityBars(); wireLeftResizers();
-  layoutLeftPane();
-  $('#right-activity-bar .activity-bar-btn').onclick=toggleRightPane;
+  layoutLeftPane(); layoutRightPane();
+  $$('#right-activity-bar .activity-bar-btn').forEach(btn=>{
+    btn.onclick=()=>toggleRightTab(btn.dataset.rightTab);
+  });
+  wirePaneResizer('rresizer-preview','preview','rpanel-',nextRightAfter);
 }
 
 async function boot(){

@@ -4,12 +4,10 @@
 
 *Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-```python
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────────────────────────────
-
-```
+> ─────────────────────────────────────────────────────────────────────────────
+> MAIN
+> ─────────────────────────────────────────────────────────────────────────────
+>
 
 One `Config` for the whole process, created here at the bottom of the file rather than beside its class.
 

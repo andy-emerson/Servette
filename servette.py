@@ -2356,7 +2356,7 @@ def _cert_days_remaining(cert_path):
 # The interactive terminal interface. Contains only UI logic — all system work
 # is delegated to functions in the SYSTEM section.
 # ─────────────────────────────────────────────────────────────────────────────
-
+#
 # Menus are generated so the right-hand column always begins at the same place
 # (2-space indent + a 22-wide label) as the status and config displays.
 _PAD = 22
@@ -3796,7 +3796,7 @@ def shell():
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
-
+#
 # Config is a module-level singleton, instantiated here (not at its class
 # definition, near the top) because migrating a pre-multi-site flat config
 # calls _domain_from_cert() to backfill the migrated site's domain, and that

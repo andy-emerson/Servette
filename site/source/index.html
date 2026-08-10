@@ -65,15 +65,11 @@
 
 <script>
   /* Set the palette before first paint so the page never flashes the wrong
-     one — the front door's script, verbatim, including its storage key, so
-     a theme chosen on servette.org carries into this page (same origin,
-     same preference). The picker in the topbar takes over from here. */
+     one. Every visit starts on the SYSTEM theme — the viewer remembers no
+     preferences (the picker's choice lasts for the session only). */
   (function () {
-    var pref;
-    try { pref = localStorage.getItem("servette-theme"); } catch (e) {}
-    if (pref !== "light" && pref !== "dark") pref = "system";
-    var dark = pref === "dark" || (pref === "system" && window.matchMedia
-      && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    var dark = window.matchMedia
+      && window.matchMedia("(prefers-color-scheme: dark)").matches;
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
   })();
 </script>
@@ -392,6 +388,7 @@ body > * { position: relative; z-index: 1; }
 /* assistant chat */
 .chat-msgs { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px; }
 .chat-notice { font-size: 11px; font-style: italic; color: var(--text-tertiary); text-align: center; padding: 2px 10px 6px; border-bottom: .5px solid var(--border-faint); flex-shrink: 0; }
+.chat-meta { font-size: 10px; color: var(--text-tertiary); margin-top: 4px; }
 .chat-msg { font-size: 12px; line-height: 1.5; padding: 7px 9px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; max-width: 94%; }
 .chat-msg.user { background: var(--bg-tertiary); color: var(--text-primary); align-self: flex-end; }
 .chat-msg.bot { background: var(--bg-secondary); color: var(--text-primary); align-self: flex-start; }
@@ -520,8 +517,9 @@ body > * { position: relative; z-index: 1; }
   <div id="main-area">
 
     <!-- left activity bar. Every visit starts the same way: both panes
-         collapsed, INIT.md open — the viewer deliberately remembers no
-         window state (only preferences: theme, line numbers). -->
+         collapsed, INIT.md open, system theme, line numbers on — the viewer
+         deliberately remembers nothing about the user except the VRAM
+         measurement (a hardware fact) and that the welcome was shown. -->
     <div id="left-activity-bar" class="activity-bar">
       <button class="activity-bar-btn" data-tab="outline" title="Navigator" data-ico="list"></button>
       <button class="activity-bar-btn" data-tab="assistant" title="AI assistant" data-ico="message-code"></button>
@@ -923,15 +921,13 @@ async function fetchSources(){
  *    it used to compute are now static CSS (see <style> §2).
  * ════════════════════════════════════════════════════════════════════════════ */
 const _themeMedia = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
-function readThemePref(){
-  const pref = lsGet('servette-theme', '');
-  return pref === 'light' || pref === 'dark' ? pref : 'system';
-}
+let _themePref = 'system';   // session-only — the viewer remembers no preferences
+function readThemePref(){ return _themePref; }
 function paintTheme(pref){
   const dark = pref === 'dark' || (pref === 'system' && _themeMedia && _themeMedia.matches);
   document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
 }
-function setThemePref(pref){ lsSet('servette-theme', pref); paintTheme(pref); }
+function setThemePref(pref){ _themePref = pref; paintTheme(pref); }
 function wireThemePicker(){
   const inputs = $$('.theme-picker input');
   const initial = readThemePref();
@@ -1662,12 +1658,16 @@ const SYS_VIEWER = [
   "Answer directly and concretely; quote code in ```python fences. Ground answers in documents you were given; never state what is in a document you have not been given — request it instead.",
 ].join('\n');
 const FETCHABLE = ['README.md', ...FILES];
-// A FETCH directive, or null. Only a reply that BEGINS with the directive
-// counts — prose that merely mentions fetching is an answer, not a request.
+// A FETCH directive, or null. The directive counts when it stands on its OWN
+// LINE anywhere in the reply — small models wrap it in politeness ("I need to
+// access the README. Please fetch it:\nFETCH: README.md" was observed in the
+// field), and a begins-with rule left that dangling as a dead answer. A line
+// must still START with FETCH:, so prose that mentions fetching inline
+// ("I would FETCH: X") stays an answer.
 function parseFetch(text){
-  const first=(text||'').trimStart();
-  if(!/^FETCH\s*:/i.test(first)) return null;
-  const names=first.split('\n')[0].replace(/^FETCH\s*:/i,'')
+  const m=/^[ \t]*FETCH\s*:\s*([^\n]+)/mi.exec(text||'');
+  if(!m) return null;
+  const names=m[1]
     .split(/[,\s]+/).map(s=>s.trim()).filter(Boolean)
     .map(s=>{
       const stem=s.replace(/\.md$/i,'').toUpperCase();
@@ -1729,6 +1729,10 @@ function chatMsgEl(m){
   if(m.role==='user') bodyEl.textContent=m.content;
   else fillBotBody(bodyEl, m.content);
   el.appendChild(bodyEl);
+  // Every reply carries its cost: how long it took, and which documents it
+  // fetched to answer — the honest account of why some answers are slow.
+  if(m.role==='assistant' && m.secs!=null)
+    el.appendChild(elem('div',{class:'chat-meta',text:m.secs+'s'+(m.fetched&&m.fetched.length?' · read '+m.fetched.join(', '):'')}));
   return el;
 }
 function renderAgentMessages(){
@@ -1818,13 +1822,18 @@ async function agentCancel(){
 // so a directive's prefix never flashes into view.)
 async function streamOnce(system, messages, idx, myCancel){
   const convo=[{role:'system',content:system}, ...messages];
-  const chunks=await agent.engine.chat.completions.create({ messages:convo, stream:true });
+  // max_tokens caps decode time — on a slow GPU an uncapped ramble is the
+  // difference between 30 seconds and 3 minutes. ~500 words of answer.
+  const chunks=await agent.engine.chat.completions.create({ messages:convo, stream:true, max_tokens:768 });
   let acc='';
   for await (const chunk of chunks){
     if (myCancel.cancelled) return null;
     acc += (chunk&&chunk.choices&&chunk.choices[0]&&chunk.choices[0].delta&&chunk.choices[0].delta.content)||'';
-    const looksFetch=/^\s*FETCH\b/i.test(acc);
-    if(!looksFetch && (acc.length>=8 || acc.includes('\n'))){
+    // The moment a directive line exists, this reply is machinery: pull any
+    // already-streamed preamble back off the screen and sit on "Thinking…".
+    if(/^[ \t]*FETCH\s*:/mi.test(acc)){
+      if(agent.messages[idx].content){ agent.messages[idx].content=''; renderAgentMessages(); }
+    } else if(acc.length>=8 || acc.includes('\n')){
       agent.messages[idx].content=acc;
       updateStreamingMessage();
     }
@@ -1839,6 +1848,17 @@ async function agentSendLocal(text, history, myCancel){
   const idx=agent.messages.length-1;
   renderAgentMessages();
   const MAX_FETCH_ROUNDS=2;
+  // The thinking clock: live seconds in the pending bubble (so a long prefill
+  // is visibly not a freeze), the total stamped on the reply when it lands.
+  const t0=performance.now();
+  const secsNow=()=>Math.round((performance.now()-t0)/1000);
+  const tick=setInterval(()=>{
+    const m=agent.messages[idx];
+    if(!m || m.content){ return; }
+    const box=$('#agent-messages'); const last=box&&box.lastElementChild;
+    const span=last&&last.querySelector('.out-md span');
+    if(span) span.textContent='Thinking… '+secsNow()+'s';
+  },1000);
   try {
     let docs=null, finalText='';
     for(let round=0;;round++){
@@ -1847,7 +1867,7 @@ async function agentSendLocal(text, history, myCancel){
       if (reply==null) return;   // cancelled
       const req = round<MAX_FETCH_ROUNDS ? parseFetch(reply) : null;
       if (!req){
-        finalText = /^\s*FETCH\b/i.test(reply)
+        finalText = /^[ \t]*FETCH\s*:/mi.test(reply)
           ? "I couldn't settle that within my document budget — try asking about one thing at a time."
           : reply;
         break;
@@ -1855,8 +1875,11 @@ async function agentSendLocal(text, history, myCancel){
       docs=resolveDocs(req);   // bubble stays on "Thinking…"; go again with the documents
     }
     agent.messages[idx].content=finalText||'(empty response)';
+    agent.messages[idx].secs=secsNow();
+    agent.messages[idx].fetched=docs?docs.list.map(d=>d.name):[];
     renderAgentMessages();
-  } catch(e){ if(!myCancel.cancelled){ agent.messages[idx].content='⚠️ '+agentFailText(e); console.error('[WebLLM] generate failed',e); renderAgentMessages(); } }
+  } catch(e){ if(!myCancel.cancelled){ agent.messages[idx].content='⚠️ '+agentFailText(e); agent.messages[idx].secs=secsNow(); console.error('[WebLLM] generate failed',e); renderAgentMessages(); } }
+  finally { clearInterval(tick); }
 }
 async function initAgent(){
   renderAgentTab();
@@ -1897,7 +1920,10 @@ function runSelfTests(){
     ok('FETCH parses', !!f1 && f1.join(',')==='SERVER.md,README.md');
     const f2=parseFetch('  fetch: shell');
     ok('FETCH normalizes case and suffix', !!f2 && f2.join(',')==='SHELL.md');
-    ok('FETCH mid-prose is an answer', parseFetch('I would FETCH: SERVER.md if I could.')===null);
+    // observed in the field: the directive wrapped in politeness, on its own line
+    const f3=parseFetch('To answer accurately, I need the README. Please fetch it:\nFETCH: README.md');
+    ok('FETCH after preamble parses', !!f3 && f3.join(',')==='README.md');
+    ok('FETCH inline in prose is an answer', parseFetch('I would FETCH: SERVER.md if I could.')===null);
     ok('FETCH unknown name → null', parseFetch('FETCH: nonsense')===null);
   } catch(e){ ok('FETCH parser',false,e.message); }
   // the call-map extractor — pure function over a synthetic literate doc
@@ -2067,7 +2093,7 @@ function wire(){
   $('#chat-copy').onclick=copyChat;
   $('#st-agent').onclick=()=>openTab('assistant');
   const ln=$('#opt-linenums'); ln.checked=nb.opts.lineNumbers;
-  ln.onchange=()=>{ nb.opts.lineNumbers=ln.checked; lsSet('servette-src:linenums', ln.checked?'1':'0'); renderNotebook(); };
+  ln.onchange=()=>{ nb.opts.lineNumbers=ln.checked; renderNotebook(); };   // session-only
   setupLeftPane(); setupRightPane(); wireActivityBars();
   layoutRightPane();
   $$('#right-activity-bar .activity-bar-btn').forEach(btn=>{
@@ -2078,7 +2104,7 @@ function wire(){
 
 async function boot(){
   wireWelcome();   // first — nothing that could fail later may eat the welcome
-  nb.opts.lineNumbers = lsGet('servette-src:linenums','0')==='1';
+  nb.opts.lineNumbers = true;   // the default; session-only, like every preference here
   const ref=$('#ref-label');
   ref.textContent='src @ '+REF;
   ref.href=`https://github.com/${REPO}/tree/${REF}/src`;

@@ -1618,11 +1618,19 @@ def run_dispatch_tests(s):
               os.path.isfile(os.path.join(dest, "sub", "page.html")))
 
         # Pre-PEP-706 interpreters (e.g. Debian 12's 3.11.2) have no
-        # extractall(filter=) — simulate one by hiding data_filter and prove
-        # both that extraction still works and that the hand-rolled guards
-        # still reject traversal without the library's help.
-        saved_filter = s.tarfile.data_filter
-        del s.tarfile.data_filter
+        # extractall(filter=) — simulate one and prove both that extraction
+        # still works and that the hand-rolled guards still reject traversal
+        # without the library's help. The simulation is a proxy module that
+        # hides data_filter from servette's probe while delegating everything
+        # else — deleting the real attribute would break 3.14's extractall,
+        # whose default-filter path resolves the module global internally.
+        class _PrePEP706Tarfile:
+            def __getattr__(self, name):
+                if name == "data_filter":
+                    raise AttributeError(name)
+                return getattr(tarfile, name)
+        saved_mod = s.tarfile
+        s.tarfile = _PrePEP706Tarfile()
         try:
             dest_nf = os.path.join(extract_root, "nofilter")
             s._extract_bundle(good, dest_nf)
@@ -1637,7 +1645,7 @@ def run_dispatch_tests(s):
             check("Traversal still rejected without data_filter", raised and
                   not os.path.exists(os.path.join(extract_root, "evil2.txt")))
         finally:
-            s.tarfile.data_filter = saved_filter
+            s.tarfile = saved_mod
 
         traversal = make_tar_gz([("../evil.txt", "pwned")])
         dest2 = os.path.join(extract_root, "traversal")

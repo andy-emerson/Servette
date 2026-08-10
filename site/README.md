@@ -12,6 +12,8 @@ One rule shapes this folder: **one subdomain ↔ one self-contained directory, a
 | - | - | - |
 | `index.html` + `assets/` | servette.org | the project page: what Servette is, how it compares, how to use it, how it is built |
 | `demo/index.html` | servette.org/demo/ and demo.servette.org | the self-test page — also the `demo.html` release asset every user's setup receives |
+| `source/index.html` | servette.org/source/ and source.servette.org | a read-only literate view of `src/*.md`, with an optional in-browser AI reading assistant |
+| `publish/` | nothing yet | reserved for the client-side publish tool planned in [#42](https://github.com/andy-emerson/Servette/issues/42) — see its own README |
 
 ## The demo page
 
@@ -19,4 +21,10 @@ One rule shapes this folder: **one subdomain ↔ one self-contained directory, a
 
 It ships with every GitHub release as the signed `demo.html` asset, and `servette.py` writes it into an empty site as `index.html` — the page a fresh Servette serves before its operator publishes anything. Its `servette:demo` marker comment is how updates tell the placeholder from an operator's own page; the marker's own text explains the rule.
 
-Both pages are self-contained: no build step, and nothing to install.
+## The source viewer
+
+`source/index.html` renders the authored `src/*.md` files as read-only notebook cells, fetched straight from GitHub at render time (`?ref=` picks a branch or tag; the parameter is validated and pinned to this repository). It began as the notebook interface Servette was written in — [andy-emerson/notebook](https://github.com/andy-emerson/notebook) — pared down by removing everything that edits, so what remains is the reading half of the real tool: file navigation and search, a rendered preview, a call map of the open file's functions, and an optional reading assistant. The assistant runs entirely in the visitor's browser (WebLLM over WebGPU), answers in the first person as Servette, and fetches the source documents each question needs; nothing typed there leaves the machine. The page remembers nothing about a visitor except a measured VRAM figure (a hardware fact, needed to size the model's context window) and that the welcome dialog was shown.
+
+## Dependencies
+
+No page has a build step. The front door and demo load nothing from third parties. The source viewer loads its libraries (markdown rendering, syntax highlighting, WebLLM) from CDNs and degrades gracefully without them. The reserved `publish/` page will be allowed no third-party code at all — it will handle a signing key; the reasoning is in its README.

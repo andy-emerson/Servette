@@ -570,7 +570,8 @@ body > * { position: relative; z-index: 1; }
 
     <div class="pane-resizer" id="right-resizer" style="display:none"></div>
 
-    <!-- right pane — panels toggle independently and stack, like the left -->
+    <!-- right pane — panels toggle independently and stack (unlike the
+         left's exclusive tabs) -->
     <div id="right-pane" class="collapsed">
       <div class="right-panel" id="rpanel-preview" data-right-tab="preview">
         <div class="rp-header"><span>Preview</span></div>
@@ -907,9 +908,9 @@ async function fetchSources(){
 
 /* ════════════════════════════════════════════════════════════════════════════
  * 4. THEME — the front door's picker, ported: preference is one of
- *    light / dark / system (stored under the front door's own key, so the
- *    choice is shared across servette.org); data-theme only ever gets the
- *    resolved colour. Under "system" the page keeps listening, so a laptop
+ *    light / dark / system, session-only (the fresh-start rule — every
+ *    visit begins on SYSTEM); data-theme only ever gets the resolved
+ *    colour. Under "system" the page keeps listening, so a laptop
  *    flipping to dark at sunset moves this page with it. The pre-paint
  *    script in <head> applied the palette before first render; this takes
  *    over from there. Replaces the shell's Paper × Ink engine — the tokens

@@ -1652,9 +1652,10 @@ const SYS_VIEWER = [
   "- SYSTEM.md — the environment: venv bootstrap, server lifecycle, certificates and the ACME client, systemd provisioning",
   "- SHELL.md — the interactive terminal interface: menus, config wizard, status displays",
   "- MAIN.md — the entry point",
-  "To request documents, reply with ONLY one line and nothing else:",
+  "FIRST decide whether the message needs a document. Pure conversation — greetings, thanks, small talk — gets a direct reply with NO request; every fetch makes the reader wait. But ANY question about Servette needs its document: the catalog above only tells you WHICH document to request — it is never itself enough to answer from. If you have not been given the document that holds the answer, request it.",
+  "When you do need documents, reply with ONLY one line and nothing else:",
   "FETCH: name, name",
-  "The reader never sees that line; the same question comes back with those documents attached. Request only what the question needs — documents are large and cost time.",
+  "The reader never sees that line; the same question comes back with those documents attached. Request only what the question needs.",
   "Answer directly and concretely; quote code in ```python fences. Ground answers in documents you were given; never state what is in a document you have not been given — request it instead.",
 ].join('\n');
 const FETCHABLE = ['README.md', ...FILES];
@@ -1675,6 +1676,18 @@ function parseFetch(text){
     })
     .filter(Boolean);
   return names.length ? [...new Set(names)] : null;
+}
+// Which documents does the reader's message NAME? Matched conservatively —
+// the uppercase stem (SYSTEM) or any case with the .md suffix — because bare
+// lowercase "server"/"shell"/"main" are ordinary English. A named document is
+// pre-attached to round 1 mechanically: the field showed the model answering
+// "What does SYSTEM do?" from the catalog line instead of fetching, and no
+// judgment is needed when the reader already said which file they mean.
+function namedDocs(text){
+  return FETCHABLE.filter(n=>{
+    const stem=n.replace(/\.md$/,'');
+    return new RegExp('\\b'+stem+'\\b').test(text) || new RegExp('\\b'+stem+'\\.md\\b','i').test(text);
+  });
 }
 // Resolve requested names to contents under a byte budget (~22k tokens):
 // requested order wins, the rest is omitted by name so the model knows.
@@ -1848,6 +1861,9 @@ async function agentSendLocal(text, history, myCancel){
   const idx=agent.messages.length-1;
   renderAgentMessages();
   const MAX_FETCH_ROUNDS=2;
+  // Documents the reader named are attached up front — no judgment round.
+  const named=namedDocs(text);
+  let docs=named.length ? resolveDocs(named) : null;
   // The thinking clock: live seconds in the pending bubble (so a long prefill
   // is visibly not a freeze), the total stamped on the reply when it lands.
   const t0=performance.now();
@@ -1860,7 +1876,7 @@ async function agentSendLocal(text, history, myCancel){
     if(span) span.textContent='Thinking… '+secsNow()+'s';
   },1000);
   try {
-    let docs=null, finalText='';
+    let finalText='';
     for(let round=0;;round++){
       const { system, messages } = assembleSight(text, history, docs, MAX_FETCH_ROUNDS-round);
       const reply=await streamOnce(system, messages, idx, myCancel);
@@ -1872,7 +1888,9 @@ async function agentSendLocal(text, history, myCancel){
           : reply;
         break;
       }
-      docs=resolveDocs(req);   // bubble stays on "Thinking…"; go again with the documents
+      // Merge with anything already attached (pre-attached named documents
+      // must survive a follow-up fetch); bubble stays on "Thinking…".
+      docs=resolveDocs([...new Set([...(docs?docs.list.map(d=>d.name):[]), ...req])]);
     }
     agent.messages[idx].content=finalText||'(empty response)';
     agent.messages[idx].secs=secsNow();
@@ -1925,6 +1943,10 @@ function runSelfTests(){
     ok('FETCH after preamble parses', !!f3 && f3.join(',')==='README.md');
     ok('FETCH inline in prose is an answer', parseFetch('I would FETCH: SERVER.md if I could.')===null);
     ok('FETCH unknown name → null', parseFetch('FETCH: nonsense')===null);
+    // named-document pre-attach — conservative matching, like the old interceptor's
+    ok('named: uppercase stem', namedDocs('What does SYSTEM do?').join(',')==='SYSTEM.md');
+    ok('named: lowercase bare stem passes', namedDocs('what does the system do?').length===0);
+    ok('named: .md any case', namedDocs('is shell.md big?').join(',')==='SHELL.md');
   } catch(e){ ok('FETCH parser',false,e.message); }
   // the call-map extractor — pure function over a synthetic literate doc
   try {

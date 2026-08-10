@@ -64,7 +64,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 
 ## Get started
 
-You need a Linux machine on the internet (Ubuntu 22.04+ or Raspberry Pi OS, Python 3.11+, SSH access) and your site files. Getting the machine is the same as for any site and isn't Servette-specific; two common shapes follow, then setup — which is identical everywhere.
+You need a Linux machine on the internet (Ubuntu 22.04+, Debian 12+, or Raspberry Pi OS; Python 3.11+; SSH access) and your site files. (macOS works in session mode — serving, certificates, and the shell, with no boot-persistent service; production deployment targets Linux.) Getting the machine is the same as for any site and isn't Servette-specific; two common shapes follow, then setup — which is identical everywhere.
 
 ### Deploy on a cloud VPS (e.g. AWS Lightsail)
 

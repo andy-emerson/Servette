@@ -4,18 +4,9 @@
 
 *Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-> ─────────────────────────────────────────────────────────────────────────────
-> SERVER
->
-> Handles all incoming HTTP(S) requests. Contains config, rate limiting, the file
-> cache, the request handler, and the threaded HTTP servers (HTTPS + port-80 redirect).
-> ─────────────────────────────────────────────────────────────────────────────
-
 ## Config
 
 ```python
-
-
 # ── Config ────────────────────────────────────────────────────────────────────
 
 

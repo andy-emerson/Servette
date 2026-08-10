@@ -4,11 +4,6 @@
 
 *Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-> ─────────────────────────────────────────────────────────────────────────────
-> MAIN
-> ─────────────────────────────────────────────────────────────────────────────
->
-
 One `Config` for the whole process, created here at the bottom of the file rather than beside its class.
 
 > Config is a module-level singleton, instantiated here (not at its class

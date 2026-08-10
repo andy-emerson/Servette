@@ -68,14 +68,6 @@ _DEFAULT_CERT_FILE = os.path.join(_DEFAULT_CERT_DIR, "cert.pem")
 _DEFAULT_KEY_FILE  = os.path.join(_DEFAULT_CERT_DIR, "key.pem")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SERVER
-#
-# Handles all incoming HTTP(S) requests. Contains config, rate limiting, the file
-# cache, the request handler, and the threaded HTTP servers (HTTPS + port-80 redirect).
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 # ── Config ────────────────────────────────────────────────────────────────────
 
 
@@ -1212,14 +1204,6 @@ class _TLSThreadingHTTPServer(_CappedThreadingHTTPServer):
         # socket timeout) rather than doing it here on the single accept loop.
         return self._ssl_context.wrap_socket(sock, server_side=True,
                                              do_handshake_on_connect=False), addr
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SYSTEM
-#
-# Manages the server's environment: bootstrapping the Python runtime, server
-# lifecycle, certificate management, and systemd service integration.
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
@@ -2359,13 +2343,6 @@ def _cert_days_remaining(cert_path):
     return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SHELL
-#
-# The interactive terminal interface. Contains only UI logic — all system work
-# is delegated to functions in the SYSTEM section.
-# ─────────────────────────────────────────────────────────────────────────────
-#
 # Menus are generated so the right-hand column always begins at the same place
 # (2-space indent + a 22-wide label) as the status and config displays.
 _PAD = 22
@@ -3818,10 +3795,6 @@ def shell():
             print(f"Unknown command: {cmd}. Type 'help' for a list of commands.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────────────────────────────
-#
 # Config is a module-level singleton, instantiated here (not at its class
 # definition, near the top) because migrating a pre-multi-site flat config
 # calls _domain_from_cert() to backfill the migrated site's domain, and that

@@ -607,6 +607,7 @@ body > * { position: relative; z-index: 1; }
     <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
     <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files), the assistant, and Settings at the bottom — one panel at a time. On the right: the Preview pane (the open file as one plain rendered document) and the Call Map (the open file's functions and who calls whom — click a function to jump to it). Click an icon to open or close its panel. The viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
     <p>There is also an optional <strong>reading assistant</strong> — Servette itself, answering for its own code. It runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine), and because the model is yours, the tokens are too: ask Servette about Servette as much as you like, with no accounts, no API keys, and no limits. Set it up in Settings → Agentic Reading; it reads whichever source files your question needs.</p>
+    <p id="welcome-build" style="font-size:11px;color:var(--text-tertiary);margin-top:14px"></p>
   </div>
 </dialog>
 
@@ -856,6 +857,12 @@ function refreshMarkdownCells(){
  *    validated (path-safe charset, no '..' segment) and pinned to REPO so a
  *    crafted link cannot fetch outside this repo's src/.
  * ════════════════════════════════════════════════════════════════════════════ */
+// Bumped on every viewer change. The topbar's "src @ <ref>" names the ref the
+// CELLS were fetched from — it says nothing about which index.html is being
+// served. This stamp does: a stale deployment showed old behavior for four
+// review rounds while reading as current, because nothing on the page said
+// which viewer it was.
+const VIEWER_BUILD = '2026-08-10.1';
 const REPO  = 'andy-emerson/Servette';
 const FILES = ['INIT.md', 'SERVER.md', 'SYSTEM.md', 'SHELL.md', 'MAIN.md'];   // build.py order
 const _refParam = new URLSearchParams(location.search).get('ref') || 'main';
@@ -2293,6 +2300,9 @@ function wire(){
 
 async function boot(){
   wireWelcome();   // first — nothing that could fail later may eat the welcome
+  console.log('[viewer] build '+VIEWER_BUILD);
+  const src=$('#about-open'); if(src) src.title='About this viewer — build '+VIEWER_BUILD;
+  const wb=$('#welcome-build'); if(wb) wb.textContent='Viewer build '+VIEWER_BUILD+' — if the page misbehaves, compare this against the repository’s current build before anything else.';
   nb.opts.lineNumbers = true;   // the default; session-only, like every preference here
   const ref=$('#ref-label');
   ref.textContent='src @ '+REF;

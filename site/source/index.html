@@ -37,7 +37,7 @@
   <style>  CSS, numbered as in the shell (removed sections keep their gaps):
     1 Base & reset   2 Theme variables   3 Layout   4 Topbar   5 Status bar
     6 Notebook + cells   7 Panels (left pane)   8 Right pane (Preview)
-    9 Markdown output   10 Toast
+    9 Markdown output   10 Toast + welcome dialog
   <script> JS:
     0 Icons   1 Doc model (parse/serialize)   2 Markdown   3 Sources (fetch)
     4 Theme   5 CodeMirror   6 Cell DOM   6c Preview
@@ -211,7 +211,8 @@ body > * { position: relative; z-index: 1; }
 .logo .cursor { color: inherit; animation: blink 1.1s steps(1) infinite; }
 @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .logo .cursor { animation: none; } }
-.topbar-logo .src-tag { font-family: var(--font-mono); font-size: 12px; color: var(--acc-code); border: 1px solid color-mix(in srgb, var(--acc-code) 35%, transparent); border-radius: 99px; padding: 2px 9px; }
+.topbar-logo .src-tag { font-family: var(--font-mono); font-size: 12px; color: var(--acc-code); background: none; border: 1px solid color-mix(in srgb, var(--acc-code) 35%, transparent); border-radius: 99px; padding: 2px 9px; cursor: pointer; }
+.topbar-logo .src-tag:hover { background: color-mix(in srgb, var(--acc-code) 12%, transparent); }
 .topbar-sep { flex: 1; }
 .tb-group { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .tb-group-btns { display: flex; align-items: center; gap: 2px; }
@@ -445,8 +446,22 @@ body > * { position: relative; z-index: 1; }
 .out-md th { background: var(--bg-secondary); font-weight: 600; }
 
 /* ════════════════════════════════════════════════════════════════════════════
- * 10. TOAST
+ * 10. TOAST + WELCOME DIALOG
  * ════════════════════════════════════════════════════════════════════════════ */
+/* First-visit welcome — the front door's license dialog construction (a native
+   <dialog>, so focus trapping, Esc, and the backdrop come from the browser),
+   on the shell's tokens. Shown once; the src badge in the topbar reopens it. */
+.welcome-dialog { width: min(560px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--border-light); border-radius: 12px; background: var(--bg-primary); color: var(--text-primary); overflow: hidden; flex-direction: column; }
+.welcome-dialog[open] { display: flex; }
+.welcome-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.welcome-dialog__head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 20px; border-bottom: 1px solid var(--border-light); flex: none; }
+.welcome-dialog__head h2 { font-family: var(--font-mono); font-weight: 500; font-size: 16px; margin: 0; }
+.welcome-dialog__close { font: 500 12px/1 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-tertiary); background: none; border: 1px solid var(--border-light); border-radius: 6px; padding: 7px 11px; cursor: pointer; }
+.welcome-dialog__close:hover { color: var(--text-primary); border-color: var(--border-medium); }
+.welcome-dialog__body { padding: 18px 20px; }
+.welcome-dialog__body p { font-size: 13.5px; line-height: 1.65; color: var(--text-secondary); margin: 0 0 12px; }
+.welcome-dialog__body p:last-child { margin-bottom: 0; }
+.welcome-dialog__body strong { color: var(--text-primary); font-weight: 600; }
 .toast { position: fixed; bottom: 38px; left: 50%; transform: translateX(-50%); background: var(--bg-primary); border: .5px solid var(--border-light); border-radius: var(--radius-md); padding: 8px 16px; font-size: 13px; color: var(--text-primary); box-shadow: 0 4px 16px rgba(0,0,0,.16); opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 200; white-space: nowrap; }
 .toast.show { opacity: 1; }
 .toast.err { color: var(--fn-red); border-color: var(--fn-red-border); }  /* failed actions read red; successes stay quiet/neutral */
@@ -460,16 +475,15 @@ body > * { position: relative; z-index: 1; }
   <div class="topbar">
     <div class="topbar-logo">
       <a href="https://servette.org" aria-label="Servette — home"><span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span></a>
-      <span class="src-tag">src</span>
+      <button class="src-tag" id="about-open" title="About this viewer">src</button>
     </div>
     <div class="topbar-sep"></div>
 
     <div class="tb-group">
       <div class="tb-group-btns">
         <button class="tb-btn" id="btn-collapse-all" data-ico="collapse">Collapse</button>
-        <button class="tb-btn" id="btn-tests" data-ico="check">Tests</button>
       </div>
-      <div class="tb-group-label">View</div>
+      <div class="tb-group-label">Cells</div>
     </div>
     <div class="tb-divider"></div>
 
@@ -561,9 +575,19 @@ body > * { position: relative; z-index: 1; }
   <div class="status-bar">
     <span class="status-spacer"></span>
     <span class="status-item status-link" id="st-agent" title="AI assistant">Agent: idle</span>
-    <span class="status-item" id="st-source">Source: loading…</span>
   </div>
 </div>
+
+<dialog class="welcome-dialog" id="welcome-dialog" aria-labelledby="welcome-title">
+  <div class="welcome-dialog__head">
+    <h2 id="welcome-title">About this viewer</h2>
+    <button class="welcome-dialog__close" type="button" id="welcome-close">Close</button>
+  </div>
+  <div class="welcome-dialog__body">
+    <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted. Pick a file in the Navigator, read it as cells here or as a plain document in the Preview pane, and search across all five files from the Navigator's search box.</p>
+    <p>There is also an optional <strong>reading assistant</strong> that runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine). Once you set it up in Settings → Agentic Reading, it can see the file you have open, answer questions about it, and jump you to the exact cell it is talking about.</p>
+  </div>
+</dialog>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
@@ -834,9 +858,9 @@ function lsGet(k,d){ try { const v=localStorage.getItem(k); return v==null?d:v; 
 function lsSet(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
 
 // Fetch every file concurrently. A failed file degrades to an inline error
-// callout in ITS slot — the rest of the document stands.
+// callout in ITS slot — the rest of the document stands; there is no separate
+// status indicator, the callouts are the signal.
 async function fetchSources(){
-  setSource('loading', 'Source: fetching ' + REF + ' …');
   nb.files = await Promise.all(FILES.map(async name => {
     try {
       const res = await fetch(RAW + name);
@@ -853,10 +877,6 @@ async function fetchSources(){
   // value falls back to the first file.
   const saved = lsGet('servette-src:file', null);
   nb.current = saved === '' ? '' : (nb.files.some(f => f.name === saved) ? saved : FILES[0]);
-  const bad = nb.files.filter(f => f.error).length;
-  if (bad === FILES.length) setSource('error', 'Source: ' + REF + ' unreachable');
-  else if (bad)            setSource('error', 'Source: ' + REF + ' · ' + bad + ' file(s) failed');
-  else                     setSource('ready', 'Source: ' + REF + ' · ' + FILES.length + ' files');
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -1212,14 +1232,16 @@ async function agentPickContextWindow(id){
   const allocMB=parseInt(lsGet('servette-src:qwenVramMB',''),10);
   const tier=AGENT_MODELS.find(m=>m.id===id);
   if(!allocMB || !tier || !tier.vramMB) throw new Error('No VRAM allocation — run Measure VRAM in Settings → Agentic Reading first.');
-  let candidate=Math.max(2048, Math.min(32768, Math.round(VRAM_FIGURES_CTX*allocMB/tier.vramMB)));
+  let candidate=Math.max(2048, Math.min(QWEN_MAX_CTX, Math.round(VRAM_FIGURES_CTX*allocMB/tier.vramMB)));
   for(let attempt=0; attempt<4 && candidate>=2048; attempt++){
     try{ await freshReload(candidate); return candidate; }
     catch(e){ console.error('[WebLLM] context_window_size='+candidate+' failed, backing off',e); candidate=Math.floor(candidate*0.7); }
   }
   throw new Error('Could not fit a context window into your '+allocMB+' MB allocation — the VRAM measurement may be stale. Re-measure in Settings → Agentic Reading.');
 }
-// Load/unload the on-disk model into VRAM (the toggle).
+// Load/unload the on-disk model into VRAM (the toggle). A successful
+// activation opens the assistant panel itself — the setup flow should end in
+// the chat, not in a settings row the reader has to know to leave.
 async function agentToggleVram(on){
   if(agent.busyId) return;
   const id=[...agent.installed][0]; if(on && !id) return;
@@ -1235,6 +1257,7 @@ async function agentToggleVram(on){
     }
   } catch(e){ agent.error=agentErr(e); console.error('[WebLLM] vram-toggle failed',e); }
   agent.busyId=null; agent.op=''; agent.progress=''; renderAgentLocal(); renderAgentTab();
+  if(on && agent.activeId){ openTab('assistant'); toast('Qwen is active — ask it about the sources'); }
 }
 // Empirically measures free VRAM by filling GPU buffers in chunks (the
 // documented pushErrorScope('out-of-memory') pattern) until one fails, then
@@ -1299,6 +1322,11 @@ function setAgent(state){ setPill($('#st-agent'), state, 'Agent: '+(state==='loa
 // The context_window_size WebLLM's published vram_required_MB figures are
 // computed at; purely the anchor for scaling an allocation into a window size.
 const VRAM_FIGURES_CTX = 4096;
+// Qwen2.5's architectural maximum window. Both the reload clamp and the
+// slider's token readout use it — on a large GPU the linear estimate can pass
+// this long before the allocation runs out, and a readout that kept counting
+// (~91k tokens on a 64 GB card) would promise a window the model cannot have.
+const QWEN_MAX_CTX = 32768;
 // Upper-end slider reserves, in absolute MB — what they protect (browser/OS
 // variance) costs roughly fixed MB regardless of GPU size.
 const VRAM_RESERVE_WARN   = 512;  // leave less free than this → yellow
@@ -1347,6 +1375,7 @@ function renderAgentLocal(){
   el.appendChild(elem('div',{style:'margin:7px 0 10px;font-size:12px;line-height:1.45;color:var(--text-secondary)',html:gpuStatusHTML()}));
 
   const gpuOk=!!(agent.gpu&&agent.gpu.supported);
+  if(!gpuOk){ syncAgentPill(); return; }   // the status block above already says why nothing follows
   if(agent.vram.resultMB==null && !agent.vram.testing){
     const savedMeas=parseInt(lsGet('servette-src:qwenVramMeasuredMB',''),10);
     if(savedMeas>0) agent.vram.resultMB=savedMeas;
@@ -1356,7 +1385,29 @@ function renderAgentLocal(){
   const active=!!agent.activeId, busy=!!agent.busyId;
   if(agent.error) el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin:0 0 8px;word-break:break-word',text:agent.error}));
 
-  const sel=elem('select',{class:'agent-select','aria-label':'On-disk model'}); sel.disabled=busy||!gpuOk;
+  // The setup is LINEAR — four numbered steps, each enabled by the one
+  // before it, ending in the chat (activation opens it): measure → allocate
+  // → model → activate. No prose needed; the gating is the explanation.
+  const step=(n,label)=>elem('div',{class:'agent-field-label',style:'margin-top:14px',text:n+' · '+label});
+
+  // 1 · Measure VRAM — see measureVram() for why this is an empirical test.
+  {
+    const v=agent.vram;
+    el.appendChild(step(1,'Measure VRAM'));
+    const measureBtn=elem('button',{class:'kv-btn',text:v.testing?'Measuring…':(measured?'Re-measure':'Measure VRAM')});
+    measureBtn.disabled=v.testing||busy;
+    measureBtn.onclick=measureVram;
+    let resultText='';
+    if(v.testing) resultText=v.testedMB+' MB filled so far…';
+    else if(v.resultMB!=null) resultText='~'+v.resultMB+' MB free ('+vramAgeText()+')';
+    else resultText='Start here — nothing below unlocks without it.';
+    el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[measureBtn, elem('span',{class:'kv-desc',id:'vram-result-text',text:resultText})]));
+    if(v.error) el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin-top:4px;word-break:break-word',text:v.error}));
+  }
+
+  // 2 · Allocate (only exists once measured) — slider block appended below.
+  // 3 · Model on disk
+  const sel=elem('select',{class:'agent-select','aria-label':'On-disk model'}); sel.disabled=busy||!measured;
   sel.appendChild(elem('option',{value:'',text:'None'}));
   AGENT_MODELS.forEach(m=>{
     const fits=agentModelFits(m);
@@ -1366,33 +1417,12 @@ function renderAgentLocal(){
   });
   sel.value=onDisk;
   sel.onchange=()=>agentSetDisk(sel.value);
-  const cb=elem('input',{type:'checkbox',class:'switch',title:measured?'Active in VRAM':'Measure VRAM first'}); cb.checked=active; cb.disabled=!gpuOk||busy||!onDisk||!measured;
+  // 4 · Activate
+  const cb=elem('input',{type:'checkbox',class:'switch',title:measured?'Load into VRAM':'Measure VRAM first'}); cb.checked=active; cb.disabled=busy||!onDisk||!measured;
   cb.onchange=()=>agentToggleVram(cb.checked);
-  el.appendChild(elem('div',{class:'agent-row'},[ elem('span',{class:'agent-row-label',text:'Qwen 2.5'}), sel, cb ]));
 
-  if(gpuOk){
-    let status, col='var(--text-tertiary)';
-    if(busy){ status=agentBusyText(); }
-    else if(active){ status='Active in VRAM — ready to chat ('+agent.activeWindowSize+'-token context)'; col='var(--fn-green)'; }
-    else if(onDisk && !measured) status='On disk · measure VRAM below to enable activation';
-    else if(onDisk) status='On disk · toggle to load into VRAM';
-    else status='No model selected';
-    el.appendChild(elem('div',{class:'kv-desc',id:'agent-status-line',style:'margin-top:8px;color:'+col,text:status}));
-  }
-
-  // VRAM budget — see measureVram() for why this is an empirical test.
-  if(gpuOk){
+  {
     const v=agent.vram;
-    const wrap=elem('div',{style:'margin-top:14px'});
-    wrap.appendChild(elem('div',{class:'agent-field-label',text:'VRAM budget'}));
-    const measureBtn=elem('button',{class:'kv-btn',text:v.testing?'Measuring…':'Measure VRAM'});
-    measureBtn.disabled=v.testing||busy;
-    measureBtn.onclick=measureVram;
-    let resultText='';
-    if(v.testing) resultText=v.testedMB+' MB filled so far…';
-    else if(v.resultMB!=null) resultText='~'+v.resultMB+' MB free ('+vramAgeText()+')';
-    wrap.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[measureBtn, elem('span',{class:'kv-desc',id:'vram-result-text',text:resultText})]));
-    if(v.error) wrap.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin-top:4px;word-break:break-word',text:v.error}));
     if(v.resultMB!=null && !v.testing){
       const savedMB=parseInt(lsGet('servette-src:qwenVramMB',''),10);
       const maxMB=Math.max(512, v.resultMB);
@@ -1424,8 +1454,11 @@ function renderAgentLocal(){
         fill.style.width='calc('+(pct*100)+'% - '+(pct*16)+'px)';
         fill.className='vram-track-fill'+(zone?' '+zone:'');
         pctEl.textContent=Math.round(pct*100)+'%';
-        label.textContent=tierOnDisk ? '~'+Math.round(VRAM_FIGURES_CTX*val/tierOnDisk.vramMB).toLocaleString()+' tokens'
-                                     : val+' MB';
+        if(tierOnDisk){
+          const est=Math.round(VRAM_FIGURES_CTX*val/tierOnDisk.vramMB);
+          label.textContent = est>=QWEN_MAX_CTX ? '~'+QWEN_MAX_CTX.toLocaleString()+' tokens (model max)'
+                                                : '~'+est.toLocaleString()+' tokens';
+        } else label.textContent=val+' MB';
         const isSaved=(val===parseInt(lsGet('servette-src:qwenVramMB',''),10));
         setBtn.disabled=(zone==='full')||isSaved;
         setBtn.innerHTML=isSaved?(svg('check')+'Saved'):'Set';
@@ -1434,42 +1467,65 @@ function renderAgentLocal(){
       setBtn.onclick=()=>{ lsSet('servette-src:qwenVramMB', slider.value); toast('VRAM budget set to '+slider.value+' MB'); sync(); };
       sync();
       if(startMB!==savedMB) lsSet('servette-src:qwenVramMB', String(startMB));
-      wrap.appendChild(elem('div',{class:'agent-row-label',style:'margin-top:8px;display:flex;justify-content:space-between'},[
-        elem('span',{text:'Allocate to Qwen'}), pctEl ]));
-      wrap.appendChild(elem('div',{class:'agent-row',style:'margin-top:4px'},[track,label,setBtn]));
+      el.appendChild(elem('div',{class:'agent-field-label',style:'margin-top:14px;display:flex;justify-content:space-between'},[
+        elem('span',{text:'2 · Allocate to Qwen'}), pctEl ]));
+      el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[track,label,setBtn]));
       if(tierOnDisk){
         const anyGreen =(2*tierOnDisk.vramMB)<=(maxMB-VRAM_RESERVE_WARN);
         const anySafe  =tierOnDisk.vramMB<=(maxMB-VRAM_RESERVE_REJECT);
-        if(!anySafe)       wrap.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin-top:5px',text:'No workable allocation — this model does not fit on this machine alongside anything else.'}));
-        else if(!anyGreen) wrap.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-amber);margin-top:5px',text:'No fully safe allocation on this GPU for this model — every position trades context room against headroom.'}));
+        if(!anySafe)       el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin-top:5px',text:'No workable allocation — this model does not fit on this machine alongside anything else.'}));
+        else if(!anyGreen) el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-amber);margin-top:5px',text:'No fully safe allocation on this GPU for this model — every position trades context room against headroom.'}));
       }
-      wrap.appendChild(elem('div',{class:'kv-desc',style:'margin-top:4px',text:'Takes effect next time Qwen is activated in VRAM.'}));
     }
-    el.appendChild(wrap);
+  }
+
+  // 3 · Model on disk — enabled by the measurement; selecting downloads.
+  el.appendChild(step(3,'Model on disk'));
+  el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[ elem('span',{class:'agent-row-label',text:'Qwen 2.5'}), sel ]));
+
+  // 4 · Activate — enabled once a model is on disk; success opens the chat.
+  el.appendChild(step(4,'Activate'));
+  el.appendChild(elem('div',{class:'setting-toggle',style:'margin-top:7px'},[ elem('span',{text:'Load into VRAM and start chatting'}), cb ]));
+
+  {
+    let status, col='var(--text-tertiary)';
+    if(busy){ status=agentBusyText(); }
+    else if(active){ status='Active — ready to chat ('+agent.activeWindowSize+'-token context)'; col='var(--fn-green)'; }
+    else if(onDisk) status='On disk · flip Activate to load it';
+    else if(measured) status='Pick a model to download';
+    else status='Measure VRAM to begin';
+    el.appendChild(elem('div',{class:'kv-desc',id:'agent-status-line',style:'margin-top:10px;color:'+col,text:status}));
+  }
+  if(active){
+    const openBtn=elem('button',{class:'kv-btn commit',style:'margin-top:8px',text:'Open the assistant →'});
+    openBtn.onclick=()=>openTab('assistant');
+    el.appendChild(openBtn);
   }
   syncAgentPill();
 }
 
 /* ── Sight + Hands ─────────────────────────────────────────────────────────
- * Sight is the five authored files plus a per-file cell map (so "SERVER.md
- * cell 3" means the same thing to the reader, the model, and the GOTO hand).
- * Both are stable across turns — the viewer never edits — so all of it rides
- * the system message, before history, where it caches (the shell's
- * sight-only ordering). The only Hands is navigation, via a reply protocol
- * rather than tool-calling: WebLLM's completions API has no tool channel, so
- * the model emits a bare `GOTO <FILE.md> <cell>` line and the viewer
- * executes and strips it. */
+ * Sight is the EXPANDED file — the same rule the notebook DOM and Preview
+ * follow: the agent sees what the reader sees. The full corpus can never be
+ * sight: the five files total ~169 KB ≈ 41k tokens, past even Qwen's 32,768
+ * maximum window (measured: the first question overflowed at 40,998 prompt
+ * tokens). The other four files appear only as the compact cell map (titles
+ * and first lines), enough to know WHERE things are; a GOTO both takes the
+ * reader there and — because it expands that file — switches the agent's own
+ * sight to it on the next turn. The only Hands is navigation, via a reply
+ * protocol rather than tool-calling: WebLLM's completions API has no tool
+ * channel, so the model emits a bare `GOTO <FILE.md> <cell>` line and the
+ * viewer executes and strips it. Sight rides the system message, before
+ * history (the shell's sight-only ordering — stable per file, so it caches
+ * until the reader switches files). */
 const SYS_VIEWER = [
   "You are the reading assistant for Servette's source viewer — a read-only literate notebook over the five authored Markdown files (src/*.md) that generate servette.py.",
-  "The full text of all five files is provided below, plus a cell map numbering each file's cells as the viewer displays them. Ground every answer in these files; if something isn't in them, say so instead of guessing. Quote code in ```python fences.",
+  "You see ONE file in full — the one the reader currently has open — plus a cell map of all five files (each cell's number, kind, and first line). Ground every answer in what you can see; if the answer lives in a file you only see in the map, say which file and offer to take the reader there instead of guessing its contents. Quote code in ```python fences.",
   "You cannot edit anything. Your ONE action: to take the reader to a place in the sources, put a line of exactly this form on its own line in your reply:",
   "GOTO <FILE.md> <cell number>",
   "for example: GOTO SERVER.md 12",
-  "The viewer navigates there and removes the line from your reply. Use at most one GOTO per reply, and only when the reader asks to be shown or taken to something.",
+  "The viewer navigates there, and because that opens the file, you will see it in full on your next turn. Use at most one GOTO per reply, and only when the reader asks to be shown or taken to something (or agrees to be).",
 ].join('\n');
-function sightSources(){
-  return nb.files.map(f=>'── src/'+f.name+' ──\n\n'+(f.raw!=null?f.raw:'(this file failed to load)')).join('\n\n');
-}
 function cellMapAll(){
   return nb.files.map(f=>f.name+':\n'+f.doc.cells.map((c,i)=>{
     const first=(c.code.split('\n').find(l=>l.trim())||'').trim();
@@ -1477,8 +1533,11 @@ function cellMapAll(){
   }).join('\n')).join('\n');
 }
 function assembleSight(priorHistory, text){
-  const state='\n\nThe authored sources (current, at ref '+REF+'):\n\n'+sightSources()+
-              '\n\nCell map — how the viewer numbers each file’s cells:\n'+cellMapAll();
+  const f=currentFile();
+  const open = f
+    ? 'The file the reader has open — src/'+f.name+' (at ref '+REF+'), in full:\n\n'+(f.raw!=null?f.raw:'(this file failed to load)')
+    : 'The reader has no file open right now — every file is folded. You still have the cell map; offer a GOTO to open one.';
+  const state='\n\n'+open+'\n\nCell map — all five files, numbered as the viewer displays them:\n'+cellMapAll();
   return { system: SYS_VIEWER+state, messages:[...priorHistory, {role:'user',content:text}] };
 }
 // GOTO protocol: find a directive line, return it parsed with the text minus
@@ -1751,10 +1810,20 @@ function setPill(el, state, label){
   el.className = 'status-item' + (el.classList.contains('status-link')?' status-link':'') + cls;
   el.textContent = label;
 }
-function setSource(state, label){ setPill($('#st-source'), state, label); }
+// First-visit welcome (and the src badge reopens it). showModal() supplies
+// the focus trap, Esc, and the backdrop; the close event — however reached —
+// records the visit, so it shows itself only once.
+function wireWelcome(){
+  const dlg=$('#welcome-dialog'); if(!dlg || !dlg.showModal) return;
+  $('#about-open').onclick=()=>dlg.showModal();
+  $('#welcome-close').onclick=()=>dlg.close();
+  dlg.addEventListener('click',e=>{ if(e.target===dlg) dlg.close(); });
+  dlg.addEventListener('close',()=>lsSet('servette-src:welcomed','1'));
+  if(lsGet('servette-src:welcomed','0')!=='1') dlg.showModal();
+}
 function wire(){
   $('#btn-collapse-all').onclick=collapseAll;
-  $('#btn-tests').onclick=runSelfTests;
+  wireWelcome();
   wireThemePicker();
   wireSearch();
   $('#chat-clear').onclick=clearChat;
@@ -1783,8 +1852,9 @@ async function boot(){
   renderNotebook();
   loadMarked();
   initAgent();
-  // expose for console / automation (the browser-verify run reads these)
-  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, parseGoto, gotoCellNumber,
+  // expose for console / automation (the browser-verify run reads these; the
+  // self-tests live here too — run NB.runSelfTests() in the console)
+  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, parseGoto, gotoCellNumber, assembleSight,
                 get files(){return nb.files;}, get agent(){return agent;} };
 }
 boot();

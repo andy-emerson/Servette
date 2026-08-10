@@ -216,8 +216,6 @@ body > * { position: relative; z-index: 1; }
 .tb-divider { width: .5px; height: 28px; align-self: center; background: var(--border-faint); margin: 0 4px; }
 .tb-btn { background: none; border: .5px solid var(--border-light); border-radius: var(--radius-md); padding: 6px 10px; font-size: 12px; font-family: var(--font-sans); color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 5px; transition: background .12s, color .12s; white-space: nowrap; }
 .tb-btn:hover { background: var(--bg-secondary); color: var(--text-primary); }
-.tb-btn.icon-only { padding: 6px; }  /* no label inside — the word lives in the group caption below */
-.tb-btn.icon-only svg { width: 15px; height: 15px; }
 .tb-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
 /* Theme picker — three icon radio buttons (sun / system / moon), LoveIDE's
@@ -291,7 +289,6 @@ body > * { position: relative; z-index: 1; }
 .file-row { display: flex; align-items: baseline; gap: 10px; margin: 26px 16px 10px; padding: 0 2px 6px; border-bottom: .5px solid var(--border-light); }
 .file-row:first-child { margin-top: 6px; }
 .file-row .fname { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--text-primary); }
-.file-row .fsub { font-size: 11px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-row a { margin-left: auto; font-size: 11px; color: var(--text-tertiary); text-decoration: none; flex-shrink: 0; }
 .file-row a:hover { color: var(--text-primary); text-decoration: underline; }
 
@@ -309,7 +306,6 @@ body > * { position: relative; z-index: 1; }
 .lv-resizer { height: 7px; flex-shrink: 0; cursor: ns-resize; position: relative; }
 .lv-resizer::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: .5px; background: var(--border-faint); transition: background .15s; }
 .lv-resizer:hover::before, .lv-resizer.dragging::before { background: var(--border-medium); }
-.pane-empty { color: var(--text-tertiary); font-size: 12px; font-style: italic; padding: 12px 14px; }
 /* Centered empty-state for a wholly empty panel/tab (ported from the oracle's .pane-placeholder). */
 .pane-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: 1; min-height: 140px; color: var(--text-tertiary); font-size: 12px; text-align: center; line-height: 1.6; padding: 20px 14px; }
 .pane-placeholder svg { width: 28px; height: 28px; opacity: 0.35; margin-bottom: 4px; }
@@ -340,7 +336,6 @@ body > * { position: relative; z-index: 1; }
 
 /* settings panel — Preferences, Agentic Reading (ported back from the shell) */
 .settings-body { padding: 14px; display: flex; flex-direction: column; gap: 0; }   /* sections self-space via header padding + divider */
-.settings-label { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 7px; }
 .settings-section { border-top: .5px solid var(--border-faint); }
 .settings-section:first-child { border-top: none; }
 .settings-section-header { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-secondary); padding: 12px 0 10px; }
@@ -1380,7 +1375,7 @@ async function agentToggleVram(on){
     }
   } catch(e){ agent.error=agentErr(e); console.error('[WebLLM] vram-toggle failed',e); }
   agent.busyId=null; agent.op=''; agent.progress=''; renderAgentLocal(); renderAgentTab();
-  if(on && agent.activeId){ openTab('assistant'); toast('Servette is ready — ask about the open file'); }
+  if(on && agent.activeId){ openTab('assistant'); toast('Servette is ready — ask it anything about the source'); }
 }
 // Empirically measures free VRAM by filling GPU buffers in chunks (the
 // documented pushErrorScope('out-of-memory') pattern) until one fails, then
@@ -1888,7 +1883,7 @@ function renderAgentTab(){
   }
   body.innerHTML='';
   const msgs=elem('div',{class:'chat-msgs',id:'agent-messages',role:'log','aria-live':'polite','aria-label':'Conversation'});
-  const ta=elem('textarea',{rows:'1',placeholder:'Ask Servette about the open file…',id:'agent-input','aria-label':'Message Servette'});
+  const ta=elem('textarea',{rows:'1',placeholder:'Ask Servette about its source…',id:'agent-input','aria-label':'Message Servette'});
   const send=elem('button',{html:svg(agent.generating?'stop':'send'),title:agent.generating?'Stop':'Send',id:'agent-send'});
   const submit=()=>{ if(!agent.generating){ agentSend(ta.value); ta.value=''; } };
   send.onclick=()=>{ if(agent.generating) agentCancel(); else submit(); };
@@ -2227,14 +2222,13 @@ function wireActivityBars(){
     btn.onclick=()=>toggleLeftTab(btn.dataset.tab);
   });
 }
-// Collapsible Settings sections — header click toggles; collapsed state
-// persists per-section (the shell's convention).
+// Collapsible Settings sections — header click toggles. Session-only: the
+// shell persisted this per-section, but here it is window state and the
+// fresh-start rule applies — every visit opens with both sections expanded.
 function initSettingsSections(){
   $$('#panel-settings .settings-section').forEach(sec=>{
     const head=sec.querySelector('.settings-section-header'); if(!head) return;
-    const key='servette-src:sec:'+sec.dataset.sec;
-    if(lsGet(key,'0')==='1') sec.classList.add('collapsed');
-    head.onclick=()=>{ const c=sec.classList.toggle('collapsed'); lsSet(key, c?'1':'0'); };
+    head.onclick=()=>sec.classList.toggle('collapsed');
   });
 }
 // Status pill (kept from the shell's runtime chrome): idle (gray) ·

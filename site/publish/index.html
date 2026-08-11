@@ -153,6 +153,15 @@
 
     .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 
+    .check-row {
+      display: flex;
+      gap: 0.55rem;
+      align-items: baseline;
+      margin-bottom: 0.9rem;
+      cursor: pointer;
+    }
+    .check-row input { accent-color: #5A8466; cursor: pointer; }
+
     .field-label {
       font-size: 0.7rem;
       letter-spacing: 0.1em;
@@ -295,11 +304,14 @@
     <div class="card-body">
       <div class="btn-row">
         <button class="action" id="btn-dir" type="button">Choose your site's folder</button>
+        <button class="action" id="btn-starter" type="button">No content yet? Start with the demo site</button>
         <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
       </div>
       <p class="hint" id="dir-summary">Pick the folder whose contents should
       become the site — the folder that holds your <b>index.html</b>. Files
-      are read here in the browser; nothing is uploaded anywhere.</p>
+      are read here in the browser; nothing is uploaded anywhere. Or start
+      with the demo site: Servette's self-test page as your front page until
+      you replace it.</p>
       <p class="error hidden" id="dir-error"></p>
     </div>
   </div>
@@ -311,10 +323,17 @@
       <span class="badge badge-dim" id="sign-badge">waiting</span>
     </div>
     <div class="card-body">
+      <label class="check-row hint" style="margin-top:0">
+        <input type="checkbox" id="chk-selftest" checked>
+        <span>include the self-test page at <b>/selftest/</b> — the connection
+        checks the demo page runs, re-runnable on your own domain after every
+        pull</span>
+      </label>
       <div class="btn-row">
         <button class="action primary" id="btn-sign" type="button" disabled>Build &amp; sign bundle</button>
       </div>
       <div id="sign-done" class="hidden">
+        <p class="hint" id="sign-note"></p>
         <div class="field-label">Signed pair</div>
         <div class="btn-row">
           <button class="action" id="btn-dl-bundle" type="button"></button>
@@ -335,12 +354,13 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
   </div><!-- /app -->
 
   <div class="note">
-    Everything above happens inside this tab: the page makes <b>no network
-    requests</b> after loading, and stores nothing in the browser unless you
-    ask it to <b>remember</b> your key — and then only a signing handle that
-    cannot be read back out. It only ever produces files you choose to
-    download — your server pulls content when you run <b>pull</b>, and never
-    accepts a push. Served by
+    Everything above happens inside this tab: the page <b>talks to no other
+    site</b> — its only request is fetching its own self-test page from this
+    same site when a bundle includes it — and it stores nothing in the
+    browser unless you ask it to <b>remember</b> your key, and then only a
+    signing handle that cannot be read back out. It only ever produces files
+    you choose to download — your server pulls content when you run
+    <b>pull</b>, and never accepts a push. Served by
     <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
@@ -587,8 +607,22 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
     pem:     null,   // set only for a key generated this session, until downloaded
     files:   null,   // [{ path, file }]
     folder:  null,   // the picked folder's name, for the bundle's file name
+    starter: false,  // true when publishing the demo starter site instead of a folder
     remembered: false,  // whether the in-memory key is the one resident in IndexedDB
+    selftestHtml: null, // cached self-test page template, fetched from ./selftest/
   };
+
+  // The self-test page lives as its own page beside this one (./selftest/) —
+  // servable and previewable there — and is fetched same-origin when a
+  // bundle wants it. The only request this page ever makes, and it carries
+  // nothing: no key material, no file contents, just a GET for a template
+  // this site already serves.
+  async function selftestTemplate() {
+    if (state.selftestHtml) return state.selftestHtml;
+    const r = await fetch('selftest/', { cache: 'no-store' });
+    if (!r.ok) throw new Error(`could not load the self-test page template (HTTP ${r.status})`);
+    return (state.selftestHtml = await r.text());
+  }
 
   function setBadge(el, cls, text) { el.className = 'badge ' + cls; el.textContent = text; }
   function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
@@ -614,7 +648,7 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
   // Called on every key/folder change: gates the sign button and retires a
   // previously signed pair, whose downloads no longer match the inputs.
   function refreshSignReady() {
-    const ready = !!(state.signKey && state.files && state.files.length);
+    const ready = !!(state.signKey && (state.starter || (state.files && state.files.length)));
     $('btn-sign').disabled = !ready;
     $('sign-done').classList.add('hidden');
     setBadge($('sign-badge'), 'badge-dim', ready ? 'ready' : 'waiting');
@@ -733,8 +767,9 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
         (hidden ? ` (${hidden} hidden entries were excluded).` : '.'));
       return;
     }
-    state.files  = kept;
-    state.folder = all[0].webkitRelativePath.split('/')[0];
+    state.files   = kept;
+    state.starter = false;
+    state.folder  = all[0].webkitRelativePath.split('/')[0];
 
     const total = kept.reduce((n, e) => n + e.file.size, 0);
     const hasIndex = kept.some((e) => e.path === 'index.html');
@@ -749,6 +784,19 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
     refreshSignReady();
   });
 
+  // ── Step 2b: the demo starter site ──
+  $('btn-starter').addEventListener('click', () => {
+    clearError($('dir-error'));
+    state.files   = null;
+    state.starter = true;
+    state.folder  = 'demo-site';
+    $('dir-summary').innerHTML = '<b>demo starter site</b> — Servette\'s ' +
+      'self-test page becomes your front page, until you publish a real ' +
+      'folder over it.';
+    setBadge($('dir-badge'), 'badge-green', '✓ demo starter');
+    refreshSignReady();
+  });
+
   // ── Step 3: sign ──
   $('btn-sign').addEventListener('click', async () => {
     clearError($('sign-error'));
@@ -757,14 +805,39 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
     try {
       const entries = [];
       let total = 0;
-      for (const { path, file } of state.files) {
-        const bytes = new Uint8Array(await file.arrayBuffer());
+      const add = (path, bytes) => {
         total += bytes.length;
         if (total > MAX_BUNDLE_BYTES)
           throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
                           `the server would reject it`);
         entries.push({ path, bytes });
+      };
+
+      // The self-test travels inside the bundle (the #42 ruling): published
+      // to the operator's own origin, it can read what a cross-origin probe
+      // from this page never could. A folder that already has a /selftest/
+      // of its own is the operator's choice — theirs is kept, never replaced.
+      let note;
+      const wantSelftest = $('chk-selftest').checked;
+      if (state.starter) {
+        const tpl = new TextEncoder().encode(await selftestTemplate());
+        add('index.html', tpl);
+        if (wantSelftest) add('selftest/index.html', tpl);
+        note = 'The demo starter site: the self-test page as the front page' +
+               (wantSelftest ? ', and again at /selftest/ for after you replace it.' : '.');
+      } else {
+        for (const { path, file } of state.files)
+          add(path, new Uint8Array(await file.arrayBuffer()));
+        if (!wantSelftest) {
+          note = 'Self-test page not included.';
+        } else if (state.files.some((e) => e.path.split('/')[0] === 'selftest')) {
+          note = 'Your folder has its own /selftest/ — the bundle keeps yours.';
+        } else {
+          add('selftest/index.html', new TextEncoder().encode(await selftestTemplate()));
+          note = 'Self-test page included at /selftest/.';
+        }
       }
+      $('sign-note').textContent = note;
       const gz  = await gzipBytes(buildTar(entries));
       const sig = await signBytes(state.signKey, gz);
 

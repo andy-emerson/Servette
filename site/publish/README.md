@@ -3,10 +3,21 @@
 The client-side publish app from
 [#42](https://github.com/andy-emerson/Servette/issues/42): `index.html`
 builds and signs content bundles entirely in the browser. The operator
-generates or loads an Ed25519 key, picks their site folder, and downloads a
-signed `.tar.gz` + `.sig` pair plus the `publish_key` hex for
-`config > publish`; hosting the pair and running `pull` stay with the
-operator — Servette itself never accepts instructions from the network.
+generates or loads an Ed25519 key, picks their site folder — or starts with
+the demo site if they have no content yet — and downloads a signed
+`.tar.gz` + `.sig` pair plus the `publish_key` hex for `config > publish`;
+hosting the pair and running `pull` stay with the operator — Servette
+itself never accepts instructions from the network.
+
+`selftest/` is the connection self-test as publishable content, the ruling
+that closed #42's post-publish-verification fork: a page on
+`publish.servette.org` cannot read what it probes on the operator's domain
+(cross-origin), so instead the tool folds this page into bundles at
+`/selftest/` — on the operator's own origin it runs the full checks the
+demo page runs, after every `pull`. It carries no `servette:demo` marker
+(published, it is the operator's content; `update` must never touch it),
+and its checks duplicate `site/demo/index.html`'s — there is no build step
+to share them, so a change to either page's checks belongs in both.
 
 Constraints the page is built to, all load-bearing:
 

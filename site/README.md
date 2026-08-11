@@ -2,7 +2,7 @@
 
 This folder is the source of servette.org. It is also the default `serve_dir`, so a development checkout of this repository serves the project's own site — which is exactly how servette.org is hosted.
 
-**Users don't copy this folder.** A user copies `servette.py` alone; setup fetches the demo page from the latest signed release and writes it into their own site folder as `index.html` (see [DESIGN.md](../DESIGN.md)).
+**Users don't copy this folder.** A user copies `servette.py` alone; setup writes the placeholder page embedded in `servette.py` itself into their own site folder as `index.html` (see [DESIGN.md](../DESIGN.md)).
 
 ## Layout
 
@@ -11,7 +11,7 @@ One rule shapes this folder: **one subdomain ↔ one self-contained directory, a
 | Path | Serves | What it is |
 | - | - | - |
 | `index.html` + `assets/` | servette.org | the project page: what Servette is, how it compares, how to use it, how it is built |
-| `demo/index.html` | servette.org/demo/ and demo.servette.org | the self-test page — also the `demo.html` release asset every user's setup receives |
+| `demo/index.html` | servette.org/demo/ and demo.servette.org | the self-test page — the live demo the home page links |
 | `src/index.html` | servette.org/src/ and src.servette.org | a read-only literate view of `src/*.md`, with an optional in-browser AI reading assistant |
 | `pub/index.html` | servette.org/pub/ and pub.servette.org | the client-side publish tool from [#42](https://github.com/andy-emerson/Servette/issues/42) — builds and signs content bundles in the browser |
 | `pub/selftest/index.html` | servette.org/pub/selftest/ | the connection self-test as publishable content — the publish tool folds it into bundles at `/selftest/` |
@@ -20,7 +20,7 @@ One rule shapes this folder: **one subdomain ↔ one self-contained directory, a
 
 `demo/index.html` checks the live connection in the browser and reports it: a green **Verified encrypted** badge over HTTPS, or a red **Not encrypted** warning over plain HTTP. Over HTTPS, the green badge confirms the server, certificate, and HTTPS redirect are working end to end. (With a self-signed certificate the browser warns first; that's expected, and the badge still confirms encryption once you proceed.)
 
-It ships with every GitHub release as the signed `demo.html` asset, and `servette.py` writes it into an empty site as `index.html` — the page a fresh Servette serves before its operator publishes anything. Its `servette:demo` marker comment is how updates tell the placeholder from an operator's own page; the marker's own text explains the rule.
+Since [#70](https://github.com/andy-emerson/Servette/issues/70) it is the website's page alone — the live demo the home page links. It no longer ships with releases: a fresh Servette seeds an empty site with the small placeholder embedded in `servette.py`, and the full self-test reaches an operator's site through the publish tool instead (`pub/selftest/`, whose checks deliberately duplicate this page's).
 
 ## The source viewer
 

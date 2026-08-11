@@ -14,7 +14,9 @@ that closed #42's post-publish-verification fork: a page on
 `pub.servette.org` cannot read what it probes on the operator's domain
 (cross-origin), so instead the tool folds this page into bundles at
 `/selftest/` — on the operator's own origin it runs the full checks the
-demo page runs, after every `pull`. It carries no `servette:demo` marker
+demo page runs, after every `pull`, plus the one check only it can make:
+the version-discovery row (`/.well-known/servette`, password-gated), which
+shows "running vX · backup vY" with the operator's own session. It carries no `servette:demo` marker
 (published, it is the operator's content; `update` must never touch it),
 and its checks duplicate `site/demo/index.html`'s — there is no build step
 to share them, so a change to either page's checks belongs in both.

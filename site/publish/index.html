@@ -255,10 +255,10 @@
           <button class="action" id="btn-load" type="button">Use an existing key file</button>
           <input type="file" id="key-file" accept=".pem,application/x-pem-file" class="hidden">
         </div>
-        <p class="hint">The key lives in this tab's memory for this session
-        only — the page stores nothing in the browser, so closing the tab
-        forgets it. Keep the key file; it is the one credential that can
-        publish to your site.</p>
+        <p class="hint">The key lives in this tab's memory — unless you choose
+        <b>remember</b> once it's loaded, nothing is stored in the browser and
+        closing the tab forgets it. Keep the key file either way; it is the
+        one credential that can publish to your site.</p>
       </div>
       <div id="key-ready" class="hidden">
         <div class="field-label">Public key — paste into <b>config &gt; publish</b> as publish_key</div>
@@ -266,8 +266,15 @@
         <div class="btn-row" style="margin-top:0.75rem">
           <button class="action" id="btn-copy-pub" type="button">Copy public key</button>
           <button class="action hidden" id="btn-save-key" type="button">Download key file</button>
+          <button class="action" id="btn-remember" type="button">Remember in this browser</button>
           <button class="linkish" id="btn-reset-key" type="button">use a different key</button>
+          <button class="linkish hidden" id="btn-forget" type="button">forget this key</button>
         </div>
+        <p class="hint hidden" id="key-remembered-note">This browser now holds
+        the key as a <b>non-extractable</b> signing key: pages on this site can
+        sign with it but cannot read it out — not even this one. It is
+        <span class="warn">not a backup</span> — clearing this browser's site
+        data deletes it, and only the key file restores it.</p>
         <p class="hint hidden" id="key-new-warn"><span class="warn">This key
         exists only in this tab until you download it.</span> The file is a
         standard Ed25519 private key (PKCS#8 PEM, readable by openssl).
@@ -329,9 +336,11 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
 
   <div class="note">
     Everything above happens inside this tab: the page makes <b>no network
-    requests</b> after loading and stores <b>nothing</b> in the browser. It
-    only ever produces files you choose to download — your server pulls
-    content when you run <b>pull</b>, and never accepts a push. Served by
+    requests</b> after loading, and stores nothing in the browser unless you
+    ask it to <b>remember</b> your key — and then only a signing handle that
+    cannot be read back out. It only ever produces files you choose to
+    download — your server pulls content when you run <b>pull</b>, and never
+    accepts a push. Served by
     <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
@@ -539,6 +548,35 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
     return new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, signKey, u8));
   }
 
+  // ── Remembered key (IndexedDB) ────────────────────────────────────────
+  // The opt-in custody layer ruled on #42: the session's CryptoKey can be
+  // kept across visits via structured clone into IndexedDB. Because the key
+  // is non-extractable, what is stored is a handle that can only *sign* —
+  // no script on this origin, this page or an injected one, can ever read
+  // the key material back out. The residual accepted with that ruling: a
+  // compromised page could misuse a remembered key while open, but never
+  // steal it. Not a backup — clearing site data deletes it; the key file
+  // remains the only durable copy.
+
+  function idbStore(mode, op) {
+    return new Promise((resolve, reject) => {
+      const open = indexedDB.open('servette-publish', 1);
+      open.onupgradeneeded = () => open.result.createObjectStore('keys');
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result;
+        const tx = db.transaction('keys', mode);
+        const req = op(tx.objectStore('keys'));
+        tx.oncomplete = () => { db.close(); resolve(req.result); };
+        tx.onerror    = () => { db.close(); reject(tx.error); };
+      };
+    });
+  }
+  const rememberKey = (signKey, pubHex) =>
+    idbStore('readwrite', (s) => s.put({ signKey, pubHex }, 'current'));
+  const recallKey = () => idbStore('readonly',  (s) => s.get('current'));
+  const forgetKey = () => idbStore('readwrite', (s) => s.delete('current'));
+
   /* ════════════════════════════════════════════════════════════════════
      The page.
      ════════════════════════════════════════════════════════════════════ */
@@ -549,6 +587,7 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
     pem:     null,   // set only for a key generated this session, until downloaded
     files:   null,   // [{ path, file }]
     folder:  null,   // the picked folder's name, for the bundle's file name
+    remembered: false,  // whether the in-memory key is the one resident in IndexedDB
   };
 
   function setBadge(el, cls, text) { el.className = 'badge ' + cls; el.textContent = text; }
@@ -582,7 +621,7 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
   }
 
   // ── Step 1: key ──
-  function keyLoaded({ signKey, pubHex, pem }, isNew) {
+  function keyLoaded({ signKey, pubHex, pem }, isNew, remembered = false) {
     state.signKey = signKey;
     state.pubHex  = pubHex;
     state.pem     = pem || null;
@@ -591,9 +630,41 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
     $('pub-hex').textContent = pubHex;
     $('btn-save-key').classList.toggle('hidden', !isNew);
     $('key-new-warn').classList.toggle('hidden', !isNew);
-    setBadge($('key-badge'), 'badge-green', isNew ? '✓ new key in memory' : '✓ key in memory');
+    setRemembered(remembered);
+    setBadge($('key-badge'), 'badge-green',
+             remembered ? '✓ key from this browser'
+                        : isNew ? '✓ new key in memory' : '✓ key in memory');
     refreshSignReady();
   }
+
+  function setRemembered(on) {
+    state.remembered = on;
+    $('btn-remember').classList.toggle('hidden', on);
+    $('btn-forget').classList.toggle('hidden', !on);
+    $('key-remembered-note').classList.toggle('hidden', !on);
+  }
+
+  $('btn-remember').addEventListener('click', async () => {
+    clearError($('key-error'));
+    try {
+      await rememberKey(state.signKey, state.pubHex);
+      setRemembered(true);
+      setBadge($('key-badge'), 'badge-green', '✓ key remembered');
+    } catch (e) {
+      showError($('key-error'), 'This browser refused to store the key: ' + e.message);
+    }
+  });
+
+  $('btn-forget').addEventListener('click', async () => {
+    clearError($('key-error'));
+    try {
+      await forgetKey();
+      setRemembered(false);
+      setBadge($('key-badge'), 'badge-green', '✓ key in memory');
+    } catch (e) {
+      showError($('key-error'), 'Could not remove the stored key: ' + e.message);
+    }
+  });
 
   $('btn-generate').addEventListener('click', async () => {
     clearError($('key-error'));
@@ -718,9 +789,12 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
     $('btn-sign').disabled = false;
   });
 
-  // ── Feature gate ──
+  // ── Feature gate & startup ──
   // The whole pipeline needs Ed25519 and gzip from the browser itself; with
-  // either missing the page says so instead of half-working.
+  // either missing the page says so instead of half-working. A key the
+  // operator chose to remember is recalled after the gate passes; a browser
+  // that refuses IndexedDB (private windows, cleared storage) just starts
+  // with no key, which is the ordinary state.
   (async () => {
     let ok = typeof CompressionStream === 'function';
     if (ok) {
@@ -728,6 +802,12 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
       catch { ok = false; }
     }
     $(ok ? 'app' : 'unsupported').classList.remove('hidden');
+    if (ok) {
+      try {
+        const saved = await recallKey();
+        if (saved && saved.signKey && saved.pubHex) keyLoaded(saved, false, true);
+      } catch { /* no stored key is the normal case, not an error */ }
+    }
   })();
 </script>
 

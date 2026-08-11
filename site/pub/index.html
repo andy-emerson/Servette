@@ -340,9 +340,15 @@
           <button class="action" id="btn-dl-sig" type="button"></button>
         </div>
         <div class="field-label">Then, wherever the pair is hosted</div>
-        <p class="hint" style="margin-top:0">Upload both files side by side —
-        any static host works — so that the signature resolves at the bundle's
-        own URL plus <b>.sig</b>. Then, in your Servette's shell:</p>
+        <p class="hint" style="margin-top:0">Upload both files side by side,
+        so the signature resolves at the bundle's URL plus <b>.sig</b>. Any
+        HTTPS host you can put two files on works: a GitHub release or Pages
+        branch, an object store (S3, R2, B2), any static host — even a corner
+        of an existing site. Signing means the host never needs your trust:
+        your server verifies every byte against your key, so the worst a bad
+        host can do is fail to deliver. Keep the URL stable — <b>pull</b>
+        always fetches the same address, so publishing again means replacing
+        the two files where they are. Then, in your Servette's shell:</p>
         <pre class="shell">config publish   <span class="c"># paste the bundle URL and the public key above</span>
 pull             <span class="c"># fetch, verify against your key, swap the content in</span>
 restore-site     <span class="c"># one step back, if you ever want the previous content</span></pre>

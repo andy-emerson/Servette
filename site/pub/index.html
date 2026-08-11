@@ -478,10 +478,16 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
   async function generateKeypair() {
     const kp   = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
     const der  = new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey));
-    const pem  = pemEncode(der);                            // v1 PKCS#8, as exported
     const seed = parsePkcs8(der);
-    const key  = await importSeed(seed);                    // non-extractable from here on
-    seed.fill(0); der.fill(0);
+    // The file is built from the normalized v1 structure, not the browser's
+    // raw export — the openssl/cryptography interop is guaranteed by
+    // construction, not by whichever DER form this browser happens to emit.
+    const v1 = new Uint8Array(48);
+    v1.set(PKCS8_V1_PREFIX, 0);
+    v1.set(seed, 16);
+    const pem = pemEncode(v1);
+    const key = await importSeed(seed);                     // non-extractable from here on
+    seed.fill(0); der.fill(0); v1.fill(0);
     return { ...key, pem };
   }
 
@@ -625,7 +631,14 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
   // this site already serves.
   async function selftestTemplate() {
     if (state.selftestHtml) return state.selftestHtml;
-    const r = await fetch('selftest/', { cache: 'no-store' });
+    // Resolved against this page's own directory, not the URL as loaded:
+    // Servette serves a directory index without redirecting to the slash
+    // form, so at servette.org/pub a naive relative 'selftest/' would
+    // resolve to /selftest/ at the site root and 404.
+    let dir = location.pathname;
+    if (dir.endsWith('/index.html')) dir = dir.slice(0, -'index.html'.length);
+    if (!dir.endsWith('/')) dir += '/';
+    const r = await fetch(dir + 'selftest/', { cache: 'no-store' });
     if (!r.ok) throw new Error(`could not load the self-test page template (HTTP ${r.status})`);
     return (state.selftestHtml = await r.text());
   }
@@ -734,9 +747,16 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
   });
 
   $('btn-copy-pub').addEventListener('click', async () => {
-    await navigator.clipboard.writeText(state.pubHex);
-    $('btn-copy-pub').textContent = 'Copied ✓';
-    setTimeout(() => { $('btn-copy-pub').textContent = 'Copy public key'; }, 1500);
+    clearError($('key-error'));
+    try {
+      await navigator.clipboard.writeText(state.pubHex);
+      $('btn-copy-pub').textContent = 'Copied ✓';
+      setTimeout(() => { $('btn-copy-pub').textContent = 'Copy public key'; }, 1500);
+    } catch (e) {
+      // A denied clipboard must not look like a successful copy — the hex
+      // box itself stays selectable as the fallback.
+      showError($('key-error'), 'The browser refused the copy — select the key text itself.');
+    }
   });
 
   $('btn-reset-key').addEventListener('click', () => {
@@ -836,8 +856,12 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
           add(path, new Uint8Array(await file.arrayBuffer()));
         if (!wantSelftest) {
           note = 'Self-test page not included.';
-        } else if (state.files.some((e) => e.path.split('/')[0] === 'selftest')) {
-          note = 'Your folder has its own /selftest/ — the bundle keeps yours.';
+        } else if (state.files.some((e) => e.path === 'selftest' || e.path.startsWith('selftest/'))) {
+          // Either shape — a selftest/ directory or a plain file named
+          // selftest — already claims the path; injecting alongside a plain
+          // file would even put a file and a directory of the same name in
+          // one tar, which the server rightly rejects at extraction.
+          note = 'Your folder already claims /selftest/ — the bundle keeps yours.';
         } else {
           add('selftest/index.html', new TextEncoder().encode(await selftestTemplate()));
           note = 'Self-test page included at /selftest/.';

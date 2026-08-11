@@ -3,8 +3,8 @@
 
 This is the release procedure's signing step made runnable (see DESIGN.md,
 "Releasing"): it refuses to sign a tree where servette.py has drifted from
-src/, signs the two release artifacts with the maintainer's private key, and
-self-checks every signature against the public key pinned inside servette.py
+src/, signs the release artifact with the maintainer's private key, and
+self-checks the signature against the public key pinned inside servette.py
 — so signing with the wrong key file fails here, not on an operator's box.
 
 It runs locally, where the private key lives. The key never enters CI; CI
@@ -14,9 +14,9 @@ Usage:
     .servette-env/bin/python3 src/release.py            # key: ./servette_signing.pem
     .servette-env/bin/python3 src/release.py --key PATH
 
-Output: dist/ containing servette.py, servette.py.sig, demo.html,
-demo.html.sig — attach all four to the GitHub release. dist/ and *.sig are
-gitignored; nothing this tool writes can be committed.
+Output: dist/ containing servette.py and servette.py.sig — attach both to
+the GitHub release. dist/ and *.sig are gitignored; nothing this tool
+writes can be committed.
 """
 
 import argparse
@@ -29,26 +29,18 @@ import build  # sibling module: the build/--check logic this tool refuses to byp
 
 _PUBKEY_RE  = re.compile(r"""^_SIGNING_PUBLIC_KEY\s*=\s*['"]([0-9a-f]{64})['"]""", re.M)
 _VERSION_RE = re.compile(r"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
-_DEMO_MARKER = "servette:demo"
 
 
 def prepare(repo_dir, key_path, out_dir):
-    """Sign the release artifacts into out_dir. Returns the version string.
-    Raises SystemExit with a message on any refusal — drift, missing marker,
-    wrong key — so the caller can't half-release."""
+    """Sign the release artifact into out_dir. Returns the version string.
+    Raises SystemExit with a message on any refusal — drift, wrong key — so
+    the caller can't half-release."""
     servette_path = os.path.join(repo_dir, "servette.py")
-    demo_path     = os.path.join(repo_dir, "site", "demo", "index.html")
 
     with open(servette_path, "rb") as f:
         source = f.read()
     if build.build(os.path.join(repo_dir, "src")).encode() != source:
         raise SystemExit("refused: servette.py has drifted from src/ — run src/build.py first.")
-
-    with open(demo_path, "rb") as f:
-        demo = f.read()
-    if _DEMO_MARKER.encode() not in demo:
-        raise SystemExit(f"refused: {demo_path} lacks the {_DEMO_MARKER} marker — "
-                         "a marker-less demo can never be refreshed on an operator's box.")
 
     text    = source.decode()
     pinned  = _PUBKEY_RE.search(text)
@@ -75,10 +67,8 @@ def prepare(repo_dir, key_path, out_dir):
 
     os.makedirs(out_dir, exist_ok=True)
     shutil.copyfile(servette_path, os.path.join(out_dir, "servette.py"))
-    shutil.copyfile(demo_path,     os.path.join(out_dir, "demo.html"))
-    for name, data in (("servette.py", source), ("demo.html", demo)):
-        with open(os.path.join(out_dir, name + ".sig"), "wb") as f:
-            f.write(key.sign(data))
+    with open(os.path.join(out_dir, "servette.py.sig"), "wb") as f:
+        f.write(key.sign(source))
     return version.group(1)
 
 
@@ -94,9 +84,9 @@ def main(argv=None):
 
     version = prepare(repo_dir, args.key, args.out)
     print(f"Signed release assets for {version} in {args.out}:")
-    for name in ("servette.py", "servette.py.sig", "demo.html", "demo.html.sig"):
+    for name in ("servette.py", "servette.py.sig"):
         print(f"  {name}")
-    print("Draft the GitHub release, attach all four, wait for the verification "
+    print("Draft the GitHub release, attach both, wait for the verification "
           "workflow to pass, then publish.")
     return 0
 

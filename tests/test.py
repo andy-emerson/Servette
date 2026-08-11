@@ -798,7 +798,6 @@ serve_dir = "b"
 
     fix = tempfile.mkdtemp()
     os.makedirs(os.path.join(fix, "src"))
-    os.makedirs(os.path.join(fix, "site", "demo"))
     fence = "```python"
     init_md = (f"{fence}\n__version__ = \"9.9.9\"\n"
                f"_SIGNING_PUBLIC_KEY = \"{rpub_hex}\"\n```\n")
@@ -810,8 +809,6 @@ serve_dir = "b"
     import build as _build_mod
     with open(os.path.join(fix, "servette.py"), "w") as f:
         f.write(_build_mod.build(os.path.join(fix, "src")))
-    with open(os.path.join(fix, "site", "demo", "index.html"), "wb") as f:
-        f.write(b"<!doctype html><!-- servette:demo fixture -->page")
     key_pem = os.path.join(fix, "key.pem")
     with open(key_pem, "wb") as f:
         f.write(rkey.private_bytes(_Enc.PEM, _PrivF.PKCS8, _NoEnc()))
@@ -819,17 +816,16 @@ serve_dir = "b"
 
     version = release.prepare(fix, key_pem, out)
     check("prepare returns the fixture version", version == "9.9.9")
-    check("dist holds all four assets",
+    check("dist holds both assets",
           all(os.path.isfile(os.path.join(out, n)) for n in
-              ("servette.py", "servette.py.sig", "demo.html", "demo.html.sig")))
+              ("servette.py", "servette.py.sig")))
     sig_ok = True
     try:
-        for n in ("servette.py", "demo.html"):
-            rkey.public_key().verify(open(os.path.join(out, n + ".sig"), "rb").read(),
-                                     open(os.path.join(out, n), "rb").read())
+        rkey.public_key().verify(open(os.path.join(out, "servette.py.sig"), "rb").read(),
+                                 open(os.path.join(out, "servette.py"), "rb").read())
     except Exception:
         sig_ok = False
-    check("Both signatures verify against the pinned key", sig_ok)
+    check("The signature verifies against the pinned key", sig_ok)
 
     with open(os.path.join(fix, "servette.py"), "a") as f:
         f.write("# drift\n")
@@ -852,15 +848,6 @@ serve_dir = "b"
         refused = str(e)
     check("A key that doesn't match the pinned public key is refused",
           "does not match" in refused)
-
-    with open(os.path.join(fix, "site", "demo", "index.html"), "wb") as f:
-        f.write(b"<!doctype html>no marker")
-    try:
-        release.prepare(fix, key_pem, out)
-        refused = ""
-    except SystemExit as e:
-        refused = str(e)
-    check("A marker-less demo is refused", "marker" in refused)
     shutil.rmtree(fix, ignore_errors=True)
 
 
@@ -1045,169 +1032,113 @@ def run_dispatch_tests(s):
             setattr(s, n, v)
         shutil.rmtree(rdir, ignore_errors=True)
 
-    section("Demo page: placeholder marker rules")
+    section("Placeholder page: marker rules")
 
     ddir   = tempfile.mkdtemp()
     dindex = os.path.join(ddir, "index.html")
-    marked = b"<!doctype html>\n<!-- servette:demo test placeholder -->\nhello"
-    check("Missing index.html is not a placeholder", not s._demo_is_placeholder(dindex))
+    check("Missing index.html is not a placeholder", not s._is_placeholder(dindex))
     with open(dindex, "wb") as f:
         f.write(b"<!doctype html>my own site")
-    check("Operator page without marker is not a placeholder", not s._demo_is_placeholder(dindex))
-    check("Seed refuses to overwrite an operator page",
-          not s._seed_demo(ddir, page=marked))
+    check("Operator page without marker is not a placeholder", not s._is_placeholder(dindex))
+    check("Seed refuses to overwrite an operator page", not s._seed_placeholder(ddir))
     check("Operator page untouched after refused seed",
           open(dindex, "rb").read() == b"<!doctype html>my own site")
     os.remove(dindex)
-    check("Seed writes into an empty folder", s._seed_demo(ddir, page=marked))
-    check("Seeded file matches the page bytes", open(dindex, "rb").read() == marked)
-    check("Seeded file is recognized as the placeholder", s._demo_is_placeholder(dindex))
-    check("Seed replaces a marked placeholder",
-          s._seed_demo(ddir, page=marked.replace(b"hello", b"v2")))
-    check("Replaced placeholder carries the new content",
-          b"v2" in open(dindex, "rb").read())
+    check("Seed writes into an empty folder", s._seed_placeholder(ddir))
+    check("Seeded file is the embedded page",
+          open(dindex, "rb").read() == s._PLACEHOLDER_PAGE)
+    check("Seeded file is recognized as the placeholder", s._is_placeholder(dindex))
+    with open(dindex, "wb") as f:
+        f.write(b"<!-- servette:demo seeded by a fetch-era release -->old demo")
+    check("A fetch-era marked page is still recognized", s._is_placeholder(dindex))
+    check("Seed replaces a marked placeholder", s._seed_placeholder(ddir))
+    check("Replaced placeholder carries the embedded page",
+          open(dindex, "rb").read() == s._PLACEHOLDER_PAGE)
     shutil.rmtree(ddir, ignore_errors=True)
 
-    section("Demo page: fetch verifies the release signature")
+    section("Placeholder page: the embedded page's invariants (#70)")
 
-    # Drive _fetch_demo against canned API/asset responses signed with a test
-    # keypair, the pinned public key patched to match — same seam the real
-    # release uses, no network.
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-    dpriv    = Ed25519PrivateKey.generate()
-    dpub_hex = dpriv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
-    dpage    = b"<!doctype html>\n<!-- servette:demo signed test page -->\nok"
-    dsig     = dpriv.sign(dpage)
+    check("Embedded page carries the servette:demo marker",
+          s._PLACEHOLDER_MARKER.encode() in s._PLACEHOLDER_PAGE)
+    check("Marker string is unchanged for fetch-era compatibility",
+          s._PLACEHOLDER_MARKER == "servette:demo")
+    check("Embedded page is script-free", b"<script" not in s._PLACEHOLDER_PAGE)
+    check("Embedded page is a complete HTML document",
+          s._PLACEHOLDER_PAGE.startswith(b"<!DOCTYPE html>")
+          and b"</html>" in s._PLACEHOLDER_PAGE.rstrip())
 
-    class _FakeResp:
-        def __init__(self, data): self._d = data
-        def read(self, n=-1):     return self._d
-        def __enter__(self):      return self
-        def __exit__(self, *a):   return False
+    section("Placeholder page: setup step seeds an empty serve_dir")
 
-    def _fake_urlopen_for(api_json, page_bytes, sig_bytes):
-        def fake(url, timeout=None, **kw):
-            u = url if isinstance(url, str) else url.full_url
-            if u == s.RELEASES_API_URL:
-                return _FakeResp(json.dumps(api_json).encode())
-            if u.endswith("demo.html"):
-                return _FakeResp(page_bytes)
-            if u.endswith("demo.html.sig"):
-                return _FakeResp(sig_bytes)
-            raise urllib.error.URLError("unexpected url " + u)
-        return fake
+    # Drive cmd_setup with cert/password/prompts stubbed: Step 1 must create
+    # the missing folder (inside BASE_DIR) and write the embedded placeholder.
+    # urlopen is stubbed to raise: the seed must involve no network at all
+    # (#70), and the public-IP lookup falls back on the raise as before.
+    def _no_network(*a, **k):
+        raise urllib.error.URLError("network touched in a no-network test")
 
-    demo_api = {"tag_name": "v9.9.9", "assets": [
-        {"name": "demo.html",     "browser_download_url": "https://github.com/x/demo.html"},
-        {"name": "demo.html.sig", "browser_download_url": "https://github.com/x/demo.html.sig"},
-    ]}
-    saved_urlopen = s.urllib.request.urlopen
-    saved_pubkey  = s._SIGNING_PUBLIC_KEY
+    setup_dir = os.path.join(s.BASE_DIR, "t2-setup-" + os.urandom(3).hex())
+    saved_setup = {n: getattr(s, n) for n in
+                   ("_config_cert", "_config_username", "_config_password", "_prompt")}
+    saved_serve_dir = s.config.sites[0].serve_dir
+    saved_urlopen   = s.urllib.request.urlopen
     try:
-        s._SIGNING_PUBLIC_KEY = dpub_hex
-
-        s.urllib.request.urlopen = _fake_urlopen_for(demo_api, dpage, dsig)
-        with contextlib.redirect_stdout(io.StringIO()):
-            got = s._fetch_demo()
-        check("Correctly signed demo asset is returned", got == dpage)
-
-        s.urllib.request.urlopen = _fake_urlopen_for(demo_api, dpage, dpriv.sign(b"other"))
+        s.urllib.request.urlopen = _no_network
+        s.config.sites[0].serve_dir = setup_dir
+        s._config_cert     = lambda site: None
+        s._config_username = lambda site: None
+        s._config_password = lambda site: None
+        prompts = iter([True, False])            # write placeholder? yes; ready to start? no
+        s._prompt = lambda *a, **k: next(prompts, False)
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            got = s._fetch_demo()
-        check("Tampered signature is refused", got is None and "signature" in buf.getvalue())
+            s.cmd_setup()
+        check("Setup creates the missing serve_dir", os.path.isdir(setup_dir))
+        check("Setup writes the placeholder as index.html, with no network",
+              open(os.path.join(setup_dir, "index.html"), "rb").read() == s._PLACEHOLDER_PAGE)
+        check("Setup says what it installed", "installed as index.html" in buf.getvalue())
 
-        s.urllib.request.urlopen = _fake_urlopen_for({"tag_name": "v9.9.9", "assets": []}, dpage, dsig)
+        # Second run: the folder now has a marked placeholder — setup reports
+        # serving it without offering to seed (the file exists).
+        prompts2 = iter([False])                  # ready to start? no
+        s._prompt = lambda *a, **k: next(prompts2, False)
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            got = s._fetch_demo()
-        check("Release without demo assets degrades with a message",
-              got is None and "missing demo.html" in buf.getvalue())
-
-        off_host = {"tag_name": "v9.9.9", "assets": [
-            {"name": "demo.html",     "browser_download_url": "https://evil.example/demo.html"},
-            {"name": "demo.html.sig", "browser_download_url": "https://evil.example/demo.html.sig"},
-        ]}
-        s.urllib.request.urlopen = _fake_urlopen_for(off_host, dpage, dsig)
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            got = s._fetch_demo()
-        check("Asset URL off the release host is refused",
-              got is None and "asset URL is not on github.com" in buf.getvalue())
-
-        unmarked     = b"<!doctype html>no marker here"
-        s.urllib.request.urlopen = _fake_urlopen_for(demo_api, unmarked, dpriv.sign(unmarked))
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            got = s._fetch_demo()
-        check("Validly signed page without the marker is refused",
-              got is None and "marker" in buf.getvalue())
-
-        section("Demo page: setup step seeds an empty serve_dir")
-
-        # Drive cmd_setup with cert/password/network stubbed: Step 1 must create
-        # the missing folder (inside BASE_DIR) and install the fetched demo.
-        setup_dir = os.path.join(s.BASE_DIR, "t2-setup-" + os.urandom(3).hex())
-        saved_setup = {n: getattr(s, n) for n in
-                       ("_config_cert", "_config_username", "_config_password", "_prompt")}
-        saved_serve_dir = s.config.sites[0].serve_dir
-        try:
-            s.urllib.request.urlopen = _fake_urlopen_for(demo_api, dpage, dsig)  # ipify raises → fallback
-            s.config.sites[0].serve_dir = setup_dir
-            s._config_cert     = lambda site: None
-            s._config_username = lambda site: None
-            s._config_password = lambda site: None
-            prompts = iter([True, False])            # fetch demo? yes; ready to start? no
-            s._prompt = lambda *a, **k: next(prompts, False)
-            with contextlib.redirect_stdout(io.StringIO()) as buf:
-                s.cmd_setup()
-            check("Setup creates the missing serve_dir", os.path.isdir(setup_dir))
-            check("Setup installs the demo as index.html",
-                  open(os.path.join(setup_dir, "index.html"), "rb").read() == dpage)
-            check("Setup says what it installed", "installed as index.html" in buf.getvalue())
-
-            # Second run: the folder now has a marked placeholder — setup reports
-            # serving it without prompting to fetch (the file exists).
-            prompts2 = iter([False])                  # ready to start? no
-            s._prompt = lambda *a, **k: next(prompts2, False)
-            with contextlib.redirect_stdout(io.StringIO()) as buf:
-                s.cmd_setup()
-            check("Setup with content in place reports serving it", "Serving" in buf.getvalue())
-        finally:
-            for n, v in saved_setup.items():
-                setattr(s, n, v)
-            s.config.sites[0].serve_dir = saved_serve_dir
-            shutil.rmtree(setup_dir, ignore_errors=True)
-
-        section("Demo page: post-update refreshes only marked placeholders")
-
-        pu_marked   = tempfile.mkdtemp(dir=s.BASE_DIR)
-        pu_owned    = tempfile.mkdtemp(dir=s.BASE_DIR)
-        with open(os.path.join(pu_marked, "index.html"), "wb") as f:
-            f.write(b"<!-- servette:demo old placeholder -->old")
-        with open(os.path.join(pu_owned, "index.html"), "wb") as f:
-            f.write(b"operator content")
-        saved_pu    = {n: getattr(s, n) for n in ("_service_file_exists",)}
-        saved_sites = [(site, site.serve_dir) for site in s.config.sites]
-        try:
-            s._service_file_exists = lambda: False
-            s.config.sites[0].serve_dir = pu_marked
-            two_sites = len(s.config.sites) > 1
-            if two_sites:
-                s.config.sites[1].serve_dir = pu_owned
-            with contextlib.redirect_stdout(io.StringIO()):
-                s._apply_post_update()
-            check("Post-update refreshes the marked placeholder",
-                  open(os.path.join(pu_marked, "index.html"), "rb").read() == dpage)
-            check("Post-update leaves the operator page alone",
-                  open(os.path.join(pu_owned, "index.html"), "rb").read() == b"operator content")
-        finally:
-            for n, v in saved_pu.items():
-                setattr(s, n, v)
-            for site, sd in saved_sites:
-                site.serve_dir = sd
-            shutil.rmtree(pu_marked, ignore_errors=True)
-            shutil.rmtree(pu_owned, ignore_errors=True)
+            s.cmd_setup()
+        check("Setup with content in place reports serving it", "Serving" in buf.getvalue())
     finally:
-        s.urllib.request.urlopen = saved_urlopen
-        s._SIGNING_PUBLIC_KEY    = saved_pubkey
+        for n, v in saved_setup.items():
+            setattr(s, n, v)
+        s.config.sites[0].serve_dir = saved_serve_dir
+        s.urllib.request.urlopen    = saved_urlopen
+        shutil.rmtree(setup_dir, ignore_errors=True)
+
+    section("Placeholder page: post-update refreshes only marked placeholders")
+
+    pu_marked   = tempfile.mkdtemp(dir=s.BASE_DIR)
+    pu_owned    = tempfile.mkdtemp(dir=s.BASE_DIR)
+    with open(os.path.join(pu_marked, "index.html"), "wb") as f:
+        f.write(b"<!-- servette:demo old placeholder -->old")   # a fetch-era page
+    with open(os.path.join(pu_owned, "index.html"), "wb") as f:
+        f.write(b"operator content")
+    saved_pu    = {n: getattr(s, n) for n in ("_service_file_exists",)}
+    saved_sites = [(site, site.serve_dir) for site in s.config.sites]
+    try:
+        s._service_file_exists = lambda: False
+        s.config.sites[0].serve_dir = pu_marked
+        two_sites = len(s.config.sites) > 1
+        if two_sites:
+            s.config.sites[1].serve_dir = pu_owned
+        with contextlib.redirect_stdout(io.StringIO()):
+            s._apply_post_update()
+        check("Post-update refreshes the marked page to the embedded placeholder",
+              open(os.path.join(pu_marked, "index.html"), "rb").read() == s._PLACEHOLDER_PAGE)
+        check("Post-update leaves the operator page alone",
+              open(os.path.join(pu_owned, "index.html"), "rb").read() == b"operator content")
+    finally:
+        for n, v in saved_pu.items():
+            setattr(s, n, v)
+        for site, sd in saved_sites:
+            site.serve_dir = sd
+        shutil.rmtree(pu_marked, ignore_errors=True)
+        shutil.rmtree(pu_owned, ignore_errors=True)
 
     section("Site management (add/remove/select)")
 
@@ -1238,7 +1169,7 @@ def run_dispatch_tests(s):
 
         saved_input = builtins.input
         try:
-            # add-site: folder, demo offer (n), domain (blank → self-signed), username (blank).
+            # add-site: folder, placeholder offer (n), domain (blank → self-signed), username (blank).
             script = iter([site_test_dir, "n", "", ""])
             builtins.input = lambda prompt="": next(script, "")
             with contextlib.redirect_stdout(io.StringIO()) as buf:

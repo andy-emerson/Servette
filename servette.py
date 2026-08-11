@@ -2537,11 +2537,11 @@ def _config_add_site():
         return
     # The same seeding offer setup makes for the first site (#37): a new site
     # with no index.html would 404 on its own domain with no way to tell the
-    # server from the content. Declining, or a failed fetch, blocks nothing.
+    # server from the content. Declining blocks nothing.
     if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
-        if _prompt("No index.html here — fetch Servette's demo page so the site works immediately?"):
-            if _seed_demo(folder):
-                print("  Demo page installed as index.html — replace it with your own site when ready.")
+        if _prompt("No index.html here — write Servette's placeholder page so the site works immediately?"):
+            if _seed_placeholder(folder):
+                print("  Placeholder installed as index.html — replace it with your own site when ready.")
 
     site = Site({"serve_dir": folder})
     config.sites.append(site)
@@ -3014,9 +3014,10 @@ def cmd_log(n=20):
 RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
 _SIGNING_PUBLIC_KEY = "abb8854be0b82df813f3b052296a26573063fc6314ea2701d54354605e6f15db"
 _VERSION_RE         = re.compile(rb"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
-# Ceiling on a downloaded release asset — servette.py or the demo page. Both are
-# orders of magnitude under this; the cap exists so a hostile or broken response
-# is bounded before the signature check, not to constrain growth.
+# Ceiling on a downloaded release asset — servette.py, the one asset 'update'
+# fetches. It is an order of magnitude under this; the cap exists so a hostile
+# or broken response is bounded before the signature check, not to constrain
+# growth.
 _MAX_SOURCE_BYTES   = 4 * 1024 * 1024
 
 def _parse_version(source_bytes):
@@ -3067,9 +3068,10 @@ def _download_verified_asset(release, name):
     signature. Returns (bytes, None) on success, (None, why) on failure.
 
     This is the one copy of the trust chain every release artifact goes
-    through — servette.py for 'update', demo.html for the seeded demo: asset
-    URLs pinned to github.com, the download capped at _MAX_SOURCE_BYTES
-    *before* the Ed25519 check against the pinned _SIGNING_PUBLIC_KEY."""
+    through — today that is servette.py for 'update' (the demo.html asset it
+    once also served was retired in #70): asset URLs pinned to github.com,
+    the download capped at _MAX_SOURCE_BYTES *before* the Ed25519 check
+    against the pinned _SIGNING_PUBLIC_KEY."""
     assets   = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
     sig_name = name + ".sig"
     if name not in assets or sig_name not in assets:
@@ -3209,76 +3211,107 @@ def _apply_post_update():
                 _reload_server()
         except (PermissionError, FileNotFoundError, subprocess.CalledProcessError) as e:
             print(f"  Could not refresh the service unit: {e}")
-    # Refresh any site still serving the marked demo placeholder, so a release
-    # that changes the demo reaches hosts that never published their own page.
-    # One fetch seeds every marked site; operator pages (no marker) are untouched.
-    marked = [s for s in config.sites
-              if _demo_is_placeholder(os.path.join(_resolve(s.serve_dir), "index.html"))]
-    if marked:
-        page = _fetch_demo()
-        if page is not None:
-            for s in marked:
-                if _seed_demo(s.serve_dir, page):
-                    print(f"  Demo page refreshed in {s.serve_dir}.")
+    # Refresh any site still serving the marked placeholder, so a release that
+    # changes the page reaches hosts that never published their own — including
+    # pages seeded by older releases that fetched a demo from GitHub: they
+    # carry the same marker, and the refresh rewrites them from the embedded
+    # page below. Operator pages (no marker) are untouched.
+    for s in config.sites:
+        if _is_placeholder(os.path.join(_resolve(s.serve_dir), "index.html")):
+            if _seed_placeholder(s.serve_dir):
+                print(f"  Placeholder page refreshed in {s.serve_dir}.")
 
 
-_DEMO_MARKER = "servette:demo"
+# The marker string keeps its historical name: pages seeded by earlier
+# releases (which fetched a richer demo page from GitHub as a release asset)
+# carry "servette:demo", and they must stay recognizable so an update can
+# refresh them into the embedded placeholder below.
+_PLACEHOLDER_MARKER = "servette:demo"
+
+# The page setup seeds into an empty site (#70): embedded, so setup finishes
+# with something to serve even with no network beyond ACME — the GitHub fetch,
+# its signed demo.html release asset, and the "could not reach GitHub"
+# degradation path are all gone. Deliberately small and script-free: the full
+# connection self-test now travels through the publish channel instead
+# (site/pub/selftest/ in the repository), one publish away for any operator
+# who wants it. Only the theme is kept — logo, colors, type — over the
+# traditional "under construction" prose.
+_PLACEHOLDER_PAGE = """<!DOCTYPE html>
+<!-- servette:demo — Servette's placeholder page. This marker is how 'update'
+     tells its own page from yours: with it present the page is refreshed on
+     update, without it the file is left alone. Delete this line to adopt the
+     page as your own and Servette will never touch it again. -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Under construction</title>
+<style>
+  :root {
+    --bg: #0e0e0e; --text: #e8e8e8; --muted: #555; --green: #5A8466;
+    /* No web fonts, no scripts: a placeholder loads nothing at all. */
+    --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+            'Liberation Mono', 'Courier New', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); font-family: var(--mono);
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 1.1rem;
+    padding: 2rem; text-align: center;
+  }
+  .logo { font-size: 3rem; font-weight: 500; line-height: 1; }
+  .logo .ette { color: var(--green); }
+  .logo .cursor { animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+  .status {
+    color: var(--muted); font-size: 0.75rem;
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  p { color: var(--muted); font-size: 0.8rem; line-height: 1.7; max-width: 44ch; }
+  a { color: var(--green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+</style>
+</head>
+<body>
+  <div class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
+  <div class="status">under construction</div>
+  <p>There is a server here, but its operator hasn't published a site yet.
+     Check back soon.</p>
+  <p>Served by <a href="https://github.com/andy-emerson/servette">Servette</a>
+     — The Simple, Secure, Static-Site Server.</p>
+</body>
+</html>
+""".encode()
 
 
-def _fetch_demo():
-    """Fetch and verify demo.html from the latest GitHub release, through the
-    same _download_verified_asset trust chain 'update' uses — one trust domain
-    with the code, deliberately not the per-site publish key. Returns the page
-    bytes, or None after printing why: a failed fetch is information ("could
-    not reach GitHub" matters at setup time), never an exception, and never
-    fails the caller's flow."""
-    release, why = _fetch_release()
-    if release is None:
-        print(f"  Demo page not fetched: {why}.")
-        return None
-    page, why = _download_verified_asset(release, "demo.html")
-    if page is None:
-        print(f"  Demo page not fetched: {why}.")
-        return None
-    if _DEMO_MARKER.encode() not in page:
-        # Without its marker the page could never be recognized for refresh —
-        # a marker-less asset is malformed, not adoptable.
-        print("  Demo page refused: fetched page lacks the servette:demo marker.")
-        return None
-    return page
-
-
-def _demo_is_placeholder(index_path):
+def _is_placeholder(index_path):
     """True when index_path exists and carries the servette:demo marker — i.e. it
     is Servette's own placeholder, safe to refresh. An operator's page (no marker)
     is never touched; an operator who deletes the marker has adopted the page
     permanently. The rule is visible in the file itself, not hidden in state."""
     try:
         with open(index_path, "rb") as f:
-            return _DEMO_MARKER.encode() in f.read(_MAX_SOURCE_BYTES)
+            return _PLACEHOLDER_MARKER.encode() in f.read(_MAX_SOURCE_BYTES)
     except OSError:
         return False
 
 
-def _seed_demo(serve_dir, page=None):
-    """Write the demo page as serve_dir/index.html when that is safe: the file is
-    absent, or still the marked placeholder. Returns True when it was written.
-    page=None fetches from the latest release; passing bytes lets one fetch seed
-    several sites. Written via rename so a reader never sees a partial file."""
+def _seed_placeholder(serve_dir):
+    """Write the embedded placeholder as serve_dir/index.html when that is safe:
+    the file is absent, or still a marked placeholder. Returns True when it was
+    written. Written via rename so a reader never sees a partial file."""
     index_path = os.path.join(_resolve(serve_dir), "index.html")
-    if os.path.exists(index_path) and not _demo_is_placeholder(index_path):
+    if os.path.exists(index_path) and not _is_placeholder(index_path):
         return False   # operator content — never overwrite
-    if page is None:
-        page = _fetch_demo()
-        if page is None:
-            return False
     tmp = index_path + ".new"
     try:
         with open(tmp, "wb") as f:
-            f.write(page)
+            f.write(_PLACEHOLDER_PAGE)
         os.replace(tmp, index_path)
     except OSError as e:
-        print(f"  Could not write the demo page: {e}")
+        print(f"  Could not write the placeholder page: {e}")
         return False
     return True
 
@@ -3688,10 +3721,10 @@ def cmd_setup():
     site = config.sites[0]  # the site setup provisions; 'add-site' handles the rest
 
     # Step 1 — the folder. Setup must never finish with nothing to serve (#37):
-    # create the folder if missing, and offer the signed demo page when it has
-    # no index.html — the demo diagnoses server/cert/redirect health before the
-    # operator's own files enter the picture. A failed fetch degrades with its
-    # own message and does not fail setup.
+    # create the folder if missing, and offer the embedded placeholder when it
+    # has no index.html — a real page on the operator's own domain, with no
+    # network involved (#70). The connection self-test that once played this
+    # role now arrives through the publish channel instead.
     print()
     print("  Step 1 — Site folder")
     serve_path = _resolve(site.serve_dir)
@@ -3709,9 +3742,9 @@ def cmd_setup():
             print(f"  Serving {serve_path}.")
         else:
             print(f"  {serve_path} has no index.html yet.")
-            if _prompt("Fetch Servette's demo page so the site works immediately?"):
-                if _seed_demo(site.serve_dir):
-                    print("  Demo page installed as index.html — replace it with your own site when ready.")
+            if _prompt("Write Servette's placeholder page so the site works immediately?"):
+                if _seed_placeholder(site.serve_dir):
+                    print("  Placeholder installed as index.html — replace it with your own site when ready.")
 
     print()
     print("  Step 2 — SSL certificate")

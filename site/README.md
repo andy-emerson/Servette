@@ -13,7 +13,7 @@ One rule shapes this folder: **one subdomain ↔ one self-contained directory, a
 | `index.html` + `assets/` | servette.org | the project page: what Servette is, how it compares, how to use it, how it is built |
 | `demo/index.html` | servette.org/demo/ and demo.servette.org | the self-test page — also the `demo.html` release asset every user's setup receives |
 | `src/index.html` | servette.org/src/ and src.servette.org | a read-only literate view of `src/*.md`, with an optional in-browser AI reading assistant |
-| `pub/index.html` | servette.org/pub/ and pub.servette.org | the client-side publish tool from [#42](https://github.com/andy-emerson/Servette/issues/42) — builds and signs content bundles in the browser; not yet linked from the home page |
+| `pub/index.html` | servette.org/pub/ and pub.servette.org | the client-side publish tool from [#42](https://github.com/andy-emerson/Servette/issues/42) — builds and signs content bundles in the browser |
 | `pub/selftest/index.html` | servette.org/pub/selftest/ | the connection self-test as publishable content — the publish tool folds it into bundles at `/selftest/` |
 
 ## The demo page

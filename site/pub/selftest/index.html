@@ -6,7 +6,10 @@
      published it is the operator's content, delivered and owned by their
      publish channel, and 'update' must never touch it. The checks duplicate
      site/demo/index.html's — there is no build step to share them, so a
-     change to either page's checks belongs in both. -->
+     change to either page's checks belongs in both — plus one of its own:
+     the version-discovery row, which needs the operator's session (the
+     endpoint is password-gated) and so belongs here, not on the placeholder
+     a fresh server shows the world. -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -397,6 +400,20 @@
         return v
           ? { ok: true, obs: 'Strict-Transport-Security: present' }
           : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
+
+    // Version discovery — the hook #42 planned this page's tool around, and
+    // only a same-origin page can use: Servette serves it solely on a
+    // password-gated site, so the exact version reaches a party that already
+    // holds the password (this browser, once you logged in) and never an
+    // anonymous scanner. Absent is a choice or an older Servette, not a
+    // defect.
+    { req: 'GET /.well-known/servette', run: async () => {
+        const r = await fetch('/.well-known/servette', { cache: 'no-store' });
+        if (r.status !== 200)
+          return { ok: null, obs: 'hidden without a password (or an older Servette)' };
+        const v = await r.json();
+        return { ok: true, obs: 'running v' + v.running +
+                 (v.backup ? ' · backup v' + v.backup : ' · no backup yet') }; } },
   ];
 
   const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };

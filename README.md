@@ -145,7 +145,7 @@ Every site has an index, shown by `sites` and starting at `0` — the one `setup
 | `servette.py` | The entire product — server, system, and shell in one file. Generated from `src/`; not edited by hand |
 | `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into `servette.py` |
 | `tests/test.py` | The whole test suite, run by CI on Python 3.11 and 3.14 |
-| `site/` | The Servette website's source, and the folder a checkout serves by default; `site/demo/` is the self-test page each release ships as `demo.html`, `site/source/` is a browsable view of the literate sources, and `site/assets/` holds the logos this README displays |
+| `site/` | The Servette website's source, and the folder a checkout serves by default; `site/demo/` is the self-test page each release ships as `demo.html`, `site/src/` is a browsable view of the literate sources, `site/pub/` is the client-side publish tool, and `site/assets/` holds the logos this README displays |
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
 | `AGENTS.md` · `CLAUDE.md` | The human–agent working agreement, and the pointer to it |

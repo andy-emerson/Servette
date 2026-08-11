@@ -93,7 +93,15 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
 
 ### Run setup
 
-Servette serves the `site/` folder next to `servette.py` — setup creates it if it's missing and offers to write Servette's placeholder page when it's empty, so a fresh copy serves a real page immediately; replace it with your own files when ready. From the server:
+Servette serves the `site/` folder next to `servette.py` — setup creates it if it's missing and offers to write Servette's placeholder page when it's empty, so a fresh copy serves a real page immediately; replace it with your own files when ready.
+
+One permission first. Recent Linux images create your home directory closed to other users (Ubuntu 21.04+ and Debian 12 default it to `0750`/`0700`), and the background service runs as its own unprivileged `servette` user — which must be able to *pass through* your home directory to reach `~/site`. Grant pass-through (it lets the service enter, not list or read anything else of yours):
+
+```
+sudo chmod o+x "$HOME"
+```
+
+Skip this and everything looks fine right up until the service serves 404s for files that exist. Then, from the server:
 
 ```
 sudo python3 servette.py   # then, at the prompt: setup

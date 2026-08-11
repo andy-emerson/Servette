@@ -1230,7 +1230,12 @@ def _bootstrap():
                 import venv as _venv_mod
                 _venv_mod.create(_VENV_DIR, with_pip=True, clear=True)
                 return None
-            except Exception as e:
+            except (Exception, SystemExit) as e:
+                # SystemExit is caught deliberately: Debian and Ubuntu patch
+                # their venv module to print apt instructions and *exit*
+                # rather than raise, and SystemExit is not an Exception —
+                # without this, the recovery below is dead code on the two
+                # platforms it exists for.
                 return e
 
         error = _create_venv()

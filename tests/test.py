@@ -861,6 +861,61 @@ def run_dispatch_tests(s):
     # infrastructure and remain integration-territory, intentionally uncovered.
     import builtins, io, contextlib
 
+    section("Bootstrap: Debian's SystemExit venv failure triggers package recovery")
+
+    # Debian/Ubuntu patch their venv module to print apt instructions and
+    # *exit* — via SystemExit, which is not an Exception — instead of raising.
+    # Drive _bootstrap through exactly that failure: venv.create exits like
+    # Debian's does, the package-manager recovery must run, the retried
+    # creation must succeed, and the re-exec must be reached. Before the fix
+    # the SystemExit escaped _create_venv and the recovery was dead code on
+    # the platforms it exists for.
+    import venv as venv_mod
+    calls = {"create": 0, "run": [], "execv": None}
+    tmp_venv = os.path.join(tempfile.mkdtemp(), "venv")
+
+    def fake_create(path, with_pip=True, clear=False):
+        calls["create"] += 1
+        if calls["create"] == 1:
+            raise SystemExit(1)              # what Debian's patched venv does
+        os.makedirs(os.path.join(path, "bin"), exist_ok=True)
+
+    def fake_run(argv, **kw):
+        calls["run"].append(list(argv))
+        return subprocess.CompletedProcess(argv, 0)
+
+    def fake_execv(path, argv):
+        calls["execv"] = (path, argv)
+        raise RuntimeError("stop-at-exec")   # halt where _bootstrap would re-exec
+
+    saved_boot = (venv_mod.create, s.subprocess.run, s.shutil.which, s.os.execv,
+                  s._VENV_DIR, s._VENV_PY)
+    try:
+        venv_mod.create  = fake_create
+        s.subprocess.run = fake_run
+        s.shutil.which   = lambda name: f"/usr/bin/{name}"
+        s.os.execv       = fake_execv
+        s._VENV_DIR = tmp_venv
+        s._VENV_PY  = os.path.join(tmp_venv, "bin", "python3")
+        halted = False
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                s._bootstrap()
+            except RuntimeError as e:
+                halted = str(e) == "stop-at-exec"
+    finally:
+        (venv_mod.create, s.subprocess.run, s.shutil.which, s.os.execv,
+         s._VENV_DIR, s._VENV_PY) = saved_boot
+
+    apt = [argv for argv in calls["run"] if argv and argv[0] == "apt-get"]
+    check("SystemExit from venv.create reaches the recovery, not the exit",
+          calls["create"] == 2)
+    check("Recovery installs the distro venv package via apt-get",
+          len(apt) == 1 and apt[0][:3] == ["apt-get", "install", "-y"]
+          and apt[0][3].endswith("-venv"))
+    check("Bootstrap proceeds to the re-exec after recovery", halted)
+    shutil.rmtree(os.path.dirname(tmp_venv), ignore_errors=True)
+
     def redirect_request(method, path, headers=None):
         """Drive one request through _RedirectHandler on an ephemeral port."""
         srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), s._RedirectHandler)

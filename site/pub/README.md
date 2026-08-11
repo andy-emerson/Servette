@@ -1,4 +1,4 @@
-# site/publish/ — the publish tool
+# site/pub/ — the publish tool
 
 The client-side publish app from
 [#42](https://github.com/andy-emerson/Servette/issues/42): `index.html`
@@ -11,7 +11,7 @@ itself never accepts instructions from the network.
 
 `selftest/` is the connection self-test as publishable content, the ruling
 that closed #42's post-publish-verification fork: a page on
-`publish.servette.org` cannot read what it probes on the operator's domain
+`pub.servette.org` cannot read what it probes on the operator's domain
 (cross-origin), so instead the tool folds this page into bundles at
 `/selftest/` — on the operator's own origin it runs the full checks the
 demo page runs, after every `pull`. It carries no `servette:demo` marker

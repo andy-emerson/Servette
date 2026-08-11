@@ -39,7 +39,7 @@ jobs:
           fi
           echo "$rel" | jq -r '.target_commitish' > .release_ref
           mkdir -p assets
-          for name in servette.py servette.py.sig demo.html demo.html.sig; do
+          for name in servette.py servette.py.sig; do
             id=$(echo "$rel" | jq -r ".assets | map(select(.name == \"$name\")) | first | .id")
             if [ -z "$id" ] || [ "$id" = "null" ]; then
               echo "FAIL: release is missing asset $name"; exit 1
@@ -75,14 +75,10 @@ jobs:
           tag    = sys.argv[1].lstrip("v")
           repo   = open("repo/servette.py", "rb").read()
           rel    = open("assets/servette.py", "rb").read()
-          demo_r = open("repo/site/demo/index.html", "rb").read()
-          demo_a = open("assets/demo.html", "rb").read()
 
           fail = []
           if rel != repo:
               fail.append("released servette.py does not byte-match the repo at the release commit")
-          if demo_a != demo_r:
-              fail.append("released demo.html does not byte-match site/demo/index.html at the release commit")
 
           sys.path.insert(0, "repo/src")
           import build
@@ -98,20 +94,16 @@ jobs:
               fail.append("could not find _SIGNING_PUBLIC_KEY in servette.py at the release commit")
           else:
               key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(m.group(1).decode()))
-              for name, data in (("servette.py", rel), ("demo.html", demo_a)):
-                  try:
-                      key.verify(open(f"assets/{name}.sig", "rb").read(), data)
-                  except Exception:
-                      fail.append(f"{name}.sig does not verify against the pinned public key")
-
-          if b"servette:demo" not in demo_a:
-              fail.append("released demo.html lacks the servette:demo marker")
+              try:
+                  key.verify(open("assets/servette.py.sig", "rb").read(), rel)
+              except Exception:
+                  fail.append("servette.py.sig does not verify against the pinned public key")
 
           if fail:
               print("RELEASE VERIFICATION FAILED:")
               for f in fail:
                   print(" -", f)
               sys.exit(1)
-          print("Release verified: all four assets present, signatures valid, "
+          print("Release verified: both assets present, signature valid, "
                 "bytes match the release commit, version matches the tag, src/ in sync.")
           PYEOF

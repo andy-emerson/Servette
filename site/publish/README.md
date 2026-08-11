@@ -17,10 +17,15 @@ Constraints the page is built to, all load-bearing:
   apply here; the reasoning is recorded in #42.
 - **Signing only.** If a capability cannot be expressed as "produce a signed
   artifact the operator chooses to pull," it does not belong here.
-- **Nothing stored.** The key is supplied per session — generated in the tab
-  or read from a PKCS#8 PEM file — and lives only in memory, as a
-  non-extractable `CryptoKey`. Clearing the browser loses nothing; an XSS
-  here has nothing durable to steal.
+- **Nothing extractable stored.** The key is supplied per session —
+  generated in the tab or read from a PKCS#8 PEM file — and held as a
+  non-extractable `CryptoKey`. By default it lives only in memory; the
+  operator can opt in to remembering it in IndexedDB, where the stored
+  handle can sign but can never be read out, by any script on the origin
+  (ruled on #42; the accepted residual is that a compromised page could
+  misuse a remembered key while open, never steal it). Either way the key
+  file is the only durable copy — clearing the browser never loses the
+  ability to publish.
 
 Not linked from the home page yet — per #42, no link until the tool is
 deployed where the link would point.

@@ -701,17 +701,6 @@ def _security_headers(site):
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
 
-def _backup_version():
-    """The version string inside servette.py.bak (left by the last 'update' or
-    'restore'), or None if no backup exists or it can't be read/parsed."""
-    bak_path = os.path.abspath(__file__) + ".bak"
-    try:
-        with open(bak_path, "rb") as f:
-            return _parse_version(f.read())
-    except OSError:
-        return None
-
-
 def _loggable(s):
     """Escape control characters in a string bound for the logs. A request path
     reaches the journal and, from there, an operator's terminal — an unescaped
@@ -818,11 +807,10 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
 
-    # Version discovery: what this box is running, and its update backup (if
-    # any) — the publish tool's "current vs. latest / current vs. backup"
-    # prompts read this. Deliberately reports only what THIS box knows;
-    # "latest available" comes from GitHub, which the tool queries directly.
-    # Host-level (one servette.py process, one version).
+    # Version discovery: what this box is running — the publish tool's
+    # self-test page reads this to show the served version. Deliberately
+    # reports only what THIS box knows; "latest available" is the package
+    # index's business, not Servette's. Host-level (one process, one version).
     #
     # Gated on the site having auth, so the exact version reaches only a party
     # that already holds the site's password — never an anonymous scanner, for
@@ -832,7 +820,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # public. (A remote tool for a no-auth site reads the version another way; a
     # local operator has it from 'status'.)
     if site.username and url_path.split("?", 1)[0] == _WELL_KNOWN_VERSION_PATH:
-        body = json.dumps({"running": __version__, "backup": _backup_version()}).encode()
+        body = json.dumps({"running": __version__}).encode()
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
 

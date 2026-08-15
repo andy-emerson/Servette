@@ -327,7 +327,7 @@ def _systemd_unit(python_path, servette_path):
     rest of the filesystem read-only, and the unit runs as a least-privilege user
     holding only CAP_NET_BIND_SERVICE. The served directory ends up read-write only
     because it lives under the server's own directory; the server never writes it.
-    The service's own code (servette.py and its .bak) and the managed venv are
+    The service's own code (servette.py) and the managed venv are
     pinned read-only on top of that writable directory — the serving process never
     rewrites them, so a compromised one cannot patch the program it re-execs into."""
     return f"""[Unit]
@@ -341,7 +341,7 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths={BASE_DIR} {ACME_WEBROOT}
-ReadOnlyPaths={servette_path} -{_VENV_DIR} -{servette_path}.bak
+ReadOnlyPaths={servette_path} -{_VENV_DIR}
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -548,6 +548,45 @@ def _ensure_swap():
             pass
 
 
+def _unit_python_path():
+    """The interpreter the unit's ExecStart names. Shared by the writer and
+    the drift check below — two computations of this path could disagree and
+    manufacture phantom drift."""
+    return _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(
+        ["which", "python3"], capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _desired_units():
+    """What every unit file should contain, as {path: text}, computed from
+    this version of the code."""
+    netwatch_service, netwatch_timer = _netwatch_units()
+    return {
+        SERVICE_PATH:               _systemd_unit(_unit_python_path(), os.path.abspath(__file__)),
+        NETWATCH_PATH + ".service": netwatch_service,
+        NETWATCH_PATH + ".timer":   netwatch_timer,
+    }
+
+
+def _stale_units():
+    """Unit files that differ from what this version would write — including
+    ones missing entirely, so a release that adds a unit flags as stale on
+    hosts enabled before it existed. Empty when the service isn't installed
+    at all: nothing to refresh on a session-only host."""
+    if not _service_file_exists():
+        return []
+    stale = []
+    for path, text in _desired_units().items():
+        try:
+            with open(path) as f:
+                current = f.read()
+        except OSError:
+            current = None
+        if current != text:
+            stale.append(path)
+    return stale
+
+
 def _write_unit_files():
     """Write (or refresh) the systemd unit, the network watchdog unit pair, and
     the file ownership they depend on. Returns True if a service file already
@@ -558,9 +597,7 @@ def _write_unit_files():
     'enable'."""
     updating      = _service_file_exists()
     servette_path = os.path.abspath(__file__)
-    python_path   = _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(
-        ["which", "python3"], capture_output=True, text=True
-    ).stdout.strip()
+    python_path   = _unit_python_path()
 
     service = _systemd_unit(python_path, servette_path)
 

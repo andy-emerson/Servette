@@ -291,8 +291,8 @@
     own site</b> — these results describe only the one you reached. Off the
     request path it runs as a <b>supervised service</b> that restarts on boot,
     <b>drops privileges</b> once the ports are bound, <b>renews its certificate</b>
-    automatically, verifies <b>signed updates</b> against a pinned key, and takes
-    a <b>backup</b> before every change it makes to itself. And nothing above
+    automatically, and accepts new site content only as <b>signed bundles</b> the
+    operator pulls on purpose. And nothing above
     happens while it is answering you: by design, <b>no request ever reaches a
     write</b>. <a href="https://servette.org">servette.org</a> describes the whole of it.
   </p>
@@ -412,8 +412,7 @@
         if (r.status !== 200)
           return { ok: null, obs: 'hidden without a password (or an older Servette)' };
         const v = await r.json();
-        return { ok: true, obs: 'running v' + v.running +
-                 (v.backup ? ' · backup v' + v.backup : ' · no backup yet') }; } },
+        return { ok: true, obs: 'running v' + v.running }; } },
   ];
 
   const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };

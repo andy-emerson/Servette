@@ -22,7 +22,7 @@ config = Config()
 
 ```
 
-Three ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. A completed self-update relaunches with `--post-update`: apply what the new version needs, then hand over to the shell. A person just runs the file — and gets the shell.
+Two ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. A person just runs the file — and gets the shell.
 
 ```python
 # The entry point
@@ -38,9 +38,6 @@ if __name__ == "__main__":
         else:
             log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
             sys.exit(1)
-    elif "--post-update" in sys.argv:
-        _apply_post_update()
-        shell()
     else:
         shell()
 ```

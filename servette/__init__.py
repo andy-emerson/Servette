@@ -3479,26 +3479,30 @@ def _runtime_stats(service_active):
     return rows
 
 
+def _site_rows():
+    """The per-site rows machine consumers read — shared by _status_data and
+    `sites --json`, which deliberately pays only for this list: no systemctl
+    round-trip, no cache-warning walk over every site's tree."""
+    return [{
+        "index":     i,
+        "domain":    site.domain,
+        "serve_dir": site.serve_dir,
+        "auth":      bool(site.username),
+        "cert_days": _cert_days_remaining(_resolve(site.cert_file)),
+        "publish":   bool(site.publish_url and site.publish_key),
+    } for i, site in enumerate(config.sites)]
+
+
 def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
     external tooling. cert_days is None when no certificate is readable."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
-    sites = []
-    for i, site in enumerate(config.sites):
-        sites.append({
-            "index":     i,
-            "domain":    site.domain,
-            "serve_dir": site.serve_dir,
-            "auth":      bool(site.username),
-            "cert_days": _cert_days_remaining(_resolve(site.cert_file)),
-            "publish":   bool(site.publish_url and site.publish_key),
-        })
     return {
         "version":  __version__,
         "running":  running,
         "mode":     "service" if service_active else ("session" if running else None),
-        "sites":    sites,
+        "sites":    _site_rows(),
         "issues":   _production_issues(),
         "warnings": _cache_warnings(),
     }
@@ -3658,6 +3662,8 @@ def _set_site_value(target, key, value):
     empty on success."""
     if key == "dir":
         resolved = os.path.realpath(_resolve(value))
+        if not os.path.isdir(resolved):
+            return f"directory not found: {resolved}"
         if not _is_within_base_dir(resolved):
             return f"dir must live under {BASE_DIR} (the publish swap and the service sandbox depend on it)"
         if _serve_dir_exposes_secrets(resolved):
@@ -3794,7 +3800,7 @@ def run_command(cmd, args):
         cmd_status(json_mode="--json" in args)
     elif cmd == "sites":
         if "--json" in args:
-            print(json.dumps(_status_data()["sites"], indent=2))
+            print(json.dumps(_site_rows(), indent=2))
         else:
             _config_sites()
     elif cmd == "set":

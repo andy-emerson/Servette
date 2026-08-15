@@ -902,6 +902,20 @@ def run_dispatch_tests(s):
     check("sites --json lists every site with its shape",
           len(sites) == len(s.config.sites)
           and {"index", "domain", "serve_dir", "auth", "cert_days", "publish"} <= set(sites[0]))
+    saved_walkers = (s._cache_warnings, s._service_is_active)
+    walked = []
+    try:
+        s._cache_warnings    = lambda: walked.append("walk") or []
+        s._service_is_active = lambda: walked.append("systemctl") or False
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.run_command("sites", ["--json"])
+        check("sites --json pays no status-wide cost (no walk, no systemctl)",
+              walked == [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.run_command("status", ["--json"])
+        check("status --json still gathers the full snapshot", set(walked) == {"walk", "systemctl"})
+    finally:
+        s._cache_warnings, s._service_is_active = saved_walkers
     check("An unknown command is not handled (the argv form exits 2 on this)",
           s.run_command("bogus", []) is False)
 
@@ -943,6 +957,11 @@ def run_dispatch_tests(s):
             s.cmd_set(["dir=/etc"])
         check("set refuses a dir outside the data directory",
               "must live under" in buf.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["dir=no-such-folder-xyz"])
+        check("set refuses a dir that doesn't exist (mirrors the interactive rule)",
+              "not found" in buf.getvalue())
 
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["99", "username=x"])

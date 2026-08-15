@@ -1198,6 +1198,7 @@ def cmd_setup():
         if _is_within_base_dir(serve_path):
             try:
                 os.makedirs(serve_path, exist_ok=True)
+                _chown_operator(serve_path)  # root created it; the operator owns it
                 print(f"  Created {serve_path}.")
             except OSError as e:
                 print(f"  Could not create {serve_path}: {e}")

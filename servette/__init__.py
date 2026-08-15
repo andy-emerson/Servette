@@ -1431,6 +1431,27 @@ def _chown_servette(path):
         subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
+def _operator_user():
+    """The human behind sudo: SUDO_USER when present, else the current user."""
+    return os.environ.get("SUDO_USER") or getpass.getuser()
+
+
+def _chown_operator(path):
+    """Site content belongs to the operator, not the service. The servette
+    user only ever reads it, and the operator must be able to copy new files
+    straight into it (scp -r mysite/ box:/var/lib/servette/site/) without
+    sudo — so the folder is theirs, made world-readable (a+rX), which is all
+    serving needs. Secrets never live here: config and keys keep the
+    servette-owned chown above. Best-effort: a host without chown/chmod
+    (macOS session mode) serves fine without either."""
+    if os.path.exists(path):
+        user = _operator_user()
+        subprocess.run(["chown", "-R", f"{user}:{user}", path], check=False,
+                       capture_output=True)
+        subprocess.run(["chmod", "-R", "a+rX", path], check=False,
+                       capture_output=True)
+
+
 def _systemd_unit(python_path, package_dir):
     """The systemd unit for the service. Writes are confined to where Servette
     actually writes — the data directory (config, certs, ACME account) and the ACME
@@ -1743,7 +1764,7 @@ def _write_unit_files():
             _chown_servette(_resolve(site.cert_file))
         if site.key_file:
             _chown_servette(_resolve(site.key_file))
-        _chown_servette(_resolve(site.serve_dir))
+        _chown_operator(_resolve(site.serve_dir))
     _chown_servette(os.path.join(BASE_DIR, "certs"))
     _chown_servette(os.path.join(BASE_DIR, ".acme-account.pem"))
     # Create the ACME webroot now so it exists when systemd applies ReadWritePaths
@@ -3482,6 +3503,7 @@ def cmd_setup():
         if _is_within_base_dir(serve_path):
             try:
                 os.makedirs(serve_path, exist_ok=True)
+                _chown_operator(serve_path)  # root created it; the operator owns it
                 print(f"  Created {serve_path}.")
             except OSError as e:
                 print(f"  Could not create {serve_path}: {e}")

@@ -2524,6 +2524,24 @@ def run_install_tests(s, tmpdir):
             check(f"systemd-analyze verify {name}: no unknown directives",
                   "unknown lvalue" not in text and "unknown key name" not in text)
 
+    section("Site content ownership (operator, not service)")
+
+    # The servette user only reads site content; the operator must be able to
+    # scp into the folder without sudo. _operator_user picks the human behind
+    # sudo when there is one.
+    saved_sudo = os.environ.get("SUDO_USER")
+    try:
+        os.environ["SUDO_USER"] = "deploybot"
+        check("Under sudo, the site folder goes to the invoking user",
+              s._operator_user() == "deploybot")
+        os.environ.pop("SUDO_USER")
+        import getpass as _getpass
+        check("Without sudo, it goes to the current user",
+              s._operator_user() == _getpass.getuser())
+    finally:
+        if saved_sudo is not None:
+            os.environ["SUDO_USER"] = saved_sudo
+
     section("Swap recommendation (supply and demand)")
 
     MB    = 1024         # 1 MB expressed in kB, matching /proc/meminfo units

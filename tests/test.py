@@ -28,9 +28,9 @@ import time
 import urllib.error
 import urllib.request
 
-# test.py lives in tests/; the repo root (containing servette.py and servette.toml) is its parent.
+# test.py lives in tests/; the repo root (containing the servette/ package) is its parent.
 SERVETTE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, SERVETTE_DIR)  # so `import servette` resolves to the file under test
+sys.path.insert(0, SERVETTE_DIR)  # so `import servette` resolves to the package under test
 os.environ["SERVETTE_HOME"] = SERVETTE_DIR  # data dir = the repo, as a dev checkout runs
 TEST_PORT    = 8443
 BASE_URL     = f"https://127.0.0.1:{TEST_PORT}"
@@ -341,8 +341,9 @@ serve_dir = "b"
 
         # Migration under a Python without cryptography must defer rather than
         # persist an empty domain (which would demote the site to the
-        # domainless catch-all: no HSTS, no renewal). The venv re-exec re-runs
-        # the migration with cryptography available.
+        # domainless catch-all: no HSTS, no renewal). A later load with
+        # cryptography available completes it — under a pip install the
+        # dependency is always present, so this is defense in depth.
         with open(s.Config.CONFIG_FILE, "w") as f:
             f.write(f'serve_dir = "myserve"\ncert_file = "{cert_path}"\nkey_file = "{key_path}"\n')
         saved_crypto = sys.modules.get("cryptography")

@@ -6,10 +6,11 @@ to report a vulnerability and what to expect in return.
 
 ## Supported versions
 
-Servette is pre-1.0 and ships as a single file that updates itself to the
-latest **signed** GitHub Release (the trust model is described in
-[`DESIGN.md`](DESIGN.md#how-it-works)). Only the latest release receives
-security fixes — run `update` from the Servette shell to stay current.
+Servette is pre-1.0 and ships as a pip-installable package (the trust
+model is described in [`DESIGN.md`](DESIGN.md#how-it-works)). Only the
+latest release receives security fixes — `pip install -U servette` to
+stay current. Site *content* has its own signed publish channel, whose
+verification is in scope below.
 
 ## Reporting a vulnerability
 
@@ -27,7 +28,7 @@ What to expect:
 
 - An acknowledgement that the report was received.
 - An honest assessment of whether it's in scope (see below) and how serious it is.
-- A fix released as a new signed version, with credit to you if you'd like it.
+- A fix released as a new version, with credit to you if you'd like it.
 
 This is a small, single-maintainer project, so responses are best-effort rather
 than bound to a formal SLA. Please allow a reasonable window to address an issue
@@ -42,7 +43,7 @@ against any of those are in scope, for example:
 - Path traversal or any way to read files outside the served directory.
 - Authentication or rate-limiting bypass.
 - TLS misconfiguration that weakens the connection.
-- Flaws in update signature verification.
+- Flaws in the publish channel's bundle signature verification.
 
 Out of scope: the deliberate design choices documented under
 [Scope & non-goals](DESIGN.md#scope--non-goals) (e.g. binding to all interfaces,

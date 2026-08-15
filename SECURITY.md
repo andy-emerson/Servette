@@ -8,8 +8,9 @@ to report a vulnerability and what to expect in return.
 
 Servette is pre-1.0 and ships as a pip-installable package (the trust
 model is described in [`DESIGN.md`](DESIGN.md#how-it-works)). Only the
-latest release receives security fixes — `pip install -U servette` to
-stay current. Site *content* has its own signed publish channel, whose
+latest release will receive security fixes — upgrade with pip to stay
+current (the README's install section has the exact command for the
+current release channel). Site *content* has its own signed publish channel, whose
 verification is in scope below.
 
 ## Reporting a vulnerability

@@ -20,6 +20,6 @@ Before proposing a feature, read [Scope & non-goals](DESIGN.md#scope--non-goals)
 
 ## Before you push
 
-The verification bar lives in [`DESIGN.md`](DESIGN.md#verification-bar); the commit discipline lives in [`AGENTS.md`](AGENTS.md). In short: one scoped change, a test that can fail, the suite green (and CodeQL clean for security-relevant work), and the docs updated in the same change. Prefer understatement — describe what a change is verified to do, not what you hope it does.
+The verification bar lives in [`DESIGN.md`](DESIGN.md#verification-bar); the commit discipline lives in [`AGENTS.md`](AGENTS.md). In short: one scoped change, a test that can fail, the suite green (and CodeQL clean for security-relevant work), and the docs updated in the same branch — as their own doc-pass commit, per [`AGENTS.md`](AGENTS.md). Prefer understatement — describe what a change is verified to do, not what you hope it does.
 
 One mechanic worth calling out: `servette/__init__.py` is generated. Edit the Markdown sources under `src/`, run `python3 src/build.py`, and commit both — never hand-edit the module. Run `python3 src/build.py --check` to catch a mismatch before you push; CI runs the same check and fails the build on drift. See [Building](DESIGN.md#building).

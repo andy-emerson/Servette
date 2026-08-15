@@ -40,9 +40,8 @@
     9 Markdown output   10 Toast + welcome dialog
   <script> JS:
     0 Icons   1 Doc model (parse/serialize)   2 Markdown   3 Sources (fetch)
-    4 Theme   5 CodeMirror   6 Cell DOM   6c Preview
-    6b Navigator (file accordion + search)
-    6e Call map (arc diagram)   9 Self-tests   10 Wiring + boot
+    4 Theme   5 CodeMirror   6 Cell DOM   6c Preview   6e Call map
+    6b Navigator (file accordion + search)   9 Self-tests   10 Wiring + boot
   (Each section is marked by a ════ banner; this list is its table of contents.)
 -->
 
@@ -306,7 +305,7 @@ body > * { position: relative; z-index: 1; }
 .lv-resizer { height: 7px; flex-shrink: 0; cursor: ns-resize; position: relative; }
 .lv-resizer::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: .5px; background: var(--border-faint); transition: background .15s; }
 .lv-resizer:hover::before, .lv-resizer.dragging::before { background: var(--border-medium); }
-/* Centered empty-state for a wholly empty panel/tab (ported from the oracle's .pane-placeholder). */
+/* Centered empty-state for a wholly empty panel/tab (ported from the notebook shell's .pane-placeholder). */
 .pane-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: 1; min-height: 140px; color: var(--text-tertiary); font-size: 12px; text-align: center; line-height: 1.6; padding: 20px 14px; }
 .pane-placeholder svg { width: 28px; height: 28px; opacity: 0.35; margin-bottom: 4px; }
 .pane-placeholder .pp-hint { font-size: 11px; opacity: 0.6; }
@@ -390,7 +389,7 @@ body > * { position: relative; z-index: 1; }
 #deps-body .dep-arrow { fill: var(--border-medium); }
 
 /* ════════════════════════════════════════════════════════════════════════════
- * 9. MARKDOWN OUTPUT  (ported from the oracle)
+ * 9. MARKDOWN OUTPUT  (ported from the notebook shell)
  * ════════════════════════════════════════════════════════════════════════════ */
 .out-md { color: var(--text-primary); white-space: normal; }
 /* Headings in the mono face, the front door's convention (h1–h3 there are
@@ -555,7 +554,7 @@ body > * { position: relative; z-index: 1; }
     <button class="welcome-dialog__close" type="button" id="welcome-close">Close</button>
   </div>
   <div class="welcome-dialog__body">
-    <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
+    <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files the <code>servette</code> module is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
     <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files) and Settings at the bottom — one panel at a time. On the right: the Preview pane (the open file as one plain rendered document) and the Call Map (the open file's functions and who calls whom — click a function to jump to it). Click an icon to open or close its panel. The viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
     <p id="welcome-build" style="font-size:11px;color:var(--text-tertiary);margin-top:14px"></p>
   </div>
@@ -566,7 +565,7 @@ body > * { position: relative; z-index: 1; }
 <script>
 "use strict";
 /* ════════════════════════════════════════════════════════════════════════════
- * 0. ICONS (inline SVG — no CDN dependency, unlike the oracle's icon webfont)
+ * 0. ICONS (inline SVG — no CDN dependency, unlike the notebook shell's icon webfont)
  * ════════════════════════════════════════════════════════════════════════════ */
 // Vendored from Tabler Icons (https://tabler.io/icons, MIT) @ v3.31.0, outline set,
 // inline so there's still no CDN/webfont dependency. svg() supplies the shared
@@ -623,8 +622,9 @@ function elem(tag, props={}, kids=[]) {
 let _uid = 0; const uid = () => ++_uid;
 // kind: '' (neutral success/info) or 'err' (red — a failed/rejected action).
 function toast(msg, kind) { const t = $('#toast'); t.textContent = msg; t.className = 'toast' + (kind ? ' ' + kind : ''); t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 1600); }
-// Centered empty-state node: faint icon + headline + optional dim hint. Used for
-// wholly empty tabs/panels (Variables, Tables, Outline, Assets, History, Agent).
+// Centered empty-state node: faint icon + headline + optional dim hint. Used
+// by the panels while their content loads or has nothing to show (Navigator,
+// Preview, Call Map).
 function panePlaceholder(icon, headline, hint) {
   const kids = [ elem('span', { html: svg(icon) }), elem('div', { text: headline }) ];
   if (hint) kids.push(elem('div', { class: 'pp-hint', text: hint }));
@@ -807,11 +807,9 @@ function refreshMarkdownCells(){
  *    crafted link cannot fetch outside this repo's src/.
  * ════════════════════════════════════════════════════════════════════════════ */
 // Bumped on every viewer change. The topbar's "src @ <ref>" names the ref the
-// CELLS were fetched from — it says nothing about which index.html is being
-// served. This stamp does: a stale deployment showed old behavior for four
-// review rounds while reading as current, because nothing on the page said
-// which viewer it was.
-const VIEWER_BUILD = '2026-08-10.1';
+// CELLS were fetched from, not which deployed index.html is serving them —
+// this stamp is the only thing on the page that identifies the viewer itself.
+const VIEWER_BUILD = '2026-08-15.1';
 const REPO  = 'andy-emerson/Servette';
 const FILES = ['INIT.md', 'SERVER.md', 'SYSTEM.md', 'SHELL.md', 'MAIN.md'];   // build.py order
 const _refParam = new URLSearchParams(location.search).get('ref') || 'main';
@@ -979,7 +977,7 @@ function createCellEl(cell){
   if (cell.collapsed) cellEl.classList.add('collapsed');
   if (cell.type==='code'){
     // Display-only trim of leading and trailing blank lines (the literate
-    // style carries them in fences purely for servette.py's spacing); the
+    // style carries them in fences purely for the generated module's spacing); the
     // doc model keeps the exact bytes.
     body.appendChild(elem('pre',{class:'code-plain',text:cell.code.replace(/^\n+/,'').replace(/\n+$/,'')}));
     setTimeout(()=>upgradeCode(cellEl,cell),0);

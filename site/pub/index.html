@@ -326,8 +326,8 @@
       <label class="check-row hint" style="margin-top:0">
         <input type="checkbox" id="chk-selftest" checked>
         <span>include the self-test page at <b>/selftest/</b> — the connection
-        checks the demo page runs, re-runnable on your own domain after every
-        pull</span>
+        checks the demo page runs, plus a version readout behind your password
+        gate, re-runnable on your own domain after every pull</span>
       </label>
       <div class="btn-row">
         <button class="action primary" id="btn-sign" type="button" disabled>Build &amp; sign bundle</button>
@@ -352,6 +352,9 @@
         <pre class="shell">config publish   <span class="c"># paste the bundle URL and the public key above</span>
 pull             <span class="c"># fetch, verify against your key, swap the content in</span>
 restore-site     <span class="c"># one step back, if you ever want the previous content</span></pre>
+        <p class="hint"><code>sudo servette pull</code> also runs as a one-shot
+        command — a cron line makes the publish loop hands-off, and the trigger
+        still never leaves your box.</p>
       </div>
       <p class="error hidden" id="sign-error"></p>
     </div>

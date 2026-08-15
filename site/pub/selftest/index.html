@@ -4,7 +4,7 @@
      demo page runs — same-origin, so it can read what a cross-origin probe
      never could. It deliberately carries no servette:demo marker: once
      published it is the operator's content, delivered and owned by their
-     publish channel, and 'update' must never touch it. The checks duplicate
+     publish channel, and Servette's placeholder refresh must never touch it. The checks duplicate
      site/demo/index.html's — there is no build step to share them, so a
      change to either page's checks belongs in both — plus one of its own:
      the version-discovery row, which needs the operator's session (the
@@ -401,8 +401,8 @@
           ? { ok: true, obs: 'Strict-Transport-Security: present' }
           : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
 
-    // Version discovery — the hook #42 planned this page's tool around, and
-    // only a same-origin page can use: Servette serves it solely on a
+    // Version discovery — same-origin, password-gated: the one check only
+    // this page can make (planned in #42). Servette serves it solely on a
     // password-gated site, so the exact version reaches a party that already
     // holds the password (this browser, once you logged in) and never an
     // anonymous scanner. Absent is a choice or an older Servette, not a

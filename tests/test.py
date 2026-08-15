@@ -860,7 +860,7 @@ def run_dispatch_tests(s):
                    ("cmd_status", "cmd_start", "stop_server", "cmd_pull", "cmd_restore_site")}
     saved_input = builtins.input
     try:
-        s.cmd_status       = lambda: calls.append("status")
+        s.cmd_status       = lambda json_mode=False: calls.append("status")
         s.cmd_start        = lambda: calls.append("start")
         s.stop_server      = lambda: calls.append("stop")
         s.cmd_pull         = lambda site: calls.append(("pull", site))
@@ -883,6 +883,74 @@ def run_dispatch_tests(s):
     pull_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "pull"]
     check("'pull 99' (bad site index) does not call cmd_pull", len(pull_calls) == 1)
     check("'quit' stops server and exits", calls[-1] == "stop")
+
+    section("One-shot CLI: run_command and set")
+
+    # The read half: status --json / sites --json parse and carry the shape
+    # external tooling depends on.
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        handled = s.run_command("status", ["--json"])
+    data = json.loads(buf.getvalue())
+    check("status --json is handled and parses",  handled and isinstance(data, dict))
+    check("status --json carries version/running/sites/issues",
+          {"version", "running", "mode", "sites", "issues", "warnings"} <= set(data))
+    check("status --json reports the running version", data["version"] == s.__version__)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        s.run_command("sites", ["--json"])
+    sites = json.loads(buf.getvalue())
+    check("sites --json lists every site with its shape",
+          len(sites) == len(s.config.sites)
+          and {"index", "domain", "serve_dir", "auth", "cert_days", "publish"} <= set(sites[0]))
+    check("An unknown command is not handled (the argv form exits 2 on this)",
+          s.run_command("bogus", []) is False)
+
+    # The write half: set validates every pair before applying any.
+    saved_set   = {n: getattr(s.config, n) for n in ("port", "trusted_proxy")}
+    saved_site  = (s.config.sites[0].publish_url, s.config.sites[0].publish_key)
+    saved_save  = s.Config.save
+    save_count  = []
+    try:
+        s.Config.save = lambda self: save_count.append(1)
+        good_key = "ab" * 32
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["0", "publish_url=https://cdn.example/bundle.tar.gz",
+                       f"publish_key={good_key}", "port=8444"])
+        check("set applies validated site and host pairs",
+              s.config.sites[0].publish_url == "https://cdn.example/bundle.tar.gz"
+              and s.config.sites[0].publish_key == good_key
+              and s.config.port == 8444)
+        check("set saves once per successful call", save_count == [1])
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["port=99999", "trusted_proxy=10.0.0.1"])
+        check("set rejects a bad pair and applies nothing from the call",
+              "port" in buf.getvalue() and s.config.port == 8444
+              and s.config.trusted_proxy == saved_set["trusted_proxy"]
+              and save_count == [1])
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["publish_key=nothex"])
+        check("set rejects a malformed publish key",
+              "64 hex" in buf.getvalue() and s.config.sites[0].publish_key == good_key)
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["password=hunter2"])
+        check("set refuses unknown keys (password is interactive-only)",
+              "Unknown or malformed" in buf.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["dir=/etc"])
+        check("set refuses a dir outside the data directory",
+              "must live under" in buf.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["99", "username=x"])
+        check("set refuses a site index that doesn't exist", "No site 99" in buf.getvalue())
+    finally:
+        s.Config.save = saved_save
+        for n, v in saved_set.items():
+            setattr(s.config, n, v)
+        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_site
 
     section("Startup refresh (stale units)")
 

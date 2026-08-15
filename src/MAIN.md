@@ -30,7 +30,7 @@ config = Config()
 
 ```
 
-Two ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. A person runs `servette` — the console script the package installs, which calls `main()` — and gets the shell. `python -m servette` is the same entry through `__main__.py`.
+Three ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. `servette <command>` runs one shell command and exits — the form external tooling drives (over SSH, which is the authentication), sharing the interactive shell's dispatcher so the two surfaces cannot drift; it exits 2 on an unknown command, and deliberately skips the startup refresh so `status --json` output stays parseable. Bare `servette` is the interactive shell. (`python -m servette` is the same entry through `__main__.py`.)
 
 ```python
 # The entry point
@@ -44,6 +44,11 @@ def main():
         else:
             log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
             sys.exit(1)
+    elif len(sys.argv) > 1:
+        cmd, args = sys.argv[1].lower(), sys.argv[2:]
+        if not run_command(cmd, args):
+            print(f"Unknown command: {cmd}. Run 'servette' for the interactive shell and its command list.")
+            sys.exit(2)
     else:
         shell()
 

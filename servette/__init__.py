@@ -2348,7 +2348,9 @@ _COMMANDS = [
     ("stop",             "stop the server"),
     ("enable",           "enable Servette as a system service"),
     ("disable",          "remove the system service"),
-    ("status",           "show whether the server is running"),
+    ("status [--json]",  "show whether the server is running"),
+    ("sites [--json]",   "list configured sites"),
+    ("set [n] k=v ...",  "change settings non-interactively"),
     ("log [n]",          "show the last n log entries"),
     ("pull [n]",         "check a site's publish channel and pull new content now"),
     ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
@@ -3380,7 +3382,35 @@ def _runtime_stats(service_active):
     return rows
 
 
-def cmd_status():
+def _status_data():
+    """The status snapshot as data — the shape `status --json` prints, for
+    external tooling. cert_days is None when no certificate is readable."""
+    service_active = _service_is_active()
+    running        = service_active or _server_running()
+    sites = []
+    for i, site in enumerate(config.sites):
+        sites.append({
+            "index":     i,
+            "domain":    site.domain,
+            "serve_dir": site.serve_dir,
+            "auth":      bool(site.username),
+            "cert_days": _cert_days_remaining(_resolve(site.cert_file)),
+            "publish":   bool(site.publish_url and site.publish_key),
+        })
+    return {
+        "version":  __version__,
+        "running":  running,
+        "mode":     "service" if service_active else ("session" if running else None),
+        "sites":    sites,
+        "issues":   _production_issues(),
+        "warnings": _cache_warnings(),
+    }
+
+
+def cmd_status(json_mode=False):
+    if json_mode:
+        print(json.dumps(_status_data(), indent=2))
+        return
     service_active = _service_is_active()
     running        = service_active or _server_running()
     W              = _PAD
@@ -3487,6 +3517,120 @@ def cmd_setup():
         print("  Run 'start' when you're ready.")
 
 
+# ── Non-interactive configuration ────────────────────────────────────────────
+#
+# `set [n] key=value ...` is the write half of the tooling surface (`status
+# --json` and `sites --json` are the read half): external tools drive it over
+# SSH, which is the authentication — no network admin API exists, by design.
+# Validation mirrors the interactive config sub-shell's rules; every pair is
+# validated against scratch objects before any is applied, so a bad pair
+# never leaves the config half-written.
+
+def _set_host_value(target, key, value):
+    """Validate one host-level pair and apply it to target (config, or a
+    scratch object during the validation pass). Returns an error string,
+    empty on success."""
+    if key == "port":
+        if not (value.isdigit() and 0 < int(value) < 65536):
+            return "port must be 1-65535"
+        target.port = int(value)
+    elif key == "email":
+        target.email = value
+    elif key in ("rate_limit", "auth_rate_limit"):
+        if not (value.isdigit() and int(value) > 0):
+            return f"{key} must be a positive integer"
+        setattr(target, key, int(value))
+    elif key == "cache_size_mb":
+        if not (value.isdigit() and int(value) > 0):
+            return "cache_size_mb must be a positive integer"
+        target.cache_size_mb = int(value)
+    elif key == "trusted_proxy":
+        if value:
+            try:
+                ipaddress.ip_address(value)
+            except ValueError:
+                return "trusted_proxy must be an IP address (or empty to clear)"
+        target.trusted_proxy = value
+    return ""
+
+
+def _set_site_value(target, key, value):
+    """Validate one per-site pair and apply it to target (the chosen site, or
+    a scratch Site during the validation pass). Returns an error string,
+    empty on success."""
+    if key == "dir":
+        resolved = os.path.realpath(_resolve(value))
+        if not _is_within_base_dir(resolved):
+            return f"dir must live under {BASE_DIR} (the publish swap and the service sandbox depend on it)"
+        if _serve_dir_exposes_secrets(resolved):
+            return "dir would serve Servette's own config and keys — refused"
+        target.serve_dir = value
+    elif key == "username":
+        target.username = value
+    elif key == "publish_url":
+        if value and not value.startswith("https://"):
+            return "publish_url must be https:// (or empty to clear)"
+        target.publish_url = value
+    elif key == "publish_key":
+        v = value.strip().lower()
+        if v and not (len(v) == 64 and all(c in "0123456789abcdef" for c in v)):
+            return "publish_key must be 64 hex characters (a 32-byte Ed25519 public key)"
+        target.publish_key = v
+    return ""
+
+
+_SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
+                  "cache_size_mb", "trusted_proxy")
+_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key")
+
+
+def _set_usage():
+    print("  Usage: set [n] key=value ...")
+    print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
+    print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
+
+
+def cmd_set(args):
+    """`set [n] key=value ...` — non-interactive configuration for tooling.
+    The optional leading index picks the site for site keys (default 0).
+    Deliberately absent: password (a secret on argv leaks into shell history
+    and the process table — set it interactively), and domain (bound up with
+    certificate issuance — run 'config cert')."""
+    site = config.sites[0]
+    if args and args[0].isdigit():
+        idx = int(args[0])
+        if idx >= len(config.sites):
+            print(f"  No site {idx} — 'sites' lists {len(config.sites)}.")
+            return
+        site, args = config.sites[idx], args[1:]
+    pairs = []
+    for token in args:
+        key, eq, value = token.partition("=")
+        key = key.strip().lower()
+        if not eq or key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
+            print(f"  Unknown or malformed: {token!r}")
+            _set_usage()
+            return
+        pairs.append((key, value))
+    if not pairs:
+        _set_usage()
+        return
+    scratch_host, scratch_site = Config.__new__(Config), Site()
+    for key, value in pairs:
+        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
+               else _set_site_value(scratch_site, key, value))
+        if err:
+            print(f"  {key}: {err}")
+            return
+    for key, value in pairs:
+        if key in _SET_HOST_KEYS:
+            _set_host_value(config, key, value)
+        else:
+            _set_site_value(site, key, value)
+    config.save()
+    print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
+
+
 # ── Main shell loop ───────────────────────────────────────────────────────────
 
 def _startup_refresh():
@@ -3515,6 +3659,50 @@ def _startup_refresh():
                 print(f"  Placeholder page refreshed in {s.serve_dir}.")
 
 
+def run_command(cmd, args):
+    """Dispatch one command by name; False for a name it doesn't know. Shared
+    verbatim by the interactive loop and the one-shot `servette <command>`
+    argv form — one dispatcher, so the two surfaces can never drift. quit and
+    help stay in the interactive loop: they are about the loop itself."""
+    if cmd == "setup":
+        cmd_setup()
+    elif cmd == "config":
+        cmd_config()
+    elif cmd == "enable":
+        cmd_enable()
+    elif cmd == "disable":
+        cmd_disable()
+    elif cmd == "start":
+        cmd_start()
+    elif cmd == "stop":
+        cmd_stop()
+    elif cmd == "status":
+        cmd_status(json_mode="--json" in args)
+    elif cmd == "sites":
+        if "--json" in args:
+            print(json.dumps(_status_data()["sites"], indent=2))
+        else:
+            _config_sites()
+    elif cmd == "set":
+        cmd_set(args)
+    elif cmd == "log":
+        try:
+            cmd_log(int(args[0]) if args else 20)
+        except ValueError:
+            print("Usage: log [number]")
+    elif cmd == "pull":
+        site = _config_site_arg(args)
+        if site is not None:
+            cmd_pull(site)
+    elif cmd == "restore-site":
+        site = _config_site_arg(args)
+        if site is not None:
+            cmd_restore_site(site)
+    else:
+        return False
+    return True
+
+
 def shell():
     _banner("Servette — The Simple Secure Server")
     _startup_refresh()
@@ -3534,40 +3722,13 @@ def shell():
         cmd   = parts[0].lower()
         args  = parts[1:]
 
-        if cmd == "setup":
-            cmd_setup()
-        elif cmd == "config":
-            cmd_config()
-        elif cmd == "enable":
-            cmd_enable()
-        elif cmd == "disable":
-            cmd_disable()
-        elif cmd == "start":
-            cmd_start()
-        elif cmd == "stop":
-            cmd_stop()
-        elif cmd == "status":
-            cmd_status()
-        elif cmd == "log":
-            try:
-                cmd_log(int(args[0]) if args else 20)
-            except ValueError:
-                print("Usage: log [number]")
-        elif cmd == "pull":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_pull(site)
-        elif cmd == "restore-site":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_restore_site(site)
-        elif cmd in ("help", "?"):
+        if cmd in ("help", "?"):
             print(HELP)
         elif cmd in ("quit", "exit"):
             stop_server()
             print("Goodbye.")
             break
-        else:
+        elif not run_command(cmd, args):
             print(f"Unknown command: {cmd}. Type 'help' for a list of commands.")
 
 
@@ -3602,6 +3763,11 @@ def main():
         else:
             log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
             sys.exit(1)
+    elif len(sys.argv) > 1:
+        cmd, args = sys.argv[1].lower(), sys.argv[2:]
+        if not run_command(cmd, args):
+            print(f"Unknown command: {cmd}. Run 'servette' for the interactive shell and its command list.")
+            sys.exit(2)
     else:
         shell()
 

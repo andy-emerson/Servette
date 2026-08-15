@@ -47,7 +47,15 @@ import urllib.request
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 # Paths
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+#
+# The data directory: state lives here, code lives wherever the package
+# manager put it, and the two never share a home. The systemd unit carries
+# Environment=SERVETTE_HOME so the service resolves the same directory the
+# shell that enabled it did.
+BASE_DIR = os.path.abspath(
+    os.environ.get("SERVETTE_HOME")
+    or (os.path.expanduser("~/.servette") if sys.platform == "darwin"
+        else "/var/lib/servette"))
 _VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
 _VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
 
@@ -1513,6 +1521,7 @@ After=network.target
 
 [Service]
 User=servette
+Environment=SERVETTE_HOME={BASE_DIR}
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
@@ -3639,6 +3648,14 @@ def shell():
 # but the stdlib request handlers have fixed signatures and cannot accept
 # extra arguments. In a single-file server that is always run as a process,
 # the global is the right call.
+
+# The data directory must exist before the singleton loads from it. Unwritable
+# (not root on a fresh host) is not fatal: config falls back to defaults and
+# read-only commands still work — the first privileged command creates it.
+try:
+    os.makedirs(BASE_DIR, exist_ok=True)
+except OSError:
+    pass
 
 # The config singleton
 config = Config()

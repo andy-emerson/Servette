@@ -63,11 +63,19 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 ```
 
-Where everything lives. `BASE_DIR` is the directory holding `servette.py` itself, and the private venv sits beside the file; the absolute paths are where provisioning writes the systemd units and where the ACME client serves its challenges from.
+Where everything lives. `BASE_DIR` is the data directory — config, certificates, the ACME account, and the default site folder — deliberately not the directory holding the code, which the package manager owns and replaces. `SERVETTE_HOME` overrides it: a development checkout run with `SERVETTE_HOME=.` serves its own `site/` (which is how servette.org deploys), and the test suite points it at the repository. The absolute paths are where provisioning writes the systemd units and where the ACME client serves its challenges from.
 
 ```python
 # Paths
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+#
+# The data directory: state lives here, code lives wherever the package
+# manager put it, and the two never share a home. The systemd unit carries
+# Environment=SERVETTE_HOME so the service resolves the same directory the
+# shell that enabled it did.
+BASE_DIR = os.path.abspath(
+    os.environ.get("SERVETTE_HOME")
+    or (os.path.expanduser("~/.servette") if sys.platform == "darwin"
+        else "/var/lib/servette"))
 _VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
 _VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
 

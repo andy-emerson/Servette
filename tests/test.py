@@ -34,6 +34,7 @@ import urllib.request
 # test.py lives in tests/; the repo root (containing servette.py and servette.toml) is its parent.
 SERVETTE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SERVETTE_DIR)  # so `import servette` resolves to the file under test
+os.environ["SERVETTE_HOME"] = SERVETTE_DIR  # data dir = the repo, as a dev checkout runs
 TEST_PORT    = 8443
 BASE_URL     = f"https://127.0.0.1:{TEST_PORT}"
 TEST_HTML    = "<!DOCTYPE html><html><body><p>Servette test</p></body></html>"
@@ -2465,6 +2466,8 @@ def run_install_tests(s, tmpdir):
     check("Private /tmp",                              "PrivateTmp=yes" in service)
     check("Writes confined to BASE_DIR + ACME webroot",
           f"ReadWritePaths={s.BASE_DIR} {s.ACME_WEBROOT}" in service)
+    check("The service resolves the same data dir the enabling shell did",
+          f"Environment=SERVETTE_HOME={s.BASE_DIR}" in service)
     ro_line = next((l for l in service.splitlines() if l.startswith("ReadOnlyPaths=")), "")
     check("The source file is pinned read-only within the writable dir (#47)",
           servette_path in ro_line)

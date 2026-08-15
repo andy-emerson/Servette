@@ -17,6 +17,14 @@ One `Config` for the whole process, created here at the bottom of the file rathe
 
 ```python
 
+# The data directory must exist before the singleton loads from it. Unwritable
+# (not root on a fresh host) is not fatal: config falls back to defaults and
+# read-only commands still work — the first privileged command creates it.
+try:
+    os.makedirs(BASE_DIR, exist_ok=True)
+except OSError:
+    pass
+
 # The config singleton
 config = Config()
 

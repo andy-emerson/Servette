@@ -2561,6 +2561,24 @@ def run_install_tests(s, tmpdir):
           f"ExecStart={sys.executable} -m servette --serve" in service)
     check("PYTHONPATH resolves -m servette for checkout deployments",
           f"Environment=PYTHONPATH={os.path.dirname(package_dir)}" in service)
+    pip_unit = s._systemd_unit(sys.executable, "/v/lib/python3.11/site-packages/servette")
+    check("A pip-installed package gets no PYTHONPATH (nothing to widen)",
+          "PYTHONPATH" not in pip_unit)
+
+    # Paths systemd cannot carry are refused, not encoded wrongly.
+    saved_base = s.BASE_DIR
+    saved_sfe  = s._service_file_exists
+    try:
+        s.BASE_DIR = "/tmp/has space"
+        check("A whitespace path is flagged unsafe for units",
+              s._unsafe_unit_path() == "/tmp/has space")
+        s._service_file_exists = lambda: True
+        check("Unsafe paths short-circuit staleness (no rewrite loop)",
+              s._stale_units() == [])
+    finally:
+        s.BASE_DIR = saved_base
+        s._service_file_exists = saved_sfe
+    check("A clean path is not flagged", s._unsafe_unit_path() is None)
 
     # Validate the real unit with systemd-analyze where available (Ubuntu CI has it;
     # skipped on macOS / non-systemd hosts). Catches typo'd or unknown directives.
@@ -2615,6 +2633,22 @@ def run_install_tests(s, tmpdir):
         import getpass as _getpass
         check("Without sudo, it goes to the current user",
               s._operator_user() == _getpass.getuser())
+
+        # The plan grants read to the servette group alone — never the world,
+        # so a .env/.git dragged into a site isn't flipped world-readable.
+        os.environ["SUDO_USER"] = "deploybot"
+        saved_exists = s._servette_user_exists
+        s._servette_user_exists = lambda: True
+        plan = s._operator_chown_plan("/data/site")
+        check("With the service user: owner operator, group servette, g+rX only",
+              plan == [["chown", "-R", "deploybot:servette", "/data/site"],
+                       ["chmod", "-R", "g+rX", "/data/site"]])
+        check("No world-readable bit anywhere in the plan",
+              not any("a+rX" in " ".join(argv) for argv in plan))
+        s._servette_user_exists = lambda: False
+        check("Before the service user exists: ownership only",
+              s._operator_chown_plan("/data/site") == [["chown", "-R", "deploybot", "/data/site"]])
+        s._servette_user_exists = saved_exists
     finally:
         if saved_sudo is not None:
             os.environ["SUDO_USER"] = saved_sudo

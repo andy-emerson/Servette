@@ -4,25 +4,25 @@
 
 *Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-> GENERATED FILE — do not edit. servette.py is built from the Markdown
-> sources in src/ by src/build.py; edit those and rebuild. Hand edits here
-> are overwritten by the next build and fail CI's `build.py --check`.
+> GENERATED FILE — do not edit. servette/__init__.py is built from the
+> Markdown sources in src/ by src/build.py; edit those and rebuild. Hand
+> edits here are overwritten by the next build and fail CI's `build.py --check`.
 
-The file opens by introducing itself: what it does, how it is run, and the three sections everything below belongs to. `__version__` is the single version of record — releases and the self-updater both read it from here.
+The module opens by introducing itself: what it does, how it is run, and the three sections everything below belongs to. `__version__` is the single version of record — the package build reads it from here.
 
 ```python
 # The docstring and version
 """
-servette.py — The Simple Secure Static Site Server
+Servette — The Simple Secure Static Site Server
 
 Servette serves a directory of static files over HTTPS with optional Basic Auth
 and essential security headers. Run it:
 
-    sudo python3 servette.py
+    sudo servette
 
 Architecture:
     Server              — config, rate limiting, file cache, the request handler, and the HTTP servers
-    System              — bootstrap, server lifecycle, certificate management, and service management
+    System              — server lifecycle, certificate management, and service management
     Shell               — the interactive terminal interface
 """
 
@@ -76,8 +76,6 @@ BASE_DIR = os.path.abspath(
     os.environ.get("SERVETTE_HOME")
     or (os.path.expanduser("~/.servette") if sys.platform == "darwin"
         else "/var/lib/servette"))
-_VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
-_VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
 
 SERVICE_PATH  = "/etc/systemd/system/servette.service"
 NETWATCH_PATH = "/etc/systemd/system/servette-netwatch"  # + ".service" / ".timer"

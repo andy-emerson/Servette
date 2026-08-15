@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-test.py — Automated tests for servette.py
+test.py — Automated tests for the servette package
 
-Run from inside the managed virtualenv:
-    .servette-env/bin/python3 test.py
-
-Or, after first-run bootstrap:
-    sudo python3 servette.py   # triggers bootstrap
-    .servette-env/bin/python3 test.py
+Run with any Python 3.11+ that has the one dependency:
+    python3 -m venv .venv && .venv/bin/pip install cryptography
+    .venv/bin/python3 tests/test.py
 """
 
 import base64
@@ -780,61 +777,6 @@ def run_dispatch_tests(s):
     # Full Let's Encrypt issuance and systemd integration need external
     # infrastructure and remain integration-territory, intentionally uncovered.
     import builtins, io, contextlib
-
-    section("Bootstrap: Debian's SystemExit venv failure triggers package recovery")
-
-    # Debian/Ubuntu patch their venv module to print apt instructions and
-    # *exit* — via SystemExit, which is not an Exception — instead of raising.
-    # Drive _bootstrap through exactly that failure: venv.create exits like
-    # Debian's does, the package-manager recovery must run, the retried
-    # creation must succeed, and the re-exec must be reached. Before the fix
-    # the SystemExit escaped _create_venv and the recovery was dead code on
-    # the platforms it exists for.
-    import venv as venv_mod
-    calls = {"create": 0, "run": [], "execv": None}
-    tmp_venv = os.path.join(tempfile.mkdtemp(), "venv")
-
-    def fake_create(path, with_pip=True, clear=False):
-        calls["create"] += 1
-        if calls["create"] == 1:
-            raise SystemExit(1)              # what Debian's patched venv does
-        os.makedirs(os.path.join(path, "bin"), exist_ok=True)
-
-    def fake_run(argv, **kw):
-        calls["run"].append(list(argv))
-        return subprocess.CompletedProcess(argv, 0)
-
-    def fake_execv(path, argv):
-        calls["execv"] = (path, argv)
-        raise RuntimeError("stop-at-exec")   # halt where _bootstrap would re-exec
-
-    saved_boot = (venv_mod.create, s.subprocess.run, s.shutil.which, s.os.execv,
-                  s._VENV_DIR, s._VENV_PY)
-    try:
-        venv_mod.create  = fake_create
-        s.subprocess.run = fake_run
-        s.shutil.which   = lambda name: f"/usr/bin/{name}"
-        s.os.execv       = fake_execv
-        s._VENV_DIR = tmp_venv
-        s._VENV_PY  = os.path.join(tmp_venv, "bin", "python3")
-        halted = False
-        with contextlib.redirect_stdout(io.StringIO()):
-            try:
-                s._bootstrap()
-            except RuntimeError as e:
-                halted = str(e) == "stop-at-exec"
-    finally:
-        (venv_mod.create, s.subprocess.run, s.shutil.which, s.os.execv,
-         s._VENV_DIR, s._VENV_PY) = saved_boot
-
-    apt = [argv for argv in calls["run"] if argv and argv[0] == "apt-get"]
-    check("SystemExit from venv.create reaches the recovery, not the exit",
-          calls["create"] == 2)
-    check("Recovery installs the distro venv package via apt-get",
-          len(apt) == 1 and apt[0][:3] == ["apt-get", "install", "-y"]
-          and apt[0][3].endswith("-venv"))
-    check("Bootstrap proceeds to the re-exec after recovery", halted)
-    shutil.rmtree(os.path.dirname(tmp_venv), ignore_errors=True)
 
     def redirect_request(method, path, headers=None):
         """Drive one request through _RedirectHandler on an ephemeral port."""
@@ -2456,9 +2398,8 @@ def run_install_tests(s, tmpdir):
     section("Service file content")
 
     # Test the real generated unit, not a reconstructed copy.
-    servette_path = os.path.abspath(s.__file__)
-    python_path   = s._VENV_PY if os.path.exists(s._VENV_PY) else "python3"
-    service = s._systemd_unit(python_path, servette_path)
+    package_dir = os.path.dirname(os.path.abspath(s.__file__))
+    service     = s._systemd_unit(sys.executable, package_dir)
     check("Service runs as the least-privilege user",  "User=servette" in service)
     check("Capabilities bounded to net-bind only",     "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" in service)
     check("NoNewPrivileges is set",                    "NoNewPrivileges=yes" in service)
@@ -2469,17 +2410,19 @@ def run_install_tests(s, tmpdir):
     check("The service resolves the same data dir the enabling shell did",
           f"Environment=SERVETTE_HOME={s.BASE_DIR}" in service)
     ro_line = next((l for l in service.splitlines() if l.startswith("ReadOnlyPaths=")), "")
-    check("The source file is pinned read-only within the writable dir (#47)",
-          servette_path in ro_line)
-    check("The managed venv is pinned read-only",
-          s._VENV_DIR in ro_line)
+    check("The package is pinned read-only — holds even for a checkout inside the data dir (#47)",
+          package_dir in ro_line)
+    check("The service starts the package with the enabling shell's interpreter",
+          f"ExecStart={sys.executable} -m servette --serve" in service)
+    check("PYTHONPATH resolves -m servette for checkout deployments",
+          f"Environment=PYTHONPATH={os.path.dirname(package_dir)}" in service)
 
     # Validate the real unit with systemd-analyze where available (Ubuntu CI has it;
     # skipped on macOS / non-systemd hosts). Catches typo'd or unknown directives.
     if shutil.which("systemd-analyze"):
         unit_path = os.path.join(tmpdir, "servette.service")
         with open(unit_path, "w") as f:
-            f.write(s._systemd_unit(sys.executable, os.path.abspath(s.__file__)))
+            f.write(s._systemd_unit(sys.executable, package_dir))
         out  = subprocess.run(["systemd-analyze", "verify", unit_path], capture_output=True, text=True)
         text = (out.stdout + out.stderr).lower()
         check("systemd-analyze verify: no unknown directives",

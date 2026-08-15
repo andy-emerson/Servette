@@ -30,13 +30,11 @@ config = Config()
 
 ```
 
-Two ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. A person just runs the file — and gets the shell.
+Two ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. A person runs `servette` — the console script the package installs, which calls `main()` — and gets the shell. `python -m servette` is the same entry through `__main__.py`.
 
 ```python
 # The entry point
-if __name__ == "__main__":
-    _bootstrap()  # no-op if already in venv; otherwise re-execs into venv
-
+def main():
     if "--serve" in sys.argv:
         start_server()
         try:
@@ -48,4 +46,8 @@ if __name__ == "__main__":
             sys.exit(1)
     else:
         shell()
+
+
+if __name__ == "__main__":
+    main()
 ```

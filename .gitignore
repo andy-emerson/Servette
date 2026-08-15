@@ -5,8 +5,10 @@ servette.toml
 *.pem
 *.sig
 
-# Signed release assets staged by src/release.py
+# Packaging build artifacts
 dist/
+build/
+*.egg-info/
 
 # Log files
 *.log
@@ -15,7 +17,8 @@ dist/
 __pycache__/
 *.pyc
 
-# Managed virtualenv created by bootstrap
+# Local virtualenvs
+.venv/
 .servette-env/
 
 # macOS

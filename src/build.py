@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Build servette.py from the Markdown sources in this directory.
+"""Build servette/__init__.py from the Markdown sources in this directory.
 
-servette.py is authored as five literate Markdown files — INIT.md, SERVER.md,
+The module is authored as five literate Markdown files — INIT.md, SERVER.md,
 SYSTEM.md, SHELL.md, MAIN.md. Each interleaves three things:
 
   * fenced ```python blocks — the code, emitted verbatim;
@@ -11,18 +11,19 @@ SYSTEM.md, SHELL.md, MAIN.md. Each interleaves three things:
   * everything else — headings, section intros — which is navigation for the
     reader and produces nothing.
 
-This tool reverses that mapping, in file order, to produce servette.py. It
+This tool reverses that mapping, in file order, to produce the module. It
 adds nothing of its own: every output line comes from either a code fence or
 a blockquote. The blockquote/comment mapping is an exact inverse of the split
-that created these files, so the build reproduces servette.py byte-for-byte —
-which `--check` verifies.
+that created these files, so the build reproduces the module byte-for-byte —
+which `--check` verifies. (`servette/__main__.py` is the one hand-written
+file in the package: two lines that call main(), authored directly.)
 
 Usage:
-    python build.py                 # write ../servette.py
+    python build.py                 # write ../servette/__init__.py
     python build.py --output PATH   # write somewhere else
     python build.py --stdout        # write to stdout
     python build.py --check         # build in memory, diff against the
-                                     # existing servette.py, exit 1 on drift
+                                     # existing module, exit 1 on drift
 """
 
 import argparse
@@ -30,7 +31,7 @@ import difflib
 import os
 import sys
 
-# The sources, in the order they concatenate into servette.py. MAIN.md is last
+# The sources, in the order they concatenate into the module. MAIN.md is last
 # because the entry point it holds — `config = Config()` and the `__main__`
 # dispatch — runs on import and calls definitions from every section above it.
 SECTION_FILES = ["INIT.md", "SERVER.md", "SYSTEM.md", "SHELL.md", "MAIN.md"]
@@ -100,7 +101,7 @@ def main(argv=None):
 
     src_dir  = os.path.dirname(os.path.abspath(__file__))
     repo_dir = os.path.dirname(src_dir)
-    default  = os.path.join(repo_dir, "servette.py")
+    default  = os.path.join(repo_dir, "servette", "__init__.py")
 
     built = build(src_dir)
 
@@ -109,9 +110,9 @@ def main(argv=None):
     # has no side effects; it catches syntax errors, not runtime ones — the test
     # suite covers the rest.
     try:
-        compile(built, "servette.py", "exec")
+        compile(built, "servette/__init__.py", "exec")
     except SyntaxError as e:
-        print(f"build failed: assembled servette.py has a syntax error: {e}", file=sys.stderr)
+        print(f"build failed: assembled module has a syntax error: {e}", file=sys.stderr)
         return 1
 
     if args.check:
@@ -139,6 +140,7 @@ def main(argv=None):
         return 0
 
     target = args.output or default
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
     with open(target, "w", encoding="utf-8") as f:
         f.write(built)
     print(f"Wrote {target} ({len(built)} bytes) from src/.")

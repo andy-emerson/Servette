@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "servette"
+description = "The Simple Secure Static Site Server — a production nanoserver in one readable module"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dynamic = ["version"]
+dependencies = ["cryptography>=41.0,<50.0"]
+
+[project.scripts]
+servette = "servette:main"
+
+[project.urls]
+Homepage = "https://servette.org"
+Source = "https://github.com/andy-emerson/Servette"
+
+[tool.setuptools]
+packages = ["servette"]
+
+[tool.setuptools.dynamic]
+version = { attr = "servette.__version__" }

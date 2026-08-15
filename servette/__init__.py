@@ -1,18 +1,18 @@
-# GENERATED FILE — do not edit. servette.py is built from the Markdown
-# sources in src/ by src/build.py; edit those and rebuild. Hand edits here
-# are overwritten by the next build and fail CI's `build.py --check`.
+# GENERATED FILE — do not edit. servette/__init__.py is built from the
+# Markdown sources in src/ by src/build.py; edit those and rebuild. Hand
+# edits here are overwritten by the next build and fail CI's `build.py --check`.
 # The docstring and version
 """
-servette.py — The Simple Secure Static Site Server
+Servette — The Simple Secure Static Site Server
 
 Servette serves a directory of static files over HTTPS with optional Basic Auth
 and essential security headers. Run it:
 
-    sudo python3 servette.py
+    sudo servette
 
 Architecture:
     Server              — config, rate limiting, file cache, the request handler, and the HTTP servers
-    System              — bootstrap, server lifecycle, certificate management, and service management
+    System              — server lifecycle, certificate management, and service management
     Shell               — the interactive terminal interface
 """
 
@@ -56,8 +56,6 @@ BASE_DIR = os.path.abspath(
     os.environ.get("SERVETTE_HOME")
     or (os.path.expanduser("~/.servette") if sys.platform == "darwin"
         else "/var/lib/servette"))
-_VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
-_VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
 
 SERVICE_PATH  = "/etc/systemd/system/servette.service"
 NETWATCH_PATH = "/etc/systemd/system/servette-netwatch"  # + ".service" / ".timer"
@@ -1202,78 +1200,6 @@ class _TLSThreadingHTTPServer(_CappedThreadingHTTPServer):
                                              do_handshake_on_connect=False), addr
 
 
-# ── Bootstrap ─────────────────────────────────────────────────────────────────
-#
-# Every invocation from the system Python re-execs into the managed virtualenv.
-# On first run (or if the venv is missing), the venv is created and deps are
-# installed first. The user just runs `sudo python3 servette.py` — the
-# environment is managed invisibly.
-
-def _bootstrap():
-    if sys.prefix == _VENV_DIR:
-        return  # Already running inside the managed virtualenv
-
-    if not os.path.exists(_VENV_PY):
-        print("Setting up Servette...")
-
-        def _create_venv():
-            """Create the venv, returning the failure instead of raising.
-            `import venv` succeeding proves nothing on its own: Debian/Ubuntu
-            ship the venv module in the stdlib but split ensurepip's wheels
-            into the python3-venv package, so create(with_pip=True) is what
-            actually fails on a minimal host — recovery must key on that."""
-            try:
-                import venv as _venv_mod
-                _venv_mod.create(_VENV_DIR, with_pip=True, clear=True)
-                return None
-            except (Exception, SystemExit) as e:
-                # SystemExit is caught deliberately: Debian and Ubuntu patch
-                # their venv module to print apt instructions and *exit*
-                # rather than raise, and SystemExit is not an Exception —
-                # without this, the recovery below is dead code on the two
-                # platforms it exists for.
-                return e
-
-        error = _create_venv()
-        if error is not None:
-            # Install the distro package that completes venv support, then try
-            # once more. Each manager gets its own argv — apk's subcommand is
-            # 'add' and it has no '-y' flag.
-            pkg_managers = [
-                (("apt-get", "install", "-y"), f"python3.{sys.version_info.minor}-venv"),
-                (("dnf",     "install", "-y"), "python3-venv"),
-                (("apk",     "add"),           "py3-venv"),
-            ]
-            for argv, pkg in pkg_managers:
-                if shutil.which(argv[0]):
-                    result = subprocess.run([*argv, pkg])
-                    if result.returncode != 0:
-                        print(f"  Error: failed to install {pkg} via {argv[0]}")
-                        sys.exit(1)
-                    break
-            else:
-                print(f"  Error: failed to create virtual environment: {error}")
-                if _IS_MACOS:
-                    print("  This Python lacks venv/pip support. Install Python 3.11+ from")
-                    print("  python.org or Homebrew and run Servette with that python3.")
-                else:
-                    print("  No supported package manager found to fix it (tried apt-get, dnf, apk).")
-                sys.exit(1)
-            error = _create_venv()
-            if error is not None:
-                print(f"  Error: failed to create virtual environment: {error}")
-                sys.exit(1)
-
-        deps = ["cryptography>=41.0,<50.0"]
-        result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
-        if result.returncode != 0:
-            print(f"  Error: failed to install dependencies")
-            sys.exit(1)
-        print()
-
-    os.execv(_VENV_PY, [_VENV_PY] + sys.argv)
-
-
 # ── Server lifecycle ──────────────────────────────────────────────────────────
 #
 # Each server is a ThreadingHTTPServer run by serve_forever() in a daemon thread;
@@ -1505,16 +1431,19 @@ def _chown_servette(path):
         subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
-def _systemd_unit(python_path, servette_path):
+def _systemd_unit(python_path, package_dir):
     """The systemd unit for the service. Writes are confined to where Servette
-    actually writes — its own directory (config, certs, ACME account) and the ACME
+    actually writes — the data directory (config, certs, ACME account) and the ACME
     webroot (HTTP-01 challenge files during renewal); ProtectSystem=strict makes the
     rest of the filesystem read-only, and the unit runs as a least-privilege user
     holding only CAP_NET_BIND_SERVICE. The served directory ends up read-write only
-    because it lives under the server's own directory; the server never writes it.
-    The service's own code (servette.py) and the managed venv are
-    pinned read-only on top of that writable directory — the serving process never
-    rewrites them, so a compromised one cannot patch the program it re-execs into."""
+    because it lives under the data directory; the server never writes it.
+    The package directory is pinned read-only on top: normally the code lives
+    outside the data directory and strict mode already covers it, but a checkout
+    deployment (SERVETTE_HOME=.) puts the code inside the writable tree, and the
+    pin holds there too — a compromised serving process cannot patch the program
+    systemd will restart it into. PYTHONPATH names the package's parent so
+    `-m servette` resolves for a checkout exactly as it does for a pip install."""
     return f"""[Unit]
 Description=Servette — The Simple Secure Server
 After=network.target
@@ -1522,12 +1451,13 @@ After=network.target
 [Service]
 User=servette
 Environment=SERVETTE_HOME={BASE_DIR}
+Environment=PYTHONPATH={os.path.dirname(package_dir)}
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths={BASE_DIR} {ACME_WEBROOT}
-ReadOnlyPaths={servette_path} -{_VENV_DIR}
+ReadOnlyPaths={package_dir}
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -1535,7 +1465,7 @@ ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictSUIDSGID=yes
 LockPersonality=yes
-ExecStart={python_path} {servette_path} --serve
+ExecStart={python_path} -m servette --serve
 Restart=always
 RestartSec=3
 StandardInput=null
@@ -1731,12 +1661,12 @@ def _ensure_swap():
 
 
 def _unit_python_path():
-    """The interpreter the unit's ExecStart names. Shared by the writer and
-    the drift check below — two computations of this path could disagree and
-    manufacture phantom drift."""
-    return _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(
-        ["which", "python3"], capture_output=True, text=True
-    ).stdout.strip()
+    """The interpreter the unit's ExecStart names: the one running this shell.
+    Under a pip/venv install that is the environment's own python, and the
+    service must use the same one to see the same installed packages. Shared
+    by the writer and the drift check — two computations of this path could
+    disagree and manufacture phantom drift."""
+    return sys.executable
 
 
 def _desired_units():
@@ -1744,7 +1674,8 @@ def _desired_units():
     this version of the code."""
     netwatch_service, netwatch_timer = _netwatch_units()
     return {
-        SERVICE_PATH:               _systemd_unit(_unit_python_path(), os.path.abspath(__file__)),
+        SERVICE_PATH:               _systemd_unit(_unit_python_path(),
+                                                    os.path.dirname(os.path.abspath(__file__))),
         NETWATCH_PATH + ".service": netwatch_service,
         NETWATCH_PATH + ".timer":   netwatch_timer,
     }
@@ -1778,10 +1709,10 @@ def _write_unit_files():
     should contain reaches an already-enabled host without a separate manual
     'enable'."""
     updating      = _service_file_exists()
-    servette_path = os.path.abspath(__file__)
-    python_path   = _unit_python_path()
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    python_path = _unit_python_path()
 
-    service = _systemd_unit(python_path, servette_path)
+    service = _systemd_unit(python_path, package_dir)
 
     # Create system user if needed
     if not _servette_user_exists():
@@ -3661,9 +3592,7 @@ except OSError:
 config = Config()
 
 # The entry point
-if __name__ == "__main__":
-    _bootstrap()  # no-op if already in venv; otherwise re-execs into venv
-
+def main():
     if "--serve" in sys.argv:
         start_server()
         try:
@@ -3675,3 +3604,7 @@ if __name__ == "__main__":
             sys.exit(1)
     else:
         shell()
+
+
+if __name__ == "__main__":
+    main()

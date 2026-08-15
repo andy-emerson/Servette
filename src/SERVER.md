@@ -344,6 +344,13 @@ permissions_policy = {s(self.permissions_policy)}
             except OSError:
                 pass
             raise
+        # The replace installs the temp file's root:root 0600 — unreadable by
+        # the servette service user, which would kill the running service's
+        # per-request config reload and crash-loop the next restart. Restore
+        # the ownership enable establishes; a no-op where the user doesn't
+        # exist (session mode, tests, macOS). Late import shape as with
+        # _domain_from_cert: _chown_servette is defined in System.
+        _chown_servette(self.CONFIG_FILE)
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:

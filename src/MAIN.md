@@ -35,7 +35,7 @@ Three ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if 
 ```python
 # The entry point
 def main():
-    if "--serve" in sys.argv:
+    if sys.argv[1:2] == ["--serve"]:
         start_server()
         try:
             _watch_server()

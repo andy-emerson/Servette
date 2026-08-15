@@ -947,11 +947,48 @@ def run_dispatch_tests(s):
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["99", "username=x"])
         check("set refuses a site index that doesn't exist", "No site 99" in buf.getvalue())
+
+        # Without root, the config write fails with a hint, not a traceback.
+        s.Config.save = lambda self: (_ for _ in ()).throw(PermissionError())
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["port=8445"])
+        check("set without root hints at sudo instead of dying",
+              "requires sudo" in buf.getvalue())
+        s.Config.save = lambda self: save_count.append(1)
     finally:
         s.Config.save = saved_save
         for n, v in saved_set.items():
             setattr(s.config, n, v)
         s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_site
+
+    # Every save restores the service user's read access — a root-owned 0600
+    # config from `sudo servette set` would otherwise kill the running service.
+    saved_chown = s._chown_servette
+    chowned = []
+    try:
+        s._chown_servette = lambda path: chowned.append(path)
+        s.config.save()
+        check("save() re-chowns the config for the service user",
+              chowned == [s.config.CONFIG_FILE])
+    finally:
+        s._chown_servette = saved_chown
+
+    # One-shot dispatch: --serve is positional, so a stray flag in a command's
+    # arguments stays an argument instead of silently becoming the server.
+    saved_argv  = sys.argv
+    saved_main  = {n: getattr(s, n) for n in ("run_command", "start_server")}
+    try:
+        routed = []
+        s.run_command  = lambda cmd, args: routed.append((cmd, args)) or True
+        s.start_server = lambda: routed.append("SERVE")
+        sys.argv = ["servette", "status", "--serve"]
+        s.main()
+        check("A trailing --serve stays a command argument",
+              routed == [("status", ["--serve"])])
+    finally:
+        sys.argv = saved_argv
+        for n, v in saved_main.items():
+            setattr(s, n, v)
 
     section("Startup refresh (stale units)")
 

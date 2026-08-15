@@ -1349,7 +1349,11 @@ def cmd_set(args):
             _set_host_value(config, key, value)
         else:
             _set_site_value(site, key, value)
-    config.save()
+    try:
+        config.save()
+    except PermissionError:
+        print("  Error: writing the config requires sudo. Run: sudo servette set ...")
+        return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 
 

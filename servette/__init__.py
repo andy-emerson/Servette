@@ -363,6 +363,13 @@ permissions_policy = {s(self.permissions_policy)}
             except OSError:
                 pass
             raise
+        # The replace installs the temp file's root:root 0600 — unreadable by
+        # the servette service user, which would kill the running service's
+        # per-request config reload and crash-loop the next restart. Restore
+        # the ownership enable establishes; a no-op where the user doesn't
+        # exist (session mode, tests, macOS). Late import shape as with
+        # _domain_from_cert: _chown_servette is defined in System.
+        _chown_servette(self.CONFIG_FILE)
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
@@ -3680,7 +3687,11 @@ def cmd_set(args):
             _set_host_value(config, key, value)
         else:
             _set_site_value(site, key, value)
-    config.save()
+    try:
+        config.save()
+    except PermissionError:
+        print("  Error: writing the config requires sudo. Run: sudo servette set ...")
+        return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 
 
@@ -3819,7 +3830,7 @@ config = Config()
 
 # The entry point
 def main():
-    if "--serve" in sys.argv:
+    if sys.argv[1:2] == ["--serve"]:
         start_server()
         try:
             _watch_server()

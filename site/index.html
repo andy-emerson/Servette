@@ -867,15 +867,15 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       </div>
       <p class="pill">One file · HTTPS by default · No config language</p>
       <h1>Everything necessary to do one thing well.</h1>
-      <p class="hero-lead">Servette is a production nanoserver: a single readable Python file that serves a static site on the public internet with a trusted certificate that renews itself, security headers on every response, rate limiting, and a hardened service that survives reboots.</p>
-      <p class="hero-sub">No configuration language to learn, and a single dependency it installs for you. Copy one file to a server, run it, follow the wizard, done.</p>
+      <p class="hero-lead">Servette is a production nanoserver: a single readable Python module that serves a static site on the public internet with a trusted certificate that renews itself, security headers on every response, rate limiting, and a hardened service that survives reboots.</p>
+      <p class="hero-sub">No configuration language to learn, and a single dependency the install brings with it. Install the package, run the wizard, done.</p>
       <div class="hero-actions">
         <a class="btn btn--primary btn--l" href="#how-to-use-it">Get started</a>
         <a class="btn btn--outline btn--l" href="#how-it-works">See how it works</a>
       </div>
       <div class="install-line">
         <span class="install-line__prompt">$</span>
-        <code id="install-cmd">sudo python3 servette.py</code>
+        <code id="install-cmd">sudo servette</code>
         <button class="copy-btn" type="button" aria-controls="install-cmd">Copy</button>
       </div>
     </div>
@@ -904,11 +904,11 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     <div class="statband autogrid">
       <div>
         <p class="stat__n">1</p>
-        <p class="stat__what">file to copy — <code>servette.py</code>, and nothing else</p>
+        <p class="stat__what">module to read — the whole server, and nothing else</p>
       </div>
       <div>
         <p class="stat__n">1</p>
-        <p class="stat__what">third-party dependency — <code>cryptography</code>, installed for you on first run</p>
+        <p class="stat__what">third-party dependency — <code>cryptography</code>, installed with the package</p>
       </div>
       <div>
         <p class="stat__n">3,468</p>
@@ -1250,7 +1250,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
         <p>That is the whole argument. The file is right there, and it is short enough to finish.</p>
       </div>
       <div class="cta__actions">
-        <a class="btn btn--primary btn--l" href="https://github.com/andy-emerson/servette/blob/main/servette.py">Open servette.py</a>
+        <a class="btn btn--primary btn--l" href="https://github.com/andy-emerson/servette/blob/main/servette/__init__.py">Open the module</a>
         <a class="btn btn--outline btn--l" href="#how-it-works">See how it works</a>
       </div>
     </div>
@@ -1266,22 +1266,21 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     <div class="sec-head">
       <p class="eyebrow">Getting started</p>
       <h2>How to use it</h2>
-      <p>Servette needs Python 3.11 or newer and a server you can SSH into. There is nothing for you to install beyond the file itself: it creates its own virtual environment and pulls its one dependency, <code>cryptography</code>, on first run. No configuration language, and nothing to build.</p>
+      <p>Servette needs Python 3.11 or newer and a server you can SSH into. It installs like any Python tool — one package, bringing its one dependency, <code>cryptography</code>, with it. No configuration language, and nothing to build.</p>
     </div>
 
     <div class="autogrid steps">
       <div class="step">
         <div class="step__head">
-          <h3>Copy the file</h3>
-          <p>One file and the folder you want to serve.</p>
+          <h3>Install the package</h3>
+          <p>An isolated venv, and a command on your PATH.</p>
         </div>
         <pre><span class="cmt"># on your server</span>
-curl -O https://raw.githubusercontent\
-.com/andy-emerson/servette/main\
-/servette.py
-
-<span class="cmt"># your site goes beside it</span>
-mkdir site
+sudo python3 -m venv /opt/servette
+sudo /opt/servette/bin/pip install \
+  servette
+sudo ln -s /opt/servette/bin/servette \
+  /usr/local/bin/servette
 </pre>
       </div>
       <div class="step">
@@ -1289,7 +1288,7 @@ mkdir site
           <h3>Run the wizard</h3>
           <p>It asks for a domain, a folder, and an email.</p>
         </div>
-        <pre>sudo python3 servette.py
+        <pre>sudo servette
 
 servette&gt; <span class="hi">setup</span>
 </pre>
@@ -1318,7 +1317,7 @@ servette&gt; <span class="hi">status</span>
     <div class="sec-head">
       <p class="eyebrow">Reference</p>
       <h2>The shell</h2>
-      <p>Running <code>servette.py</code> without arguments drops you into an interactive shell. Everything is a command — there is no config file to hand-edit, and nothing that requires restarting the server to take effect.</p>
+      <p>Running <code>servette</code> without arguments drops you into an interactive shell; <code>servette &lt;command&gt;</code> runs one command and exits, which is how scripts drive it. Everything is a command — there is no config file to hand-edit, and nothing that requires restarting the server to take effect.</p>
     </div>
 
     <div class="autogrid cmds">
@@ -1331,8 +1330,8 @@ servette&gt; <span class="hi">status</span>
           <div><dt>enable / disable</dt><dd>install or remove the system service</dd></div>
           <div><dt>status</dt><dd>show whether the server is running</dd></div>
           <div><dt>log [n]</dt><dd>show the last n log entries</dd></div>
-          <div><dt>update</dt><dd>download the latest version of servette.py</dd></div>
-          <div><dt>restore</dt><dd>roll back to the previous version</dd></div>
+          <div><dt>sites [--json]</dt><dd>list configured sites</dd></div>
+          <div><dt>set [n] k=v …</dt><dd>change settings non-interactively</dd></div>
           <div><dt>pull [n]</dt><dd>pull a site's new content now</dd></div>
           <div><dt>restore-site [n]</dt><dd>roll back a site's content</dd></div>
           <div><dt>help / quit</dt><dd>show commands, or exit</dd></div>
@@ -1452,10 +1451,10 @@ servette&gt; <span class="hi">status</span>
           <tr><th scope="col">Principle</th><th scope="col">What it commits us to</th></tr>
         </thead>
         <tbody>
-          <tr><th scope="row">Single file</th><td>All of Servette is one <code>servette.py</code>, readable and debuggable in an afternoon. No module sprawl, no hidden machinery.</td></tr>
+          <tr><th scope="row">Readable in an afternoon</th><td>All of Servette is one literate module, small enough to read and debug in an afternoon. No module sprawl, no hidden machinery.</td></tr>
           <tr><th scope="row">Secure by default</th><td>Trusted TLS, HTTPS-only, security headers on every response, optional auth, rate limiting, a least-privilege service user. Security is the default state, never an opt-in.</td></tr>
           <tr><th scope="row">Production-grade</th><td>Makes the stdlib's <code>http.server</code> fit to serve real sites on the public internet: automatic renewal, auto-restart, survives reboots. The production layer, not a dev tool.</td></tr>
-          <tr><th scope="row">Zero-friction</th><td>Copy one file, run it, follow the wizard. No configuration language, no manual certificate or dependency management.</td></tr>
+          <tr><th scope="row">Zero-friction</th><td>Install the package, run it, follow the wizard. No configuration language, no manual certificate or dependency management.</td></tr>
           <tr><th scope="row">Minimal footprint</th><td>The standard library plus a single package, <code>cryptography</code>; transport, TLS, and the ACME client are stdlib or hand-rolled. Light enough for a Raspberry Pi.</td></tr>
         </tbody>
       </table>
@@ -1537,7 +1536,7 @@ servette&gt; <span class="hi">status</span>
       <p><strong>Certificates.</strong> Let's Encrypt certificates come from Servette's own minimal ACME client: RFC 8555 HTTP-01 over stdlib <code>urllib</code>, with <code>cryptography</code> for JWS signing and the CSR. It is deliberately narrow — HTTP-01 only, no revocation or key rollover — which is why it fits in one file instead of pulling in the certbot stack. It first attempts a certificate covering both the domain and its <code>www.</code> form, falling back to the bare domain if only that fails DNS validation, and saying so.</p>
       <p><strong>Cert watchdog.</strong> A daemon thread polling every 60 seconds. The renewal check itself does not need that cadence — it reads an expiry date and acts only inside the last 30 days — but the same pass also detects a certificate rotated on disk by an outside tool, by mtime, and reloads the server for it. That is the case worth catching quickly, and an expiry check is cheap enough to ride along on the same tick. Renewal failures back off to at most one attempt an hour. Each pass contains its own exceptions: a failed pass logs and retries rather than killing the thread, since a dead watchdog would silently end renewals.</p>
       <p><strong>systemd and host provisioning.</strong> <code>enable</code> creates the login-less <code>servette</code> user and writes a sandboxed unit: <code>CAP_NET_BIND_SERVICE</code> to bind 80 and 443 without root, with <code>NoNewPrivileges</code>, <code>ProtectSystem=strict</code>, <code>PrivateTmp</code>, and write access limited to the server's own directory and the ACME webroot. Install also provisions two host-level defenses born of a production post-mortem: a network watchdog that restarts the host's network manager if the default route disappears, and a swapfile offer sized from measured RAM and demand rather than a hardcoded ceiling.</p>
-      <p><strong>Self-update.</strong> Updates come from signed GitHub Releases, not from <code>main</code> — the signature is the trust anchor, because a release is verifiable whereas <code>main</code> is whatever is currently there, signed by no one. <code>update</code> fetches the release's <code>servette.py</code> and its signature, verifies against a pinned public key, validates syntax, backs up the current file, and swaps atomically. Settings are never touched.</p>
+      <p><strong>Updates.</strong> Servette updates the way every pip-installed tool does — <code>pip install -U servette</code> — and rolls back by installing the version you want. The next shell launch notices a stale service unit and refreshes it. Site <em>content</em> keeps its own separate channel: signed bundles the operator pulls on purpose, verified in-process against a key only that site trusts. Settings are never touched by either.</p>
     </div>
   </section>
 
@@ -1577,8 +1576,9 @@ servette&gt; <span class="hi">status</span>
 
     <div class="codeblock">
       <p class="codeblock__label">Running</p>
-      <pre>sudo python3 servette.py          <span class="cmt"># interactive shell (re-execs into the venv)</span>
-python3 servette.py --serve       <span class="cmt"># non-interactive service mode (used by systemd)</span></pre>
+      <pre>sudo servette                     <span class="cmt"># interactive shell</span>
+sudo servette status --json       <span class="cmt"># one-shot command, for scripts and tools</span>
+python3 -m servette --serve       <span class="cmt"># non-interactive service mode (used by systemd)</span></pre>
     </div>
 
     <div class="codeblock">
@@ -1622,7 +1622,7 @@ python3 servette.py --serve       <span class="cmt"># non-interactive service mo
         <p>Everything above describes 3,468 lines of Python. They are one click away, and short enough to finish.</p>
       </div>
       <div class="cta__actions">
-        <a class="btn btn--primary btn--l" href="https://github.com/andy-emerson/servette/blob/main/servette.py">Open servette.py</a>
+        <a class="btn btn--primary btn--l" href="https://github.com/andy-emerson/servette/blob/main/servette/__init__.py">Open the module</a>
         <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette/blob/main/DESIGN.md">Read DESIGN.md</a>
       </div>
     </div>

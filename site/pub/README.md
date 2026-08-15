@@ -18,7 +18,7 @@ demo page runs, after every `pull`, plus the one check only it can make:
 the version-discovery row (`/.well-known/servette`, password-gated), which
 shows "running vX · backup vY" with the operator's own session. It carries
 no `servette:demo` marker (published, it is the operator's content;
-`update` must never touch it), and its checks duplicate
+Servette's placeholder refresh must never touch it), and its checks duplicate
 `site/demo/index.html`'s — there is no build step to share them, so a
 change to either page's checks belongs in both.
 

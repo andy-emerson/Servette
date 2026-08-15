@@ -1360,15 +1360,27 @@ def _startup_refresh():
     launch instead: code now arrives through the package manager, which can
     neither refresh a stale systemd unit nor rewrite an outdated placeholder
     page — so the shell notices on its next run. Prints nothing when nothing
-    is stale, and fails soft: a refresh that needs root just says so."""
+    is stale, and fails soft: a refresh that needs root just says so.
+
+    Auto-refresh is gated on the environment matching: a stale unit whose
+    data directory or interpreter differs from this shell's is reported and
+    left alone — rewriting it would repoint a live service at this shell's
+    environment, which only an explicit 'enable' may do."""
     if _stale_units():
-        try:
-            _write_unit_files()
-            if _service_is_active():
-                _reload_server()
-            print("  Service unit refreshed to this version's shape.")
-        except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
-            print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
+        drift = _service_env_drift()
+        if drift:
+            print("  The enabled service was set up from a different environment:")
+            for d in drift:
+                print(f"    - {d}")
+            print("  Leaving it untouched — run 'enable' to re-provision from this shell.")
+        else:
+            try:
+                _write_unit_files()
+                if _service_is_active():
+                    _reload_server()
+                print(f"  Service refreshed to v{__version__}.")
+            except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
+                print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
     for s in config.sites:
         index_path = os.path.join(_resolve(s.serve_dir), "index.html")
         if _is_placeholder(index_path):

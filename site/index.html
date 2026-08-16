@@ -1609,26 +1609,32 @@ servette&gt; <span class="hi">status</span>
     <div class="sec-head">
       <p class="eyebrow">Verifying</p>
       <h2>Check what you actually deployed</h2>
-      <p>Your install serves a connection self-test at the reserved <code>/selftest/</code> path, from inside the program — so it is there on a fresh install, with nothing to add and nothing to copy into your folder. Visit <strong>your own</strong> <code>/selftest/</code> and it probes that connection from the browser and reports what came back, rather than asserting that everything is fine. It is same-origin by construction: it can only ever report on the server that served it, which is what lets it read headers a cross-origin checker never could.</p>
+      <p>Open <code>/selftest/</code> on <strong>your own</strong> site — <code>https://your-domain/selftest/</code> — and it reports what a visitor's browser actually receives. That is a different question from whether the process is running, which is all <code>status</code> can answer from the machine itself. Every install serves it from inside the program, so it is there on a fresh setup with nothing to add.</p>
     </div>
 
-    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+    <div class="autogrid" style="--min: 260px; --gap: 20px;">
       <div class="card card--ours">
-        <h3>It reports, it does not reassure</h3>
-        <p>Real requests, and what actually came back: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped — never passed.</p>
+        <h3>Right after setup</h3>
+        <p>The certificate chain, the HTTP-to-HTTPS redirect, and every security header, as seen from the public internet rather than from inside the box. <code>status</code> says the process is alive; this says the internet agrees.</p>
       </div>
       <div class="card">
-        <h3>It runs where your visitors are</h3>
-        <p>The checks execute in the browser, over the same connection a visitor gets and behind the same password if the site has one. It measures the deployment as reached from outside, not the server's opinion of itself.</p>
+        <h3>After a config change</h3>
+        <p>Turned on CSP, changed the cache policy, added a password? Reload it and see whether the change reached the wire. A setting that is saved and a setting that is being sent are not the same claim.</p>
       </div>
       <div class="card">
-        <h3>Your content still wins</h3>
-        <p>The path is reserved, not defended: put anything named <code>selftest</code> in your site root and yours is served instead. The self-test occupies the path only while you are not using it.</p>
+        <h3>After an update</h3>
+        <p>The version row reports what is <em>actually running</em>, which is not always what is installed — a running process keeps the code it loaded until it restarts. Served only on a password-protected site, so the version never reaches an anonymous scanner.</p>
+      </div>
+      <div class="card">
+        <h3>When something looks wrong</h3>
+        <p>A proxy or CDN stripping headers, a partial certificate chain, HSTS missing because no domain is configured. It separates a misconfigured server from a network between you and it.</p>
       </div>
     </div>
 
     <div class="prose">
-      <p>Nothing here tests <em>your</em> server — it cannot. The link below runs the checks against this one, so you can see the report you would get before installing anything.</p>
+      <p>What it reports: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped — never passed — and an optional header you switched off reads as a choice, not a defect.</p>
+      <p>It is same-origin by construction, which is exactly what lets it read what a cross-origin checker never could. The same property means it only ever reports on the server that served it: the path is reserved, not defended, so anything named <code>selftest</code> in your site root is served instead of it.</p>
+      <p class="aside">The link below runs the checks against <em>this</em> server, not yours — a look at the report before you install anything.</p>
       <p><a class="btn btn--outline btn--l" href="selftest/">See it run on this server →</a></p>
     </div>
   </section>

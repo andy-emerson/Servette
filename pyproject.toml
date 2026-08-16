@@ -21,5 +21,8 @@ Source = "https://github.com/andy-emerson/Servette"
 [tool.setuptools]
 packages = ["servette"]
 
+[tool.setuptools.package-data]
+servette = ["selftest.html"]
+
 [tool.setuptools.dynamic]
 version = { attr = "servette.__version__" }

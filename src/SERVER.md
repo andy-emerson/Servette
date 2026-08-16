@@ -707,6 +707,19 @@ def _security_headers(site):
 
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
+# The reserved self-test page (DECISIONS.md: "The self-test is server-
+# delivered, client-executed"): shipped beside this module as package data,
+# read once at import, served at /selftest/ wherever the operator's content
+# doesn't shadow it. A missing file (an unusual install) degrades to the
+# normal 404 rather than an error.
+_SELFTEST_PATHS = ("/selftest", "/selftest/", "/selftest/index.html")
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "selftest.html"), "rb") as _f:
+        _SELFTEST_PAGE = _f.read()
+except OSError:
+    _SELFTEST_PAGE = None
+
 
 def _loggable(s):
     """Escape control characters in a string bound for the logs. A request path
@@ -830,6 +843,19 @@ def _handle_request(method, url_path, headers, raw_ip):
         body = json.dumps({"running": __version__}).encode()
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
+
+    # The reserved self-test path: the embedded page serves at /selftest/
+    # wherever the operator's content doesn't shadow it — shadowing is simply
+    # having selftest/index.html in the site. Read-only bytes like any file;
+    # the page checks, in the visitor's browser, the connection it arrived
+    # over. Behind the same auth as everything else on the site.
+    if (_SELFTEST_PAGE is not None
+            and url_path.split("?", 1)[0] in _SELFTEST_PATHS
+            and not os.path.exists(os.path.join(_resolve(site.serve_dir),
+                                                "selftest", "index.html"))):
+        return resp(200, [(b"content-type", b"text/html; charset=utf-8"),
+                          (b"content-length", str(len(_SELFTEST_PAGE)).encode())],
+                    _SELFTEST_PAGE)
 
     # Resolve request path to a file within the matched site's own serve_dir
     try:

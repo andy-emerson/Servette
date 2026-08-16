@@ -2348,6 +2348,44 @@ def run_server_tests(s, serve_dir):
     s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
+    section("Reserved self-test path")
+
+    # The embedded page serves at /selftest/ unless the operator's content
+    # shadows it; it rides the site's own auth like everything else.
+    resp = req("GET", "/selftest/")
+    check("GET /selftest/ serves the embedded page",
+          resp.status == 200 and b"Self-test" in resp.body
+          and "text/html" in resp.headers.get("Content-Type", ""))
+    check("All three path forms serve it",
+          req("GET", "/selftest").status == 200
+          and req("GET", "/selftest/index.html").status == 200)
+    check("HEAD /selftest/ answers with an empty body",
+          req("HEAD", "/selftest/").status == 200 and req("HEAD", "/selftest/").body == b"")
+
+    shadow_dir = os.path.join(s._resolve(s.config.sites[0].serve_dir), "selftest")
+    os.makedirs(shadow_dir, exist_ok=True)
+    try:
+        with open(os.path.join(shadow_dir, "index.html"), "w") as f:
+            f.write("<!DOCTYPE html><p>operator selftest</p>")
+        check("Operator content shadows the reserved path",
+              b"operator selftest" in req("GET", "/selftest/").body)
+    finally:
+        shutil.rmtree(shadow_dir, ignore_errors=True)
+    check("Unshadowed again after removal", b"Self-test" in req("GET", "/selftest/").body)
+
+    s.config.sites[0].username = "testuser"
+    s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")
+    try:
+        check("On an auth site the page is behind the same gate",
+              req("GET", "/selftest/").status == 401)
+        check("...and serves with credentials",
+              req("GET", "/selftest/", auth=("testuser", "testpass")).status == 200)
+    finally:
+        s.config.sites[0].username      = ""
+        s.config.sites[0].password_hash = ""
+        s.config.sites[0].password_salt = ""
+        s._auth_fail_times.clear()
+
     section("Cache-Control policies")
 
     s.config.cache_policy = "no-cache"

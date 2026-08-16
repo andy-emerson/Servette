@@ -6,10 +6,10 @@
 
 ## Config
 
+Relative paths in the config are anchored to the data directory, never to wherever the process happens to run.
+
 ```python
-# ── Config ────────────────────────────────────────────────────────────────────
-
-
+# Resolving data paths
 def _resolve(path):
     """Return path as-is if absolute, otherwise anchor it to BASE_DIR."""
     return path if os.path.isabs(path) else os.path.join(BASE_DIR, path)
@@ -34,6 +34,7 @@ def _resolve(path):
 > design would hand attackers a deterministic denial of every legitimate login).
 
 ```python
+# Password hashing
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1
 _SCRYPT_MAX_CONCURRENT          = 4
 _SCRYPT_SLOTS                   = threading.BoundedSemaphore(_SCRYPT_MAX_CONCURRENT)
@@ -65,6 +66,12 @@ def _check_password(submitted, stored_hash, stored_salt):
         return False
 
 
+```
+
+Everything that varies per hosted domain lives on a `Site`; everything host-level lives once on `Config`. No field exists at both levels, so there is no fallback lookup to reason about.
+
+```python
+# A site
 class Site:
     """One `[[site]]` block: everything that varies per hosted domain — the domain
     itself, its folder, its own certificate, its visitor auth, its publish channel.
@@ -86,6 +93,12 @@ class Site:
         self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
+```
+
+The signal for a config that must not take effect. Where it is raised decides what happens: fatal at startup, ignored (last good config stays live) on the per-request reload.
+
+```python
+# The invalid-config signal
 class _ConfigInvalid(Exception):
     """servette.toml cannot be safely applied — unparseable TOML, or a
     serve_dir that would publish Servette's own secrets. At startup this is
@@ -93,6 +106,12 @@ class _ConfigInvalid(Exception):
     stays in force — see reload_if_changed."""
 
 
+```
+
+The `Config` class is the whole settings lifecycle: load (with validation before any live field mutates, and the flat-config migration), the per-request reload that survives a bad edit, and the atomic save that writes `servette.toml` — the TOML template with its operator-facing comments is the string literal inside `save()`.
+
+```python
+# Config
 class Config:
     """Holds all Servette settings and handles reading/writing servette.toml."""
 
@@ -234,98 +253,54 @@ class Config:
 
         sites_content = "\n".join(f"""\
 [[site]]
-```
-
-> Leave domain blank for a self-signed certificate (browsers will warn visitors)
-
-```python
+# Leave domain blank for a self-signed certificate (browsers will warn visitors)
 domain = {s(site.domain)}
 serve_dir = {s(site.serve_dir)}
 cert_file = {s(site.cert_file)}
 key_file = {s(site.key_file)}
 
-```
-
-> Leave username blank to disable password protection
-
-```python
+# Leave username blank to disable password protection
 username = {s(site.username)}
 
-```
-
-> Site publish channel: where signed content bundles are pulled from, and the
-> public key (distinct from Servette's own release-signing key) that verifies
-> them. Leave blank to disable — no polling happens without both set.
-
-```python
+# Site publish channel: where signed content bundles are pulled from, and the
+# public key (distinct from Servette's own release-signing key) that verifies
+# them. Leave blank to disable — no polling happens without both set.
 publish_url = {s(site.publish_url)}
 publish_key = {s(site.publish_key)}
 
-```
-
-> Machine-generated — do not edit by hand
-
-```python
+# Machine-generated — do not edit by hand
 password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
 """ for site in self.sites)
 
         content = f"""\
-```
-
-> Servette configuration — https://github.com/andy-emerson/servette
->
-> Host-level settings below apply to every site on this box. Each [[site]]
-> block below is one hosted domain — its own folder, certificate, auth, and
-> publish channel.
-
-```python
+# Servette configuration — https://github.com/andy-emerson/servette
+#
+# Host-level settings below apply to every site on this box. Each [[site]]
+# block below is one hosted domain — its own folder, certificate, auth, and
+# publish channel.
 
 port = {self.port}
 
-```
-
-> Rate limiting (requests per minute per IP, shared across all sites)
-
-```python
+# Rate limiting (requests per minute per IP, shared across all sites)
 rate_limit = {self.rate_limit}
 auth_rate_limit = {self.auth_rate_limit}
 
-```
-
-> Browser cache policy: no-store, no-cache, or max-age
-
-```python
+# Browser cache policy: no-store, no-cache, or max-age
 cache_policy = {s(self.cache_policy)}
 cache_max_age = {self.cache_max_age}
-```
-
-> In-memory file cache limit in MB — reduce on constrained hardware
-
-```python
+# In-memory file cache limit in MB — reduce on constrained hardware
 cache_size_mb = {self.cache_size_mb}
 
-```
-
-> Let's Encrypt registration email and optional reverse proxy IP
-
-```python
+# Let's Encrypt registration email and optional reverse proxy IP
 email = {s(self.email)}
 trusted_proxy = {s(self.trusted_proxy)}
 
-```
-
-> TLS settings
-
-```python
+# TLS settings
 tls_min_version = {s(self.tls_min_version)}
 ciphers = {s(self.ciphers)}
 
-```
-
-> Security headers — use config shell to adjust
-
-```python
+# Security headers — use config shell to adjust
 csp = {s(self.csp)}
 permissions_policy = {s(self.permissions_policy)}
 
@@ -361,12 +336,10 @@ permissions_policy = {s(self.permissions_policy)}
 
 ## Logging
 
-```python
-# ── Logging ───────────────────────────────────────────────────────────────────
-#
-# In service mode, logs go to systemd journal (StandardOutput=journal).
-# In interactive mode, warnings and errors go to the terminal.
+In service mode, logs go to the systemd journal (`StandardOutput=journal`); interactively, warnings and errors go to the terminal.
 
+```python
+# Logging setup
 def setup_logging():
     root = logging.getLogger()
     root.handlers.clear()
@@ -384,6 +357,12 @@ log = logging.getLogger(__name__)
 setup_logging()
 
 
+```
+
+Color for interactive output only; pipes and the journal get plain text.
+
+```python
+# Terminal color
 def _c(text, color):
     """Wrap text in an ANSI color for interactive (TTY) output; plain text otherwise."""
     codes = {"green": "32", "red": "31", "yellow": "33"}
@@ -396,13 +375,10 @@ def _c(text, color):
 
 ## Rate limiter
 
-```python
-# ── Rate limiter ──────────────────────────────────────────────────────────────
-#
-# Uses threading.Lock because the critical section is in-memory deque
-# manipulation — not I/O — so it's held only briefly and stays barely contended
-# even when many connection threads hit it at once.
+Sliding-window counters per IP, guarded by a plain `threading.Lock` — the critical section is in-memory deque manipulation, not I/O, so it is held only briefly and stays barely contended even when many connection threads hit it at once.
 
+```python
+# Rate state
 RATE_WINDOW  = 60      # seconds
 _RATE_IP_CAP = 10_000  # max IPs tracked per dict; bounds memory under IP-flood attacks
 
@@ -411,6 +387,12 @@ _auth_fail_times = {}
 _rate_lock       = threading.Lock()
 
 
+```
+
+Both spellings of a mapped IPv4 address must share one bucket.
+
+```python
+# Normalizing addresses
 def _normalize_ip(ip):
     """Normalize IPv6-mapped IPv4 addresses so both forms bucket together.
 
@@ -426,6 +408,12 @@ def _normalize_ip(ip):
     return ip
 
 
+```
+
+A background sweep keeps the trackers bounded no matter what traffic does.
+
+```python
+# The sweep
 def _rate_sweep(stop_event):
     """Background thread: evict stale IPs and enforce the IP cap every 30 seconds."""
     while not stop_event.wait(timeout=30):
@@ -441,6 +429,12 @@ def _rate_sweep(stop_event):
                         del tracker[k]
 
 
+```
+
+The check itself, with its two modes: count-and-decide, or peek without counting so an expensive operation can be gated on the limit before it spends anything.
+
+```python
+# The limit check
 def _rate_limit_exceeded(tracker, ip, limit, record=True):
     """Return True if ip is over `limit` within the window.
 
@@ -485,9 +479,10 @@ def _rate_limit_exceeded(tracker, ip, limit, record=True):
 
 ## File cache
 
-```python
-# ── File cache ────────────────────────────────────────────────────────────────
+An LRU byte-cache of served files, bounded by `cache_size_mb`.
 
+```python
+# Cache state
 _file_cache       = collections.OrderedDict()
 _file_cache_lock  = threading.Lock()
 _file_cache_bytes = 0
@@ -498,15 +493,28 @@ _file_cache_bytes = 0
 > pdf, video, archives) gain nothing, so they're served and stored uncompressed.
 
 ```python
+# Compressible types
 _COMPRESSIBLE_EXTS = {
     ".html", ".css", ".js", ".json", ".svg", ".txt", ".xml", ".webmanifest", ".ttf",
 }
 
 
+```
+
+An entry's cost counts both representations it may hold.
+
+```python
+# An entry's cost
 def _entry_bytes(entry):
     return len(entry["raw"]) + (len(entry["compressed"]) if entry["compressed"] else 0)
 
 
+```
+
+The read-through path: mtime-validated hits, one gzip per file change, and two protections for the bound — a file too large for the cache is served but never stored (so it can't purge everything else), and eviction is oldest-first.
+
+```python
+# Reading through the cache
 def _get_cached_file(path):
     """Return (raw, compressed_or_None, etag), reloading only if the file changed.
 
@@ -564,6 +572,14 @@ def _get_cached_file(path):
     return raw, compressed, etag
 
 
+```
+
+## Path resolution
+
+Extension-to-MIME is a fixed table; anything unknown is served as opaque bytes.
+
+```python
+# MIME types
 MIME_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css":  "text/css; charset=utf-8",
@@ -589,6 +605,13 @@ def _mime_type(path):
     ext = os.path.splitext(path)[1].lower()
     return MIME_TYPES.get(ext, "application/octet-stream")
 
+
+```
+
+The two predicates path resolution is built on: containment within the site's own tree, and the dotfile refusal.
+
+```python
+# Containment
 def _within(base, target):
     """True if `target` is `base` or sits inside it. commonpath on already-resolved
     absolute paths means a traversal or symlink escape lands outside `base` and fails."""
@@ -606,6 +629,12 @@ def _hidden_segment(segments):
     return any(seg.startswith(".") and seg != ".well-known" for seg in segments if seg)
 
 
+```
+
+URL to file, confined to the matched site's `serve_dir`. The hidden-name rule runs twice — once on the requested segments, once on the resolved target — so a dotfile is refused by whatever name it was reached, including through a symlink.
+
+```python
+# Resolving a request path
 def _resolve_request_path(url_path, serve_dir):
     """Resolve a URL path to an absolute file path within the matched site's
     serve_dir. Returns (None, 403) on traversal or a hidden path, (None, 404) if
@@ -641,6 +670,14 @@ def _resolve_request_path(url_path, serve_dir):
     return abs_path, 200
 
 
+```
+
+## Response headers
+
+Cache-Control scope follows the site's auth: a password-protected site's responses are `private`, so a shared cache never holds what only some visitors may see.
+
+```python
+# Cache-Control
 def _cache_control_header(username):
     """Cache-Control for the matched site. A site behind Basic Auth gets
     `private`, so a shared cache never holds a response only some visitors
@@ -653,6 +690,12 @@ def _cache_control_header(username):
     return f"{scope}, max-age={config.cache_max_age}"
 
 
+```
+
+Single byte ranges only — enough for media seeking; multi-range requests fall back to the full body.
+
+```python
+# Byte ranges
 def _parse_range(header, total):
     """Parse a single HTTP byte range against a body of `total` bytes. Returns
     (start, end) inclusive, "invalid" if unsatisfiable, or None if absent or
@@ -679,6 +722,12 @@ def _parse_range(header, total):
     return (start, end)
 
 
+```
+
+Security headers ride every HTTPS response, success or error; HSTS only where a real certificate backs the pin.
+
+```python
+# Security headers
 def _security_headers(site):
     """Security headers sent on every HTTPS response — success or error. site is
     the matched site (whose domain gates HSTS — a real Let's Encrypt cert backs
@@ -700,11 +749,12 @@ def _security_headers(site):
 
 ```
 
-## HTTP server
+## The request core
+
+Two reserved paths precede the handler: version discovery at `/.well-known/servette`, and the embedded self-test page, shipped beside the module as package data and read once at import.
 
 ```python
-# ── HTTP server ───────────────────────────────────────────────────────────────
-
+# Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
 # The reserved self-test page (DECISIONS.md: "The self-test is server-
@@ -723,6 +773,12 @@ except OSError:
     _SELFTEST_ETAG = None
 
 
+```
+
+Anything a request writes into the logs is escaped first — a crafted path must never drive an operator's terminal.
+
+```python
+# Log escaping
 def _loggable(s):
     """Escape control characters in a string bound for the logs. A request path
     reaches the journal and, from there, an operator's terminal — an unescaped
@@ -731,6 +787,12 @@ def _loggable(s):
     return "".join(c if c >= " " and c != "\x7f" else f"\\x{ord(c):02x}" for c in s)
 
 
+```
+
+The request core is one function, transport-agnostic and ordered deliberately: reload, rate limit (ahead of site selection, so unmatched Hosts still throttle), site selection (an unmatched Host gets the undifferentiated closed-system 404 — deliberately ahead of the method check, so no 405 leaks that something is here), method check, per-site auth with the scrypt gate, the reserved paths, then file resolution and the caching/range/gzip protocol. Every inline comment below marks one of those decisions where it takes effect.
+
+```python
+# The request core
 def _handle_request(method, url_path, headers, raw_ip):
     """The request core. Given the method, URL path, the parsed request headers (a
     case-insensitive mapping — an http.client.HTTPMessage in production), and the raw
@@ -952,6 +1014,14 @@ def _handle_request(method, url_path, headers, raw_ip):
     ], raw)
 
 
+```
+
+## Site selection and TLS
+
+Host to site, uniform regardless of site count: exact domain first, then the www pairing (mirroring what `_obtain_trusted_cert` issues), then the first domainless site as catch-all.
+
+```python
+# Site selection
 def _select_site(host):
     """Match a Host/SNI value (bare hostname, port stripped if present) against
     configured sites — uniform regardless of site count. Exact domain match
@@ -978,6 +1048,12 @@ def _select_site(host):
     return None
 
 
+```
+
+Two sites must never share a domain — TLS and routing would silently disagree about which is served.
+
+```python
+# Domain collisions
 def _domain_in_use(domain, excluding=None):
     """True if some other configured site already claims this domain
     (case-insensitive). Two sites sharing a domain would make TLS and HTTP
@@ -990,6 +1066,12 @@ def _domain_in_use(domain, excluding=None):
     return any(s is not excluding and s.domain and s.domain.lower() == domain for s in config.sites)
 
 
+```
+
+One certificate, one TLS context — minimum version enforced, ALPN pinned to HTTP/1.1, unreadable material raising so startup fails closed.
+
+```python
+# One certificate's context
 def _build_ssl_context(cert_path, key_path):
     """TLS context for one certificate — minimum version enforced, optional cipher
     override, ALPN pinned to HTTP/1.1. Raises if the cert or key is unreadable, so
@@ -1003,6 +1085,12 @@ def _build_ssl_context(cert_path, key_path):
     return ctx
 
 
+```
+
+The certificate presented when SNI matches nothing and no domainless site exists to be the natural default — tied to no site's identity.
+
+```python
+# The default certificate
 def _ensure_default_cert():
     """The generic, no-domain cert behind the closed-system TLS fallback — used
     only when no configured site is itself domainless (which would otherwise
@@ -1015,6 +1103,12 @@ def _ensure_default_cert():
     return _DEFAULT_CERT_FILE, _DEFAULT_KEY_FILE
 
 
+```
+
+The SNI table: one context per site, the www names answered with their bare domain's certificate, and the default context carrying the callback so the per-site contexts live only inside its closure.
+
+```python
+# The SNI table
 def _build_site_ssl_contexts():
     """Build one SSLContext per configured site, plus the default/base context the
     listening socket is constructed with and that's presented whenever SNI doesn't
@@ -1055,6 +1149,14 @@ def _build_site_ssl_contexts():
     return default_ctx
 
 
+```
+
+## The servers
+
+The HTTPS handler is a thin adapter: it hands `_handle_request` what `http.server` parsed and writes back what it returns.
+
+```python
+# The HTTPS handler
 class _Handler(http.server.BaseHTTPRequestHandler):
     """Serves every request through the transport-agnostic _handle_request. Each
     connection runs in its own thread (ThreadingHTTPServer), so one request's
@@ -1089,6 +1191,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         pass  # Servette logs through `log`, not stderr
 
 
+```
+
+The port-80 handler serves ACME challenge tokens during issuance and 301-redirects everything else to HTTPS.
+
+```python
+# The redirect handler
 class _RedirectHandler(http.server.BaseHTTPRequestHandler):
     """Port-80 handler: serves ACME HTTP-01 challenge tokens during issuance, and
     301-redirects everything else to HTTPS (preserving the query string)."""
@@ -1153,10 +1261,17 @@ class _RedirectHandler(http.server.BaseHTTPRequestHandler):
 > holding every slot: monopolizing the pool takes cooperating addresses, not one client.
 
 ```python
+# Connection ceilings
 MAX_CONNECTIONS        = 128
 MAX_CONNECTIONS_PER_IP = 32
 
 
+```
+
+The capped server enforces both ceilings at accept time — before any bytes are read, which is what catches connections that never send a request.
+
+```python
+# The capped server
 class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
     """ThreadingHTTPServer with ceilings on concurrent connections: a global cap,
     and a per-source-IP cap so one source cannot monopolize the pool. Past either,
@@ -1239,6 +1354,12 @@ class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+```
+
+TLS on top, with the handshake deferred to the worker thread so a slow handshake can't stall the accept loop.
+
+```python
+# The TLS server
 class _TLSThreadingHTTPServer(_CappedThreadingHTTPServer):
     """Adds TLS, with the handshake performed in the per-connection worker thread
     (not the accept loop) so a slow handshake can't stall every new connection."""

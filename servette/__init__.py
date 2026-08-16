@@ -74,9 +74,7 @@ _DEFAULT_CERT_FILE = os.path.join(_DEFAULT_CERT_DIR, "cert.pem")
 _DEFAULT_KEY_FILE  = os.path.join(_DEFAULT_CERT_DIR, "key.pem")
 
 
-# ── Config ────────────────────────────────────────────────────────────────────
-
-
+# Resolving data paths
 def _resolve(path):
     """Return path as-is if absolute, otherwise anchor it to BASE_DIR."""
     return path if os.path.isabs(path) else os.path.join(BASE_DIR, path)
@@ -97,6 +95,7 @@ def _resolve(path):
 # hashes/s drain against at most `MAX_CONNECTIONS` waiters is a ~3 s ceiling —
 # so an attack degrades login to slow, never to unavailable (a shed-with-503
 # design would hand attackers a deterministic denial of every legitimate login).
+# Password hashing
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1
 _SCRYPT_MAX_CONCURRENT          = 4
 _SCRYPT_SLOTS                   = threading.BoundedSemaphore(_SCRYPT_MAX_CONCURRENT)
@@ -128,6 +127,7 @@ def _check_password(submitted, stored_hash, stored_salt):
         return False
 
 
+# A site
 class Site:
     """One `[[site]]` block: everything that varies per hosted domain — the domain
     itself, its folder, its own certificate, its visitor auth, its publish channel.
@@ -149,6 +149,7 @@ class Site:
         self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
+# The invalid-config signal
 class _ConfigInvalid(Exception):
     """servette.toml cannot be safely applied — unparseable TOML, or a
     serve_dir that would publish Servette's own secrets. At startup this is
@@ -156,6 +157,7 @@ class _ConfigInvalid(Exception):
     stays in force — see reload_if_changed."""
 
 
+# Config
 class Config:
     """Holds all Servette settings and handles reading/writing servette.toml."""
 
@@ -376,11 +378,7 @@ permissions_policy = {s(self.permissions_policy)}
             pass
 
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-#
-# In service mode, logs go to systemd journal (StandardOutput=journal).
-# In interactive mode, warnings and errors go to the terminal.
-
+# Logging setup
 def setup_logging():
     root = logging.getLogger()
     root.handlers.clear()
@@ -398,6 +396,7 @@ log = logging.getLogger(__name__)
 setup_logging()
 
 
+# Terminal color
 def _c(text, color):
     """Wrap text in an ANSI color for interactive (TTY) output; plain text otherwise."""
     codes = {"green": "32", "red": "31", "yellow": "33"}
@@ -406,12 +405,7 @@ def _c(text, color):
     return f"\033[{codes[color]}m{text}\033[0m"
 
 
-# ── Rate limiter ──────────────────────────────────────────────────────────────
-#
-# Uses threading.Lock because the critical section is in-memory deque
-# manipulation — not I/O — so it's held only briefly and stays barely contended
-# even when many connection threads hit it at once.
-
+# Rate state
 RATE_WINDOW  = 60      # seconds
 _RATE_IP_CAP = 10_000  # max IPs tracked per dict; bounds memory under IP-flood attacks
 
@@ -420,6 +414,7 @@ _auth_fail_times = {}
 _rate_lock       = threading.Lock()
 
 
+# Normalizing addresses
 def _normalize_ip(ip):
     """Normalize IPv6-mapped IPv4 addresses so both forms bucket together.
 
@@ -435,6 +430,7 @@ def _normalize_ip(ip):
     return ip
 
 
+# The sweep
 def _rate_sweep(stop_event):
     """Background thread: evict stale IPs and enforce the IP cap every 30 seconds."""
     while not stop_event.wait(timeout=30):
@@ -450,6 +446,7 @@ def _rate_sweep(stop_event):
                         del tracker[k]
 
 
+# The limit check
 def _rate_limit_exceeded(tracker, ip, limit, record=True):
     """Return True if ip is over `limit` within the window.
 
@@ -490,23 +487,25 @@ def _rate_limit_exceeded(tracker, ip, limit, record=True):
         return len(timestamps) > limit
 
 
-# ── File cache ────────────────────────────────────────────────────────────────
-
+# Cache state
 _file_cache       = collections.OrderedDict()
 _file_cache_lock  = threading.Lock()
 _file_cache_bytes = 0
 
 # Text-like types worth gzipping. Already-compressed formats (images, woff/woff2,
 # pdf, video, archives) gain nothing, so they're served and stored uncompressed.
+# Compressible types
 _COMPRESSIBLE_EXTS = {
     ".html", ".css", ".js", ".json", ".svg", ".txt", ".xml", ".webmanifest", ".ttf",
 }
 
 
+# An entry's cost
 def _entry_bytes(entry):
     return len(entry["raw"]) + (len(entry["compressed"]) if entry["compressed"] else 0)
 
 
+# Reading through the cache
 def _get_cached_file(path):
     """Return (raw, compressed_or_None, etag), reloading only if the file changed.
 
@@ -564,6 +563,7 @@ def _get_cached_file(path):
     return raw, compressed, etag
 
 
+# MIME types
 MIME_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css":  "text/css; charset=utf-8",
@@ -589,6 +589,8 @@ def _mime_type(path):
     ext = os.path.splitext(path)[1].lower()
     return MIME_TYPES.get(ext, "application/octet-stream")
 
+
+# Containment
 def _within(base, target):
     """True if `target` is `base` or sits inside it. commonpath on already-resolved
     absolute paths means a traversal or symlink escape lands outside `base` and fails."""
@@ -606,6 +608,7 @@ def _hidden_segment(segments):
     return any(seg.startswith(".") and seg != ".well-known" for seg in segments if seg)
 
 
+# Resolving a request path
 def _resolve_request_path(url_path, serve_dir):
     """Resolve a URL path to an absolute file path within the matched site's
     serve_dir. Returns (None, 403) on traversal or a hidden path, (None, 404) if
@@ -641,6 +644,7 @@ def _resolve_request_path(url_path, serve_dir):
     return abs_path, 200
 
 
+# Cache-Control
 def _cache_control_header(username):
     """Cache-Control for the matched site. A site behind Basic Auth gets
     `private`, so a shared cache never holds a response only some visitors
@@ -653,6 +657,7 @@ def _cache_control_header(username):
     return f"{scope}, max-age={config.cache_max_age}"
 
 
+# Byte ranges
 def _parse_range(header, total):
     """Parse a single HTTP byte range against a body of `total` bytes. Returns
     (start, end) inclusive, "invalid" if unsatisfiable, or None if absent or
@@ -679,6 +684,7 @@ def _parse_range(header, total):
     return (start, end)
 
 
+# Security headers
 def _security_headers(site):
     """Security headers sent on every HTTPS response — success or error. site is
     the matched site (whose domain gates HSTS — a real Let's Encrypt cert backs
@@ -698,8 +704,7 @@ def _security_headers(site):
     return headers
 
 
-# ── HTTP server ───────────────────────────────────────────────────────────────
-
+# Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
 # The reserved self-test page (DECISIONS.md: "The self-test is server-
@@ -718,6 +723,7 @@ except OSError:
     _SELFTEST_ETAG = None
 
 
+# Log escaping
 def _loggable(s):
     """Escape control characters in a string bound for the logs. A request path
     reaches the journal and, from there, an operator's terminal — an unescaped
@@ -726,6 +732,7 @@ def _loggable(s):
     return "".join(c if c >= " " and c != "\x7f" else f"\\x{ord(c):02x}" for c in s)
 
 
+# The request core
 def _handle_request(method, url_path, headers, raw_ip):
     """The request core. Given the method, URL path, the parsed request headers (a
     case-insensitive mapping — an http.client.HTTPMessage in production), and the raw
@@ -947,6 +954,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     ], raw)
 
 
+# Site selection
 def _select_site(host):
     """Match a Host/SNI value (bare hostname, port stripped if present) against
     configured sites — uniform regardless of site count. Exact domain match
@@ -973,6 +981,7 @@ def _select_site(host):
     return None
 
 
+# Domain collisions
 def _domain_in_use(domain, excluding=None):
     """True if some other configured site already claims this domain
     (case-insensitive). Two sites sharing a domain would make TLS and HTTP
@@ -985,6 +994,7 @@ def _domain_in_use(domain, excluding=None):
     return any(s is not excluding and s.domain and s.domain.lower() == domain for s in config.sites)
 
 
+# One certificate's context
 def _build_ssl_context(cert_path, key_path):
     """TLS context for one certificate — minimum version enforced, optional cipher
     override, ALPN pinned to HTTP/1.1. Raises if the cert or key is unreadable, so
@@ -998,6 +1008,7 @@ def _build_ssl_context(cert_path, key_path):
     return ctx
 
 
+# The default certificate
 def _ensure_default_cert():
     """The generic, no-domain cert behind the closed-system TLS fallback — used
     only when no configured site is itself domainless (which would otherwise
@@ -1010,6 +1021,7 @@ def _ensure_default_cert():
     return _DEFAULT_CERT_FILE, _DEFAULT_KEY_FILE
 
 
+# The SNI table
 def _build_site_ssl_contexts():
     """Build one SSLContext per configured site, plus the default/base context the
     listening socket is constructed with and that's presented whenever SNI doesn't
@@ -1050,6 +1062,7 @@ def _build_site_ssl_contexts():
     return default_ctx
 
 
+# The HTTPS handler
 class _Handler(http.server.BaseHTTPRequestHandler):
     """Serves every request through the transport-agnostic _handle_request. Each
     connection runs in its own thread (ThreadingHTTPServer), so one request's
@@ -1084,6 +1097,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         pass  # Servette logs through `log`, not stderr
 
 
+# The redirect handler
 class _RedirectHandler(http.server.BaseHTTPRequestHandler):
     """Port-80 handler: serves ACME HTTP-01 challenge tokens during issuance, and
     301-redirects everything else to HTTPS (preserving the query string)."""
@@ -1144,10 +1158,12 @@ class _RedirectHandler(http.server.BaseHTTPRequestHandler):
 # so the global cap bounds thread/memory use under a connection flood — light enough
 # for a Raspberry Pi, ample for a static site. The per-IP cap stops one source from
 # holding every slot: monopolizing the pool takes cooperating addresses, not one client.
+# Connection ceilings
 MAX_CONNECTIONS        = 128
 MAX_CONNECTIONS_PER_IP = 32
 
 
+# The capped server
 class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
     """ThreadingHTTPServer with ceilings on concurrent connections: a global cap,
     and a per-source-IP cap so one source cannot monopolize the pool. Past either,
@@ -1230,6 +1246,7 @@ class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+# The TLS server
 class _TLSThreadingHTTPServer(_CappedThreadingHTTPServer):
     """Adds TLS, with the handshake performed in the per-connection worker thread
     (not the accept loop) so a slow handshake can't stall every new connection."""

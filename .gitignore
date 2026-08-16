@@ -21,5 +21,10 @@ __pycache__/
 .venv/
 .servette-env/
 
+# Viewer e2e harness (tests/viewer/)
+node_modules/
+test-results/
+playwright-report/
+
 # macOS
 .DS_Store

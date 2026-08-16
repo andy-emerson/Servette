@@ -11,7 +11,7 @@
    region of the markup below. */
 
 /* ── Design tokens ─────────────────────────────────────────────────
-   The dark palette is the demo page's, unchanged (site/demo/index.html); the
+   The dark palette is the self-test page's, unchanged (servette/selftest.html); the
    light palette is its counterpart, built around the same #5A8466 the
    logo uses in both themes. */
 
@@ -68,7 +68,7 @@ body {
   text-wrap: pretty;
 }
 
-/* The grain the demo page wears, at the same weight. Fixed and inert, so it
+/* The grain the self-test page wears, at the same weight. Fixed and inert, so it
    sits under everything without intercepting a single click. */
 body::before {
   content: '';
@@ -218,7 +218,7 @@ pre { min-width: 0; }
 
 /* ── Logo ──────────────────────────────────────────────────────────
    Set in text rather than shipped as an image so the cursor can blink and
-   both palettes are served by one mark — the same construction as the demo
+   both palettes are served by one mark — the same construction as the self-test
    page and the two SVGs in assets/. */
 
 .logo {
@@ -1437,11 +1437,10 @@ servette&gt; <span class="hi">status</span>
     <div class="autogrid cta">
       <div>
         <h2>See what it looks like, live.</h2>
-        <p>A real Servette instance, serving this website's own copy of the connection self-test. Every check on it is running against that server, in your browser, right now.</p>
+        <p>Every Servette serves the connection self-test at <code>/selftest/</code> — including the one serving this website. Every check on it runs against this server, in your browser, right now.</p>
       </div>
       <div class="cta__actions">
-        <a class="btn btn--primary btn--l" href="https://demo.servette.org">Open the live demo</a>
-        <a class="btn btn--outline btn--l" href="demo/">See the page on this site</a>
+        <a class="btn btn--primary btn--l" href="selftest/">Open the live self-test</a>
       </div>
     </div>
   </section>

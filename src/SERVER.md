@@ -707,6 +707,21 @@ def _security_headers(site):
 
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
+# The reserved self-test page (DECISIONS.md: "The self-test is server-
+# delivered, client-executed"): shipped beside this module as package data,
+# read once at import, served at /selftest/ wherever the operator's content
+# doesn't shadow it. A missing file (an unusual install) degrades to the
+# normal 404 rather than an error.
+_SELFTEST_PATHS = ("/selftest", "/selftest/", "/selftest/index.html")
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "selftest.html"), "rb") as _f:
+        _SELFTEST_PAGE = _f.read()
+    _SELFTEST_ETAG = '"' + hashlib.sha256(_SELFTEST_PAGE).hexdigest()[:16] + '"'
+except OSError:
+    _SELFTEST_PAGE = None
+    _SELFTEST_ETAG = None
+
 
 def _loggable(s):
     """Escape control characters in a string bound for the logs. A request path
@@ -814,8 +829,8 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
 
-    # Version discovery: what this box is running — the publish tool's
-    # self-test page reads this to show the served version. Deliberately
+    # Version discovery: what this box is running — the embedded self-test
+    # page reads this to show the served version. Deliberately
     # reports only what THIS box knows; "latest available" is the package
     # index's business, not Servette's. Host-level (one process, one version).
     #
@@ -845,6 +860,29 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
+        # The reserved self-test path, as a 404 fallback: the embedded page
+        # answers /selftest/ only when resolution above came up empty AND no
+        # entry named selftest (file or directory) exists in the site root —
+        # so operator content wins by simply existing, in either shape. The
+        # response mirrors the file path's caching contract (ETag,
+        # Cache-Control, 304) because the page's own checks probe the URL it
+        # was served from; the page checks, in the visitor's browser, the
+        # connection it arrived over, behind the site's own auth.
+        if (_SELFTEST_PAGE is not None
+                and url_path.split("?", 1)[0] in _SELFTEST_PATHS
+                and not os.path.exists(os.path.join(_resolve(site.serve_dir), "selftest"))):
+            if headers.get("If-None-Match", "") == _SELFTEST_ETAG:
+                log.info("304 Not Modified %s to %s", log_path, ip)
+                return resp(304, [(b"etag", _SELFTEST_ETAG.encode()),
+                                  (b"cache-control", _cache_control_header(site.username).encode())])
+            log.info("200 %s (embedded self-test) to %s", log_path, ip)
+            return resp(200, [
+                (b"content-type",   b"text/html; charset=utf-8"),
+                (b"content-length", str(len(_SELFTEST_PAGE)).encode()),
+                (b"etag",           _SELFTEST_ETAG.encode()),
+                (b"cache-control",  _cache_control_header(site.username).encode()),
+            ], _SELFTEST_PAGE)
+
         # Try custom 404.html in serve_dir root
         custom_404 = os.path.join(_resolve(site.serve_dir), "404.html")
         if os.path.isfile(custom_404):

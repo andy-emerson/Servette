@@ -135,7 +135,7 @@ Every site has an index, shown by `sites` and starting at `0` — the one `setup
 
 ### Publish without copying files (optional)
 
-Each site can have a **publish channel**: build a signed bundle of your site in the browser at [servette.org/pub/](https://servette.org/pub/), host the `.tar.gz` + `.sig` pair at any HTTPS URL, and run `pull` — Servette fetches the bundle, verifies its signature against that site's `publish_key`, and swaps the content in atomically; `restore-site` undoes the last pull. Configure it with `config` → `publish [n]`. `sudo servette pull [n]` runs one-shot, so a cron line gives you hands-off deploys — and the trigger always stays on your box: Servette never accepts content pushed from the network. With a password set, your site also answers `GET /.well-known/servette` with `{"running": "<version>"}` to logged-in clients — the version readout the publish tool's self-test page shows.
+Each site can have a **publish channel**: build a signed bundle of your site in the browser at [servette.org/pub/](https://servette.org/pub/), host the `.tar.gz` + `.sig` pair at any HTTPS URL, and run `pull` — Servette fetches the bundle, verifies its signature against that site's `publish_key`, and swaps the content in atomically; `restore-site` undoes the last pull. Configure it with `config` → `publish [n]`. `sudo servette pull [n]` runs one-shot, so a cron line gives you hands-off deploys — and the trigger always stays on your box: Servette never accepts content pushed from the network. With a password set, your site also answers `GET /.well-known/servette` with `{"running": "<version>"}` to logged-in clients — the version readout the self-test shows. **Verify any Servette site at `/selftest/`** — every install serves the connection self-test there (your own `selftest/` content takes precedence), checking the certificate, redirect, and headers from a real browser's vantage.
 
 ### If something's wrong
 
@@ -148,14 +148,14 @@ Each site can have a **publish channel**: build a signed bundle of your site in 
 
 | Path | What it is |
 |---|---|
-| `servette/` | The installable package: `__init__.py` is the entire product — server, system, and shell in one module, generated from `src/` and not edited by hand — beside a stub `__main__.py` |
+| `servette/` | The installable package: `__init__.py` is the entire product — server, system, and shell in one module, generated from `src/` and not edited by hand — beside a stub `__main__.py` and `selftest.html`, the embedded connection self-test every install serves at `/selftest/` |
 | `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into the module |
 | `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 and 3.14) and Debian 12 |
-| `site/` | The Servette website's source, and the folder a checkout serves by default; `site/demo/` is the live demo page servette.org links, `site/src/` is a browsable view of the literate sources, `site/pub/` is the client-side publish tool, and `site/assets/` holds the logos this README displays |
+| `site/` | The Servette website's source, and the folder a checkout serves by default; `site/src/` is a browsable view of the literate sources, `site/pub/` is the client-side publish tool, and `site/assets/` holds the logos this README displays |
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
 | `AGENTS.md` · `CLAUDE.md` | The human–agent working agreement, and the pointer to it |
 | `CONTRIBUTING.md` · `SECURITY.md` | How to contribute, and how to report a vulnerability |
 | `LICENSE` | MIT |
 
-The deploy guide above is the complete walkthrough; [servette.org](https://servette.org) carries the live demo, a browsable view of the sources, and the publish tool.
+The deploy guide above is the complete walkthrough; [servette.org](https://servette.org) carries the live self-test, a browsable view of the sources, and the publish tool.

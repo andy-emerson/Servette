@@ -1,13 +1,18 @@
 <!DOCTYPE html>
-<!-- site/demo — the website's live demo: the connection self-test at
-     demo.servette.org, linked from the home page. Its checks are deliberate
-     duplicates of site/pub/selftest/index.html's — no build step shares
-     them, so a change to either page's checks belongs in both. -->
+<!-- servette/selftest.html — the connection self-test, shipped inside the
+     module and served at the reserved path /selftest/ on every site whose
+     content doesn't shadow it (see DECISIONS.md, "The self-test is
+     server-delivered, client-executed"). Same-origin by construction, so it
+     can read what a cross-origin probe never could: it checks the
+     connection it was itself loaded over. The version-discovery row needs
+     the operator's session — the endpoint is auth-gated — and shows for a
+     logged-in reader only. Because this file ships with the server, its
+     checks can never drift from the features they check. -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Servette — It's working.</title>
+  <title>Servette — Self-test</title>
   <style>
     :root {
       --bg:      #0e0e0e;
@@ -291,7 +296,10 @@
   </p>
 
   <div class="note">
-    Served by <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> — The Simple, Secure, Static-Site Server.
+    This page ships inside Servette itself and runs on this site's own
+    domain — that is why it can read what it tests. Served by
+    <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
+    The Simple, Secure, Static-Site Server.
   </div>
 
 </div>
@@ -306,8 +314,8 @@
   if (isHttps) {
     $('badge').textContent = '✓ Verified encrypted';
     $('badge').className    = 'badge badge-green';
-    // Deliberately not "your server": this same page is served from
-    // demo.servette.org, where it is emphatically not the reader's.
+    // Deliberately not "your server": this page serves on every Servette
+    // site, and most readers are visitors, not the operator.
     $('tagline-text').textContent = 'THIS SERVER IS RUNNING';
   } else {
     $('badge').textContent = '⚠ Not encrypted';
@@ -390,6 +398,19 @@
         return v
           ? { ok: true, obs: 'Strict-Transport-Security: present' }
           : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
+
+    // Version discovery — same-origin, password-gated: the one check only
+    // this page can make (planned in #42). Servette serves it solely on a
+    // password-gated site, so the exact version reaches a party that already
+    // holds the password (this browser, once you logged in) and never an
+    // anonymous scanner. Absent is a choice or an older Servette, not a
+    // defect.
+    { req: 'GET /.well-known/servette', run: async () => {
+        const r = await fetch('/.well-known/servette', { cache: 'no-store' });
+        if (r.status !== 200)
+          return { ok: null, obs: 'hidden without a password (or an older Servette)' };
+        const v = await r.json();
+        return { ok: true, obs: 'running v' + v.running }; } },
   ];
 
   const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };

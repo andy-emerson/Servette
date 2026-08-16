@@ -2348,6 +2348,65 @@ def run_server_tests(s, serve_dir):
     s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
+    section("Reserved self-test path")
+
+    # The embedded page serves at /selftest/ unless the operator's content
+    # shadows it; it rides the site's own auth like everything else.
+    resp = req("GET", "/selftest/")
+    check("GET /selftest/ serves the embedded page",
+          resp.status == 200 and b"Self-test" in resp.body
+          and "text/html" in resp.headers.get("Content-Type", ""))
+    check("All three path forms serve it",
+          req("GET", "/selftest").status == 200
+          and req("GET", "/selftest/index.html").status == 200)
+    check("HEAD /selftest/ answers with an empty body",
+          req("HEAD", "/selftest/").status == 200 and req("HEAD", "/selftest/").body == b"")
+
+    # The embedded response honors the caching contract the page's own
+    # checks probe for (it fetches its served URL expecting ETag + 304).
+    resp = req("GET", "/selftest/")
+    etag = resp.headers.get("ETag", "")
+    check("Embedded page carries ETag and Cache-Control",
+          bool(etag) and bool(resp.headers.get("Cache-Control")))
+    check("If-None-Match revalidates to 304",
+          req("GET", "/selftest/", headers={"If-None-Match": etag}).status == 304)
+
+    shadow_dir = os.path.join(s._resolve(s.config.sites[0].serve_dir), "selftest")
+    os.makedirs(shadow_dir, exist_ok=True)
+    try:
+        with open(os.path.join(shadow_dir, "index.html"), "w") as f:
+            f.write("<!DOCTYPE html><p>operator selftest</p>")
+        check("Operator content shadows the reserved path",
+              b"operator selftest" in req("GET", "/selftest/").body)
+    finally:
+        shutil.rmtree(shadow_dir, ignore_errors=True)
+    check("Unshadowed again after removal", b"Self-test" in req("GET", "/selftest/").body)
+
+    # A plain file named selftest claims the path too — either shape wins.
+    shadow_file = os.path.join(s._resolve(s.config.sites[0].serve_dir), "selftest")
+    try:
+        with open(shadow_file, "w") as f:
+            f.write("plain-file selftest")
+        check("A plain file named selftest shadows the no-slash form",
+              b"plain-file selftest" in req("GET", "/selftest").body)
+        check("...and wins on the slash form too — the embedded page never serves beside it",
+              b"plain-file selftest" in req("GET", "/selftest/").body)
+    finally:
+        os.remove(shadow_file)
+
+    s.config.sites[0].username = "testuser"
+    s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")
+    try:
+        check("On an auth site the page is behind the same gate",
+              req("GET", "/selftest/").status == 401)
+        check("...and serves with credentials",
+              req("GET", "/selftest/", auth=("testuser", "testpass")).status == 200)
+    finally:
+        s.config.sites[0].username      = ""
+        s.config.sites[0].password_hash = ""
+        s.config.sites[0].password_salt = ""
+        s._auth_fail_times.clear()
+
     section("Cache-Control policies")
 
     s.config.cache_policy = "no-cache"

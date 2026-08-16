@@ -38,6 +38,16 @@ Linux with systemd is the production target: the service user, ambient-capabilit
 
 One property underwrites the whole security story and is worth naming on its own, because it — not the file types served — is what makes the guarantees hold: **at request time, Servette never writes to disk and never evaluates user input.** Serving a request is read-and-send, nothing more. Several security properties are not features anyone coded; they are what you get for free by never doing certain things — a read-only served tree, a closed threat model, a systemd sandbox that never has to widen. Every write Servette does perform (config, cert issuance, the ACME challenge file, the published site content) happens in the shell or a background thread, never on the serving path. A proposed change is measured against this invariant first: if it adds a request-time write or evaluates request input, it breaks guarantees the static design gets for free, and it is a different program — not a feature.
 
+## The status code tells the truth
+
+A second property worth naming, because it settles a family of choices before they are argued one at a time: **the status code reports what happened; Servette's own contribution goes in the body.** `200` means here is what you asked for. `404` means there is nothing at that address. The number is the half of the answer that machines read — caches, crawlers, uptime monitors — and it is never bent for effect.
+
+The default error page is the case that makes the principle concrete. It carries a full diagnostic page instead of ten bytes of `Not found.`, and it is still a `404`, including at the root of a site with nothing published: the operator's server is working, and there is genuinely no page at that address. Both facts are reported, each in its own channel.
+
+What the principle rules out is a family of tempting moves, all of them the same mistake: a *soft 404* that answers `200` with an apology (the reason search engines end up indexing error pages as content); a `200` at an unpublished root so an uptime check reads green when there is nothing to serve; a `404` standing in for a `403` to make a refusal look like an absence. Each buys a nicer-looking signal by making the signal mean less.
+
+Withholding is not bending. The closed-system miss — a `Host` matching no configured site — deliberately reveals nothing per-site, and does it by keeping the *body* bare while the status stays a true `404`. Version discovery is the same shape: on a site with no password the endpoint is not served at all, so its `404` is a fact about that site, not a disguise. A proposed change is measured against this the way it is measured against the request-time invariant: if it needs the status code to say something other than what happened, the answer is a better body.
+
 ## Verification bar
 
 Servette is a security tool, so a claim about it may never sit above its evidence. Three gates stand between a change and `main`, enforced by branch protection:

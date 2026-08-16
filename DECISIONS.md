@@ -6,6 +6,25 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The status code tells the truth; the body does the work
+
+**Ruled (principle).** Servette answers with the status code the situation
+actually calls for, and puts its own contribution in the body. `200` is
+`200`, `404` is `404`; the difference is that Servette's `404` is useful.
+The status is the machine-readable half of the response — caches, crawlers,
+uptime monitors — and is never bent to make a signal look better than the
+thing it reports. Withholding is not bending: the closed-system miss and
+the unserved version endpoint keep a true `404` and say less in the body.
+**Scope:** every response Servette sends. It settles, without further
+argument, soft-404s that answer `200` with an apology, a `200` at an
+unpublished root to keep an uptime check green, and a `404` worn by a
+refusal that is really a `403`. Described in
+[DESIGN.md](DESIGN.md#the-status-code-tells-the-truth); the diagnostic
+error page below is the case that made it explicit. **Reopen:** a standard
+or a client Servette must interoperate with requires a status Servette
+considers untrue — in which case the conflict is recorded, not resolved by
+quietly bending one. *(2026-08-16)*
+
 ## The default error page diagnoses; the placeholder is retired
 
 **Ruled:** every server needs an error page, so Servette's earns the
@@ -23,17 +42,15 @@ file-discovery oracle. Because this answer covers a site's own root while
 nothing is published there, the seeded placeholder page and its whole
 `servette:demo` ownership protocol are deleted, superseding
 [#70](https://github.com/andy-emerson/Servette/issues/70).
-**Rejected:** the bare `Not found.` (a whole response spent saying only
-that the reader was wrong); serving the self-test verbatim, branding and
-feature advertisement included, as the operator's error page; narrowing
-the trigger to the site root at status 200 (it answers a different
-question — the site *is* missing that path, and every other typo would
-fall back to the bare line). **Trade accepted:** a site with nothing
-published answers its root with 404 rather than the placeholder's 200 —
-honest, since there is no index there, but a real change for a monitor
-pointed at a domain before launch. **Reopen:** operators report the 404
-status on an unpublished root breaking uptime checks or crawlers in
-practice. *(2026-08-16)*
+The status stays 404 throughout, per [the status code tells the
+truth](DESIGN.md#the-status-code-tells-the-truth): a 404 is what happened,
+and the diagnosis is the body's job. **Rejected:** the bare `Not found.`
+(a whole response spent saying only that the reader was wrong); serving the
+self-test verbatim, branding and feature advertisement included, as the
+operator's error page; answering an unpublished root with 200 to restore
+what the placeholder used to return — a monitor reading green over a site
+with nothing to serve is the signal meaning less, which the principle
+forbids. *(2026-08-16)*
 
 ## The self-test is server-delivered, client-executed
 

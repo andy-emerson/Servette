@@ -1609,7 +1609,7 @@ servette&gt; <span class="hi">status</span>
     <div class="sec-head">
       <p class="eyebrow">Verifying</p>
       <h2>Your 404 page does the diagnosis</h2>
-      <p>Every server needs an error page. Most spend the whole response telling the reader they were wrong. Servette's default one also reports that the server is up, which host answered, the path that was asked for, what the response actually carries — and whether anything is published at your site root at all, which is what tells a mistyped link apart from a deploy that never landed. Write your own <code>404.html</code> and it takes over; until then this is what a miss returns. The same page is at <code>/selftest/</code> on <strong>your own</strong> site whenever you want to ask it directly.</p>
+      <p>Every server needs an error page. Most spend the whole response telling the reader they were wrong. Servette's default one also reports that the server is up, which host answered, the path that was asked for, what the response actually carries — and whether anything is published at your site root at all, which is what tells a mistyped link apart from a deploy that never landed. The status is still <code>404</code> — a missing path is a missing path, and nothing here bends a status code to look better than the thing it reports. Only the body changed. Write your own <code>404.html</code> and it takes over; until then this is what a miss returns. The same page is at <code>/selftest/</code> on <strong>your own</strong> site whenever you want to ask it directly.</p>
     </div>
 
     <div class="autogrid" style="--min: 260px; --gap: 20px;">

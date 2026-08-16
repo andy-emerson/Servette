@@ -879,7 +879,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       </div>
       <pre>servette&gt; <span class="hi">setup</span>
 
-  Site folder     <span class="cmt">created, placeholder page in</span>
+  Site folder     <span class="cmt">created, empty for now</span>
   Domain          <span class="hi">example.com</span>
   Email for certs <span class="hi">you@example.com</span>
   Password        <span class="cmt">skipped</span>
@@ -1499,7 +1499,7 @@ servette&gt; <span class="hi">status</span>
     <div class="prose">
       <p>The wizard issues a Let's Encrypt certificate, redirects plain HTTP up to HTTPS, and installs a systemd service so the server comes back after a reboot. Renewal happens on its own: a background watchdog renews the certificate once it is inside thirty days of expiring, so it never lapses and you never touch it.</p>
       <p><code>sudo</code> is needed only for the interactive shell, which writes the systemd unit and creates the service user. The server itself runs as an unprivileged <code>servette</code> user with no login shell.</p>
-      <p>Into an empty site folder, setup offers to write a small placeholder page — embedded in Servette, script-free — so the site answers on the very first request. That page rendering over HTTPS is itself the end-to-end proof: the server, the certificate, and the HTTP-to-HTTPS redirect all working. Drop in your own <code>index.html</code> whenever you are ready, and Servette will not touch a page you have made your own.</p>
+      <p>Setup writes nothing into your site folder, and it does not need to: a site with nothing published answers its own domain with Servette's diagnostic page, which reports that the server is up and what the connection is actually sending. That page rendering over HTTPS is itself the end-to-end proof — the server, the certificate, and the HTTP-to-HTTPS redirect all working — and it is a more useful first request than a placeholder would have been. Drop in your own <code>index.html</code> whenever you are ready; Servette never writes to your folder except on a <code>pull</code> you ask for.</p>
       <p class="aside">Serving over a self-signed certificate works too, for a local network or a machine without a public domain. The browser will warn once; everything else behaves the same.</p>
     </div>
   </section>
@@ -1608,14 +1608,14 @@ servette&gt; <span class="hi">status</span>
   <section class="wrap section">
     <div class="sec-head">
       <p class="eyebrow">Verifying</p>
-      <h2>Check what you actually deployed</h2>
-      <p>Open <code>/selftest/</code> on <strong>your own</strong> site — <code>https://your-domain/selftest/</code> — and it reports what a visitor's browser actually receives. That is a different question from whether the process is running, which is all <code>status</code> can answer from the machine itself. Every install serves it from inside the program, so it is there on a fresh setup with nothing to add.</p>
+      <h2>Your 404 page does the diagnosis</h2>
+      <p>Every server needs an error page. Most spend the whole response telling the reader they were wrong. Servette's default one also reports that the server is up, which host answered, the path that was asked for, what the response actually carries — and whether anything is published at your site root at all, which is what tells a mistyped link apart from a deploy that never landed. Write your own <code>404.html</code> and it takes over; until then this is what a miss returns. The same page is at <code>/selftest/</code> on <strong>your own</strong> site whenever you want to ask it directly.</p>
     </div>
 
     <div class="autogrid" style="--min: 260px; --gap: 20px;">
       <div class="card card--ours">
         <h3>Right after setup</h3>
-        <p>The certificate chain, the HTTP-to-HTTPS redirect, and every security header, as seen from the public internet rather than from inside the box. <code>status</code> says the process is alive; this says the internet agrees.</p>
+        <p>You do not have to go looking for it: with nothing published yet, your own domain answers with it. The certificate chain, the HTTP-to-HTTPS redirect, and every security header, as seen from the public internet rather than from inside the box. <code>status</code> says the process is alive; this says the internet agrees.</p>
       </div>
       <div class="card">
         <h3>After a config change</h3>
@@ -1633,7 +1633,8 @@ servette&gt; <span class="hi">status</span>
 
     <div class="prose">
       <p>What it reports: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped — never passed — and an optional header you switched off reads as a choice, not a defect.</p>
-      <p>It is same-origin by construction, which is exactly what lets it read what a cross-origin checker never could. The same property means it only ever reports on the server that served it: the path is reserved, not defended, so anything named <code>selftest</code> in your site root is served instead of it.</p>
+      <p>It is same-origin by construction, which is exactly what lets it read what a cross-origin checker never could. The same property means it only ever reports on the server that served it — ours reports on ours, yours on yours. Your content wins either slot: anything named <code>selftest</code> in your site root takes that path, and a <code>404.html</code> takes the default-miss body.</p>
+      <p>What it will not do is guess. It never lists your directories or suggests near-miss filenames, however helpful that would be to you, because the same suggestions handed to a stranger turn an error page into a file-discovery tool. And in the error role it drops the paragraph describing Servette's other features: your error page is not our advertising space.</p>
       <p class="aside">The link below runs the checks against <em>this</em> server, not yours — a look at the report before you install anything.</p>
       <p><a class="btn btn--outline btn--l" href="selftest/">See it run on this server →</a></p>
     </div>

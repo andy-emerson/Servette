@@ -91,7 +91,7 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
 
 ### Run setup
 
-Servette keeps everything it serves and everything it saves in its data directory, `/var/lib/servette` — setup creates the `site/` folder there, owns it to *you* (the service only reads it), and offers to write Servette's placeholder page when it's empty, so a fresh install serves a real page immediately. From the server:
+Servette keeps everything it serves and everything it saves in its data directory, `/var/lib/servette` — setup creates the `site/` folder there and owns it to *you* (the service only reads it), leaving it empty — an empty folder still answers, because a site with nothing published serves Servette's diagnostic page, which reports that the server is up and what the connection is actually sending. From the server:
 
 ```
 sudo servette   # then, at the prompt: setup

@@ -1093,47 +1093,14 @@ def run_dispatch_tests(s):
             setattr(s, n, v)
         shutil.rmtree(udir, ignore_errors=True)
 
-    section("Placeholder page: marker rules")
+    section("An empty site folder is left empty (the placeholder is gone)")
 
-    ddir   = tempfile.mkdtemp()
-    dindex = os.path.join(ddir, "index.html")
-    check("Missing index.html is not a placeholder", not s._is_placeholder(dindex))
-    with open(dindex, "wb") as f:
-        f.write(b"<!doctype html>my own site")
-    check("Operator page without marker is not a placeholder", not s._is_placeholder(dindex))
-    check("Seed refuses to overwrite an operator page", not s._seed_placeholder(ddir))
-    check("Operator page untouched after refused seed",
-          open(dindex, "rb").read() == b"<!doctype html>my own site")
-    os.remove(dindex)
-    check("Seed writes into an empty folder", s._seed_placeholder(ddir))
-    check("Seeded file is the embedded page",
-          open(dindex, "rb").read() == s._PLACEHOLDER_PAGE)
-    check("Seeded file is recognized as the placeholder", s._is_placeholder(dindex))
-    with open(dindex, "wb") as f:
-        f.write(b"<!-- servette:demo seeded by a fetch-era release -->old demo")
-    check("A fetch-era marked page is still recognized", s._is_placeholder(dindex))
-    check("Seed replaces a marked placeholder", s._seed_placeholder(ddir))
-    check("Replaced placeholder carries the embedded page",
-          open(dindex, "rb").read() == s._PLACEHOLDER_PAGE)
-    shutil.rmtree(ddir, ignore_errors=True)
-
-    section("Placeholder page: the embedded page's invariants (#70)")
-
-    check("Embedded page carries the servette:demo marker",
-          s._PLACEHOLDER_MARKER.encode() in s._PLACEHOLDER_PAGE)
-    check("Marker string is unchanged for fetch-era compatibility",
-          s._PLACEHOLDER_MARKER == "servette:demo")
-    check("Embedded page is script-free", b"<script" not in s._PLACEHOLDER_PAGE)
-    check("Embedded page is a complete HTML document",
-          s._PLACEHOLDER_PAGE.startswith(b"<!DOCTYPE html>")
-          and b"</html>" in s._PLACEHOLDER_PAGE.rstrip())
-
-    section("Placeholder page: setup step seeds an empty serve_dir")
-
-    # Drive cmd_setup with cert/password/prompts stubbed: Step 1 must create
-    # the missing folder (inside BASE_DIR) and write the embedded placeholder.
-    # urlopen is stubbed to raise: the seed must involve no network at all
-    # (#70), and the public-IP lookup falls back on the raise as before.
+    # Setup must still never finish with nothing to serve (#37), but it no
+    # longer keeps that promise by writing a file: a folder with no index.html
+    # answers its domain with the embedded diagnostic page. So Step 1 creates
+    # the missing folder, writes nothing into it, and says what will answer.
+    # urlopen is stubbed to raise, so the public-IP lookup falls back as before
+    # and nothing here can reach the network.
     def _no_network(*a, **k):
         raise urllib.error.URLError("network touched in a no-network test")
 
@@ -1148,19 +1115,21 @@ def run_dispatch_tests(s):
         s._config_cert     = lambda site: None
         s._config_username = lambda site: None
         s._config_password = lambda site: None
-        prompts = iter([True, False])            # write placeholder? yes; ready to start? no
-        s._prompt = lambda *a, **k: next(prompts, False)
+        s._prompt = lambda *a, **k: False        # ready to start? no
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_setup()
+        out = buf.getvalue()
         check("Setup creates the missing serve_dir", os.path.isdir(setup_dir))
-        check("Setup writes the placeholder as index.html, with no network",
-              open(os.path.join(setup_dir, "index.html"), "rb").read() == s._PLACEHOLDER_PAGE)
-        check("Setup says what it installed", "installed as index.html" in buf.getvalue())
+        check("Setup writes nothing into the empty folder",
+              os.listdir(setup_dir) == [])
+        check("Setup says the diagnostic page will answer until they publish",
+              "diagnostic page" in out)
+        check("Setup no longer offers to install a placeholder",
+              "placeholder" not in out.lower())
 
-        # Second run: the folder now has a marked placeholder — setup reports
-        # serving it without offering to seed (the file exists).
-        prompts2 = iter([False])                  # ready to start? no
-        s._prompt = lambda *a, **k: next(prompts2, False)
+        # With content in place setup reports serving it, unchanged.
+        with open(os.path.join(setup_dir, "index.html"), "w") as f:
+            f.write("<!doctype html>the operator's own page")
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_setup()
         check("Setup with content in place reports serving it", "Serving" in buf.getvalue())
@@ -1171,12 +1140,17 @@ def run_dispatch_tests(s):
         s.urllib.request.urlopen    = saved_urlopen
         shutil.rmtree(setup_dir, ignore_errors=True)
 
-    section("Placeholder page: startup refresh rewrites only marked placeholders")
+    section("The startup refresh never writes into a site folder")
 
-    pu_marked   = tempfile.mkdtemp(dir=s.BASE_DIR)
-    pu_owned    = tempfile.mkdtemp(dir=s.BASE_DIR)
+    # It used to rewrite pages carrying the servette:demo marker. With the
+    # placeholder gone it touches systemd units only — so a page carrying that
+    # historical marker is now ordinary operator content, and stays byte-for-
+    # byte as the operator left it.
+    pu_marked = tempfile.mkdtemp(dir=s.BASE_DIR)
+    pu_owned  = tempfile.mkdtemp(dir=s.BASE_DIR)
+    marked_bytes = b"<!-- servette:demo seeded by an older release -->old demo"
     with open(os.path.join(pu_marked, "index.html"), "wb") as f:
-        f.write(b"<!-- servette:demo old placeholder -->old")   # a fetch-era page
+        f.write(marked_bytes)
     with open(os.path.join(pu_owned, "index.html"), "wb") as f:
         f.write(b"operator content")
     saved_pu    = {n: getattr(s, n) for n in ("_service_file_exists",)}
@@ -1184,13 +1158,12 @@ def run_dispatch_tests(s):
     try:
         s._service_file_exists = lambda: False
         s.config.sites[0].serve_dir = pu_marked
-        two_sites = len(s.config.sites) > 1
-        if two_sites:
+        if len(s.config.sites) > 1:
             s.config.sites[1].serve_dir = pu_owned
         with contextlib.redirect_stdout(io.StringIO()):
             s._startup_refresh()
-        check("Startup refresh rewrites the marked page to the embedded placeholder",
-              open(os.path.join(pu_marked, "index.html"), "rb").read() == s._PLACEHOLDER_PAGE)
+        check("A page carrying the old servette:demo marker is left alone",
+              open(os.path.join(pu_marked, "index.html"), "rb").read() == marked_bytes)
         check("Startup refresh leaves the operator page alone",
               open(os.path.join(pu_owned, "index.html"), "rb").read() == b"operator content")
     finally:
@@ -1230,8 +1203,9 @@ def run_dispatch_tests(s):
 
         saved_input = builtins.input
         try:
-            # add-site: folder, placeholder offer (n), domain (blank → self-signed), username (blank).
-            script = iter([site_test_dir, "n", "", ""])
+            # add-site: folder, domain (blank → self-signed), username (blank). No
+            # placeholder offer any more — an empty folder is left empty.
+            script = iter([site_test_dir, "", ""])
             builtins.input = lambda prompt="": next(script, "")
             with contextlib.redirect_stdout(io.StringIO()) as buf:
                 s._config_add_site()
@@ -1326,7 +1300,7 @@ def run_dispatch_tests(s):
         saved_input2 = builtins.input
         try:
             # Two self-signed sites added back to back must not collide.
-            script = iter([dirs2[0], "n", "", "", dirs2[1], "n", "", ""])
+            script = iter([dirs2[0], "", "", dirs2[1], "", ""])
             builtins.input = lambda prompt="": next(script, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -1352,7 +1326,7 @@ def run_dispatch_tests(s):
             check("Survivor kept its own cert file across the removal",
                   s.config.sites[1].cert_file == survivor_cert)
 
-            script2 = iter([dirs2[2], "n", "", ""])
+            script2 = iter([dirs2[2], "", ""])
             builtins.input = lambda prompt="": next(script2, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -1374,7 +1348,7 @@ def run_dispatch_tests(s):
         dir6 = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input3 = builtins.input
         try:
-            script3 = iter([dir6, "n", "domain-test.example.com", ""])
+            script3 = iter([dir6, "domain-test.example.com", ""])
             builtins.input = lambda prompt="": next(script3, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -1403,7 +1377,7 @@ def run_dispatch_tests(s):
         dir6c = tempfile.mkdtemp(dir=s.BASE_DIR)
         saved_input3c = builtins.input
         try:
-            script3c = iter([dir6c, "n", "issued.example.com", ""])
+            script3c = iter([dir6c, "issued.example.com", ""])
             builtins.input = lambda prompt="": next(script3c, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -1427,7 +1401,7 @@ def run_dispatch_tests(s):
         dir6b = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input3b = builtins.input
         try:
-            script3b = iter([dir6b, "n", "unreachable.example.com", ""])
+            script3b = iter([dir6b, "unreachable.example.com", ""])
             builtins.input = lambda prompt="": next(script3b, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -1449,7 +1423,7 @@ def run_dispatch_tests(s):
         dir7 = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input4 = builtins.input
         try:
-            script4 = iter([dir7, "n", "taken.example.com", ""])
+            script4 = iter([dir7, "taken.example.com", ""])
             builtins.input = lambda prompt="": next(script4, "")
             with contextlib.redirect_stdout(io.StringIO()) as buf:
                 s._config_add_site()
@@ -2210,6 +2184,51 @@ def run_server_tests(s, serve_dir):
     check("Non-existent path returns 404",
           req("GET", path="/nonexistent.html").status == 404)
 
+    # With no 404.html of the operator's own, a miss is answered by the
+    # embedded diagnostic page rather than a bare line of text: every server
+    # needs an error page, and this one also reports that the server is up and
+    # what it is actually sending. The status stays 404 — the path really is
+    # not there — and the body is HTML so the page can run.
+    resp = req("GET", path="/nonexistent.html")
+    check("Default 404 body is the embedded diagnostic page",
+          resp.status == 404 and b"notfound-path" in resp.body)
+    check("Default 404 is served as HTML",
+          "text/html" in resp.headers.get("Content-Type", ""))
+    check("Default 404 is no longer the bare line",
+          resp.body != b"Not found.")
+    # The page probes the URL it was served from, so a 404 carrying no
+    # validators would make it report a defect that is really this response's
+    # shape.
+    etag_404 = resp.headers.get("ETag")
+    check("Default 404 carries ETag and Cache-Control",
+          bool(etag_404) and bool(resp.headers.get("Cache-Control")))
+    # Guarded on the ETag existing: without the guard a regression that drops
+    # the validator sends If-None-Match: None and takes the whole suite down
+    # with a TypeError instead of reporting one clean failure.
+    check("Default 404 revalidates to 304",
+          bool(etag_404) and req("GET", path="/nonexistent.html",
+                                 headers={"If-None-Match": etag_404}).status == 304)
+    # Same bytes as the asked-for page: one file in two roles, so one ETag.
+    check("Default 404 body is the same page /selftest/ serves",
+          resp.body == req("GET", path="/selftest/").body)
+    check("/selftest/ still answers 200 where it was asked for",
+          req("GET", path="/selftest/").status == 200)
+
+    # An error page must never sit in a shared cache with a positive lifetime:
+    # the operator publishes the file that was missing and cached clients would
+    # keep the 404. Under max-age the 404 role is downgraded to no-cache, while
+    # the asked-for page at /selftest/ keeps the site's policy.
+    saved_policy, saved_age = s.config.cache_policy, s.config.cache_max_age
+    s.config.cache_policy, s.config.cache_max_age = "max-age", 3600
+    try:
+        cc_404 = req("GET", path="/nonexistent.html").headers.get("Cache-Control", "")
+        check("Default 404 is not cached with a positive max-age",
+              "max-age" not in cc_404 and "no-cache" in cc_404)
+        check("/selftest/ keeps the site's max-age policy",
+              "max-age=3600" in req("GET", path="/selftest/").headers.get("Cache-Control", ""))
+    finally:
+        s.config.cache_policy, s.config.cache_max_age = saved_policy, saved_age
+
     custom_404      = b"<html><body>Custom 404</body></html>"
     custom_404_path = os.path.join(serve_dir, "404.html")
     with open(custom_404_path, "wb") as f:
@@ -2224,6 +2243,9 @@ def run_server_tests(s, serve_dir):
 
     os.remove(custom_404_path)
     s._file_cache.clear()
+
+    check("Removing 404.html restores the diagnostic page as the default body",
+          b"notfound-path" in req("GET", path="/nonexistent.html").body)
 
     section("403 — path traversal")
 

@@ -879,7 +879,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       </div>
       <pre>servette&gt; <span class="hi">setup</span>
 
-  Site folder     <span class="cmt">created, placeholder page in</span>
+  Site folder     <span class="cmt">created, empty for now</span>
   Domain          <span class="hi">example.com</span>
   Email for certs <span class="hi">you@example.com</span>
   Password        <span class="cmt">skipped</span>
@@ -907,7 +907,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
         <p class="stat__what">third-party dependency — <code>cryptography</code>, installed with the package</p>
       </div>
       <div>
-        <p class="stat__n">3,896</p>
+        <p class="stat__n">3,925</p>
         <p class="stat__what">lines you can read top to bottom in an afternoon</p>
       </div>
       <div>
@@ -1161,6 +1161,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
           <tr><th scope="row">Least-privilege service</th><td>Runs as its own login-less user under a systemd sandbox: no new privileges, a read-only system, and write access to its own directory only.</td></tr>
           <tr><th scope="row">Nothing writes on request</th><td>Serving a request is read-and-send. No HTTP request can cause Servette to write to disk — see <a href="#how-it-works">How it Works</a>.</td></tr>
           <tr><th scope="row">Optional password</th><td>Basic Auth per site when you want it, stored as a memory-hard scrypt hash, never in plaintext.</td></tr>
+          <tr><th scope="row">An error page that diagnoses</th><td>A miss returns <code>404</code> with a page that reports the live connection and whether your site root is published at all — not ten bytes of <code>Not found.</code> Your own <code>404.html</code> replaces it.</td></tr>
         </tbody>
       </table>
     </div>
@@ -1170,7 +1171,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     <div class="sec-head">
       <p class="eyebrow">Simplicity, measured</p>
       <h2>The whole server, counted</h2>
-      <p>"Readable in an afternoon" is a claim, and this is the number behind it. Servette is 3,896 lines of Python, of which 3,003 are code and the rest comments and blanks. It is one module you can read top to bottom — generated from literate Markdown sources you can read just as easily, in this site's own <a href="src/">source viewer</a>.</p>
+      <p>"Readable in an afternoon" is a claim, and this is the number behind it. Servette is 3,925 lines of Python, of which 2,951 are code and the rest comments and blanks. It is one module you can read top to bottom — generated from literate Markdown sources you can read just as easily, in this site's own <a href="src/">source viewer</a>.</p>
     </div>
 
     <div class="scrollx">
@@ -1196,19 +1197,19 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
         <tr>
           <th scope="row">Server</th>
           <td>Everything on the request path</td>
-          <td class="num">1,133</td><td class="num">771</td><td class="num">29%</td>
-          <td><span class="loc-bar" style="width: 29%;"></span></td>
+          <td class="num">1,216</td><td class="num">799</td><td class="num">27%</td>
+          <td><span class="loc-bar" style="width: 27%;"></span></td>
         </tr>
         <tr>
           <th scope="row">System</th>
           <td>Lifecycle, certificates, systemd</td>
-          <td class="num">1,203</td><td class="num">976</td><td class="num">31%</td>
-          <td><span class="loc-bar loc-bar--sys" style="width: 31%;"></span></td>
+          <td class="num">1,237</td><td class="num">981</td><td class="num">33%</td>
+          <td><span class="loc-bar loc-bar--sys" style="width: 33%;"></span></td>
         </tr>
         <tr>
           <th scope="row">Shell</th>
           <td>The interactive terminal interface</td>
-          <td class="num">1,442</td><td class="num">1,184</td><td class="num">37%</td>
+          <td class="num">1,354</td><td class="num">1,099</td><td class="num">37%</td>
           <td><span class="loc-bar loc-bar--shell" style="width: 37%;"></span></td>
         </tr>
         <tr>
@@ -1220,7 +1221,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
         <tr class="total">
           <th scope="row">Total</th>
           <td>&nbsp;</td>
-          <td class="num">3,896</td><td class="num">3,003</td><td class="num">100%</td>
+          <td class="num">3,925</td><td class="num">2,951</td><td class="num">100%</td>
           <td>&nbsp;</td>
         </tr>
       </tbody>
@@ -1310,7 +1311,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     <div class="sub-head">
       <p class="eyebrow">Region 1 of 4 · read-only</p>
       <h3>Server — everything on the request path</h3>
-      <p>1,133 lines. The only region a network request can reach, and the only one whose correctness a stranger can probe.</p>
+      <p>1,216 lines. The only region a network request can reach, and the only one whose correctness a stranger can probe.</p>
     </div>
 
     <div class="prose">
@@ -1326,7 +1327,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     <div class="sub-head">
       <p class="eyebrow">Region 2 of 4 · writes, off the request path</p>
       <h3>System — the environment around the server</h3>
-      <p>1,203 lines. Everything that runs on its own schedule rather than on anyone's request.</p>
+      <p>1,237 lines. Everything that runs on its own schedule rather than on anyone's request.</p>
     </div>
 
     <div class="prose">
@@ -1344,7 +1345,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     <div class="sub-head">
       <p class="eyebrow">Region 3 of 4 · read+write</p>
       <h3>Shell — the interactive terminal interface</h3>
-      <p>1,442 lines, and the largest region of the module. The only layer that writes to configuration interactively, and reachable only by an operator over SSH.</p>
+      <p>1,354 lines, and the largest region of the module. The only layer that writes to configuration interactively, and reachable only by an operator over SSH.</p>
     </div>
 
     <div class="prose">
@@ -1499,7 +1500,7 @@ servette&gt; <span class="hi">status</span>
     <div class="prose">
       <p>The wizard issues a Let's Encrypt certificate, redirects plain HTTP up to HTTPS, and installs a systemd service so the server comes back after a reboot. Renewal happens on its own: a background watchdog renews the certificate once it is inside thirty days of expiring, so it never lapses and you never touch it.</p>
       <p><code>sudo</code> is needed only for the interactive shell, which writes the systemd unit and creates the service user. The server itself runs as an unprivileged <code>servette</code> user with no login shell.</p>
-      <p>Into an empty site folder, setup offers to write a small placeholder page — embedded in Servette, script-free — so the site answers on the very first request. That page rendering over HTTPS is itself the end-to-end proof: the server, the certificate, and the HTTP-to-HTTPS redirect all working. Drop in your own <code>index.html</code> whenever you are ready, and Servette will not touch a page you have made your own.</p>
+      <p>Setup writes nothing into your site folder, and it does not need to: a site with nothing published answers its own domain with Servette's diagnostic page, which reports that the server is up and what the connection is actually sending. That page rendering over HTTPS is itself the end-to-end proof — the server, the certificate, and the HTTP-to-HTTPS redirect all working — and it is a more useful first request than a placeholder would have been. Drop in your own <code>index.html</code> whenever you are ready; Servette never writes to your folder except on a <code>pull</code> you ask for.</p>
       <p class="aside">Serving over a self-signed certificate works too, for a local network or a machine without a public domain. The browser will warn once; everything else behaves the same.</p>
     </div>
   </section>
@@ -1608,27 +1609,35 @@ servette&gt; <span class="hi">status</span>
   <section class="wrap section">
     <div class="sec-head">
       <p class="eyebrow">Verifying</p>
-      <h2>Check what you actually deployed</h2>
-      <p>Every Servette serves a connection self-test at the reserved <code>/selftest/</code> path, from inside the program — so it is there on a fresh install, with nothing to add and nothing to copy into your folder. It probes the live connection from a browser and reports what came back, rather than asserting that everything is fine.</p>
+      <h2>Your 404 page does the diagnosis</h2>
+      <p>Every server needs an error page. Most spend the whole response telling the reader they were wrong. Servette's default one also reports that the server is up, which host answered, the path that was asked for, what the response actually carries — and whether anything is published at your site root at all, which is what tells a mistyped link apart from a deploy that never landed. The status is still <code>404</code> — a missing path is a missing path, and nothing here bends a status code to look better than the thing it reports. Only the body changed. Write your own <code>404.html</code> and it takes over; until then this is what a miss returns. The same page is at <code>/selftest/</code> on <strong>your own</strong> site whenever you want to ask it directly.</p>
     </div>
 
-    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+    <div class="autogrid" style="--min: 260px; --gap: 20px;">
       <div class="card card--ours">
-        <h3>It reports, it does not reassure</h3>
-        <p>Real requests, and what actually came back: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped — never passed.</p>
+        <h3>Right after setup</h3>
+        <p>You do not have to go looking for it: with nothing published yet, your own domain answers with it. The certificate chain, the HTTP-to-HTTPS redirect, and every security header, as seen from the public internet rather than from inside the box. <code>status</code> says the process is alive; this says the internet agrees.</p>
       </div>
       <div class="card">
-        <h3>It runs where your visitors are</h3>
-        <p>The checks execute in the browser, over the same connection a visitor gets and behind the same password if the site has one. It measures the deployment as reached from outside, not the server's opinion of itself.</p>
+        <h3>After a config change</h3>
+        <p>Turned on CSP, changed the cache policy, added a password? Reload it and see whether the change reached the wire. A setting that is saved and a setting that is being sent are not the same claim.</p>
       </div>
       <div class="card">
-        <h3>Your content still wins</h3>
-        <p>The path is reserved, not defended: put anything named <code>selftest</code> in your site root and yours is served instead. The self-test occupies the path only while you are not using it.</p>
+        <h3>After an update</h3>
+        <p>The version row reports what is <em>actually running</em>, which is not always what is installed — a running process keeps the code it loaded until it restarts. Served only on a password-protected site, so the version never reaches an anonymous scanner.</p>
+      </div>
+      <div class="card">
+        <h3>When something looks wrong</h3>
+        <p>A proxy or CDN stripping headers, a partial certificate chain, HSTS missing because no domain is configured. It separates a misconfigured server from a network between you and it.</p>
       </div>
     </div>
 
     <div class="prose">
-      <p><a class="btn btn--primary btn--l" href="selftest/">Run it against this server →</a></p>
+      <p>What it reports: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped — never passed — and an optional header you switched off reads as a choice, not a defect.</p>
+      <p>It is same-origin by construction, which is exactly what lets it read what a cross-origin checker never could. The same property means it only ever reports on the server that served it — ours reports on ours, yours on yours. Your content wins either slot: anything named <code>selftest</code> in your site root takes that path, and a <code>404.html</code> takes the default-miss body.</p>
+      <p>What it will not do is guess. It never lists your directories or suggests near-miss filenames, however helpful that would be to you, because the same suggestions handed to a stranger turn an error page into a file-discovery tool. And in the error role it drops the paragraph describing Servette's other features: your error page is not our advertising space.</p>
+      <p class="aside">The link below runs the checks against <em>this</em> server, not yours — a look at the report before you install anything.</p>
+      <p><a class="btn btn--outline btn--l" href="selftest/">See it run on this server →</a></p>
     </div>
   </section>
 
@@ -1659,10 +1668,14 @@ servette&gt; <span class="hi">status</span>
            page deploys with the pages beside it, while subdomains wait on
            DNS — and #42's rule is no dead links. Each is named for what it
            does, not for the directory it happens to live in. -->
+      <!-- The self-test is deliberately not listed here. It is same-origin by
+           construction, so this site's copy only ever reports on this site —
+           it does nothing for a visitor, and listing it as a service promises
+           a check of their server that it cannot perform. Their own install
+           serves its own. -->
       <div class="footer-links">
         <a href="src/">Read the source</a>
         <a href="pub/">Sign a site bundle</a>
-        <a href="selftest/">Test this connection</a>
       </div>
     </div>
     <div>

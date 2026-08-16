@@ -862,31 +862,59 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
-        # The reserved self-test path, as a 404 fallback: the embedded page
-        # answers /selftest/ only when resolution above came up empty AND no
-        # entry named selftest (file or directory) exists in the site root —
-        # so operator content wins by simply existing, in either shape. The
-        # response mirrors the file path's caching contract (ETag,
+        # The embedded self-test answers on two paths, and operator content
+        # wins both by simply existing:
+        #
+        #   /selftest/  — the reserved path, unless an entry of that name
+        #                 (file or directory) sits in the site root. Answers
+        #                 200: the page was asked for and it is there.
+        #   any miss    — as the default error page, unless the operator has
+        #                 written a 404.html. Answers 404: the path really is
+        #                 not there. Every server needs an error page, and a
+        #                 bare "Not found." spends a whole response telling the
+        #                 reader only that they were wrong. This one also says
+        #                 what the server is, that it is up, and what it is
+        #                 actually sending — the diagnosis is free, the request
+        #                 was already made.
+        #
+        # That second answer also covers a site's own root while nothing is
+        # published there: no index.html means the root is itself a miss, so the
+        # domain reports on itself instead of answering with ten bytes of text.
+        #
+        # The response mirrors the file path's caching contract (ETag,
         # Cache-Control, 304) because the page's own checks probe the URL it
-        # was served from; the page checks, in the visitor's browser, the
-        # connection it arrived over, behind the site's own auth.
-        if (_SELFTEST_PAGE is not None
-                and url_path.split("?", 1)[0] in _SELFTEST_PATHS
-                and not os.path.exists(os.path.join(_resolve(site.serve_dir), "selftest"))):
+        # was served from; without validators it would report a defect that is
+        # really this response's shape. The page checks, in the visitor's
+        # browser, the connection it arrived over, behind the site's own auth.
+        site_root  = _resolve(site.serve_dir)
+        custom_404 = os.path.join(site_root, "404.html")
+        selftest_asked = (url_path.split("?", 1)[0] in _SELFTEST_PATHS
+                          and not os.path.exists(os.path.join(site_root, "selftest")))
+        if _SELFTEST_PAGE is not None and (selftest_asked or not os.path.isfile(custom_404)):
+            code = 200 if selftest_asked else 404
+            # In the 404 role a positive lifetime is downgraded to
+            # revalidate-always. Under cache_policy = "max-age" an error page
+            # would otherwise sit in a shared cache for max_age seconds and keep
+            # answering 404 for a path *after* the operator publishes the very
+            # file that was missing. The asked-for page at /selftest/ keeps the
+            # site's policy: it is a real, unchanging resource.
+            cache = _cache_control_header(site.username)
+            if code == 404 and "max-age" in cache:
+                cache = ("private" if site.username else "public") + ", no-cache"
             if headers.get("If-None-Match", "") == _SELFTEST_ETAG:
                 log.info("304 Not Modified %s to %s", log_path, ip)
                 return resp(304, [(b"etag", _SELFTEST_ETAG.encode()),
-                                  (b"cache-control", _cache_control_header(site.username).encode())])
-            log.info("200 %s (embedded self-test) to %s", log_path, ip)
-            return resp(200, [
+                                  (b"cache-control", cache.encode())])
+            log.info("%d %s (embedded diagnostic page) to %s", code, log_path, ip)
+            return resp(code, [
                 (b"content-type",   b"text/html; charset=utf-8"),
                 (b"content-length", str(len(_SELFTEST_PAGE)).encode()),
                 (b"etag",           _SELFTEST_ETAG.encode()),
-                (b"cache-control",  _cache_control_header(site.username).encode()),
+                (b"cache-control",  cache.encode()),
             ], _SELFTEST_PAGE)
 
-        # Try custom 404.html in serve_dir root
-        custom_404 = os.path.join(_resolve(site.serve_dir), "404.html")
+        # The operator's own 404.html, or the bare line where the embedded page
+        # is missing (an unusual install).
         if os.path.isfile(custom_404):
             raw_404, _, _ = _get_cached_file(custom_404)
             body_404 = raw_404 or b"Not found."
@@ -2684,13 +2712,13 @@ def _config_add_site():
     if _serve_dir_exposes_secrets(_resolve(folder)):
         print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
-    # The same seeding offer setup makes for the first site (#37): a new site
-    # with no index.html would 404 on its own domain with no way to tell the
-    # server from the content. Declining blocks nothing.
+    # Nothing is written and nothing is offered: a site with no index.html
+    # answers its own domain with the embedded diagnostic page, which says the
+    # server is up and that nothing is published yet. Setup still never leaves
+    # a site with nothing to serve (#37) — it just no longer needs to put a
+    # file in the operator's folder to keep that promise.
     if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
-        if _prompt("No index.html here — write Servette's placeholder page so the site works immediately?"):
-            if _seed_placeholder(folder):
-                print("  Placeholder installed as index.html — replace it with your own site when ready.")
+        print("  No index.html yet — the site will answer with Servette's diagnostic page until you publish one.")
 
     site = Site({"serve_dir": folder})
     config.sites.append(site)
@@ -3174,100 +3202,6 @@ def cmd_log(n=20):
             print("journalctl not found. Is this a systemd system?")
 
 
-# The placeholder page
-# The marker string keeps its historical name: pages seeded by earlier
-# releases (which fetched a richer demo page from GitHub as a release asset)
-# carry "servette:demo". The marker distinguishes Servette's own placeholder
-# from operator content — a marked page is Servette's to rewrite, an
-# unmarked one is never touched.
-_PLACEHOLDER_MARKER = "servette:demo"
-
-# The page setup seeds into an empty site (#70): embedded, so setup finishes
-# with something to serve, and no network is involved. Deliberately small
-# and script-free: the full connection self-test is not this page's job —
-# the server itself serves it at the reserved /selftest/ path (see
-# _SELFTEST_PAGE in Server). Only the theme is kept — logo, colors, type —
-# over the traditional "under construction" prose.
-_PLACEHOLDER_PAGE = """<!DOCTYPE html>
-<!-- servette:demo — Servette's placeholder page. This marker is how 'update'
-     tells its own page from yours: with it present the page is refreshed on
-     update, without it the file is left alone. Delete this line to adopt the
-     page as your own and Servette will never touch it again. -->
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Under construction</title>
-<style>
-  :root {
-    --bg: #0e0e0e; --text: #e8e8e8; --muted: #555; --green: #5A8466;
-    /* No web fonts, no scripts: a placeholder loads nothing at all. */
-    --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
-            'Liberation Mono', 'Courier New', monospace;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: var(--bg); color: var(--text); font-family: var(--mono);
-    min-height: 100vh; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 1.1rem;
-    padding: 2rem; text-align: center;
-  }
-  .logo { font-size: 3rem; font-weight: 500; line-height: 1; }
-  .logo .ette { color: var(--green); }
-  .logo .cursor { animation: blink 1.1s steps(1) infinite; }
-  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
-  .status {
-    color: var(--muted); font-size: 0.75rem;
-    letter-spacing: 0.08em; text-transform: uppercase;
-  }
-  p { color: var(--muted); font-size: 0.8rem; line-height: 1.7; max-width: 44ch; }
-  a { color: var(--green); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
-</style>
-</head>
-<body>
-  <div class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-  <div class="status">under construction</div>
-  <p>There is a server here, but its operator hasn't published a site yet.
-     Check back soon.</p>
-  <p>Served by <a href="https://github.com/andy-emerson/servette">Servette</a>
-     — The Simple, Secure, Static-Site Server.</p>
-</body>
-</html>
-""".encode()
-
-
-# Recognizing the placeholder
-def _is_placeholder(index_path):
-    """True when index_path exists and carries the servette:demo marker — i.e. it
-    is Servette's own placeholder, safe to refresh. An operator's page (no marker)
-    is never touched; an operator who deletes the marker has adopted the page
-    permanently. The rule is visible in the file itself, not hidden in state."""
-    try:
-        with open(index_path, "rb") as f:
-            return _PLACEHOLDER_MARKER.encode() in f.read(1024 * 1024)  # placeholder is ~2 KB; cap bounds a huge index.html
-    except OSError:
-        return False
-
-
-def _seed_placeholder(serve_dir):
-    """Write the embedded placeholder as serve_dir/index.html when that is safe:
-    the file is absent, or still a marked placeholder. Returns True when it was
-    written. Written via rename so a reader never sees a partial file."""
-    index_path = os.path.join(_resolve(serve_dir), "index.html")
-    if os.path.exists(index_path) and not _is_placeholder(index_path):
-        return False   # operator content — never overwrite
-    tmp = index_path + ".new"
-    try:
-        with open(tmp, "wb") as f:
-            f.write(_PLACEHOLDER_PAGE)
-        os.replace(tmp, index_path)
-    except OSError as e:
-        print(f"  Could not write the placeholder page: {e}")
-        return False
-    return True
-
 # The update channel for a site's *content*: a signed tar.gz bundle, pulled
 # from publish_url, verified against publish_key, and swapped into serve_dir
 # with a single-shot .bak — 'restore-site' rolls back to it, and a successful
@@ -3676,11 +3610,11 @@ def cmd_setup():
 
     site = config.sites[0]  # the site setup provisions; 'add-site' handles the rest
 
-    # Step 1 — the folder. Setup must never finish with nothing to serve (#37):
-    # create the folder if missing, and offer the embedded placeholder when it
-    # has no index.html — a real page on the operator's own domain, with no
-    # network involved (#70). The connection self-test that once played this
-    # role now arrives through the publish channel instead.
+    # Step 1 — the folder. Setup must never finish with nothing to serve (#37),
+    # and no longer needs to write a file to keep that promise: it creates the
+    # folder if missing, and a folder with no index.html answers its domain
+    # with the embedded diagnostic page. The page names the reserved path it
+    # also lives at, which is how an operator learns /selftest/ exists.
     print()
     print("  Step 1 — Site folder")
     serve_path = _resolve(site.serve_dir)
@@ -3698,10 +3632,9 @@ def cmd_setup():
         if os.path.exists(os.path.join(serve_path, "index.html")):
             print(f"  Serving {serve_path}.")
         else:
-            print(f"  {serve_path} has no index.html yet.")
-            if _prompt("Write Servette's placeholder page so the site works immediately?"):
-                if _seed_placeholder(site.serve_dir):
-                    print("  Placeholder installed as index.html — replace it with your own site when ready.")
+            print(f"  {serve_path} has no index.html yet — until you publish one, the")
+            print("  site answers with Servette's diagnostic page: it reports that the")
+            print("  server is up and what the connection is actually sending.")
 
     print()
     print("  Step 2 — SSL certificate")
@@ -3847,10 +3780,10 @@ def cmd_set(args):
 # The startup refresh
 def _startup_refresh():
     """What 'update' once did after swapping versions, done at every shell
-    launch instead: code now arrives through the package manager, which can
-    neither refresh a stale systemd unit nor rewrite an outdated placeholder
-    page — so the shell notices on its next run. Prints nothing when nothing
-    is stale, and fails soft: a refresh that needs root just says so.
+    launch instead: code now arrives through the package manager, which cannot
+    refresh a stale systemd unit — so the shell notices on its next run.
+    Prints nothing when nothing is stale, and fails soft: a refresh that needs
+    root just says so.
 
     Auto-refresh is gated on the environment matching: a stale unit whose
     data directory or interpreter differs from this shell's is reported and
@@ -3871,16 +3804,6 @@ def _startup_refresh():
                 print(f"  Service refreshed to v{__version__}.")
             except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
                 print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
-    for s in config.sites:
-        index_path = os.path.join(_resolve(s.serve_dir), "index.html")
-        if _is_placeholder(index_path):
-            try:
-                with open(index_path, "rb") as f:
-                    current = f.read()
-            except OSError:
-                continue
-            if current != _PLACEHOLDER_PAGE and _seed_placeholder(s.serve_dir):
-                print(f"  Placeholder page refreshed in {s.serve_dir}.")
 
 
 # The dispatcher

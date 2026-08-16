@@ -1,13 +1,34 @@
 <!DOCTYPE html>
-<!-- servette/selftest.html — the connection self-test, shipped inside the
-     module and served at the reserved path /selftest/ on every site whose
-     content doesn't shadow it (see DECISIONS.md, "The self-test is
-     server-delivered, client-executed"). Same-origin by construction, so it
-     can read what a cross-origin probe never could: it checks the
-     connection it was itself loaded over. The version-discovery row needs
-     the operator's session — the endpoint is auth-gated — and shows for a
-     logged-in reader only. Because this file ships with the server, its
-     checks can never drift from the features they check. -->
+<!-- servette/selftest.html — the diagnostic page, shipped inside the module
+     and served in two roles (see DECISIONS.md, "The self-test is
+     server-delivered, client-executed"):
+
+       /selftest/  at 200 — the connection self-test, asked for on purpose.
+       any miss    at 404 — the default error page, where the site publishes
+                            no 404.html of its own.
+
+     Every server needs an error page, and a bare "Not found." spends a whole
+     response saying only that the reader was wrong. In the 404 role this page
+     also reports that the server is up, which host answered, what it is
+     sending, and whether the site has anything published at all — the
+     diagnosis is free, since the request was already made.
+
+     One file serves both roles because the checks are the same; the bytes are
+     identical, so both responses share an ETag. The role is read from
+     location.pathname (SELFTEST_PATHS below), which the server keeps in step:
+     it answers 200 only on those paths. In the 404 role the page drops the
+     paragraph describing Servette's wider features — an operator's error page
+     is not this project's billboard — and keeps only the modest served-by
+     credit that every default error page carries.
+
+     Same-origin by construction, so it can read what a cross-origin probe
+     never could: it checks the connection it was itself loaded over. It never
+     enumerates the filesystem — no "did you mean" suggestions — because that
+     would turn an error page into a file-discovery oracle for strangers. The
+     version-discovery row needs the operator's session (the endpoint is
+     auth-gated) and shows for a logged-in reader only. Because this file ships
+     with the server, its checks can never drift from the features they
+     check. -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -101,6 +122,72 @@
     }
 
     .dot.red { background: var(--red); animation: none; }
+
+    /* ── Not-found banner (404 role only) ── */
+    .notfound {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--muted);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 1.25rem;
+      margin-bottom: 1.5rem;
+      opacity: 0;
+      animation: rise 0.5s ease 0.1s forwards;
+    }
+
+    .notfound-head {
+      display: flex;
+      align-items: baseline;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+    }
+
+    .notfound-code {
+      font-size: 1.5rem;
+      font-weight: 500;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .notfound-msg {
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    /* The requested path is attacker-controlled text. It is written with
+       textContent and wrapped here rather than truncated, so a long path
+       cannot push the layout sideways. */
+    .notfound-path {
+      margin-top: 0.85rem;
+      font-size: 0.8rem;
+      color: var(--text);
+      overflow-wrap: anywhere;
+      word-break: break-all;
+    }
+
+    .notfound-why {
+      margin-top: 0.85rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      line-height: 1.7;
+    }
+
+    .notfound-why code {
+      color: var(--text);
+      font-size: 0.72rem;
+    }
+
+    .notfound-home {
+      display: inline-block;
+      margin-top: 0.85rem;
+      font-size: 0.75rem;
+      color: #5A8466;
+      text-decoration: none;
+    }
+
+    .notfound-home:hover { text-decoration: underline; }
 
     /* ── Connection card ── */
     .verified {
@@ -262,6 +349,23 @@
     </div>
   </div>
 
+  <!-- Shown only in the 404 role. The server is up and answered — the path is
+       what is missing — so this leads with the path rather than with blame. -->
+  <div class="notfound" id="notfound" hidden>
+    <div class="notfound-head">
+      <span class="notfound-code">404</span>
+      <span class="notfound-msg">Nothing published here</span>
+    </div>
+    <div class="notfound-path" id="notfound-path">—</div>
+    <p class="notfound-why" id="notfound-why">
+      The server is running and answered this request, so the connection is
+      fine — only the path is missing. You are seeing this page because the
+      site publishes no <code>404.html</code> of its own; the checks below
+      report what the server is actually sending.
+    </p>
+    <a class="notfound-home" id="notfound-home" href="/">← the site's home page</a>
+  </div>
+
   <div class="verified">
     <div class="verified-header">
       <div>
@@ -274,14 +378,16 @@
 
   <div class="selftest">
     <div class="selftest-head">
-      <span class="selftest-title">Self-test — live from your browser</span>
+      <span class="selftest-title" id="selftest-title">Self-test — live from your browser</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>
     <div class="t-summary" id="t-summary">running…</div>
   </div>
 
-  <p class="features">
+  <!-- Hidden in the 404 role: an operator's error page is not the place to
+       advertise the server's feature list to their visitors. -->
+  <p class="features" id="features">
     These checks only reach what a browser can see. The rest of Servette runs
     where this page cannot look. On the request path it <b>redirects HTTP to
     HTTPS</b>, <b>gzip-compresses</b> what it sends, <b>rate-limits</b> abusive
@@ -307,6 +413,27 @@
 <script>
   const $ = (id) => document.getElementById(id);
 
+  // ── Which role is this page playing? ──────────────────────────────
+  // The server answers 200 on these paths and 404 everywhere else, so the
+  // path alone settles the role — no request needed, and no flash of the
+  // wrong framing while one is in flight. Kept in step with _SELFTEST_PATHS
+  // in Server.
+  const SELFTEST_PATHS = ['/selftest', '/selftest/', '/selftest/index.html'];
+  const isErrorPage    = !SELFTEST_PATHS.includes(location.pathname);
+
+  if (isErrorPage) {
+    document.title = '404 — not found';
+    $('notfound').hidden = false;
+    // textContent, never innerHTML: the path is whatever the client asked
+    // for. decodeURI so an escaped path reads as the reader typed it, with
+    // the raw value kept when it is malformed enough to throw.
+    let shown = location.pathname + location.search;
+    try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
+    $('notfound-path').textContent = shown;
+    $('features').hidden           = true;
+    $('selftest-title').textContent = 'Diagnosis — live from your browser';
+  }
+
   // ── Connection card ───────────────────────────────────────────────
   const isHttps = location.protocol === 'https:';
   $('url').textContent = location.protocol + '//' + location.host;
@@ -316,7 +443,9 @@
     $('badge').className    = 'badge badge-green';
     // Deliberately not "your server": this page serves on every Servette
     // site, and most readers are visitors, not the operator.
-    $('tagline-text').textContent = 'THIS SERVER IS RUNNING';
+    $('tagline-text').textContent = isErrorPage
+      ? 'THE SERVER IS RUNNING — THIS PATH IS NOT'
+      : 'THIS SERVER IS RUNNING';
   } else {
     $('badge').textContent = '⚠ Not encrypted';
     $('badge').className    = 'badge badge-red';
@@ -335,43 +464,84 @@
   // other direction.
   const here = location.href.split('#')[0];
 
+  // Rows that probe `here` are labelled with the path actually requested,
+  // not a hard-coded "/". In the 404 role that path is whatever the reader
+  // typed, and a label naming a request the page never made is a small lie
+  // it can avoid. Truncated to keep the column from being pushed sideways by
+  // a long path.
+  const P = (() => {
+    let p = location.pathname || '/';
+    try { p = decodeURI(p); } catch (e) { /* keep the raw form */ }
+    return p.length > 24 ? p.slice(0, 23) + '…' : p;
+  })();
+
   let _hdrs = null;
   const H = async () => (_hdrs ||= (await fetch(here, { cache: 'no-store' })).headers);
   const seen = (v) => v || '(absent)';
 
-  const checks = [
+  // Diagnosis rows, in the 404 role only. They answer the two questions a
+  // bare "Not found." leaves open: is this response shaped like an error
+  // page at all, and is the *site* deployed or is nothing published anywhere?
+  // A visitor who mistyped one path sees a working home page; an operator
+  // whose deploy never landed sees that the root misses too. Both are read
+  // from same-origin requests a visitor could make by hand — the page adds
+  // no disclosure, and deliberately never lists directory contents or
+  // guesses near-miss filenames, which would make an error page into a
+  // file-discovery oracle.
+  const errorChecks = [
+    { req: 'GET ' + P, run: async () => {
+        const r = await fetch(here, { cache: 'no-store' });
+        const ct = r.headers.get('Content-Type') || '(absent)';
+        return { ok: r.status === 404 && ct.includes('text/html'),
+                 obs: '→ ' + r.status + ', ' + ct }; } },
+
+    // Skipped when this page *is* the root: the row above already reported
+    // that exact request, and two identical GET / rows disagreeing on PASS
+    // and FAIL reads as a contradiction rather than a diagnosis.
+    ...(location.pathname === '/' ? [] : [
     { req: 'GET /', run: async () => {
+        const s = (await fetch('/', { cache: 'no-store' })).status;
+        if (s === 200)
+          return { ok: true, obs: '→ 200 — the site has a home page' };
+        if (s === 401)
+          return { ok: null, obs: '→ 401 — home page needs a password' };
+        return { ok: false, obs: '→ ' + s + ' — nothing is published at the root' }; } },
+    ]),
+  ];
+
+  const checks = [
+    { req: 'GET ' + P, run: async () => {
         const v = (await H()).get('X-Frame-Options');
         return { ok: v === 'DENY', obs: 'X-Frame-Options: ' + seen(v) }; } },
 
-    { req: 'GET /', run: async () => {
+    { req: 'GET ' + P, run: async () => {
         const v = (await H()).get('X-Content-Type-Options');
         return { ok: v === 'nosniff', obs: 'X-Content-Type-Options: ' + seen(v) }; } },
 
-    { req: 'GET /', run: async () => {
+    { req: 'GET ' + P, run: async () => {
         const v = (await H()).get('Referrer-Policy');
         return { ok: !!v, obs: 'Referrer-Policy: ' + seen(v) }; } },
 
     // Optional (config: csp). Absent means disabled, not broken.
-    { req: 'GET /', run: async () => {
+    { req: 'GET ' + P, run: async () => {
         const v = (await H()).get('Content-Security-Policy');
         return v
           ? { ok: true, obs: 'Content-Security-Policy: present' }
           : { ok: null, obs: 'CSP: disabled in config' }; } },
 
     // Optional (config: permissions_policy). Absent means disabled.
-    { req: 'GET /', run: async () => {
+    { req: 'GET ' + P, run: async () => {
         const v = (await H()).get('Permissions-Policy');
         return v
           ? { ok: true, obs: 'Permissions-Policy: present' }
           : { ok: null, obs: 'Permissions-Policy: disabled in config' }; } },
 
-    { req: 'GET /', run: async () => {
+    { req: 'GET ' + P, run: async () => {
         const h = await H();
         return { ok: !!h.get('ETag') && !!h.get('Cache-Control'),
                  obs: 'Cache-Control + ETag: ' + (h.get('ETag') || '(absent)') }; } },
 
-    { req: 'GET /  (If-None-Match)', run: async () => {
+    { req: 'GET ' + P + '  (If-None-Match)', run: async () => {
         const etag = (await H()).get('ETag');
         if (!etag) return { ok: null, obs: 'no ETag to revalidate' };
         const r = await fetch(here, { cache: 'no-store', headers: { 'If-None-Match': etag } });
@@ -379,7 +549,7 @@
           ? { ok: true, obs: '→ 304 Not Modified' }
           : { ok: null, obs: '→ ' + r.status + ' (browser cache varies)' }; } },
 
-    { req: 'POST /', run: async () => {
+    { req: 'POST ' + P, run: async () => {
         const s = (await fetch(here, { method: 'POST' })).status;
         return { ok: s === 405, obs: '→ ' + s + (s === 405 ? ' Method Not Allowed' : '') }; } },
 
@@ -393,7 +563,7 @@
 
     // HSTS is only sent for a site with a real domain certificate, so on a
     // self-signed or LAN server its absence is correct.
-    { req: 'GET /', run: async () => {
+    { req: 'GET ' + P, run: async () => {
         const v = (await H()).get('Strict-Transport-Security');
         return v
           ? { ok: true, obs: 'Strict-Transport-Security: present' }
@@ -435,7 +605,10 @@
     logEl.innerHTML = '';
     $('t-summary').textContent = 'running…';
     let pass = 0, fail = 0, skip = 0;
-    for (const c of checks) {
+    // In the 404 role the two diagnosis rows come first: what this response
+    // is, and whether the site is deployed at all. They frame the header
+    // checks that follow rather than being buried under them.
+    for (const c of (isErrorPage ? errorChecks.concat(checks) : checks)) {
       const { st, obs } = addRow(c.req);
       let r;
       try { r = await c.run(); }

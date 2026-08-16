@@ -1645,6 +1645,13 @@ _SWAP_MIN_MB        = 512
 _SWAP_MAX_MB        = 2048
 
 
+# Ceiling division
+def _ceil_div(a, b):
+    """Integer division of a by b, rounding up instead of down."""
+    quotient, remainder = divmod(a, b)
+    return quotient + 1 if remainder else quotient
+
+
 # Rounding an estimate
 def _round_up_2sig(n):
     """Round a positive integer up to two significant digits (1148 → 1200).
@@ -1652,7 +1659,7 @@ def _round_up_2sig(n):
     The swap default is an estimate; a round number says so, where an
     exact-looking one would overstate its precision."""
     mag = 10 ** max(len(str(int(n))) - 2, 0)
-    return -(-int(n) // mag) * mag
+    return _ceil_div(int(n), mag) * mag
 
 
 # The recommendation
@@ -1671,7 +1678,7 @@ def _swap_recommendation(mem_kb, avail_kb, cache_mb):
     deficit_kb = demand_kb - mem_kb
     if deficit_kb <= 0:
         return None
-    size_mb = _round_up_2sig(-(-2 * deficit_kb // 1024))
+    size_mb = _round_up_2sig(_ceil_div(2 * deficit_kb, 1024))
     return min(max(size_mb, _SWAP_MIN_MB), _SWAP_MAX_MB) * 1024 ** 2
 
 
@@ -2131,7 +2138,8 @@ def _b64url(data):
 
 def _b64url_int(n):
     """A non-negative integer as a base64url big-endian byte string (for JWK n/e)."""
-    return _b64url(n.to_bytes((n.bit_length() + 7) // 8 or 1, "big"))
+    length = max(_ceil_div(n.bit_length(), 8), 1)   # zero still encodes as one byte
+    return _b64url(n.to_bytes(length, "big"))
 
 
 # The response holder
@@ -3334,7 +3342,8 @@ def _publish_sig_url(url):
     carries a query string (e.g. a pre-signed download link), landing '.sig'
     after the query instead of after the file extension."""
     parts = urlsplit(url)
-    return urlunsplit(parts._replace(path=parts.path + ".sig"))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path + ".sig",
+                       parts.query, parts.fragment))
 
 
 # Checking the channel
@@ -3813,7 +3822,9 @@ def cmd_set(args):
     if not pairs:
         _set_usage()
         return
-    scratch_host, scratch_site = Config.__new__(Config), Site()
+    class _ScratchHost:
+        pass
+    scratch_host, scratch_site = _ScratchHost(), Site()
     for key, value in pairs:
         err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
                else _set_site_value(scratch_site, key, value))

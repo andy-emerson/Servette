@@ -462,6 +462,18 @@ _SWAP_MAX_MB        = 2048
 
 ```
 
+Integer division that rounds up instead of down, spelled out once — the swap sizing and the JWK encoding both need it, and Python has no built-in operator for it.
+
+```python
+# Ceiling division
+def _ceil_div(a, b):
+    """Integer division of a by b, rounding up instead of down."""
+    quotient, remainder = divmod(a, b)
+    return quotient + 1 if remainder else quotient
+
+
+```
+
 The recommendation is an estimate, and its rounding says so.
 
 ```python
@@ -472,7 +484,7 @@ def _round_up_2sig(n):
     The swap default is an estimate; a round number says so, where an
     exact-looking one would overstate its precision."""
     mag = 10 ** max(len(str(int(n))) - 2, 0)
-    return -(-int(n) // mag) * mag
+    return _ceil_div(int(n), mag) * mag
 
 
 ```
@@ -496,7 +508,7 @@ def _swap_recommendation(mem_kb, avail_kb, cache_mb):
     deficit_kb = demand_kb - mem_kb
     if deficit_kb <= 0:
         return None
-    size_mb = _round_up_2sig(-(-2 * deficit_kb // 1024))
+    size_mb = _round_up_2sig(_ceil_div(2 * deficit_kb, 1024))
     return min(max(size_mb, _SWAP_MIN_MB), _SWAP_MAX_MB) * 1024 ** 2
 
 
@@ -1038,7 +1050,8 @@ def _b64url(data):
 
 def _b64url_int(n):
     """A non-negative integer as a base64url big-endian byte string (for JWK n/e)."""
-    return _b64url(n.to_bytes((n.bit_length() + 7) // 8 or 1, "big"))
+    length = max(_ceil_div(n.bit_length(), 8), 1)   # zero still encodes as one byte
+    return _b64url(n.to_bytes(length, "big"))
 
 
 ```

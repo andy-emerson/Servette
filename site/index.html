@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Servette — The Simple, Secure, Static-Site Server</title>
-<meta name="description" content="Servette is a production nanoserver in a single readable Python file: trusted HTTPS that renews itself, security headers, rate limiting, and a hardened service that survives reboots. No configuration language, and one dependency it installs for you.">
+<meta name="description" content="Servette is a production nanoserver in a single readable Python module: trusted HTTPS that renews itself, security headers, rate limiting, and a hardened service that survives reboots. No configuration language, and one dependency the install brings with it.">
 
 <style>
 /* Organized in page order: tokens, base, shared patterns, then one block per
@@ -865,7 +865,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       <div class="hero-logo">
         <span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span>
       </div>
-      <p class="pill">One file · HTTPS by default · No config language</p>
+      <p class="pill">One module · HTTPS by default · No config language</p>
       <h1>Everything necessary to do one thing well.</h1>
       <p class="hero-lead">Servette is a production nanoserver: a single readable Python module that serves a static site on the public internet with a trusted certificate that renews itself, security headers on every response, rate limiting, and a hardened service that survives reboots.</p>
       <p class="hero-sub">No configuration language to learn, and a single dependency the install brings with it. Install the package, run the wizard, done.</p>
@@ -876,6 +876,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       <div class="install-line">
         <span class="install-line__prompt">$</span>
         <code id="install-cmd">sudo servette</code>
+        <span class="cmt"># after installing — see below</span>
         <button class="copy-btn" type="button" aria-controls="install-cmd">Copy</button>
       </div>
     </div>
@@ -886,9 +887,12 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       </div>
       <pre>servette&gt; <span class="hi">setup</span>
 
+  Site folder     <span class="cmt">created, placeholder page in</span>
   Domain          <span class="hi">example.com</span>
-  Folder to serve <span class="hi">site</span>
   Email for certs <span class="hi">you@example.com</span>
+  Password        <span class="cmt">skipped</span>
+
+  Ready to start? <span class="hi">yes</span>
 
   <span class="acc">✓</span> certificate issued (Let's Encrypt)
   <span class="acc">✓</span> HTTP → HTTPS redirect active
@@ -911,7 +915,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
         <p class="stat__what">third-party dependency — <code>cryptography</code>, installed with the package</p>
       </div>
       <div>
-        <p class="stat__n">3,468</p>
+        <p class="stat__n">3,896</p>
         <p class="stat__what">lines you can read top to bottom in an afternoon</p>
       </div>
       <div>
@@ -945,7 +949,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       </div>
       <div class="card">
         <h3>It stays legible</h3>
-        <p>One file you can read in an afternoon. No plugin system, no configuration language, no hidden machinery to take on trust.</p>
+        <p>One module you can read in an afternoon, installed as a package. No plugin system, no configuration language, no hidden machinery to take on trust.</p>
       </div>
     </div>
 
@@ -996,12 +1000,12 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       </div>
       <div class="card">
         <h3>How to Use it</h3>
-        <p>Getting a site live: copying the file, running the wizard, leaving it running, and the full command reference for the interactive shell.</p>
+        <p>Getting a site live: installing the package, running the wizard, leaving it running, and the full command reference for the interactive shell.</p>
         <p><button class="btn btn--outline btn--s" type="button" data-goto="how-to-use-it">Get started →</button></p>
       </div>
       <div class="card">
         <h3>How it Works</h3>
-        <p>The developer's view: the design principles, the architecture map, what each region of the file does, and how to work on Servette itself.</p>
+        <p>The developer's view: the design principles, the architecture map, what each region of the module does, and how to work on Servette itself.</p>
         <p><button class="btn btn--outline btn--s" type="button" data-goto="how-it-works">Read the design →</button></p>
       </div>
     </div>
@@ -1011,7 +1015,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     <div class="autogrid cta">
       <div>
         <h2>Serve your site in under ten minutes.</h2>
-        <p>Copy one file to a server, run it, and answer a few questions.</p>
+        <p>Install one package on a server, run it, and answer a few questions.</p>
       </div>
       <div class="cta__actions">
         <a class="btn btn--primary btn--l" href="#how-to-use-it">Read the walkthrough</a>
@@ -1135,7 +1139,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
           </tr>
           <tr>
             <th scope="row">Readable source</th>
-            <td class="ctable__ours">~3,500 lines</td>
+            <td class="ctable__ours">~3,900 lines</td>
             <td>~4,600 lines</td>
             <td>binary</td>
             <td>binary</td>
@@ -1153,7 +1157,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     </div>
 
     <div class="prose">
-      <p>All of these are excellent at what they are built for. None of them do quite what Servette does: serve a static site you own, securely, on the public internet, from a single file you can read.</p>
+      <p>All of these are excellent at what they are built for. None of them do quite what Servette does: serve a static site you own, securely, on the public internet, from a single module you can read.</p>
     </div>
   </section>
 
@@ -1187,7 +1191,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     <div class="sec-head">
       <p class="eyebrow">Simplicity, measured</p>
       <h2>The whole server, counted</h2>
-      <p>"Readable in an afternoon" is a claim, and this is the number behind it. Servette is 3,468 lines of Python, of which 2,405 are code and the rest comments and blanks. There is no second file, no framework underneath, and nothing generated.</p>
+      <p>"Readable in an afternoon" is a claim, and this is the number behind it. Servette is 3,896 lines of Python, of which 3,003 are code and the rest comments and blanks. It is one module you can read top to bottom — generated from literate Markdown sources you can read just as easily, in this site's own <a href="src/">source viewer</a>.</p>
     </div>
 
     <div class="scrollx">
@@ -1206,32 +1210,38 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       <tbody>
         <tr>
           <th scope="row">Init</th>
-          <td>Entry dispatch and imports</td>
-          <td class="num">91</td><td class="num">53</td><td class="num">3%</td>
-          <td><span class="loc-bar" style="width: 3%;"></span></td>
-        </tr>
-        <tr>
-          <th scope="row">System</th>
-          <td>Bootstrap, lifecycle, certificates, systemd</td>
-          <td class="num">1,120</td><td class="num">780</td><td class="num">32%</td>
-          <td><span class="loc-bar loc-bar--sys" style="width: 32%;"></span></td>
-        </tr>
-        <tr>
-          <th scope="row">Shell</th>
-          <td>The interactive terminal interface</td>
-          <td class="num">1,254</td><td class="num">948</td><td class="num">36%</td>
-          <td><span class="loc-bar loc-bar--shell" style="width: 36%;"></span></td>
+          <td>Module preamble and imports</td>
+          <td class="num">76</td><td class="num">48</td><td class="num">2%</td>
+          <td><span class="loc-bar" style="width: 2%;"></span></td>
         </tr>
         <tr>
           <th scope="row">Server</th>
           <td>Everything on the request path</td>
-          <td class="num">1,003</td><td class="num">624</td><td class="num">29%</td>
+          <td class="num">1,133</td><td class="num">771</td><td class="num">29%</td>
           <td><span class="loc-bar" style="width: 29%;"></span></td>
+        </tr>
+        <tr>
+          <th scope="row">System</th>
+          <td>Lifecycle, certificates, systemd</td>
+          <td class="num">1,203</td><td class="num">976</td><td class="num">31%</td>
+          <td><span class="loc-bar loc-bar--sys" style="width: 31%;"></span></td>
+        </tr>
+        <tr>
+          <th scope="row">Shell</th>
+          <td>The interactive terminal interface</td>
+          <td class="num">1,442</td><td class="num">1,184</td><td class="num">37%</td>
+          <td><span class="loc-bar loc-bar--shell" style="width: 37%;"></span></td>
+        </tr>
+        <tr>
+          <th scope="row">Main</th>
+          <td>The entry dispatch</td>
+          <td class="num">42</td><td class="num">24</td><td class="num">1%</td>
+          <td><span class="loc-bar" style="width: 1%;"></span></td>
         </tr>
         <tr class="total">
           <th scope="row">Total</th>
           <td>&nbsp;</td>
-          <td class="num">3,468</td><td class="num">2,405</td><td class="num">100%</td>
+          <td class="num">3,896</td><td class="num">3,003</td><td class="num">100%</td>
           <td>&nbsp;</td>
         </tr>
       </tbody>
@@ -1239,7 +1249,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     </div>
 
     <div class="prose">
-      <p>The shape is worth a second look: the part that faces the internet is the <em>smallest</em> of the three. Well over half the file is setup, operation, and the interactive shell — work that happens before or between requests, where a mistake cannot be reached by a visitor.</p>
+      <p>The shape is worth a second look: the part that faces the internet is the <em>smallest</em> of the three big sections. Well over half the module is setup, operation, and the interactive shell — work that happens before or between requests, where a mistake cannot be reached by a visitor.</p>
     </div>
   </section>
 
@@ -1273,12 +1283,12 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       <div class="step">
         <div class="step__head">
           <h3>Install the package</h3>
-          <p>An isolated venv, and a command on your PATH.</p>
+          <p>An isolated venv, and a command on your PATH. (Plain <code>pip install servette</code> once the first PyPI release lands.)</p>
         </div>
         <pre><span class="cmt"># on your server</span>
 sudo python3 -m venv /opt/servette
 sudo /opt/servette/bin/pip install \
-  servette
+  "servette @ git+https://github.com/andy-emerson/Servette"
 sudo ln -s /opt/servette/bin/servette \
   /usr/local/bin/servette
 </pre>
@@ -1286,7 +1296,7 @@ sudo ln -s /opt/servette/bin/servette \
       <div class="step">
         <div class="step__head">
           <h3>Run the wizard</h3>
-          <p>It asks for a domain, a folder, and an email.</p>
+          <p>It asks for a domain, an email, and an optional password.</p>
         </div>
         <pre>sudo servette
 
@@ -1328,7 +1338,7 @@ servette&gt; <span class="hi">status</span>
           <div><dt>config</dt><dd>view and edit settings</dd></div>
           <div><dt>start / stop</dt><dd>start or stop the server</dd></div>
           <div><dt>enable / disable</dt><dd>install or remove the system service</dd></div>
-          <div><dt>status</dt><dd>show whether the server is running</dd></div>
+          <div><dt>status [--json]</dt><dd>show whether the server is running</dd></div>
           <div><dt>log [n]</dt><dd>show the last n log entries</dd></div>
           <div><dt>sites [--json]</dt><dd>list configured sites</dd></div>
           <div><dt>set [n] k=v …</dt><dd>change settings non-interactively</dd></div>
@@ -1360,7 +1370,7 @@ servette&gt; <span class="hi">status</span>
     </div>
 
     <div class="prose">
-      <p>Settings live in <code>servette.toml</code> beside the script, written <code>0600</code>. Every field has a default, and the file is re-read whenever it changes — so a setting takes effect on the next request, not the next restart.</p>
+      <p>Settings live in <code>/var/lib/servette/servette.toml</code>, written <code>0600</code> — everything Servette keeps lives under <code>/var/lib/servette</code>, and <code>SERVETTE_HOME</code> moves it. Every field has a default, and the file is re-read whenever it changes — so a setting takes effect on the next request, not the next restart.</p>
     </div>
   </section>
 
@@ -1373,6 +1383,10 @@ servette&gt; <span class="hi">status</span>
 
     <div class="autogrid" style="--min: 290px; --gap: 20px;">
       <div class="card">
+        <h3>Your files, your folder</h3>
+        <p>The site lives in <code>/var/lib/servette/site/</code>, and you own it — copy files up as yourself, no root: <code>scp -r mysite/* you@server:/var/lib/servette/site/</code>. The service only reads the folder.</p>
+      </div>
+      <div class="card">
         <h3>Edit in place</h3>
         <p>Change a file in the served folder. The next request sees it — Servette checks each file's modification time as it serves. Nothing to reload, nothing to invalidate.</p>
       </div>
@@ -1382,12 +1396,12 @@ servette&gt; <span class="hi">status</span>
       </div>
       <div class="card">
         <h3>Roll it back</h3>
-        <p><code>restore-site</code> undoes the last pull; <code>restore</code> undoes the last <code>update</code> to Servette itself. One backup of each is kept, and restoring consumes it.</p>
+        <p><code>restore-site</code> undoes the last pull — one backup is kept, and restoring consumes it. Servette itself rolls back the way any pip-installed tool does: <code>pip install servette==x.y.z</code> pins the version you want.</p>
       </div>
     </div>
 
     <div class="prose">
-      <p>The content signing key is deliberately separate from the one Servette verifies its own updates with, so a compromised content key can never forge a code update, or the reverse.</p>
+      <p>Each site's publish channel has its own Ed25519 key pair, so one site's key grants nothing over another. Code travels a different channel entirely — pip delivers it — and no content key can touch it.</p>
       <p class="aside">Publishing is always operator-triggered — from the shell, over SSH. No network-reachable trigger exists, and no HTTP request can cause Servette to write anything. See <a href="#how-it-works">How it Works</a> for why that line is drawn where it is.</p>
     </div>
   </section>
@@ -1395,27 +1409,27 @@ servette&gt; <span class="hi">status</span>
   <section class="wrap section">
     <div class="sec-head">
       <p class="eyebrow">Before your own HTML</p>
-      <h2>The folder you copy already has a page in it</h2>
-      <p>The <code>site/</code> folder that comes with Servette is not empty. Alongside this page it carries a self-test: a page that checks the live connection from the visitor's own browser and reports what it actually observed, rather than asserting that everything is fine.</p>
+      <h2>Your site is never empty</h2>
+      <p>Setup seeds the new site folder with a small placeholder page — script-free, written by Servette itself when you say yes — so a fresh install has something real to serve the moment it starts. For a deeper check there is the connection self-test: a page that probes the live connection from the visitor's own browser and reports what it actually observed, rather than asserting that everything is fine.</p>
     </div>
 
     <div class="autogrid" style="--min: 290px; --gap: 20px;">
       <div class="card">
         <h3>It answers on the first request</h3>
-        <p>Copy the folder across, finish <code>setup</code>, and load the site. A green <strong>Verified encrypted</strong> badge means the server, the certificate, and the HTTP-to-HTTPS redirect are all working end to end. Over plain HTTP it says so in red instead.</p>
+        <p>Finish <code>setup</code> and load the site. The placeholder rendering over HTTPS means the server, the certificate, and the HTTP-to-HTTPS redirect are all working end to end.</p>
       </div>
       <div class="card">
-        <h3>It probes, then reports</h3>
-        <p>It makes real requests from the browser and prints what came back: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped, never passed.</p>
+        <h3>The self-test probes, then reports</h3>
+        <p>It makes real requests from the browser and prints what came back: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped, never passed. It reaches a site the way content does — as <code>/selftest/</code> in a bundle built by the <a href="pub/">publish tool</a>.</p>
       </div>
       <div class="card">
         <h3>Then you replace it</h3>
-        <p>It is a starting point, not a fixture. Once you have seen it pass, drop your own <code>index.html</code> and assets into the same folder — Servette serves whatever is there, with no build step and no restart.</p>
+        <p>The placeholder is a stand-in, not a fixture. Drop your own <code>index.html</code> and assets into the site folder — Servette serves whatever is there, with no build step and no restart.</p>
       </div>
     </div>
 
     <div class="prose">
-      <p class="aside">Servette does not generate this page or push it to you — it simply ships in the folder, so a fresh copy has something real to serve the moment it starts. If you point Servette at a folder of your own instead, that is what it serves, and there is nothing to remove.</p>
+      <p class="aside">Nothing ships as a folder to copy: the placeholder is embedded in Servette, and the wizard offers to write it. If you point Servette at a folder of your own instead, that is what it serves, and there is nothing to remove.</p>
     </div>
   </section>
 
@@ -1423,7 +1437,7 @@ servette&gt; <span class="hi">status</span>
     <div class="autogrid cta">
       <div>
         <h2>See what it looks like, live.</h2>
-        <p>A real Servette instance, serving the self-test page it ships with. Every check on it is running against that server, in your browser, right now.</p>
+        <p>A real Servette instance, serving this website's own copy of the connection self-test. Every check on it is running against that server, in your browser, right now.</p>
       </div>
       <div class="cta__actions">
         <a class="btn btn--primary btn--l" href="https://demo.servette.org">Open the live demo</a>
@@ -1487,7 +1501,7 @@ servette&gt; <span class="hi">status</span>
     </div>
 
     <figure class="arch">
-      <div id="chord" role="img" aria-label="Servette architecture diagram, circular layout. Three arcs, coloured by section. SYSTEM holds Bootstrap, Server Lifecycle, Cert Watchdog, Certificate Management, and Service Management, chained in that order. SHELL, which reads and writes, holds the Main Shell Loop, which an SSH-connected operator reaches directly, dispatching to add-site and config, pull, update, and restore-site and restore; pull and update both feed a shared fetch, verify, and swap pipeline. SERVER, which is read-only, holds Config, HTTPS Handler, Rate Limiter, Site Selection, Auth, Version Discovery, and Static File Serving; a GET request connects directly to the HTTPS Handler. Across sections: INIT enters only at Bootstrap; Bootstrap also starts the Main Shell Loop; Certificate Management reloads the server's TLS context on renewal; add-site and config delegate to Service Management and Certificate Management; the fetch-verify-swap pipeline and restore-site both write into Static File Serving; and Config is read by both Bootstrap and the Main Shell Loop."></div>
+      <div id="chord" role="img" aria-label="Servette architecture diagram, circular layout. Three arcs, coloured by section. SYSTEM holds Startup Refresh, Server Lifecycle, Cert Watchdog, Certificate Management, and Service Management, chained in that order. SHELL, which reads and writes, holds the Main Shell Loop, which an SSH-connected operator reaches directly, dispatching to add-site and config, pull, and restore-site; pull feeds a fetch, verify, and swap pipeline. SERVER, which is read-only, holds Config, HTTPS Handler, Rate Limiter, Site Selection, Auth, Version Discovery, and Static File Serving; a GET request connects directly to the HTTPS Handler. Across sections: INIT enters only at Startup Refresh, which starts the Server Lifecycle or the Main Shell Loop; Certificate Management reloads the server's TLS context on renewal; add-site and config delegate to Service Management and Certificate Management; the fetch-verify-swap pipeline and restore-site both write into Static File Serving; and Config is read by both Startup Refresh and the Main Shell Loop."></div>
     </figure>
 
     <div class="legend">
@@ -1510,7 +1524,7 @@ servette&gt; <span class="hi">status</span>
     <div class="sub-head">
       <p class="eyebrow">Region 1 of 4 · read-only</p>
       <h3>Server — everything on the request path</h3>
-      <p>1,003 lines. The only region a network request can reach, and the only one whose correctness a stranger can probe.</p>
+      <p>1,133 lines. The only region a network request can reach, and the only one whose correctness a stranger can probe.</p>
     </div>
 
     <div class="prose">
@@ -1526,11 +1540,11 @@ servette&gt; <span class="hi">status</span>
     <div class="sub-head">
       <p class="eyebrow">Region 2 of 4 · writes, off the request path</p>
       <h3>System — the environment around the server</h3>
-      <p>1,120 lines. Everything that runs on its own schedule rather than on anyone's request.</p>
+      <p>1,203 lines. Everything that runs on its own schedule rather than on anyone's request.</p>
     </div>
 
     <div class="prose">
-      <p><strong>Bootstrap.</strong> Runs before any other code. If the interpreter is not the managed venv, it creates <code>.servette-env/</code>, installs <code>cryptography</code>, and re-executes itself inside it. As a systemd service the venv Python is invoked directly and bootstrap is a no-op.</p>
+      <p><strong>Startup refresh.</strong> There is no bootstrap: pip owns the environment, and systemd invokes the installed package directly. What runs at startup instead is a drift gate — the systemd units Servette writes are stamped with the version that wrote them, so a shell launched from a newer install notices the stale stamp, refreshes the units, and restarts the service before doing anything else.</p>
       <p><strong>Server lifecycle.</strong> <code>start_server()</code> and <code>stop_server()</code> own the HTTP servers, their daemon threads, and the background workers. Under <code>--serve</code> the main thread then blocks watching the HTTPS thread's liveness, and exits nonzero once it has been dead past a grace period — so systemd's <code>Restart=always</code> brings the service back. Without that watch, a dead server thread would leave a living process systemd reports as healthy.</p>
       <p><strong>Production honesty.</strong> <code>_production_issues()</code> returns the conditions blocking production readiness — serve directory missing, cert not configured, self-signed cert, no password, a small-RAM host with no swap — printed on startup and on every <code>status</code>. It refuses to imply production-ready while anything is wrong.</p>
       <p><strong>Certificates.</strong> Let's Encrypt certificates come from Servette's own minimal ACME client: RFC 8555 HTTP-01 over stdlib <code>urllib</code>, with <code>cryptography</code> for JWS signing and the CSR. It is deliberately narrow — HTTP-01 only, no revocation or key rollover — which is why it fits in one file instead of pulling in the certbot stack. It first attempts a certificate covering both the domain and its <code>www.</code> form, falling back to the bare domain if only that fails DNS validation, and saying so.</p>
@@ -1544,11 +1558,11 @@ servette&gt; <span class="hi">status</span>
     <div class="sub-head">
       <p class="eyebrow">Region 3 of 4 · read+write</p>
       <h3>Shell — the interactive terminal interface</h3>
-      <p>1,254 lines, and the largest region of the file. The only layer that writes to configuration interactively, and reachable only by an operator over SSH.</p>
+      <p>1,442 lines, and the largest region of the module. The only layer that writes to configuration interactively, and reachable only by an operator over SSH.</p>
     </div>
 
     <div class="prose">
-      <p>The REPL shown when running without <code>--serve</code>, dispatching to setup, config, enable and disable, start and stop, status, log, update and restore, pull and restore-site. The <code>config</code> sub-shell writes each setting to <code>servette.toml</code> immediately. It contains only UI logic — the work itself lives in the other regions.</p>
+      <p>The REPL shown when running without <code>--serve</code>, dispatching to setup, config, enable and disable, start and stop, status, sites, set, log, pull, and restore-site. The <code>config</code> sub-shell writes each setting to <code>servette.toml</code> immediately. It contains only UI logic — the work itself lives in the other regions.</p>
       <p>That it is the biggest region is the point rather than an accident. The interface a human uses is where care is cheapest to spend and mistakes are least dangerous: nothing here is reachable by a request.</p>
     </div>
   </section>
@@ -1556,8 +1570,8 @@ servette&gt; <span class="hi">status</span>
   <section class="wrap section">
     <div class="sub-head">
       <p class="eyebrow">Region 4 of 4</p>
-      <h3>Init — the entry dispatch</h3>
-      <p>91 lines: the module preamble, and the decision about which of the other three regions you get.</p>
+      <h3>Init and Main — the bookends</h3>
+      <p>76 and 42 lines: the module preamble and imports at the top, and at the bottom the dispatch that decides which of the other three regions you get.</p>
     </div>
 
     <div class="prose">
@@ -1583,12 +1597,14 @@ python3 -m servette --serve       <span class="cmt"># non-interactive service mo
 
     <div class="codeblock">
       <p class="codeblock__label">Tests</p>
-      <pre>.servette-env/bin/python3 tests/test.py</pre>
+      <pre><span class="cmt"># any Python with cryptography available, e.g.</span>
+python3 -m venv .venv &amp;&amp; .venv/bin/pip install cryptography
+.venv/bin/python3 tests/test.py</pre>
     </div>
 
     <div class="prose">
       <p>The suite starts a real server on a test port, runs its checks, and tears down; it backs up and restores any existing <code>servette.toml</code>. It requires <code>openssl</code> on PATH, used only to generate a throwaway certificate during setup.</p>
-      <p>Intentionally not covered end to end: live systemd operations, real Let's Encrypt issuance, and <code>update</code>'s network path — each needs external infrastructure. Their seams are covered at the unit level instead: shell dispatch runs under scripted input, generated unit files are checked against <code>systemd-analyze</code> where available, and restore, the prompts, and the install helpers have direct tests.</p>
+      <p>Intentionally not covered end to end: live systemd operations and real Let's Encrypt issuance — each needs external infrastructure. Their seams are covered at the unit level instead: shell dispatch runs under scripted input, generated unit files are checked against <code>systemd-analyze</code> where available, and restore-site, the prompts, and the install helpers have direct tests.</p>
     </div>
 
     <div class="sub-head" style="margin-top: 38px;">
@@ -1602,7 +1618,7 @@ python3 -m servette --serve       <span class="cmt"># non-interactive service mo
           <tr><th scope="col">Gate</th><th scope="col">What it means</th></tr>
         </thead>
         <tbody>
-          <tr><th scope="row">Tests green</th><td><code>tests/test.py</code> passes on the supported Python versions — CI runs 3.11 and 3.14. A behaviour change ships with the test that would have caught its absence.</td></tr>
+          <tr><th scope="row">Tests green</th><td><code>tests/test.py</code> passes against the pip-installed package on the supported Python versions — CI runs 3.11 and 3.14 on Ubuntu, plus Debian 12. A behaviour change ships with the test that would have caught its absence.</td></tr>
           <tr><th scope="row">CodeQL clean</th><td>No <em>new</em> alerts. Standing alerts are either fixed or dismissed with a recorded reason, so "clean" means clean, not "no new noise."</td></tr>
           <tr><th scope="row">Human read</th><td>Any change touching auth, TLS, rate limiting, or path resolution is read by a person for what it claims, not only for what the tests assert.</td></tr>
         </tbody>
@@ -1619,7 +1635,7 @@ python3 -m servette --serve       <span class="cmt"># non-interactive service mo
     <div class="autogrid cta">
       <div>
         <h2>The map is not the territory.</h2>
-        <p>Everything above describes 3,468 lines of Python. They are one click away, and short enough to finish.</p>
+        <p>Everything above describes 3,896 lines of Python. They are one click away, and short enough to finish.</p>
       </div>
       <div class="cta__actions">
         <a class="btn btn--primary btn--l" href="https://github.com/andy-emerson/servette/blob/main/servette/__init__.py">Open the module</a>
@@ -1976,42 +1992,43 @@ SOFTWARE.</pre>
   var GROUPS = [
     { title: "SYSTEM", subtitle: "", range: [95, 175],
       color: "var(--dg-system)", bg: "var(--dg-system-bg)",
-      nodes: ["BOOT", "SRVLIFE", "WATCHDOG", "CERTMGMT", "SVCMGMT"] },
+      nodes: ["STARTUP", "SRVLIFE", "WATCHDOG", "CERTMGMT", "SVCMGMT"] },
     { title: "SHELL", subtitle: "read+write", range: [185, 335],
       color: "var(--dg-write)", bg: "var(--dg-write-bg)",
-      nodes: ["LOOP", "SITECFG", "PULLCMD", "UPDATECMD", "PIPE", "RESTORE"] },
+      nodes: ["LOOP", "SITECFG", "PULLCMD", "PIPE", "RESTORE"] },
     { title: "SERVER", subtitle: "read-only", range: [345, 445],
       color: "var(--dg-server)", bg: "var(--dg-server-bg)",
       nodes: ["CONFIG", "HTTPSH", "RATELIM", "SITESEL", "AUTHN", "VERSION", "STATIC"] },
   ];
 
   var LABELS = {
-    BOOT: "Bootstrap", SRVLIFE: "Server Lifecycle", WATCHDOG: "Cert Watchdog\nself-timed, 60s",
+    STARTUP: "Startup Refresh\nversion-stamped units", SRVLIFE: "Server Lifecycle",
+    WATCHDOG: "Cert Watchdog\nself-timed, 60s",
     CERTMGMT: "Certificate Mgmt\nACME, renew", SVCMGMT: "Service Mgmt\nsystemd unit files",
     LOOP: "Main Shell Loop", SITECFG: "add-site / config", PULLCMD: "pull [n]",
-    UPDATECMD: "update", PIPE: "fetch → verify → swap", RESTORE: "restore-site / restore",
+    PIPE: "fetch → verify → swap", RESTORE: "restore-site [n]",
     CONFIG: "Config", HTTPSH: "HTTPS Handler", RATELIM: "Rate Limiter", SITESEL: "Site Selection",
     AUTHN: "Auth (optional)", VERSION: "Version Discovery", STATIC: "Static File Serving",
   };
 
   /* Each satellite is one way in, and the single node it enters through. */
-  var SATELLITES = { INIT: "BOOT", GET: "HTTPSH", SSH: "LOOP" };
+  var SATELLITES = { INIT: "STARTUP", GET: "HTTPSH", SSH: "LOOP" };
   var SATELLITE_IDS = Object.keys(SATELLITES);
 
   /* [from, to, kind?] — kind is "boundary" | "write" | "dotted", or absent
      for plain control flow. */
   var EDGES = [
-    ["BOOT", "SRVLIFE"], ["SRVLIFE", "WATCHDOG"], ["WATCHDOG", "CERTMGMT"],
+    ["STARTUP", "SRVLIFE"], ["SRVLIFE", "WATCHDOG"], ["WATCHDOG", "CERTMGMT"],
     ["HTTPSH", "RATELIM"], ["RATELIM", "SITESEL"], ["SITESEL", "AUTHN"],
     ["AUTHN", "VERSION"], ["AUTHN", "STATIC"],
-    ["LOOP", "SITECFG"], ["LOOP", "PULLCMD"], ["LOOP", "UPDATECMD"], ["LOOP", "RESTORE"],
-    ["PULLCMD", "PIPE"], ["UPDATECMD", "PIPE"],
-    ["INIT", "BOOT"], ["GET", "HTTPSH"], ["SSH", "LOOP"],
-    ["BOOT", "LOOP"], ["SRVLIFE", "HTTPSH"],
+    ["LOOP", "SITECFG"], ["LOOP", "PULLCMD"], ["LOOP", "RESTORE"],
+    ["PULLCMD", "PIPE"],
+    ["INIT", "STARTUP"], ["GET", "HTTPSH"], ["SSH", "LOOP"],
+    ["STARTUP", "LOOP"], ["SRVLIFE", "HTTPSH"],
     ["CERTMGMT", "HTTPSH", "boundary"],
     ["SITECFG", "SVCMGMT", "dotted"], ["SITECFG", "CERTMGMT", "dotted"],
     ["PIPE", "STATIC", "write"], ["RESTORE", "STATIC", "write"],
-    ["CONFIG", "BOOT", "dotted"], ["CONFIG", "LOOP", "dotted"],
+    ["CONFIG", "STARTUP", "dotted"], ["CONFIG", "LOOP", "dotted"],
   ];
 
   /* Tunables. The node ring's radius is not among them: it is grown until

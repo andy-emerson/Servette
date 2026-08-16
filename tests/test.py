@@ -2362,6 +2362,15 @@ def run_server_tests(s, serve_dir):
     check("HEAD /selftest/ answers with an empty body",
           req("HEAD", "/selftest/").status == 200 and req("HEAD", "/selftest/").body == b"")
 
+    # The embedded response honors the caching contract the page's own
+    # checks probe for (it fetches its served URL expecting ETag + 304).
+    resp = req("GET", "/selftest/")
+    etag = resp.headers.get("ETag", "")
+    check("Embedded page carries ETag and Cache-Control",
+          bool(etag) and bool(resp.headers.get("Cache-Control")))
+    check("If-None-Match revalidates to 304",
+          req("GET", "/selftest/", headers={"If-None-Match": etag}).status == 304)
+
     shadow_dir = os.path.join(s._resolve(s.config.sites[0].serve_dir), "selftest")
     os.makedirs(shadow_dir, exist_ok=True)
     try:
@@ -2372,6 +2381,18 @@ def run_server_tests(s, serve_dir):
     finally:
         shutil.rmtree(shadow_dir, ignore_errors=True)
     check("Unshadowed again after removal", b"Self-test" in req("GET", "/selftest/").body)
+
+    # A plain file named selftest claims the path too — either shape wins.
+    shadow_file = os.path.join(s._resolve(s.config.sites[0].serve_dir), "selftest")
+    try:
+        with open(shadow_file, "w") as f:
+            f.write("plain-file selftest")
+        check("A plain file named selftest shadows the no-slash form",
+              b"plain-file selftest" in req("GET", "/selftest").body)
+        check("...and wins on the slash form too — the embedded page never serves beside it",
+              b"plain-file selftest" in req("GET", "/selftest/").body)
+    finally:
+        os.remove(shadow_file)
 
     s.config.sites[0].username = "testuser"
     s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")

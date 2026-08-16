@@ -1,0 +1,18 @@
+{
+  "name": "servette-viewer-e2e",
+  "private": true,
+  "description": "End-to-end harness for the source viewer (site/src/index.html): real CodeMirror, served from local bundles, against the real src/*.md. Run: npm ci && npm test (first run on a machine without a Playwright chromium: npx playwright install chromium).",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@codemirror/lang-python": "^6",
+    "@codemirror/language": "^6",
+    "@codemirror/state": "^6",
+    "@codemirror/view": "^6",
+    "@lezer/highlight": "^1",
+    "@playwright/test": "^1.49",
+    "esbuild": "^0.24",
+    "marked": "9.1.6"
+  }
+}

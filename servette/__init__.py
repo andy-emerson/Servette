@@ -74,9 +74,7 @@ _DEFAULT_CERT_FILE = os.path.join(_DEFAULT_CERT_DIR, "cert.pem")
 _DEFAULT_KEY_FILE  = os.path.join(_DEFAULT_CERT_DIR, "key.pem")
 
 
-# ── Config ────────────────────────────────────────────────────────────────────
-
-
+# Resolving data paths
 def _resolve(path):
     """Return path as-is if absolute, otherwise anchor it to BASE_DIR."""
     return path if os.path.isabs(path) else os.path.join(BASE_DIR, path)
@@ -97,6 +95,7 @@ def _resolve(path):
 # hashes/s drain against at most `MAX_CONNECTIONS` waiters is a ~3 s ceiling —
 # so an attack degrades login to slow, never to unavailable (a shed-with-503
 # design would hand attackers a deterministic denial of every legitimate login).
+# Password hashing
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1
 _SCRYPT_MAX_CONCURRENT          = 4
 _SCRYPT_SLOTS                   = threading.BoundedSemaphore(_SCRYPT_MAX_CONCURRENT)
@@ -128,6 +127,7 @@ def _check_password(submitted, stored_hash, stored_salt):
         return False
 
 
+# A site
 class Site:
     """One `[[site]]` block: everything that varies per hosted domain — the domain
     itself, its folder, its own certificate, its visitor auth, its publish channel.
@@ -149,6 +149,7 @@ class Site:
         self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
+# The invalid-config signal
 class _ConfigInvalid(Exception):
     """servette.toml cannot be safely applied — unparseable TOML, or a
     serve_dir that would publish Servette's own secrets. At startup this is
@@ -156,6 +157,7 @@ class _ConfigInvalid(Exception):
     stays in force — see reload_if_changed."""
 
 
+# Config
 class Config:
     """Holds all Servette settings and handles reading/writing servette.toml."""
 
@@ -376,11 +378,7 @@ permissions_policy = {s(self.permissions_policy)}
             pass
 
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-#
-# In service mode, logs go to systemd journal (StandardOutput=journal).
-# In interactive mode, warnings and errors go to the terminal.
-
+# Logging setup
 def setup_logging():
     root = logging.getLogger()
     root.handlers.clear()
@@ -398,6 +396,7 @@ log = logging.getLogger(__name__)
 setup_logging()
 
 
+# Terminal color
 def _c(text, color):
     """Wrap text in an ANSI color for interactive (TTY) output; plain text otherwise."""
     codes = {"green": "32", "red": "31", "yellow": "33"}
@@ -406,12 +405,7 @@ def _c(text, color):
     return f"\033[{codes[color]}m{text}\033[0m"
 
 
-# ── Rate limiter ──────────────────────────────────────────────────────────────
-#
-# Uses threading.Lock because the critical section is in-memory deque
-# manipulation — not I/O — so it's held only briefly and stays barely contended
-# even when many connection threads hit it at once.
-
+# Rate state
 RATE_WINDOW  = 60      # seconds
 _RATE_IP_CAP = 10_000  # max IPs tracked per dict; bounds memory under IP-flood attacks
 
@@ -420,6 +414,7 @@ _auth_fail_times = {}
 _rate_lock       = threading.Lock()
 
 
+# Normalizing addresses
 def _normalize_ip(ip):
     """Normalize IPv6-mapped IPv4 addresses so both forms bucket together.
 
@@ -435,6 +430,7 @@ def _normalize_ip(ip):
     return ip
 
 
+# The sweep
 def _rate_sweep(stop_event):
     """Background thread: evict stale IPs and enforce the IP cap every 30 seconds."""
     while not stop_event.wait(timeout=30):
@@ -450,6 +446,7 @@ def _rate_sweep(stop_event):
                         del tracker[k]
 
 
+# The limit check
 def _rate_limit_exceeded(tracker, ip, limit, record=True):
     """Return True if ip is over `limit` within the window.
 
@@ -490,23 +487,25 @@ def _rate_limit_exceeded(tracker, ip, limit, record=True):
         return len(timestamps) > limit
 
 
-# ── File cache ────────────────────────────────────────────────────────────────
-
+# Cache state
 _file_cache       = collections.OrderedDict()
 _file_cache_lock  = threading.Lock()
 _file_cache_bytes = 0
 
 # Text-like types worth gzipping. Already-compressed formats (images, woff/woff2,
 # pdf, video, archives) gain nothing, so they're served and stored uncompressed.
+# Compressible types
 _COMPRESSIBLE_EXTS = {
     ".html", ".css", ".js", ".json", ".svg", ".txt", ".xml", ".webmanifest", ".ttf",
 }
 
 
+# An entry's cost
 def _entry_bytes(entry):
     return len(entry["raw"]) + (len(entry["compressed"]) if entry["compressed"] else 0)
 
 
+# Reading through the cache
 def _get_cached_file(path):
     """Return (raw, compressed_or_None, etag), reloading only if the file changed.
 
@@ -564,6 +563,7 @@ def _get_cached_file(path):
     return raw, compressed, etag
 
 
+# MIME types
 MIME_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css":  "text/css; charset=utf-8",
@@ -589,6 +589,8 @@ def _mime_type(path):
     ext = os.path.splitext(path)[1].lower()
     return MIME_TYPES.get(ext, "application/octet-stream")
 
+
+# Containment
 def _within(base, target):
     """True if `target` is `base` or sits inside it. commonpath on already-resolved
     absolute paths means a traversal or symlink escape lands outside `base` and fails."""
@@ -606,6 +608,7 @@ def _hidden_segment(segments):
     return any(seg.startswith(".") and seg != ".well-known" for seg in segments if seg)
 
 
+# Resolving a request path
 def _resolve_request_path(url_path, serve_dir):
     """Resolve a URL path to an absolute file path within the matched site's
     serve_dir. Returns (None, 403) on traversal or a hidden path, (None, 404) if
@@ -641,6 +644,7 @@ def _resolve_request_path(url_path, serve_dir):
     return abs_path, 200
 
 
+# Cache-Control
 def _cache_control_header(username):
     """Cache-Control for the matched site. A site behind Basic Auth gets
     `private`, so a shared cache never holds a response only some visitors
@@ -653,6 +657,7 @@ def _cache_control_header(username):
     return f"{scope}, max-age={config.cache_max_age}"
 
 
+# Byte ranges
 def _parse_range(header, total):
     """Parse a single HTTP byte range against a body of `total` bytes. Returns
     (start, end) inclusive, "invalid" if unsatisfiable, or None if absent or
@@ -679,6 +684,7 @@ def _parse_range(header, total):
     return (start, end)
 
 
+# Security headers
 def _security_headers(site):
     """Security headers sent on every HTTPS response — success or error. site is
     the matched site (whose domain gates HSTS — a real Let's Encrypt cert backs
@@ -698,8 +704,7 @@ def _security_headers(site):
     return headers
 
 
-# ── HTTP server ───────────────────────────────────────────────────────────────
-
+# Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
 # The reserved self-test page (DECISIONS.md: "The self-test is server-
@@ -718,6 +723,7 @@ except OSError:
     _SELFTEST_ETAG = None
 
 
+# Log escaping
 def _loggable(s):
     """Escape control characters in a string bound for the logs. A request path
     reaches the journal and, from there, an operator's terminal — an unescaped
@@ -726,6 +732,7 @@ def _loggable(s):
     return "".join(c if c >= " " and c != "\x7f" else f"\\x{ord(c):02x}" for c in s)
 
 
+# The request core
 def _handle_request(method, url_path, headers, raw_ip):
     """The request core. Given the method, URL path, the parsed request headers (a
     case-insensitive mapping — an http.client.HTTPMessage in production), and the raw
@@ -947,6 +954,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     ], raw)
 
 
+# Site selection
 def _select_site(host):
     """Match a Host/SNI value (bare hostname, port stripped if present) against
     configured sites — uniform regardless of site count. Exact domain match
@@ -973,6 +981,7 @@ def _select_site(host):
     return None
 
 
+# Domain collisions
 def _domain_in_use(domain, excluding=None):
     """True if some other configured site already claims this domain
     (case-insensitive). Two sites sharing a domain would make TLS and HTTP
@@ -985,6 +994,7 @@ def _domain_in_use(domain, excluding=None):
     return any(s is not excluding and s.domain and s.domain.lower() == domain for s in config.sites)
 
 
+# One certificate's context
 def _build_ssl_context(cert_path, key_path):
     """TLS context for one certificate — minimum version enforced, optional cipher
     override, ALPN pinned to HTTP/1.1. Raises if the cert or key is unreadable, so
@@ -998,6 +1008,7 @@ def _build_ssl_context(cert_path, key_path):
     return ctx
 
 
+# The default certificate
 def _ensure_default_cert():
     """The generic, no-domain cert behind the closed-system TLS fallback — used
     only when no configured site is itself domainless (which would otherwise
@@ -1010,6 +1021,7 @@ def _ensure_default_cert():
     return _DEFAULT_CERT_FILE, _DEFAULT_KEY_FILE
 
 
+# The SNI table
 def _build_site_ssl_contexts():
     """Build one SSLContext per configured site, plus the default/base context the
     listening socket is constructed with and that's presented whenever SNI doesn't
@@ -1050,6 +1062,7 @@ def _build_site_ssl_contexts():
     return default_ctx
 
 
+# The HTTPS handler
 class _Handler(http.server.BaseHTTPRequestHandler):
     """Serves every request through the transport-agnostic _handle_request. Each
     connection runs in its own thread (ThreadingHTTPServer), so one request's
@@ -1084,6 +1097,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         pass  # Servette logs through `log`, not stderr
 
 
+# The redirect handler
 class _RedirectHandler(http.server.BaseHTTPRequestHandler):
     """Port-80 handler: serves ACME HTTP-01 challenge tokens during issuance, and
     301-redirects everything else to HTTPS (preserving the query string)."""
@@ -1144,10 +1158,12 @@ class _RedirectHandler(http.server.BaseHTTPRequestHandler):
 # so the global cap bounds thread/memory use under a connection flood — light enough
 # for a Raspberry Pi, ample for a static site. The per-IP cap stops one source from
 # holding every slot: monopolizing the pool takes cooperating addresses, not one client.
+# Connection ceilings
 MAX_CONNECTIONS        = 128
 MAX_CONNECTIONS_PER_IP = 32
 
 
+# The capped server
 class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
     """ThreadingHTTPServer with ceilings on concurrent connections: a global cap,
     and a per-source-IP cap so one source cannot monopolize the pool. Past either,
@@ -1230,6 +1246,7 @@ class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+# The TLS server
 class _TLSThreadingHTTPServer(_CappedThreadingHTTPServer):
     """Adds TLS, with the handshake performed in the per-connection worker thread
     (not the accept loop) so a slow handshake can't stall every new connection."""
@@ -1245,10 +1262,7 @@ class _TLSThreadingHTTPServer(_CappedThreadingHTTPServer):
                                              do_handshake_on_connect=False), addr
 
 
-# ── Server lifecycle ──────────────────────────────────────────────────────────
-#
-# Each server is a ThreadingHTTPServer run by serve_forever() in a daemon thread;
-# stop_server() calls shutdown() on it from the shell thread to stop gracefully.
+# Server state
 
 _https_server         = None  # the running HTTPS ThreadingHTTPServer (None when stopped)
 _https_thread         = None  # the thread running its serve_forever loop
@@ -1257,14 +1271,13 @@ _server_start_time    = None
 _watchdog_thread      = None
 _sweep_thread         = None
 _sweep_stop           = threading.Event()
-_last_renewal_attempt = {}  # domain -> monotonic timestamp of the last renewal attempt;
-                            # per-domain so one site's failure-triggered backoff
-                            # can't delay another's renewal
+_last_renewal_attempt = {}  # domain -> monotonic timestamp of the last renewal attempt
 
 _TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
 ACME_RETRIES  = 3
 
 
+# The liveness test
 def _server_running():
     """True when the HTTPS server is actually serving — the thread must be alive,
     not merely the server object constructed, so a crashed serve loop reads as
@@ -1272,6 +1285,7 @@ def _server_running():
     return _https_thread is not None and _https_thread.is_alive()
 
 
+# The watchdog pass
 def _cert_watchdog_tick():
     """One renewal/reload pass over every configured site's certificate. Each
     site's pass is wrapped in its own try/except: one site's failure can't skip
@@ -1307,6 +1321,7 @@ def _cert_watchdog_tick():
                           site.domain or "a self-signed site")
 
 
+# The watchdog thread
 def _cert_watchdog():
     """Auto-renew Let's Encrypt certs before expiry; detect externally-rotated certs."""
     while _server_running():
@@ -1316,6 +1331,7 @@ def _cert_watchdog():
         _cert_watchdog_tick()
 
 
+# Starting
 def start_server():
     global _server_start_time, _watchdog_thread, _sweep_thread, \
         _https_server, _https_thread, _http_server
@@ -1338,9 +1354,7 @@ def start_server():
                     sys.exit(1)
                 return
 
-    # Build the HTTPS server, failing closed if the socket can't bind or a cert is
-    # unreadable — better than a live process that serves nothing. Both surface here
-    # synchronously: the bind happens in the constructor, the certs in _build_site_ssl_contexts.
+    # fail closed: a bad bind or an unreadable cert surfaces here, synchronously
     try:
         https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_site_ssl_contexts())
     except Exception as e:
@@ -1350,7 +1364,7 @@ def start_server():
             sys.exit(1)
         return
 
-    # The port-80 redirect is best-effort (needs privilege and a free port).
+    # the port-80 redirect is best-effort (needs privilege and a free port)
     try:
         redirect = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
     except OSError as e:
@@ -1398,6 +1412,7 @@ def start_server():
         print(_c(f"  {warning}", "yellow"))
 
 
+# Stopping
 def stop_server():
     global _server_start_time, _sweep_thread, _https_server, _https_thread, _http_server
 
@@ -1425,6 +1440,7 @@ def stop_server():
     print("Session server stopped.")
 
 
+# The service watch
 def _watch_server(poll=5, grace=30):
     """Block until the HTTPS server has been dead for `grace` seconds.
 
@@ -1448,8 +1464,7 @@ def _watch_server(poll=5, grace=30):
         time.sleep(poll)
 
 
-# ── Service management ────────────────────────────────────────────────────────
-
+# Service probes
 def _service_file_exists():
     return os.path.exists(SERVICE_PATH)
 
@@ -1470,12 +1485,14 @@ def _servette_user_exists():
     return result.returncode == 0
 
 
+# Ownership: the service user
 def _chown_servette(path):
     """Chown path to servette:servette if the user exists and the path exists."""
     if _servette_user_exists() and os.path.exists(path):
         subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
+# Ownership: the operator
 def _operator_user():
     """The human behind sudo: SUDO_USER when present, else the current user."""
     return os.environ.get("SUDO_USER") or getpass.getuser()
@@ -1508,6 +1525,7 @@ def _chown_operator(path):
             subprocess.run(argv, check=False, capture_output=True)
 
 
+# The systemd unit
 def _systemd_unit(python_path, package_dir):
     """The systemd unit for the service. Writes are confined to where Servette
     actually writes — the data directory (config, certs, ACME account) and the ACME
@@ -1567,6 +1585,7 @@ WantedBy=multi-user.target
 """
 
 
+# The network watchdog units
 def _netwatch_units():
     """The (service, timer) unit pair for the network watchdog.
 
@@ -1599,6 +1618,7 @@ WantedBy=timers.target
     return service, timer
 
 
+# Reading /proc/meminfo
 _SWAP_PATH = "/swapfile"
 
 
@@ -1619,11 +1639,13 @@ def _meminfo():
 # The unpredictable part of demand: an allowance for the single-process spike
 # nobody plans for, sized to the largest one observed in production (fwupd
 # ballooning to ~656 MB virtual on a 414 MB host, hourly, for weeks).
+# The swap bounds
 _SPIKE_ALLOWANCE_KB = 700 * 1024
 _SWAP_MIN_MB        = 512
 _SWAP_MAX_MB        = 2048
 
 
+# Rounding an estimate
 def _round_up_2sig(n):
     """Round a positive integer up to two significant digits (1148 → 1200).
 
@@ -1633,6 +1655,7 @@ def _round_up_2sig(n):
     return -(-int(n) // mag) * mag
 
 
+# The recommendation
 def _swap_recommendation(mem_kb, avail_kb, cache_mb):
     """Recommended total swap in bytes for this host, or None when demand fits in RAM.
 
@@ -1673,6 +1696,7 @@ def _swap_offer(rec_mb, ours, active_mb):
     return f"a {active_mb} MB swapfile", f"keep {active_mb}"
 
 
+# The flash-wear note
 def _root_on_sd_card():
     """True when the root filesystem sits on an SD/eMMC device (/dev/mmcblk*),
     where swap writes add flash wear worth mentioning before the operator decides."""
@@ -1684,6 +1708,7 @@ def _root_on_sd_card():
         return False
 
 
+# The swap offer
 def _ensure_swap():
     """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
     if _IS_MACOS:
@@ -1751,6 +1776,7 @@ def _ensure_swap():
             pass
 
 
+# The unit interpreter
 def _unit_python_path():
     """The interpreter the unit's ExecStart names: the one running this shell.
     Under a pip/venv install that is the environment's own python, and the
@@ -1760,6 +1786,11 @@ def _unit_python_path():
     return sys.executable
 
 
+# A systemd directive value splits on whitespace, so a path carrying any would
+# silently become two wrong grants — and a newline would inject an arbitrary
+# directive into the sandbox definition. Servette refuses to write units for
+# such a path rather than encode it wrongly.
+# The whitespace refusal
 def _unsafe_unit_path():
     """The first unit-embedded path (data dir, package dir) carrying
     whitespace, or None. systemd directive values split on whitespace, so
@@ -1773,6 +1804,7 @@ def _unsafe_unit_path():
     return None
 
 
+# The desired units
 def _desired_units():
     """What every unit file should contain, as {path: text}, computed from
     this version of the code."""
@@ -1804,6 +1836,7 @@ def _stale_units():
     return stale
 
 
+# The environment-drift gate
 def _service_env_drift():
     """Ways the enabled unit's environment differs from this shell's, as
     human-readable strings; empty when they agree or no unit exists. A stale
@@ -1832,6 +1865,7 @@ def _service_env_drift():
     return drift
 
 
+# Writing the units
 def _write_unit_files():
     """Write (or refresh) the systemd unit, the network watchdog unit pair, and
     the file ownership they depend on. Returns True if a service file already
@@ -1849,7 +1883,6 @@ def _write_unit_files():
 
     updating = _service_file_exists()
 
-    # Create system user if needed
     if not _servette_user_exists():
         subprocess.run(
             ["useradd", "--system", "--no-create-home", "--shell", "/sbin/nologin", "servette"],
@@ -1857,9 +1890,7 @@ def _write_unit_files():
         )
         print("Created system user 'servette'.")
 
-    # One computation of the unit texts, shared with the staleness check —
-    # a writer that recomputed them independently could drift from the checker,
-    # making every shell launch rewrite units forever.
+    # one computation of the unit texts, shared with the staleness check
     for path, text in _desired_units().items():
         with open(path, "w") as f:
             f.write(text)
@@ -1869,7 +1900,7 @@ def _write_unit_files():
     subprocess.run(["systemctl", "enable", "--now", "servette-netwatch.timer"],
                    check=True, capture_output=True)
 
-    # Chown files the service process needs to read, across every site
+    # chown files the service process needs to read, across every site
     _chown_servette(config.CONFIG_FILE)
     for site in config.sites:
         if site.cert_file:
@@ -1884,7 +1915,7 @@ def _write_unit_files():
     os.makedirs(ACME_WEBROOT, exist_ok=True)
     _chown_servette(ACME_WEBROOT)
 
-    # Warn if any site's serve_dir isn't world-readable
+    # warn if any site's serve_dir isn't world-readable
     for site in config.sites:
         if not site.serve_dir:
             continue
@@ -1898,6 +1929,7 @@ def _write_unit_files():
     return updating
 
 
+# enable
 def cmd_enable():
     try:
         updating = _write_unit_files()
@@ -1932,6 +1964,7 @@ def cmd_enable():
         print(f"Error during enable: {e}")
 
 
+# disable
 def cmd_disable():
     if not _service_file_exists():
         cmd_status()
@@ -1960,8 +1993,7 @@ def cmd_disable():
         print(f"Error during disable: {e}")
 
 
-# ── Certificate management ────────────────────────────────────────────────────
-
+# The spinner
 def _spin(message, stop_event):
     frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     i = 0
@@ -1996,6 +2028,7 @@ class _spinner:
         return False
 
 
+# Writing private keys
 def _write_private_key(path, data):
     """Write key material with 0600 set at file creation, not chmod'd after:
     under a permissive umask, write-then-chmod leaves a window where another
@@ -2007,6 +2040,7 @@ def _write_private_key(path, data):
         f.write(data)
 
 
+# The self-signed certificate
 def _generate_self_signed_cert(cert_path, key_path):
     """Generate a self-signed certificate and write it to cert_path/key_path."""
     from cryptography import x509 as _x509
@@ -2049,6 +2083,7 @@ def _generate_self_signed_cert(cert_path, key_path):
     log.info("Generated self-signed certificate at %s", cert_path)
 
 
+# Waiting for the port
 def _wait_for_port_free(port, timeout=15):
     import socket as _socket
     deadline = time.monotonic() + timeout
@@ -2066,6 +2101,7 @@ def _wait_for_port_free(port, timeout=15):
     return False
 
 
+# Reloading
 def _reload_server():
     """Reload the server to pick up a new certificate."""
     if "--serve" in sys.argv:
@@ -2087,6 +2123,7 @@ def _reload_server():
         start_server()
 
 
+# base64url
 def _b64url(data):
     """base64url without padding — the encoding JOSE/ACME uses everywhere."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -2097,6 +2134,7 @@ def _b64url_int(n):
     return _b64url(n.to_bytes((n.bit_length() + 7) // 8 or 1, "big"))
 
 
+# The response holder
 class _Resp:
     """A tiny HTTP response holder so the ACME client can read status/headers/body
     uniformly whether urllib returned success or raised HTTPError."""
@@ -2122,6 +2160,7 @@ class _ACMEError(Exception):
         self.failed = failed or set()
 
 
+# The ACME client
 class _ACMEClient:
     """A minimal ACME (RFC 8555) client — just enough of the protocol for HTTP-01
     issuance with a single account key, replacing the certbot `acme` + `josepy`
@@ -2142,7 +2181,7 @@ class _ACMEClient:
             self._dir = self._request(self._url).json()
         return self._dir
 
-    # ── HTTP + nonce ──
+    # HTTP + nonce
     def _request(self, url, data=None, method=None):
         headers = {"User-Agent": "servette"}
         if data is not None:
@@ -2157,7 +2196,7 @@ class _ACMEClient:
             self._nonce = resp.headers["Replay-Nonce"]
         return resp
 
-    # ── JWS ──
+    # JWS
     def _jwk(self):
         nums = self._key.public_key().public_numbers()
         return {"e": _b64url_int(nums.e), "kty": "RSA", "n": _b64url_int(nums.n)}
@@ -2202,7 +2241,7 @@ class _ACMEClient:
     def _post_as_get(self, url):
         return self._post(url, None)
 
-    # ── protocol steps ──
+    # protocol steps
     def new_account(self, email):
         payload = {"termsOfServiceAgreed": True}
         if email:
@@ -2262,6 +2301,7 @@ class _ACMEClient:
                     pass
 
 
+# Issuance
 def _obtain_trusted_cert(domain, site):
     """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
     minimal ACME client (_ACMEClient) on stdlib urllib + cryptography, and store it
@@ -2298,7 +2338,7 @@ def _obtain_trusted_cert(domain, site):
         ))
         _chown_servette(ACCOUNT_KEY_FILE)
 
-    # Start a temporary HTTP listener on port 80 if the main server isn't running
+    # start a temporary port-80 listener if the main server isn't running
     tmp_server = None
     if not _server_running():
         try:
@@ -2393,6 +2433,7 @@ def _obtain_trusted_cert(domain, site):
         tmp_server.server_close()
 
 
+# Loading a certificate
 def _load_cert(cert_path):
     """Return a cryptography X.509 certificate object, or None on failure."""
     try:
@@ -2403,6 +2444,7 @@ def _load_cert(cert_path):
         return None
 
 
+# The domain a certificate names
 def _is_real_domain(s):
     if s in ("localhost", "servette"):
         return False
@@ -2437,6 +2479,7 @@ def _domain_from_cert(cert_path):
     return None
 
 
+# Days to expiry
 def _cert_days_remaining(cert_path):
     cert = _load_cert(cert_path)
     if cert is None:
@@ -2448,8 +2491,7 @@ def _cert_days_remaining(cert_path):
     return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
 
 
-# Menus are generated so the right-hand column always begins at the same place
-# (2-space indent + a 22-wide label) as the status and config displays.
+# Menu metrics
 _PAD = 22
 
 
@@ -2472,10 +2514,7 @@ def _section(title):
     print(_section_text(title), end="")
 
 
-# Ordered like systemctl's own manual: runtime control (start/stop) before
-# persistence (enable/disable) — Servette wraps systemd, and its audience
-# already has that convention's intuition. Onboarding, then runtime control,
-# then persistence, then observability, then maintenance, then meta.
+# The commands
 _COMMANDS = [
     ("setup",            "guided walkthrough for getting started"),
     ("config",           "view and edit settings"),
@@ -2494,12 +2533,7 @@ _COMMANDS = [
 ]
 HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
 
-# Ordered: sites first (list/add/remove — the multi-site entry points), then
-# what a site serves and how it's reached (dir/port/cert/email — email is the
-# ACME registration address, grouped with the certificate it belongs to), then
-# access control, then traffic shaping, then advanced/rarely-touched security
-# tuning, then meta. dir/cert/publish/username/password take an optional site
-# index (default 0) — same [n] convention as the top-level 'log [n]'.
+# The config commands
 _CONFIG_COMMANDS = [
     ("sites",           "list configured sites"),
     ("add-site",        "add a new site (folder, domain, password, publish channel)"),
@@ -2523,6 +2557,7 @@ _CONFIG_COMMANDS = [
 CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
 
 
+# Safe input
 def _input(prompt, default=""):
     """input() that answers `default` on Ctrl-D / Ctrl-C instead of letting the
     exception traceback out of a command and kill the shell. The default lets
@@ -2538,8 +2573,7 @@ def _prompt(question):
     return _input(f"  {question} [y/n]: ").strip().lower() == "y"
 
 
-# ── Config sub-shell ──────────────────────────────────────────────────────────
-
+# The settings display
 def _config_show():
     def val(v):
         return v if v else "(not set)"
@@ -2592,6 +2626,7 @@ def _config_sites():
     print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
 
 
+# serve_dir containment
 def _is_within_base_dir(path):
     """True if path (already resolved) is BASE_DIR itself or somewhere under
     it. serve_dir must satisfy this: the publish pipeline's atomic swap
@@ -2619,6 +2654,7 @@ def _serve_dir_exposes_secrets(path):
     return real == base or real == certs or real.startswith(certs + os.sep)
 
 
+# add-site
 def _config_add_site():
     """Add a site — the same questions cmd_setup asks for the very first one
     (domain, password), plus the folder question the first site gets for free
@@ -2715,6 +2751,7 @@ def _config_add_site():
         _reload_server()
 
 
+# remove-site
 def _config_remove_site(args):
     if not args:
         print("  Usage: remove-site <site index>")
@@ -2744,6 +2781,7 @@ def _config_remove_site(args):
         _reload_server()
 
 
+# dir
 def _config_dir(site):
     dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
     if dirs:
@@ -2769,6 +2807,7 @@ def _config_dir(site):
     print("  → saved")
 
 
+# The generic setter
 def _config_set(attr, label, cast=str, validate=None, error="invalid value", hint=None):
     current = getattr(config, attr)
     if hint:
@@ -2788,6 +2827,7 @@ def _config_set(attr, label, cast=str, validate=None, error="invalid value", hin
         print(f"  → {error}, unchanged")
 
 
+# cert
 def _config_cert(site):
     cert_path = _resolve(site.cert_file)
     if os.path.exists(cert_path):
@@ -2825,6 +2865,7 @@ def _config_cert(site):
             _reload_server()
 
 
+# username and password
 def _config_username(site):
     current   = site.username
     new_value = _input(f"  username [{current}]: ").strip()
@@ -2863,6 +2904,7 @@ def _config_password(site):
     print("  → saved")
 
 
+# limits and cache
 def _config_limits():
     _config_set("rate_limit",      "rate_limit",      int, error="invalid number", hint="Requests per minute per IP")
     _config_set("auth_rate_limit", "auth_rate_limit", int, error="invalid number", hint="Failed login attempts per minute per IP")
@@ -2895,6 +2937,7 @@ def _config_cache():
                 "invalid number", hint="In-memory file cache limit in MB (e.g. 32 on a Raspberry Pi)")
 
 
+# proxy
 def _config_trusted_proxy():
     current = config.trusted_proxy
     print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
@@ -2909,6 +2952,7 @@ def _config_trusted_proxy():
     print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
 
 
+# publish
 def _config_publish(site):
     print(f"\n  Current watch URL: {site.publish_url or '(not set)'}")
     print("  Where signed content bundles (a .tar.gz plus its .sig) are pulled from —")
@@ -2937,6 +2981,7 @@ def _config_publish(site):
         print("  → unchanged")
 
 
+# tls
 def _config_tls():
     print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
     print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
@@ -2963,6 +3008,7 @@ def _config_tls():
     print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
 
 
+# The site-index argument
 def _config_site_arg(args):
     """Resolve dir/cert/username/password/publish's optional site-index
     argument to a Site, defaulting to site 0 — same [n] convention as the
@@ -2981,6 +3027,7 @@ def _config_site_arg(args):
     return config.sites[idx]
 
 
+# config
 def cmd_config():
     _config_show()
     print(CONFIG_HELP)
@@ -3052,6 +3099,7 @@ def cmd_config():
             print(CONFIG_HELP)
 
 
+# start
 def cmd_start():
     if _service_file_exists():
         if _service_is_active():
@@ -3077,6 +3125,7 @@ def cmd_start():
                 cmd_enable()
 
 
+# stop
 def cmd_stop():
     stopped = False
 
@@ -3101,6 +3150,7 @@ def cmd_stop():
         cmd_status()
 
 
+# log
 def cmd_log(n=20):
     try:
         result = subprocess.run(
@@ -3116,6 +3166,7 @@ def cmd_log(n=20):
             print("journalctl not found. Is this a systemd system?")
 
 
+# The placeholder page
 # The marker string keeps its historical name: pages seeded by earlier
 # releases (which fetched a richer demo page from GitHub as a release asset)
 # carry "servette:demo". The marker distinguishes Servette's own placeholder
@@ -3179,6 +3230,7 @@ _PLACEHOLDER_PAGE = """<!DOCTYPE html>
 """.encode()
 
 
+# Recognizing the placeholder
 def _is_placeholder(index_path):
     """True when index_path exists and carries the servette:demo marker — i.e. it
     is Servette's own placeholder, safe to refresh. An operator's page (no marker)
@@ -3208,18 +3260,17 @@ def _seed_placeholder(serve_dir):
         return False
     return True
 
-# ── Site content publishing ─────────────────────────────────────────────────
-#
 # The update channel for a site's *content*: a signed tar.gz bundle, pulled
 # from publish_url, verified against publish_key, and swapped into serve_dir
 # with a single-shot .bak — 'restore-site' rolls back to it, and a successful
 # restore consumes it. Pull-only — this box never accepts an inbound push of
 # content, only fetches from a URL it already trusts. (Servette's own code
 # updates travel through the package manager, not through Servette.)
-
+# The bundle ceiling
 _MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
 
 
+# Extracting a bundle
 def _extract_bundle(data, dest_dir):
     """Extract a tar.gz byte string into dest_dir (must not yet exist).
 
@@ -3253,6 +3304,7 @@ def _extract_bundle(data, dest_dir):
             tf.extractall(dest_dir, members=members)
 
 
+# The content swap
 def _swap_site_content(new_dir, serve_dir):
     """Atomically replace the live serve_dir with new_dir's contents, keeping
     a single-shot backup: serve_dir.bak holds the one previous state, and a
@@ -3275,6 +3327,7 @@ _publish_lock = threading.Lock()  # serializes site-content mutation across ever
                                    # multiple unguarded filesystem ops, not one.
 
 
+# The .sig companion
 def _publish_sig_url(url):
     """url's own '.sig' companion, with '.sig' appended to the path rather than
     the whole URL — naive string concatenation breaks for a publish_url that
@@ -3284,6 +3337,7 @@ def _publish_sig_url(url):
     return urlunsplit(parts._replace(path=parts.path + ".sig"))
 
 
+# Checking the channel
 def _check_for_content_update(site):
     """Pull, verify, and swap in a new site bundle for `site` if its publish
     channel is configured. No-ops silently (not an error) if publish_url/
@@ -3338,6 +3392,7 @@ def _check_for_content_update(site):
     return "published"
 
 
+# pull
 def cmd_pull(site):
     """Manually check the publish channel for new site content and pull it in."""
     if not (site.publish_url and site.publish_key):
@@ -3380,6 +3435,7 @@ def cmd_restore_site(site):
     print("  Site content restored from backup.")
 
 
+# Formatting uptime
 def _format_uptime(seconds):
     s = int(seconds)
     if s < 60:
@@ -3392,6 +3448,7 @@ def _format_uptime(seconds):
         return f"{s // 86400}d {(s % 86400) // 3600}h"
 
 
+# Production issues
 def _production_issues():
     """Return a list of strings describing conditions that prevent production
     readiness, across every configured site. Single-site installs (still the
@@ -3429,6 +3486,7 @@ def _production_issues():
     return issues
 
 
+# Cache warnings
 def _cache_warnings():
     """Warn when a site, or any single file within it, is too big for the shared
     in-memory cache. Single-site installs see exactly today's unlabeled messages;
@@ -3462,6 +3520,7 @@ def _cache_warnings():
     return warnings
 
 
+# Runtime stats
 def _runtime_stats(service_active):
     """Runtime stats for the running server as (label, value) rows — uptime, memory,
     PID — omitting any that aren't available. Service mode reads from systemd;
@@ -3515,6 +3574,7 @@ def _runtime_stats(service_active):
     return rows
 
 
+# The site rows
 def _site_rows():
     """The per-site rows machine consumers read — shared by _status_data and
     `sites --json`, which deliberately pays only for this list: no systemctl
@@ -3544,6 +3604,7 @@ def _status_data():
     }
 
 
+# status
 def cmd_status(json_mode=False):
     if json_mode:
         print(json.dumps(_status_data(), indent=2))
@@ -3594,8 +3655,7 @@ def cmd_status(json_mode=False):
     print()
 
 
-# ── Setup wizard ──────────────────────────────────────────────────────────────
-
+# setup
 def cmd_setup():
     with _spinner("Detecting public IP..."):
         try:
@@ -3655,15 +3715,10 @@ def cmd_setup():
         print("  Run 'start' when you're ready.")
 
 
-# ── Non-interactive configuration ────────────────────────────────────────────
-#
 # `set [n] key=value ...` is the write half of the tooling surface (`status
 # --json` and `sites --json` are the read half): external tools drive it over
 # SSH, which is the authentication — no network admin API exists, by design.
-# Validation mirrors the interactive config sub-shell's rules; every pair is
-# validated against scratch objects before any is applied, so a bad pair
-# never leaves the config half-written.
-
+# Host pairs
 def _set_host_value(target, key, value):
     """Validate one host-level pair and apply it to target (config, or a
     scratch object during the validation pass). Returns an error string,
@@ -3692,6 +3747,7 @@ def _set_host_value(target, key, value):
     return ""
 
 
+# Site pairs
 def _set_site_value(target, key, value):
     """Validate one per-site pair and apply it to target (the chosen site, or
     a scratch Site during the validation pass). Returns an error string,
@@ -3719,6 +3775,7 @@ def _set_site_value(target, key, value):
     return ""
 
 
+# The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
 _SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key")
@@ -3730,6 +3787,7 @@ def _set_usage():
     print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
 
 
+# set
 def cmd_set(args):
     """`set [n] key=value ...` — non-interactive configuration for tooling.
     The optional leading index picks the site for site keys (default 0).
@@ -3775,8 +3833,7 @@ def cmd_set(args):
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 
 
-# ── Main shell loop ───────────────────────────────────────────────────────────
-
+# The startup refresh
 def _startup_refresh():
     """What 'update' once did after swapping versions, done at every shell
     launch instead: code now arrives through the package manager, which can
@@ -3815,6 +3872,7 @@ def _startup_refresh():
                 print(f"  Placeholder page refreshed in {s.serve_dir}.")
 
 
+# The dispatcher
 def run_command(cmd, args):
     """Dispatch one command by name; False for a name it doesn't know. Shared
     verbatim by the interactive loop and the one-shot `servette <command>`
@@ -3859,6 +3917,7 @@ def run_command(cmd, args):
     return True
 
 
+# The shell
 def shell():
     _banner("Servette — The Simple Secure Server")
     _startup_refresh()

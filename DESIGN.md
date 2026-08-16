@@ -210,12 +210,15 @@ The package manager owns the environment: `pip install` brings `cryptography`, a
 ```bash
 python3 src/build.py            # regenerate servette/__init__.py from src/
 python3 src/build.py --check    # exit non-zero if the module has drifted from src/
-# The literate style the sources should follow is settled but not yet applied
-# to the three big files — that rework is #69; don't take their current shape
-# as the bar.
 ```
 
 Edit `src/`, run the build, commit both. Never hand-edit the module: `build.py --check` fails when the two disagree — run it before committing, and CI runs it as a required check — and `build.py` refuses to emit a file that does not parse. The split is byte-preserving, so the generated module is exactly what review and the package build see.
+
+### The literate style
+
+Each source file is a sequence of cells. A fenced ` ```python ` block holds one def, class, or tight group, and opens with a one-line `# Name` comment — the block's reference name, which the source viewer displays (marker stripped) as the cell header and Navigator entry, and which ships into the module as its minimal section label. One to three sentences of plain prose sit immediately before each fence saying what the code below is; plain prose is the literate view's voice and emits nothing into the module. Markdown `##` headings are the landmarks; there are no banner comments in either view.
+
+Comments inside fences are minimal: docstrings, plus short labels for non-obvious steps. Rationale lives once, in the prose. The one construct that ships prose into the module is the blockquote (`> …`), which `build.py` maps to a `#` comment block — reserved for warnings and invariants that must survive into the generated `servette/__init__.py`, and therefore rare. Fences may open and close with blank lines; those are the generated module's inter-block spacing, and the viewer display-trims them while its doc model keeps the exact bytes.
 
 ### The website (`site/`)
 
@@ -237,6 +240,14 @@ python3 -m venv .venv && .venv/bin/pip install .   # once — the package brings
 Requires `openssl` on PATH (used only by test setup to generate a throwaway cert). The suite starts a real server on a test port, runs checks, and tears down. It backs up and restores any existing `servette.toml`.
 
 Intentionally not covered end-to-end: live systemd operations and real Let's Encrypt issuance — each needs external infrastructure. Their seams are covered at the unit level: shell dispatch runs under scripted input, the generated unit files are checked (and verified with `systemd-analyze` where available), and `restore-site`, the prompts, and the install helpers have direct tests.
+
+The source viewer has its own end-to-end harness:
+
+```bash
+cd tests/viewer && npm ci && npm test    # first run on a fresh machine: npx playwright install chromium
+```
+
+Playwright serves `site/src/index.html` intact and intercepts its three external surfaces — the raw source fetches answer with the working tree's `src/*.md`, esm.sh with real CodeMirror bundled per-package from pinned npm packages, the marked CDN with the same pinned file — so the run is hermetic and tests the authored bytes. It verifies the doc model against an independent fence split byte-for-byte, that CodeMirror mounts and highlights every code cell, the Navigator landmarks and `# Name` cell labels, the fence-edge display trim, and the page's embedded self-tests. Run it as evidence with any viewer or `src/*.md` shape change.
 
 ### Git
 

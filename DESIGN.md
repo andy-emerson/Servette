@@ -52,11 +52,9 @@ Withholding is not bending. The closed-system miss — a `Host` matching no conf
 
 Servette is a security tool, so a claim about it may never sit above its evidence. Three gates stand between a change and `main`, enforced by branch protection:
 
-- **Tests green.** `tests/test.py` passes on the supported Python versions (CI runs 3.11 and 3.14). A behavior change ships with the test that would have caught its absence.
+- **Tests green.** The `Tests` workflow passes on the supported Python versions (CI runs 3.11 and 3.14, plus Debian 12's own 3.11). It is three checks in one gate: `tests/test.py`, `build.py --check` (the module matches `src/`), and `build.py --check-counts` (the line counts the website publishes match `src/`). A behavior change ships with the test that would have caught its absence; a claim that is a number ships with the run that keeps it true.
 - **CodeQL clean.** The code-scanning workflow shows no *new* alerts. Standing alerts are either fixed or dismissed with a recorded reason, so "clean" means clean, not "no new noise."
 - **Human read on security surfaces.** Any change touching auth, TLS, rate limiting, or path resolution gets read by a person for what it claims, not only what the tests assert.
-
-One check sits below the bar rather than on it: `build.py --check-counts` verifies every line count the website publishes against `src/` (see [Building](#building)). A measurement claim is never stronger than its latest run, and these are stated publicly, so they want a gate — but it is **not a CI step yet**, so for now it runs only when someone runs it. Wiring it in is what would promote it.
 
 Prefer understatement: `_production_issues()` is the model — it lists what is wrong rather than implying everything is fine. The failure mode to guard against is never fabrication; it is a claim quietly stronger than its evidence. The stale counts were exactly that failure: a number the page kept asserting long after it stopped being true.
 
@@ -230,7 +228,7 @@ python3 src/build.py --check-counts  # exit non-zero if the website's counts are
 
 Edit `src/`, run the build, commit both. Never hand-edit the module: `build.py --check` fails when the two disagree — run it before committing, and CI runs it as a required check — and `build.py` refuses to emit a file that does not parse. The split is byte-preserving, so the generated module is exactly what review and the package build see.
 
-The counts modes exist because the website publishes exact line numbers to back "readable in an afternoon" — a headline figure, a per-section table, and three region paragraphs. Those are a measurement claim, so they are only as good as their latest run, and they drifted unnoticed once: the page said 3,896/3,003 while `main` held 4,002/3,034. `--check-counts` computes them from `src/` the one way and verifies every place the page states one, so a rewrite that changes the module's size is caught rather than remembered. A reworded sentence fails it too — moving a claim should make someone re-check it, not quietly remove it from the gate's view. **It is not yet a CI step**, so today it only runs when someone runs it; the step belongs beside `--check` in `.github/workflows/test.yml`.
+The counts modes exist because the website publishes exact line numbers to back "readable in an afternoon" — a headline figure, a per-section table, and three region paragraphs. Those are a measurement claim, so they are only as good as their latest run, and they drifted unnoticed once: the page said 3,896/3,003 while `main` held 4,002/3,034. `--check-counts` computes them from `src/` the one way and verifies every place the page states one, so a rewrite that changes the module's size is caught rather than remembered. A reworded sentence fails it too — moving a claim should make someone re-check it, not quietly remove it from the gate's view. CI runs it beside `--check`, so a change that alters the module's size fails until the page is updated.
 
 ### The literate style
 

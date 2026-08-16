@@ -2210,6 +2210,51 @@ def run_server_tests(s, serve_dir):
     check("Non-existent path returns 404",
           req("GET", path="/nonexistent.html").status == 404)
 
+    # With no 404.html of the operator's own, a miss is answered by the
+    # embedded diagnostic page rather than a bare line of text: every server
+    # needs an error page, and this one also reports that the server is up and
+    # what it is actually sending. The status stays 404 — the path really is
+    # not there — and the body is HTML so the page can run.
+    resp = req("GET", path="/nonexistent.html")
+    check("Default 404 body is the embedded diagnostic page",
+          resp.status == 404 and b"notfound-path" in resp.body)
+    check("Default 404 is served as HTML",
+          "text/html" in resp.headers.get("Content-Type", ""))
+    check("Default 404 is no longer the bare line",
+          resp.body != b"Not found.")
+    # The page probes the URL it was served from, so a 404 carrying no
+    # validators would make it report a defect that is really this response's
+    # shape.
+    etag_404 = resp.headers.get("ETag")
+    check("Default 404 carries ETag and Cache-Control",
+          bool(etag_404) and bool(resp.headers.get("Cache-Control")))
+    # Guarded on the ETag existing: without the guard a regression that drops
+    # the validator sends If-None-Match: None and takes the whole suite down
+    # with a TypeError instead of reporting one clean failure.
+    check("Default 404 revalidates to 304",
+          bool(etag_404) and req("GET", path="/nonexistent.html",
+                                 headers={"If-None-Match": etag_404}).status == 304)
+    # Same bytes as the asked-for page: one file in two roles, so one ETag.
+    check("Default 404 body is the same page /selftest/ serves",
+          resp.body == req("GET", path="/selftest/").body)
+    check("/selftest/ still answers 200 where it was asked for",
+          req("GET", path="/selftest/").status == 200)
+
+    # An error page must never sit in a shared cache with a positive lifetime:
+    # the operator publishes the file that was missing and cached clients would
+    # keep the 404. Under max-age the 404 role is downgraded to no-cache, while
+    # the asked-for page at /selftest/ keeps the site's policy.
+    saved_policy, saved_age = s.config.cache_policy, s.config.cache_max_age
+    s.config.cache_policy, s.config.cache_max_age = "max-age", 3600
+    try:
+        cc_404 = req("GET", path="/nonexistent.html").headers.get("Cache-Control", "")
+        check("Default 404 is not cached with a positive max-age",
+              "max-age" not in cc_404 and "no-cache" in cc_404)
+        check("/selftest/ keeps the site's max-age policy",
+              "max-age=3600" in req("GET", path="/selftest/").headers.get("Cache-Control", ""))
+    finally:
+        s.config.cache_policy, s.config.cache_max_age = saved_policy, saved_age
+
     custom_404      = b"<html><body>Custom 404</body></html>"
     custom_404_path = os.path.join(serve_dir, "404.html")
     with open(custom_404_path, "wb") as f:
@@ -2224,6 +2269,9 @@ def run_server_tests(s, serve_dir):
 
     os.remove(custom_404_path)
     s._file_cache.clear()
+
+    check("Removing 404.html restores the diagnostic page as the default body",
+          b"notfound-path" in req("GET", path="/nonexistent.html").body)
 
     section("403 — path traversal")
 

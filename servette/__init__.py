@@ -862,31 +862,59 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
-        # The reserved self-test path, as a 404 fallback: the embedded page
-        # answers /selftest/ only when resolution above came up empty AND no
-        # entry named selftest (file or directory) exists in the site root —
-        # so operator content wins by simply existing, in either shape. The
-        # response mirrors the file path's caching contract (ETag,
+        # The embedded self-test answers on two paths, and operator content
+        # wins both by simply existing:
+        #
+        #   /selftest/  — the reserved path, unless an entry of that name
+        #                 (file or directory) sits in the site root. Answers
+        #                 200: the page was asked for and it is there.
+        #   any miss    — as the default error page, unless the operator has
+        #                 written a 404.html. Answers 404: the path really is
+        #                 not there. Every server needs an error page, and a
+        #                 bare "Not found." spends a whole response telling the
+        #                 reader only that they were wrong. This one also says
+        #                 what the server is, that it is up, and what it is
+        #                 actually sending — the diagnosis is free, the request
+        #                 was already made.
+        #
+        # That second answer also covers a site's own root while nothing is
+        # published there: no index.html means the root is itself a miss, so the
+        # domain reports on itself instead of answering with ten bytes of text.
+        #
+        # The response mirrors the file path's caching contract (ETag,
         # Cache-Control, 304) because the page's own checks probe the URL it
-        # was served from; the page checks, in the visitor's browser, the
-        # connection it arrived over, behind the site's own auth.
-        if (_SELFTEST_PAGE is not None
-                and url_path.split("?", 1)[0] in _SELFTEST_PATHS
-                and not os.path.exists(os.path.join(_resolve(site.serve_dir), "selftest"))):
+        # was served from; without validators it would report a defect that is
+        # really this response's shape. The page checks, in the visitor's
+        # browser, the connection it arrived over, behind the site's own auth.
+        site_root  = _resolve(site.serve_dir)
+        custom_404 = os.path.join(site_root, "404.html")
+        selftest_asked = (url_path.split("?", 1)[0] in _SELFTEST_PATHS
+                          and not os.path.exists(os.path.join(site_root, "selftest")))
+        if _SELFTEST_PAGE is not None and (selftest_asked or not os.path.isfile(custom_404)):
+            code = 200 if selftest_asked else 404
+            # In the 404 role a positive lifetime is downgraded to
+            # revalidate-always. Under cache_policy = "max-age" an error page
+            # would otherwise sit in a shared cache for max_age seconds and keep
+            # answering 404 for a path *after* the operator publishes the very
+            # file that was missing. The asked-for page at /selftest/ keeps the
+            # site's policy: it is a real, unchanging resource.
+            cache = _cache_control_header(site.username)
+            if code == 404 and "max-age" in cache:
+                cache = ("private" if site.username else "public") + ", no-cache"
             if headers.get("If-None-Match", "") == _SELFTEST_ETAG:
                 log.info("304 Not Modified %s to %s", log_path, ip)
                 return resp(304, [(b"etag", _SELFTEST_ETAG.encode()),
-                                  (b"cache-control", _cache_control_header(site.username).encode())])
-            log.info("200 %s (embedded self-test) to %s", log_path, ip)
-            return resp(200, [
+                                  (b"cache-control", cache.encode())])
+            log.info("%d %s (embedded diagnostic page) to %s", code, log_path, ip)
+            return resp(code, [
                 (b"content-type",   b"text/html; charset=utf-8"),
                 (b"content-length", str(len(_SELFTEST_PAGE)).encode()),
                 (b"etag",           _SELFTEST_ETAG.encode()),
-                (b"cache-control",  _cache_control_header(site.username).encode()),
+                (b"cache-control",  cache.encode()),
             ], _SELFTEST_PAGE)
 
-        # Try custom 404.html in serve_dir root
-        custom_404 = os.path.join(_resolve(site.serve_dir), "404.html")
+        # The operator's own 404.html, or the bare line where the embedded page
+        # is missing (an unusual install).
         if os.path.isfile(custom_404):
             raw_404, _, _ = _get_cached_file(custom_404)
             body_404 = raw_404 or b"Not found."

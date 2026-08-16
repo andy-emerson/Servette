@@ -12,7 +12,7 @@
     "@codemirror/view": "^6",
     "@lezer/highlight": "^1",
     "@playwright/test": "^1.49",
-    "esbuild": "^0.24",
+    "esbuild": "^0.28.2",
     "marked": "9.1.6"
   }
 }

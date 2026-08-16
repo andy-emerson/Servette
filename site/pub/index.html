@@ -1,4 +1,23 @@
 <!DOCTYPE html>
+<!-- site/pub — the client-side publish tool (#42): builds and signs content
+     bundles entirely in this browser. Constraints, all load-bearing (ruling
+     in DECISIONS.md, "The publish tool's custody constraints"):
+
+     - Dependency-free. This page handles the operator's private signing
+       key, so it loads no third-party script — the pipeline is browser
+       primitives only (WebCrypto Ed25519, CompressionStream, a hand-rolled
+       ustar writer emitting only the entry types _extract_bundle accepts).
+       The CDN allowance the other site pages get does not apply here.
+     - Signing-only. Every capability must reduce to "produce a signed
+       artifact the operator chooses to pull." If it can't, it doesn't
+       belong on this page.
+     - Nothing extractable stored. The key arrives per session (generated
+       in the tab or read from a PKCS#8 PEM) and is held as a
+       non-extractable CryptoKey. Remembering it in IndexedDB is opt-in,
+       and the stored handle can sign but never be read out — by any
+       script on this origin. Accepted residual: a compromised page could
+       misuse a remembered key while open, never steal it. The key file
+       stays the only durable copy. -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">

@@ -118,7 +118,11 @@ pre { min-width: 0; }
 }
 
 .section { padding-block: clamp(48px, 6vw, 76px) 0; }
-.section--last { padding-block: clamp(48px, 6vw, 76px); }
+
+/* Panels own their bottom edge: whatever section ends a panel gets the same
+   breathing room a section top gets, with no per-section "last" class to
+   forget when sections are added or removed. */
+.panel > section:last-child { padding-bottom: clamp(48px, 6vw, 76px); }
 
 .sec-head { max-width: 62ch; margin-bottom: 32px; }
 
@@ -261,6 +265,18 @@ pre { min-width: 0; }
 .brand { display: flex; align-items: center; flex: none; background: none; border: none; padding: 0; cursor: pointer; }
 .brand .logo { font-size: 25px; }
 
+/* The status pill beside the logo — the source viewer's "src" tag, worn here
+   as the project's own maturity label. */
+.beta-tag {
+  flex: none;
+  margin-left: -14px;
+  font: 400 12px/1.5 var(--mono);
+  color: var(--green);
+  border: 1px solid color-mix(in srgb, var(--green) 35%, transparent);
+  border-radius: 99px;
+  padding: 2px 9px;
+}
+
 /* The tab strip. These are the site's navigation — each one swaps the whole
    main region, so they carry the same weight nav links would. */
 .tabs { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto; }
@@ -378,7 +394,6 @@ pre { min-width: 0; }
 .hero h1 { font-size: clamp(30px, 4.4vw, 46px); line-height: 1.14; margin-bottom: 18px; }
 .hero-lead { margin: 0 0 14px; font-size: 17.5px; line-height: 1.62; color: var(--text-2); max-width: 54ch; }
 .hero-sub { margin: 0 0 26px; font-size: 16px; line-height: 1.6; color: var(--muted); max-width: 54ch; }
-.hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 22px; }
 
 .install-line {
   display: flex;
@@ -693,28 +708,6 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 .loc-bar--sys { background: var(--muted); }
 .loc-bar--shell { background: var(--clay); }
 
-/* ── Closing call to action ────────────────────────────────────── */
-
-.cta {
-  --min: 270px;
-  --gap: 34px;
-  background: var(--band);
-  color: var(--band-ink);
-  border-radius: 14px;
-  padding: clamp(30px, 5vw, 52px);
-  align-items: center;
-}
-
-.cta h2 { font-size: clamp(24px, 3vw, 31px); line-height: 1.18; margin-bottom: 12px; }
-.cta p { margin: 0; font-size: 16px; line-height: 1.6; opacity: 0.75; }
-.cta__actions { display: flex; flex-direction: column; gap: 10px; }
-.cta__actions .btn { text-align: center; }
-.cta__actions .btn--outline {
-  background: none;
-  border-color: color-mix(in oklab, var(--band-ink) 30%, transparent);
-  color: var(--band-ink);
-}
-
 /* ── Footer ────────────────────────────────────────────────────── */
 
 .site-footer { border-top: 1px solid var(--border); background: var(--bg-2); }
@@ -810,19 +803,14 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 
 <script>
   /* Set the palette before first paint so the page never flashes the wrong
-     one. The picker at the end of the body takes over from here.
-
-     Two different things are stored and applied: the *preference* is
-     "light", "dark", or "system", and only the resolved result of it ever
-     reaches data-theme. Storing "system" rather than the colour it happens
-     to mean today is what lets the page keep following the OS afterwards. */
+     one. Dark is the default; a stored "light" preference (from the retired
+     header toggle, whose wiring below is kept for its possible return) is
+     still honoured, so light mode stays alive without being offered. */
   (function () {
     var pref;
     try { pref = localStorage.getItem("servette-theme"); } catch (e) {}
-    if (pref !== "light" && pref !== "dark") pref = "system";
-    var dark = pref === "dark" || (pref === "system" && window.matchMedia
-      && window.matchMedia("(prefers-color-scheme: dark)").matches);
-    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    if (pref !== "light" && pref !== "dark") pref = "dark";
+    document.documentElement.setAttribute("data-theme", pref);
   })();
 </script>
 </head>
@@ -833,24 +821,17 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     <button class="brand" type="button" data-goto="home" aria-label="Servette — home">
       <span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span>
     </button>
+    <span class="beta-tag">beta</span>
     <nav class="tabs" role="tablist" aria-label="Sections">
       <button class="tab" type="button" role="tab" aria-selected="true"  aria-controls="page-home"     id="tabbtn-home">Home</button>
       <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-compares" id="tabbtn-compares">How it Compares</button>
       <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-use"      id="tabbtn-use">How to Use it</button>
       <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-works"    id="tabbtn-works">How it Works</button>
     </nav>
-    <!-- Radio inputs rather than buttons: the browser supplies the grouping,
-         the roving focus, and arrow-key selection, none of which would be
-         free with three <button>s and aria-checked. -->
-    <fieldset class="theme-picker">
-      <legend class="visually-hidden">Theme</legend>
-      <input type="radio" name="theme" id="theme-light"  value="light">
-      <label for="theme-light"  title="Light theme"><span aria-hidden="true">☀</span><span class="visually-hidden">Light</span></label>
-      <input type="radio" name="theme" id="theme-system" value="system">
-      <label for="theme-system" title="Match system"><span aria-hidden="true">◐</span><span class="visually-hidden">Match system</span></label>
-      <input type="radio" name="theme" id="theme-dark"   value="dark">
-      <label for="theme-dark"   title="Dark theme"><span aria-hidden="true">☾</span><span class="visually-hidden">Dark</span></label>
-    </fieldset>
+    <!-- The theme toggle lived here; dark is now the default and the toggle
+         is retired from the chrome. Its wiring (readPref/paint/setPref and
+         the .theme-picker styles) is kept below so restoring it is a matter
+         of putting the markup back. -->
   </div>
 </header>
 
@@ -869,10 +850,6 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
       <h1>Everything necessary to do one thing well.</h1>
       <p class="hero-lead">Servette is a production nanoserver: a single readable Python module that serves a static site on the public internet with a trusted certificate that renews itself, security headers on every response, rate limiting, and a hardened service that survives reboots.</p>
       <p class="hero-sub">No configuration language to learn, and a single dependency the install brings with it. Install the package, run the wizard, done.</p>
-      <div class="hero-actions">
-        <a class="btn btn--primary btn--l" href="#how-to-use-it">Get started</a>
-        <a class="btn btn--outline btn--l" href="#how-it-works">See how it works</a>
-      </div>
       <div class="install-line">
         <span class="install-line__prompt">$</span>
         <code id="install-cmd">sudo servette</code>
@@ -1007,19 +984,6 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
         <h3>How it Works</h3>
         <p>The developer's view: the design principles, the architecture map, what each region of the module does, and how to work on Servette itself.</p>
         <p><button class="btn btn--outline btn--s" type="button" data-goto="how-it-works">Read the design →</button></p>
-      </div>
-    </div>
-  </section>
-
-  <section class="wrap section--last">
-    <div class="autogrid cta">
-      <div>
-        <h2>Serve your site in under ten minutes.</h2>
-        <p>Install one package on a server, run it, and answer a few questions.</p>
-      </div>
-      <div class="cta__actions">
-        <a class="btn btn--primary btn--l" href="#how-to-use-it">Read the walkthrough</a>
-        <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette">View on GitHub</a>
       </div>
     </div>
   </section>
@@ -1253,19 +1217,6 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     </div>
   </section>
 
-  <section class="wrap section--last">
-    <div class="autogrid cta">
-      <div>
-        <h2>Read it before you trust it.</h2>
-        <p>That is the whole argument. The file is right there, and it is short enough to finish.</p>
-      </div>
-      <div class="cta__actions">
-        <a class="btn btn--primary btn--l" href="https://github.com/andy-emerson/servette/blob/main/servette/__init__.py">Open the module</a>
-        <a class="btn btn--outline btn--l" href="#how-it-works">See how it works</a>
-      </div>
-    </div>
-  </section>
-
 </div>
 
 <!-- ══ How to Use it ═══════════════════════════════════════════════ -->
@@ -1402,7 +1353,34 @@ servette&gt; <span class="hi">status</span>
 
     <div class="prose">
       <p>Each site's publish channel has its own Ed25519 key pair, so one site's key grants nothing over another. Code travels a different channel entirely — pip delivers it — and no content key can touch it.</p>
-      <p class="aside">Publishing is always operator-triggered — from the shell, over SSH. No network-reachable trigger exists, and no HTTP request can cause Servette to write anything. See <a href="#how-it-works">How it Works</a> for why that line is drawn where it is.</p>
+      <p class="aside">Publishing is always operator-triggered — from the shell, over SSH. No network-reachable trigger exists, and no HTTP request can cause Servette to write anything.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Signing your bundles</p>
+      <h2>The publish tool</h2>
+      <p>A bundle has to be built and signed before Servette will pull it. The publish tool does both, in your browser — it is where a publish channel's key pair comes from.</p>
+    </div>
+
+    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+      <div class="card">
+        <h3>Point it at a folder</h3>
+        <p>Pick your site folder and it builds the <code>.tar.gz</code>, signs it with your key, and hands back the bundle and its <code>.sig</code> — plus the public key hex to paste into <code>config &gt; publish</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Your key never leaves</h3>
+        <p>The page makes no network request at all, and keeps nothing extractable. Signing happens with your browser's own WebCrypto — the private half of the key is yours to hold, and to lose.</p>
+      </div>
+      <div class="card">
+        <h3>Then host the pair anywhere</h3>
+        <p>Put the two files wherever you like — a GitHub release, object storage — and run <code>pull</code> on the server. The trigger stays with the person who owns the machine.</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p><a class="btn btn--primary btn--l" href="pub/">Open the publish tool →</a></p>
     </div>
   </section>
 
@@ -1420,7 +1398,7 @@ servette&gt; <span class="hi">status</span>
       </div>
       <div class="card">
         <h3>The self-test probes, then reports</h3>
-        <p>It makes real requests from the browser and prints what came back: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped, never passed. It reaches a site the way content does — as <code>/selftest/</code> in a bundle built by the <a href="pub/">publish tool</a>.</p>
+        <p>It makes real requests from the browser and prints what came back: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped, never passed. Every Servette serves it at <a href="selftest/"><code>/selftest/</code></a> — including the one serving this website, so that link runs the checks against this server, in your browser, right now.</p>
       </div>
       <div class="card">
         <h3>Then you replace it</h3>
@@ -1430,18 +1408,6 @@ servette&gt; <span class="hi">status</span>
 
     <div class="prose">
       <p class="aside">Nothing ships as a folder to copy: the placeholder is embedded in Servette, and the wizard offers to write it. If you point Servette at a folder of your own instead, that is what it serves, and there is nothing to remove.</p>
-    </div>
-  </section>
-
-  <section class="wrap section--last">
-    <div class="autogrid cta">
-      <div>
-        <h2>See what it looks like, live.</h2>
-        <p>Every Servette serves the connection self-test at <code>/selftest/</code> — including the one serving this website. Every check on it runs against this server, in your browser, right now.</p>
-      </div>
-      <div class="cta__actions">
-        <a class="btn btn--primary btn--l" href="selftest/">Open the live self-test</a>
-      </div>
     </div>
   </section>
 
@@ -1582,6 +1548,35 @@ servette&gt; <span class="hi">status</span>
 
   <section class="wrap">
     <div class="sec-head">
+      <p class="eyebrow">Read the source</p>
+      <h2>The source viewer</h2>
+      <p>Servette's module is generated from five literate Markdown files, where the prose explaining a piece of code sits directly beside it. The source viewer is how you read them — in the browser, with no checkout.</p>
+    </div>
+
+    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+      <div class="card">
+        <h3>The authored bytes, not a copy</h3>
+        <p>Each file is fetched from the repository as the page renders, so what you read is what is in the repository — never a stale duplicate. A <code>?ref=</code> parameter picks the branch or tag.</p>
+      </div>
+      <div class="card">
+        <h3>Built to navigate</h3>
+        <p>Prose renders, Python is highlighted, and every code block is a named cell you can jump to. Alongside it: search across all five files, a rendered preview of the open file, and a call map of its functions.</p>
+      </div>
+      <div class="card">
+        <h3>The reading half of a real tool</h3>
+        <p>It began as the notebook interface Servette was written in, with everything that edits removed. It stores nothing about you and runs entirely in your browser.</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p><a class="btn btn--primary btn--l" href="src/">Open the source viewer →</a></p>
+    </div>
+  </section>
+
+  <div class="wrap"><div class="rule"></div></div>
+
+  <section class="wrap">
+    <div class="sec-head">
       <p class="eyebrow">Working on it</p>
       <h2>Developing Servette itself</h2>
       <p>Two entry points, one test command, and a verification bar that stands between any change and <code>main</code>.</p>
@@ -1630,19 +1625,6 @@ python3 -m venv .venv &amp;&amp; .venv/bin/pip install cryptography
     </div>
   </section>
 
-  <section class="wrap section--last">
-    <div class="autogrid cta">
-      <div>
-        <h2>The map is not the territory.</h2>
-        <p>Everything above describes 3,896 lines of Python. They are one click away, and short enough to finish.</p>
-      </div>
-      <div class="cta__actions">
-        <a class="btn btn--primary btn--l" href="https://github.com/andy-emerson/servette/blob/main/servette/__init__.py">Open the module</a>
-        <a class="btn btn--outline btn--l" href="https://github.com/andy-emerson/servette/blob/main/DESIGN.md">Read DESIGN.md</a>
-      </div>
-    </div>
-  </section>
-
 </div>
 
 </main>
@@ -1662,11 +1644,18 @@ python3 -m venv .venv &amp;&amp; .venv/bin/pip install cryptography
         <button type="button" data-goto="how-it-compares">How it Compares</button>
         <button type="button" data-goto="how-to-use-it">How to Use it</button>
         <button type="button" data-goto="how-it-works">How it Works</button>
-        <!-- Path forms, not subdomains: the paths are alive the moment
-             this page deploys with the pages beside it, while subdomains
-             wait on DNS — and #42's rule is no dead links. -->
-        <a href="src/">Source viewer</a>
-        <a href="pub/">Publish tool</a>
+      </div>
+    </div>
+    <div>
+      <p class="footer-label">Services</p>
+      <!-- Path forms, not subdomains: the paths are alive the moment this
+           page deploys with the pages beside it, while subdomains wait on
+           DNS — and #42's rule is no dead links. Each is named for what it
+           does, not for the directory it happens to live in. -->
+      <div class="footer-links">
+        <a href="src/">Read the source</a>
+        <a href="pub/">Sign a site bundle</a>
+        <a href="selftest/">Test this connection</a>
       </div>
     </div>
     <div>
@@ -1749,7 +1738,7 @@ SOFTWARE.</pre>
   function readPref() {
     var pref;
     try { pref = localStorage.getItem("servette-theme"); } catch (e) {}
-    return pref === "light" || pref === "dark" ? pref : "system";
+    return pref === "light" || pref === "dark" ? pref : "dark";
   }
 
   function paint(pref) {

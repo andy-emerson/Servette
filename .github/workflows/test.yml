@@ -13,9 +13,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     # Empty for the Ubuntu legs (plain VM); an image name runs the same steps
-    # inside that OS. debian:12 = Debian's own Python 3.11 and its split
-    # python3-venv package — the configuration the bootstrap's apt-get
-    # recovery path was written for.
+    # inside that OS. debian:12 = Debian's own Python 3.11 — the oldest
+    # supported interpreter as its target platform actually ships it.
     container: ${{ matrix.container }}
     strategy:
       matrix:
@@ -33,11 +32,13 @@ jobs:
       - name: Install the distro's Python
         if: ${{ matrix.container }}
         run: apt-get update -qq && apt-get install -y -qq python3 python3-venv
-      - name: Verify servette.py is in sync with src/
+      - name: Verify the built package is in sync with src/
         run: python3 src/build.py --check
-      - name: Install dependencies
+      - name: Install the package into a venv (exercises pyproject.toml)
         run: |
-          python3 -m venv .servette-env
-          .servette-env/bin/pip install --quiet "cryptography>=41.0,<50.0"
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet .
+      - name: Console script smoke test
+        run: SERVETTE_HOME=. .venv/bin/servette status --json > /dev/null
       - name: Run tests
-        run: .servette-env/bin/python3 tests/test.py
+        run: .venv/bin/python3 tests/test.py

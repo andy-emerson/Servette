@@ -1,18 +1,18 @@
-# GENERATED FILE — do not edit. servette.py is built from the Markdown
-# sources in src/ by src/build.py; edit those and rebuild. Hand edits here
-# are overwritten by the next build and fail CI's `build.py --check`.
+# GENERATED FILE — do not edit. servette/__init__.py is built from the
+# Markdown sources in src/ by src/build.py; edit those and rebuild. Hand
+# edits here are overwritten by the next build and fail CI's `build.py --check`.
 # The docstring and version
 """
-servette.py — The Simple Secure Static Site Server
+Servette — The Simple Secure Static Site Server
 
 Servette serves a directory of static files over HTTPS with optional Basic Auth
 and essential security headers. Run it:
 
-    sudo python3 servette.py
+    sudo servette
 
 Architecture:
     Server              — config, rate limiting, file cache, the request handler, and the HTTP servers
-    System              — bootstrap, server lifecycle, certificate management, and service management
+    System              — server lifecycle, certificate management, and service management
     Shell               — the interactive terminal interface
 """
 
@@ -47,9 +47,15 @@ import urllib.request
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 # Paths
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-_VENV_DIR   = os.path.join(BASE_DIR, ".servette-env")
-_VENV_PY    = os.path.join(_VENV_DIR, "bin", "python3")
+#
+# The data directory: state lives here, code lives wherever the package
+# manager put it, and the two never share a home. The systemd unit carries
+# Environment=SERVETTE_HOME so the service resolves the same directory the
+# shell that enabled it did.
+BASE_DIR = os.path.abspath(
+    os.environ.get("SERVETTE_HOME")
+    or (os.path.expanduser("~/.servette") if sys.platform == "darwin"
+        else "/var/lib/servette"))
 
 SERVICE_PATH  = "/etc/systemd/system/servette.service"
 NETWATCH_PATH = "/etc/systemd/system/servette-netwatch"  # + ".service" / ".timer"
@@ -357,6 +363,13 @@ permissions_policy = {s(self.permissions_policy)}
             except OSError:
                 pass
             raise
+        # The replace installs the temp file's root:root 0600 — unreadable by
+        # the servette service user, which would kill the running service's
+        # per-request config reload and crash-loop the next restart. Restore
+        # the ownership enable establishes; a no-op where the user doesn't
+        # exist (session mode, tests, macOS). Late import shape as with
+        # _domain_from_cert: _chown_servette is defined in System.
+        _chown_servette(self.CONFIG_FILE)
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
@@ -690,17 +703,6 @@ def _security_headers(site):
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
 
-def _backup_version():
-    """The version string inside servette.py.bak (left by the last 'update' or
-    'restore'), or None if no backup exists or it can't be read/parsed."""
-    bak_path = os.path.abspath(__file__) + ".bak"
-    try:
-        with open(bak_path, "rb") as f:
-            return _parse_version(f.read())
-    except OSError:
-        return None
-
-
 def _loggable(s):
     """Escape control characters in a string bound for the logs. A request path
     reaches the journal and, from there, an operator's terminal — an unescaped
@@ -807,11 +809,10 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
 
-    # Version discovery: what this box is running, and its update backup (if
-    # any) — the publish tool's "current vs. latest / current vs. backup"
-    # prompts read this. Deliberately reports only what THIS box knows;
-    # "latest available" comes from GitHub, which the tool queries directly.
-    # Host-level (one servette.py process, one version).
+    # Version discovery: what this box is running — the publish tool's
+    # self-test page reads this to show the served version. Deliberately
+    # reports only what THIS box knows; "latest available" is the package
+    # index's business, not Servette's. Host-level (one process, one version).
     #
     # Gated on the site having auth, so the exact version reaches only a party
     # that already holds the site's password — never an anonymous scanner, for
@@ -821,7 +822,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # public. (A remote tool for a no-auth site reads the version another way; a
     # local operator has it from 'status'.)
     if site.username and url_path.split("?", 1)[0] == _WELL_KNOWN_VERSION_PATH:
-        body = json.dumps({"running": __version__, "backup": _backup_version()}).encode()
+        body = json.dumps({"running": __version__}).encode()
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
 
@@ -1206,78 +1207,6 @@ class _TLSThreadingHTTPServer(_CappedThreadingHTTPServer):
                                              do_handshake_on_connect=False), addr
 
 
-# ── Bootstrap ─────────────────────────────────────────────────────────────────
-#
-# Every invocation from the system Python re-execs into the managed virtualenv.
-# On first run (or if the venv is missing), the venv is created and deps are
-# installed first. The user just runs `sudo python3 servette.py` — the
-# environment is managed invisibly.
-
-def _bootstrap():
-    if sys.prefix == _VENV_DIR:
-        return  # Already running inside the managed virtualenv
-
-    if not os.path.exists(_VENV_PY):
-        print("Setting up Servette...")
-
-        def _create_venv():
-            """Create the venv, returning the failure instead of raising.
-            `import venv` succeeding proves nothing on its own: Debian/Ubuntu
-            ship the venv module in the stdlib but split ensurepip's wheels
-            into the python3-venv package, so create(with_pip=True) is what
-            actually fails on a minimal host — recovery must key on that."""
-            try:
-                import venv as _venv_mod
-                _venv_mod.create(_VENV_DIR, with_pip=True, clear=True)
-                return None
-            except (Exception, SystemExit) as e:
-                # SystemExit is caught deliberately: Debian and Ubuntu patch
-                # their venv module to print apt instructions and *exit*
-                # rather than raise, and SystemExit is not an Exception —
-                # without this, the recovery below is dead code on the two
-                # platforms it exists for.
-                return e
-
-        error = _create_venv()
-        if error is not None:
-            # Install the distro package that completes venv support, then try
-            # once more. Each manager gets its own argv — apk's subcommand is
-            # 'add' and it has no '-y' flag.
-            pkg_managers = [
-                (("apt-get", "install", "-y"), f"python3.{sys.version_info.minor}-venv"),
-                (("dnf",     "install", "-y"), "python3-venv"),
-                (("apk",     "add"),           "py3-venv"),
-            ]
-            for argv, pkg in pkg_managers:
-                if shutil.which(argv[0]):
-                    result = subprocess.run([*argv, pkg])
-                    if result.returncode != 0:
-                        print(f"  Error: failed to install {pkg} via {argv[0]}")
-                        sys.exit(1)
-                    break
-            else:
-                print(f"  Error: failed to create virtual environment: {error}")
-                if _IS_MACOS:
-                    print("  This Python lacks venv/pip support. Install Python 3.11+ from")
-                    print("  python.org or Homebrew and run Servette with that python3.")
-                else:
-                    print("  No supported package manager found to fix it (tried apt-get, dnf, apk).")
-                sys.exit(1)
-            error = _create_venv()
-            if error is not None:
-                print(f"  Error: failed to create virtual environment: {error}")
-                sys.exit(1)
-
-        deps = ["cryptography>=41.0,<50.0"]
-        result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
-        if result.returncode != 0:
-            print(f"  Error: failed to install dependencies")
-            sys.exit(1)
-        print()
-
-    os.execv(_VENV_PY, [_VENV_PY] + sys.argv)
-
-
 # ── Server lifecycle ──────────────────────────────────────────────────────────
 #
 # Each server is a ThreadingHTTPServer run by serve_forever() in a daemon thread;
@@ -1509,28 +1438,77 @@ def _chown_servette(path):
         subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
-def _systemd_unit(python_path, servette_path):
+def _operator_user():
+    """The human behind sudo: SUDO_USER when present, else the current user."""
+    return os.environ.get("SUDO_USER") or getpass.getuser()
+
+
+def _operator_chown_plan(path):
+    """The chown/chmod invocations _chown_operator runs, as argv lists —
+    separated from the running so the decision is testable without root.
+    Owner is the human behind sudo; group is `servette` with g+rX, which is
+    all the read-only serving path needs, granted to exactly one system user
+    instead of the world — a .env or .git a deploy drags in is never flipped
+    world-readable on the filesystem (the request path already refuses to
+    serve dotfiles; this keeps other local accounts out too). Explicit
+    `:servette` rather than the operator's own group, which need not exist
+    on hosts without user-private groups. Before the service user exists
+    (setup before enable, macOS session mode) ownership alone is set;
+    enable re-runs this once the user exists."""
+    user = _operator_user()
+    if _servette_user_exists():
+        return [["chown", "-R", f"{user}:servette", path],
+                ["chmod", "-R", "g+rX", path]]
+    return [["chown", "-R", user, path]]
+
+
+def _chown_operator(path):
+    """Apply _operator_chown_plan. Best-effort: a host without chown
+    semantics (macOS session mode) serves fine without it."""
+    if os.path.exists(path):
+        for argv in _operator_chown_plan(path):
+            subprocess.run(argv, check=False, capture_output=True)
+
+
+def _systemd_unit(python_path, package_dir):
     """The systemd unit for the service. Writes are confined to where Servette
-    actually writes — its own directory (config, certs, ACME account) and the ACME
+    actually writes — the data directory (config, certs, ACME account) and the ACME
     webroot (HTTP-01 challenge files during renewal); ProtectSystem=strict makes the
     rest of the filesystem read-only, and the unit runs as a least-privilege user
     holding only CAP_NET_BIND_SERVICE. The served directory ends up read-write only
-    because it lives under the server's own directory; the server never writes it.
-    The service's own code (servette.py and its .bak) and the managed venv are
-    pinned read-only on top of that writable directory — the serving process never
-    rewrites them, so a compromised one cannot patch the program it re-execs into."""
-    return f"""[Unit]
+    because it lives under the data directory; the server never writes it.
+    The package directory is pinned read-only on top: normally the code lives
+    outside the data directory and strict mode already covers it, but a checkout
+    deployment (SERVETTE_HOME=.) puts the code inside the writable tree, and the
+    pin holds there too — a compromised serving process cannot patch the program
+    systemd will restart it into. PYTHONPATH names the package's parent ONLY
+    when the package sits outside the interpreter's own site-packages (a
+    checkout) — a pip-installed package resolves without it, and an
+    unconditional PYTHONPATH would put a path entry ahead of the stdlib for
+    no benefit, widening what a write anywhere on that entry could shadow.
+
+    The leading version stamp is load-bearing, not decoration: a pip upgrade
+    changes no directive, so without the stamp an upgraded host's units would
+    never read as stale and the running service would keep the old code. With
+    it, any upgrade drifts every unit's text and the startup refresh restarts
+    the service onto the version the shell is running."""
+    parent = os.path.dirname(package_dir)
+    pythonpath = ("" if os.path.basename(parent) in ("site-packages", "dist-packages")
+                  else f"Environment=PYTHONPATH={parent}\n")
+    return f"""# generated by servette {__version__}
+[Unit]
 Description=Servette — The Simple Secure Server
 After=network.target
 
 [Service]
 User=servette
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment=SERVETTE_HOME={BASE_DIR}
+{pythonpath}AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths={BASE_DIR} {ACME_WEBROOT}
-ReadOnlyPaths={servette_path} -{_VENV_DIR} -{servette_path}.bak
+ReadOnlyPaths={package_dir}
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -1538,7 +1516,7 @@ ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictSUIDSGID=yes
 LockPersonality=yes
-ExecStart={python_path} {servette_path} --serve
+ExecStart={python_path} -m servette --serve
 Restart=always
 RestartSec=3
 StandardInput=null
@@ -1561,14 +1539,16 @@ def _netwatch_units():
     running, so of the three known managers (systemd-networkd on Ubuntu,
     NetworkManager on Raspberry Pi OS, dhcpcd on older Pi OS) exactly one acts;
     the whole check is a no-op while the route is healthy."""
-    service = """[Unit]
+    service = f"""# generated by servette {__version__}
+[Unit]
 Description=Servette network watchdog — recover a dropped default route
 
 [Service]
 Type=oneshot
 ExecStart=/bin/sh -c 'ip route get 1.1.1.1 >/dev/null 2>&1 && exit 0; for u in systemd-networkd NetworkManager dhcpcd; do systemctl try-restart "$u.service" 2>/dev/null || true; done'
 """
-    timer = """[Unit]
+    timer = f"""# generated by servette {__version__}
+[Unit]
 Description=Run the Servette network watchdog every 5 minutes
 
 [Timer]
@@ -1733,6 +1713,87 @@ def _ensure_swap():
             pass
 
 
+def _unit_python_path():
+    """The interpreter the unit's ExecStart names: the one running this shell.
+    Under a pip/venv install that is the environment's own python, and the
+    service must use the same one to see the same installed packages. Shared
+    by the writer and the drift check — two computations of this path could
+    disagree and manufacture phantom drift."""
+    return sys.executable
+
+
+def _unsafe_unit_path():
+    """The first unit-embedded path (data dir, package dir) carrying
+    whitespace, or None. systemd directive values split on whitespace, so
+    such a path would silently become two wrong grants — and a newline would
+    inject an arbitrary directive into the sandbox definition. Servette
+    refuses to write units for one rather than encode it wrongly."""
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    for p in (BASE_DIR, package_dir):
+        if re.search(r"\s", p):
+            return p
+    return None
+
+
+def _desired_units():
+    """What every unit file should contain, as {path: text}, computed from
+    this version of the code."""
+    netwatch_service, netwatch_timer = _netwatch_units()
+    return {
+        SERVICE_PATH:               _systemd_unit(_unit_python_path(),
+                                                    os.path.dirname(os.path.abspath(__file__))),
+        NETWATCH_PATH + ".service": netwatch_service,
+        NETWATCH_PATH + ".timer":   netwatch_timer,
+    }
+
+
+def _stale_units():
+    """Unit files that differ from what this version would write — including
+    ones missing entirely, so a release that adds a unit flags as stale on
+    hosts enabled before it existed. Empty when the service isn't installed
+    at all: nothing to refresh on a session-only host."""
+    if not _service_file_exists() or _unsafe_unit_path():
+        return []   # no units to manage — or units this environment must not write
+    stale = []
+    for path, text in _desired_units().items():
+        try:
+            with open(path) as f:
+                current = f.read()
+        except OSError:
+            current = None
+        if current != text:
+            stale.append(path)
+    return stale
+
+
+def _service_env_drift():
+    """Ways the enabled unit's environment differs from this shell's, as
+    human-readable strings; empty when they agree or no unit exists. A stale
+    unit is only auto-refreshed when this is empty: text drift with matching
+    environment means a version or shape change (safe to adopt silently),
+    while a different data directory or interpreter means the operator
+    launched from an environment the service was never enabled from — a
+    silent rewrite would repoint a live site's data or crash-loop it onto
+    another interpreter, so that adoption belongs to an explicit 'enable'.
+    A unit with no SERVETTE_HOME line predates the data directory and is
+    treated as drift for the same reason: migration is a decision."""
+    try:
+        with open(SERVICE_PATH) as f:
+            text = f.read()
+    except OSError:
+        return []
+    drift = []
+    m = re.search(r"^Environment=SERVETTE_HOME=(.*)$", text, re.M)
+    if m is None:
+        drift.append("the service unit predates the data directory")
+    elif m.group(1) != BASE_DIR:
+        drift.append(f"data directory: service uses {m.group(1)}, this shell uses {BASE_DIR}")
+    m = re.search(r"^ExecStart=(\S+)", text, re.M)
+    if m and m.group(1) != _unit_python_path():
+        drift.append(f"interpreter: service uses {m.group(1)}, this shell runs {_unit_python_path()}")
+    return drift
+
+
 def _write_unit_files():
     """Write (or refresh) the systemd unit, the network watchdog unit pair, and
     the file ownership they depend on. Returns True if a service file already
@@ -1741,13 +1802,14 @@ def _write_unit_files():
     the post-update path (silent), so a release that changes what the unit
     should contain reaches an already-enabled host without a separate manual
     'enable'."""
-    updating      = _service_file_exists()
-    servette_path = os.path.abspath(__file__)
-    python_path   = _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(
-        ["which", "python3"], capture_output=True, text=True
-    ).stdout.strip()
+    bad = _unsafe_unit_path()
+    if bad:
+        print(f"  Error: {bad!r} contains whitespace — a systemd unit cannot")
+        print("  carry such a path safely. Use a whitespace-free data directory")
+        print("  and install path.")
+        raise ValueError("unit path contains whitespace")
 
-    service = _systemd_unit(python_path, servette_path)
+    updating = _service_file_exists()
 
     # Create system user if needed
     if not _servette_user_exists():
@@ -1757,14 +1819,12 @@ def _write_unit_files():
         )
         print("Created system user 'servette'.")
 
-    with open(SERVICE_PATH, "w") as f:
-        f.write(service)
-
-    netwatch_service, netwatch_timer = _netwatch_units()
-    with open(NETWATCH_PATH + ".service", "w") as f:
-        f.write(netwatch_service)
-    with open(NETWATCH_PATH + ".timer", "w") as f:
-        f.write(netwatch_timer)
+    # One computation of the unit texts, shared with the staleness check —
+    # a writer that recomputed them independently could drift from the checker,
+    # making every shell launch rewrite units forever.
+    for path, text in _desired_units().items():
+        with open(path, "w") as f:
+            f.write(text)
 
     subprocess.run(["systemctl", "daemon-reload"],      check=True)
     subprocess.run(["systemctl", "enable", "servette"], check=True, capture_output=True)
@@ -1778,7 +1838,7 @@ def _write_unit_files():
             _chown_servette(_resolve(site.cert_file))
         if site.key_file:
             _chown_servette(_resolve(site.key_file))
-        _chown_servette(_resolve(site.serve_dir))
+        _chown_operator(_resolve(site.serve_dir))
     _chown_servette(os.path.join(BASE_DIR, "certs"))
     _chown_servette(os.path.join(BASE_DIR, ".acme-account.pem"))
     # Create the ACME webroot now so it exists when systemd applies ReadWritePaths
@@ -1824,8 +1884,10 @@ def cmd_enable():
                 log.info("Service started after enable")
                 cmd_status()
 
+    except ValueError:
+        pass  # the writer already printed the path refusal
     except PermissionError:
-        print("Error: enable requires sudo. Run: sudo python3 servette.py")
+        print("Error: enable requires sudo. Run: sudo servette")
     except FileNotFoundError:
         print("Error: enable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
@@ -2383,10 +2445,10 @@ _COMMANDS = [
     ("stop",             "stop the server"),
     ("enable",           "enable Servette as a system service"),
     ("disable",          "remove the system service"),
-    ("status",           "show whether the server is running"),
+    ("status [--json]",  "show whether the server is running"),
+    ("sites [--json]",   "list configured sites"),
+    ("set [n] k=v ...",  "change settings non-interactively"),
     ("log [n]",          "show the last n log entries"),
-    ("update",           "download the latest version of servette.py"),
-    ("restore",          "roll back to the previous version (undoes the last update)"),
     ("pull [n]",         "check a site's publish channel and pull new content now"),
     ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
     ("help",             "show this message"),
@@ -3016,221 +3078,11 @@ def cmd_log(n=20):
             print("journalctl not found. Is this a systemd system?")
 
 
-RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
-_SIGNING_PUBLIC_KEY = "abb8854be0b82df813f3b052296a26573063fc6314ea2701d54354605e6f15db"
-_VERSION_RE         = re.compile(rb"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
-# Ceiling on a downloaded release asset — servette.py, the one asset 'update'
-# fetches. It is an order of magnitude under this; the cap exists so a hostile
-# or broken response is bounded before the signature check, not to constrain
-# growth.
-_MAX_SOURCE_BYTES   = 4 * 1024 * 1024
-
-def _parse_version(source_bytes):
-    """Extract __version__ from servette.py source bytes. Returns the string or None."""
-    m = _VERSION_RE.search(source_bytes)
-    return m.group(1).decode() if m else None
-
-
-def _is_downgrade(current, candidate):
-    """True when candidate is an older version than current. Versions compare as
-    tuples of their dot-separated integers; if either carries a non-numeric part
-    it can't be ordered, so this returns False — an uncomparable version never
-    blocks an update."""
-    def parse(v):
-        try:
-            return tuple(int(p) for p in v.split("."))
-        except ValueError:
-            return None
-    a, b = parse(current), parse(candidate)
-    return a is not None and b is not None and b < a
-
-
-def _release_asset_url_ok(url):
-    """True when a release-asset URL is HTTPS on github.com. Update downloads are
-    pinned to the release host so a poisoned API response can't redirect the fetch
-    elsewhere — the Ed25519 signature is the real gate; this narrows the fetch."""
-    parts = urlsplit(url)
-    return parts.scheme == "https" and parts.netloc == "github.com"
-
-
-def _fetch_release():
-    """The latest-release JSON from the GitHub API. Returns (release, None) on
-    success, (None, why) on failure — quiet either way, so each caller keeps
-    its own spinner and message prefix."""
-    try:
-        req = urllib.request.Request(
-            RELEASES_API_URL,
-            headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read()), None
-    except Exception as e:
-        return None, str(e)
-
-
-def _download_verified_asset(release, name):
-    """Download release asset `name` and its .sig companion and verify the
-    signature. Returns (bytes, None) on success, (None, why) on failure.
-
-    This is the one copy of the trust chain every release artifact goes
-    through — today that is servette.py for 'update' (the demo.html asset it
-    once also served was retired in #70): asset URLs pinned to github.com,
-    the download capped at _MAX_SOURCE_BYTES *before* the Ed25519 check
-    against the pinned _SIGNING_PUBLIC_KEY."""
-    assets   = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
-    sig_name = name + ".sig"
-    if name not in assets or sig_name not in assets:
-        return None, f"release is missing {name} or {sig_name} assets"
-    if not all(_release_asset_url_ok(assets[n]) for n in (name, sig_name)):
-        return None, "asset URL is not on github.com"
-    try:
-        data = urllib.request.urlopen(assets[name], timeout=30).read(_MAX_SOURCE_BYTES + 1)
-        if len(data) > _MAX_SOURCE_BYTES:
-            return None, f"{name} asset exceeds {_MAX_SOURCE_BYTES // 1024} KB"
-        sig = urllib.request.urlopen(assets[sig_name], timeout=15).read(4096)
-    except Exception as e:
-        return None, str(e)
-    try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        from cryptography.exceptions import InvalidSignature
-        Ed25519PublicKey.from_public_bytes(bytes.fromhex(_SIGNING_PUBLIC_KEY)).verify(sig, data)
-    except InvalidSignature:
-        return None, "signature verification failed"
-    except Exception as e:
-        return None, f"could not verify signature: {e}"
-    return data, None
-
-def _offer_restart(version):
-    """Apply a freshly swapped servette.py (from update or restore): restart the
-    service if it's managed, otherwise tell the user how — this shell still holds the
-    old code in memory, so it can't relaunch itself into the new file."""
-    if _service_is_active():
-        if _prompt("Restart the servette service now?"):
-            try:
-                subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
-                print(f"  Service restarted on {version}.")
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print(f"  Restart failed — run 'sudo systemctl restart servette' yourself ({e}).")
-        else:
-            print("  Run 'sudo systemctl restart servette' when ready.")
-    elif _server_running():
-        print("  This shell is still running the old version — exit and rerun Servette to apply.")
-    else:
-        print(f"  Restart to run version {version}: 'start', or 'sudo systemctl restart servette'.")
-
-
-def cmd_update():
-    servette_path = os.path.abspath(__file__)
-
-    with _spinner("Checking for update..."):
-        release, why = _fetch_release()
-    if release is None:
-        print(f"  Update failed: {why}")
-        return
-
-    new_version = release.get("tag_name", "").lstrip("v")
-    if not new_version:
-        print("  Update failed: could not read version from release.")
-        return
-
-    if new_version == __version__:
-        print(f"  Already up to date ({__version__}).")
-        return
-
-    # 'update' only moves forward. A signed but older release — a stale "latest"
-    # from the API, or a downgrade a network attacker slipped past TLS — must not
-    # roll the server back to a version with known holes. 'restore' is the
-    # deliberate path back to the previous version.
-    if _is_downgrade(__version__, new_version):
-        print(f"  Update declined: {new_version} is older than the running {__version__}.")
-        print("  Use 'restore' to roll back to the previous version on purpose.")
-        return
-
-    # Gate on major version bump
-    try:
-        cur_major = int(__version__.split(".")[0])
-        new_major = int(new_version.split(".")[0])
-    except (ValueError, IndexError):
-        cur_major = new_major = 0
-
-    if new_major != cur_major:
-        print(f"  Major version change: {__version__} → {new_version}")
-        print("  This may include breaking changes. Review before upgrading.")
-        if not _prompt("Continue?"):
-            print("  Update cancelled.")
-            return
-
-    # Download and verify through the shared trust chain (asset presence,
-    # github.com pinning, size cap before the Ed25519 check).
-    with _spinner(f"Downloading {new_version}..."):
-        new_source, why = _download_verified_asset(release, "servette.py")
-    if new_source is None:
-        print(f"  Update failed: {why}.")
-        return
-
-    file_version = _parse_version(new_source)
-    if file_version != new_version:
-        print(f"  Update failed: release tag {new_version!r} doesn't match file version {file_version!r}.")
-        return
-
-    try:
-        compile(new_source, "servette.py", "exec")
-    except SyntaxError as e:
-        print(f"  Update failed: downloaded file has a syntax error: {e}")
-        return
-
-    bak_path = servette_path + ".bak"
-    tmp_path = servette_path + ".new"
-    with open(tmp_path, "wb") as f:
-        f.write(new_source)
-    os.chmod(tmp_path, os.stat(servette_path).st_mode)
-    shutil.copy2(servette_path, bak_path)
-    os.replace(tmp_path, servette_path)
-
-    print(f"  Updated {__version__} → {new_version}.")
-    print(f"  Previous version saved to {bak_path}.")
-
-    if _server_running() and not _service_is_active():
-        # A session-mode server runs in this very process; re-executing would
-        # kill it without warning, so fall back to telling the operator how to
-        # apply the update themselves.
-        print("  This shell is still running the old version — exit and rerun Servette to apply.")
-        return
-
-    print("  Reloading...")
-    os.execv(_VENV_PY, [_VENV_PY, servette_path, "--post-update"])
-
-
-def _apply_post_update():
-    """Runs once, immediately after 'update' re-execs into the freshly swapped
-    file — the first thing this fresh process does. If the service was already
-    enabled, silently refresh its unit (and the network watchdog's) to this
-    version's shape and restart it: an update should never leave an enabled
-    host on a stale unit, and should never need a separate manual 'enable' to
-    pick up host-provisioning changes a release adds."""
-    print(f"  Reloaded as v{__version__}.")
-    if _service_file_exists():
-        try:
-            _write_unit_files()
-            if _service_is_active():
-                _reload_server()
-        except (PermissionError, FileNotFoundError, subprocess.CalledProcessError) as e:
-            print(f"  Could not refresh the service unit: {e}")
-    # Refresh any site still serving the marked placeholder, so a release that
-    # changes the page reaches hosts that never published their own — including
-    # pages seeded by older releases that fetched a demo from GitHub: they
-    # carry the same marker, and the refresh rewrites them from the embedded
-    # page below. Operator pages (no marker) are untouched.
-    for s in config.sites:
-        if _is_placeholder(os.path.join(_resolve(s.serve_dir), "index.html")):
-            if _seed_placeholder(s.serve_dir):
-                print(f"  Placeholder page refreshed in {s.serve_dir}.")
-
-
 # The marker string keeps its historical name: pages seeded by earlier
 # releases (which fetched a richer demo page from GitHub as a release asset)
-# carry "servette:demo", and they must stay recognizable so an update can
-# refresh them into the embedded placeholder below.
+# carry "servette:demo". The marker distinguishes Servette's own placeholder
+# from operator content — a marked page is Servette's to rewrite, an
+# unmarked one is never touched.
 _PLACEHOLDER_MARKER = "servette:demo"
 
 # The page setup seeds into an empty site (#70): embedded, so setup finishes
@@ -3298,7 +3150,7 @@ def _is_placeholder(index_path):
     permanently. The rule is visible in the file itself, not hidden in state."""
     try:
         with open(index_path, "rb") as f:
-            return _PLACEHOLDER_MARKER.encode() in f.read(_MAX_SOURCE_BYTES)
+            return _PLACEHOLDER_MARKER.encode() in f.read(1024 * 1024)  # placeholder is ~2 KB; cap bounds a huge index.html
     except OSError:
         return False
 
@@ -3320,53 +3172,14 @@ def _seed_placeholder(serve_dir):
         return False
     return True
 
-
-def cmd_restore():
-    """Roll back to the version saved by the last 'update'. The backup is single-shot:
-    only ever one servette.py.bak exists, and a successful restore consumes it."""
-    servette_path = os.path.abspath(__file__)
-    bak_path      = servette_path + ".bak"
-
-    if not os.path.exists(bak_path):
-        print("  Nothing to restore — no servette.py.bak. ('update' saves one each time it runs.)")
-        return
-
-    try:
-        with open(bak_path, "rb") as f:
-            bak_source = f.read()
-    except OSError as e:
-        print(f"  Restore failed: cannot read {bak_path} ({e}).")
-        return
-
-    # Refuse to restore a corrupt backup — better to keep the working file in place.
-    try:
-        compile(bak_source, "servette.py", "exec")
-    except SyntaxError as e:
-        print(f"  Restore failed: the backup has a syntax error ({e}).")
-        return
-
-    bak_version = _parse_version(bak_source) or "unknown"
-    if not _prompt(f"Restore {__version__} → {bak_version} from servette.py.bak? The backup is then removed."):
-        print("  Restore cancelled.")
-        return
-
-    # Atomically move the backup into place (keeping the live file's mode). The rename
-    # consumes the backup, so only ever one is kept and it's spent on use.
-    os.chmod(bak_path, os.stat(servette_path).st_mode)
-    os.replace(bak_path, servette_path)
-
-    print(f"  Restored {__version__} → {bak_version}.")
-    _offer_restart(bak_version)
-
-
 # ── Site content publishing ─────────────────────────────────────────────────
 #
-# The content-side sibling of self-update: a signed tar.gz bundle, pulled from
-# publish_url, verified against publish_key (a keypair distinct from
-# Servette's own release-signing key), and swapped into serve_dir with the
-# same single-shot .bak/restore pattern 'update'/'restore' already give the
-# code. Pull-only — this box never accepts an inbound push of content, only
-# fetches from a URL it already trusts.
+# The update channel for a site's *content*: a signed tar.gz bundle, pulled
+# from publish_url, verified against publish_key, and swapped into serve_dir
+# with a single-shot .bak — 'restore-site' rolls back to it, and a successful
+# restore consumes it. Pull-only — this box never accepts an inbound push of
+# content, only fetches from a URL it already trusts. (Servette's own code
+# updates travel through the package manager, not through Servette.)
 
 _MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
 
@@ -3406,7 +3219,8 @@ def _extract_bundle(data, dest_dir):
 
 def _swap_site_content(new_dir, serve_dir):
     """Atomically replace the live serve_dir with new_dir's contents, keeping
-    a single-shot backup — the same one-step-back pattern as servette.py.bak.
+    a single-shot backup: serve_dir.bak holds the one previous state, and a
+    successful restore-site consumes it.
     new_dir must be on the same filesystem as serve_dir (both under BASE_DIR)
     so the renames are atomic; the only unavoidable risk window is the two
     renames themselves, each a single fast syscall back to back — proportionate
@@ -3507,8 +3321,8 @@ def cmd_pull(site):
 
 
 def cmd_restore_site(site):
-    """Roll back to the content saved by the last successful publish. Mirrors
-    cmd_restore exactly: single-shot, consumed on use."""
+    """Roll back to the content saved by the last successful publish. The
+    backup is single-shot: one is kept, and a successful restore consumes it."""
     live_dir = _resolve(site.serve_dir).rstrip(os.sep)
     bak_dir  = live_dir + ".bak"
 
@@ -3665,7 +3479,39 @@ def _runtime_stats(service_active):
     return rows
 
 
-def cmd_status():
+def _site_rows():
+    """The per-site rows machine consumers read — shared by _status_data and
+    `sites --json`, which deliberately pays only for this list: no systemctl
+    round-trip, no cache-warning walk over every site's tree."""
+    return [{
+        "index":     i,
+        "domain":    site.domain,
+        "serve_dir": site.serve_dir,
+        "auth":      bool(site.username),
+        "cert_days": _cert_days_remaining(_resolve(site.cert_file)),
+        "publish":   bool(site.publish_url and site.publish_key),
+    } for i, site in enumerate(config.sites)]
+
+
+def _status_data():
+    """The status snapshot as data — the shape `status --json` prints, for
+    external tooling. cert_days is None when no certificate is readable."""
+    service_active = _service_is_active()
+    running        = service_active or _server_running()
+    return {
+        "version":  __version__,
+        "running":  running,
+        "mode":     "service" if service_active else ("session" if running else None),
+        "sites":    _site_rows(),
+        "issues":   _production_issues(),
+        "warnings": _cache_warnings(),
+    }
+
+
+def cmd_status(json_mode=False):
+    if json_mode:
+        print(json.dumps(_status_data(), indent=2))
+        return
     service_active = _service_is_active()
     running        = service_active or _server_running()
     W              = _PAD
@@ -3737,6 +3583,7 @@ def cmd_setup():
         if _is_within_base_dir(serve_path):
             try:
                 os.makedirs(serve_path, exist_ok=True)
+                _chown_operator(serve_path)  # root created it; the operator owns it
                 print(f"  Created {serve_path}.")
             except OSError as e:
                 print(f"  Could not create {serve_path}: {e}")
@@ -3772,10 +3619,213 @@ def cmd_setup():
         print("  Run 'start' when you're ready.")
 
 
+# ── Non-interactive configuration ────────────────────────────────────────────
+#
+# `set [n] key=value ...` is the write half of the tooling surface (`status
+# --json` and `sites --json` are the read half): external tools drive it over
+# SSH, which is the authentication — no network admin API exists, by design.
+# Validation mirrors the interactive config sub-shell's rules; every pair is
+# validated against scratch objects before any is applied, so a bad pair
+# never leaves the config half-written.
+
+def _set_host_value(target, key, value):
+    """Validate one host-level pair and apply it to target (config, or a
+    scratch object during the validation pass). Returns an error string,
+    empty on success."""
+    if key == "port":
+        if not (value.isdigit() and 0 < int(value) < 65536):
+            return "port must be 1-65535"
+        target.port = int(value)
+    elif key == "email":
+        target.email = value
+    elif key in ("rate_limit", "auth_rate_limit"):
+        if not (value.isdigit() and int(value) > 0):
+            return f"{key} must be a positive integer"
+        setattr(target, key, int(value))
+    elif key == "cache_size_mb":
+        if not (value.isdigit() and int(value) > 0):
+            return "cache_size_mb must be a positive integer"
+        target.cache_size_mb = int(value)
+    elif key == "trusted_proxy":
+        if value:
+            try:
+                ipaddress.ip_address(value)
+            except ValueError:
+                return "trusted_proxy must be an IP address (or empty to clear)"
+        target.trusted_proxy = value
+    return ""
+
+
+def _set_site_value(target, key, value):
+    """Validate one per-site pair and apply it to target (the chosen site, or
+    a scratch Site during the validation pass). Returns an error string,
+    empty on success."""
+    if key == "dir":
+        resolved = os.path.realpath(_resolve(value))
+        if not os.path.isdir(resolved):
+            return f"directory not found: {resolved}"
+        if not _is_within_base_dir(resolved):
+            return f"dir must live under {BASE_DIR} (the publish swap and the service sandbox depend on it)"
+        if _serve_dir_exposes_secrets(resolved):
+            return "dir would serve Servette's own config and keys — refused"
+        target.serve_dir = value
+    elif key == "username":
+        target.username = value
+    elif key == "publish_url":
+        if value and not value.startswith("https://"):
+            return "publish_url must be https:// (or empty to clear)"
+        target.publish_url = value
+    elif key == "publish_key":
+        v = value.strip().lower()
+        if v and not (len(v) == 64 and all(c in "0123456789abcdef" for c in v)):
+            return "publish_key must be 64 hex characters (a 32-byte Ed25519 public key)"
+        target.publish_key = v
+    return ""
+
+
+_SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
+                  "cache_size_mb", "trusted_proxy")
+_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key")
+
+
+def _set_usage():
+    print("  Usage: set [n] key=value ...")
+    print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
+    print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
+
+
+def cmd_set(args):
+    """`set [n] key=value ...` — non-interactive configuration for tooling.
+    The optional leading index picks the site for site keys (default 0).
+    Deliberately absent: password (a secret on argv leaks into shell history
+    and the process table — set it interactively), and domain (bound up with
+    certificate issuance — run 'config cert')."""
+    site = config.sites[0]
+    if args and args[0].isdigit():
+        idx = int(args[0])
+        if idx >= len(config.sites):
+            print(f"  No site {idx} — 'sites' lists {len(config.sites)}.")
+            return
+        site, args = config.sites[idx], args[1:]
+    pairs = []
+    for token in args:
+        key, eq, value = token.partition("=")
+        key = key.strip().lower()
+        if not eq or key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
+            print(f"  Unknown or malformed: {token!r}")
+            _set_usage()
+            return
+        pairs.append((key, value))
+    if not pairs:
+        _set_usage()
+        return
+    scratch_host, scratch_site = Config.__new__(Config), Site()
+    for key, value in pairs:
+        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
+               else _set_site_value(scratch_site, key, value))
+        if err:
+            print(f"  {key}: {err}")
+            return
+    for key, value in pairs:
+        if key in _SET_HOST_KEYS:
+            _set_host_value(config, key, value)
+        else:
+            _set_site_value(site, key, value)
+    try:
+        config.save()
+    except PermissionError:
+        print("  Error: writing the config requires sudo. Run: sudo servette set ...")
+        return
+    print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
+
+
 # ── Main shell loop ───────────────────────────────────────────────────────────
+
+def _startup_refresh():
+    """What 'update' once did after swapping versions, done at every shell
+    launch instead: code now arrives through the package manager, which can
+    neither refresh a stale systemd unit nor rewrite an outdated placeholder
+    page — so the shell notices on its next run. Prints nothing when nothing
+    is stale, and fails soft: a refresh that needs root just says so.
+
+    Auto-refresh is gated on the environment matching: a stale unit whose
+    data directory or interpreter differs from this shell's is reported and
+    left alone — rewriting it would repoint a live service at this shell's
+    environment, which only an explicit 'enable' may do."""
+    if _stale_units():
+        drift = _service_env_drift()
+        if drift:
+            print("  The enabled service was set up from a different environment:")
+            for d in drift:
+                print(f"    - {d}")
+            print("  Leaving it untouched — run 'enable' to re-provision from this shell.")
+        else:
+            try:
+                _write_unit_files()
+                if _service_is_active():
+                    _reload_server()
+                print(f"  Service refreshed to v{__version__}.")
+            except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
+                print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
+    for s in config.sites:
+        index_path = os.path.join(_resolve(s.serve_dir), "index.html")
+        if _is_placeholder(index_path):
+            try:
+                with open(index_path, "rb") as f:
+                    current = f.read()
+            except OSError:
+                continue
+            if current != _PLACEHOLDER_PAGE and _seed_placeholder(s.serve_dir):
+                print(f"  Placeholder page refreshed in {s.serve_dir}.")
+
+
+def run_command(cmd, args):
+    """Dispatch one command by name; False for a name it doesn't know. Shared
+    verbatim by the interactive loop and the one-shot `servette <command>`
+    argv form — one dispatcher, so the two surfaces can never drift. quit and
+    help stay in the interactive loop: they are about the loop itself."""
+    if cmd == "setup":
+        cmd_setup()
+    elif cmd == "config":
+        cmd_config()
+    elif cmd == "enable":
+        cmd_enable()
+    elif cmd == "disable":
+        cmd_disable()
+    elif cmd == "start":
+        cmd_start()
+    elif cmd == "stop":
+        cmd_stop()
+    elif cmd == "status":
+        cmd_status(json_mode="--json" in args)
+    elif cmd == "sites":
+        if "--json" in args:
+            print(json.dumps(_site_rows(), indent=2))
+        else:
+            _config_sites()
+    elif cmd == "set":
+        cmd_set(args)
+    elif cmd == "log":
+        try:
+            cmd_log(int(args[0]) if args else 20)
+        except ValueError:
+            print("Usage: log [number]")
+    elif cmd == "pull":
+        site = _config_site_arg(args)
+        if site is not None:
+            cmd_pull(site)
+    elif cmd == "restore-site":
+        site = _config_site_arg(args)
+        if site is not None:
+            cmd_restore_site(site)
+    else:
+        return False
+    return True
+
 
 def shell():
     _banner("Servette — The Simple Secure Server")
+    _startup_refresh()
     print(HELP)
 
     while True:
@@ -3792,44 +3842,13 @@ def shell():
         cmd   = parts[0].lower()
         args  = parts[1:]
 
-        if cmd == "setup":
-            cmd_setup()
-        elif cmd == "config":
-            cmd_config()
-        elif cmd == "enable":
-            cmd_enable()
-        elif cmd == "disable":
-            cmd_disable()
-        elif cmd == "start":
-            cmd_start()
-        elif cmd == "stop":
-            cmd_stop()
-        elif cmd == "status":
-            cmd_status()
-        elif cmd == "log":
-            try:
-                cmd_log(int(args[0]) if args else 20)
-            except ValueError:
-                print("Usage: log [number]")
-        elif cmd == "update":
-            cmd_update()
-        elif cmd == "restore":
-            cmd_restore()
-        elif cmd == "pull":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_pull(site)
-        elif cmd == "restore-site":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_restore_site(site)
-        elif cmd in ("help", "?"):
+        if cmd in ("help", "?"):
             print(HELP)
         elif cmd in ("quit", "exit"):
             stop_server()
             print("Goodbye.")
             break
-        else:
+        elif not run_command(cmd, args):
             print(f"Unknown command: {cmd}. Type 'help' for a list of commands.")
 
 
@@ -3842,14 +3861,20 @@ def shell():
 # extra arguments. In a single-file server that is always run as a process,
 # the global is the right call.
 
+# The data directory must exist before the singleton loads from it. Unwritable
+# (not root on a fresh host) is not fatal: config falls back to defaults and
+# read-only commands still work — the first privileged command creates it.
+try:
+    os.makedirs(BASE_DIR, exist_ok=True)
+except OSError:
+    pass
+
 # The config singleton
 config = Config()
 
 # The entry point
-if __name__ == "__main__":
-    _bootstrap()  # no-op if already in venv; otherwise re-execs into venv
-
-    if "--serve" in sys.argv:
+def main():
+    if sys.argv[1:2] == ["--serve"]:
         start_server()
         try:
             _watch_server()
@@ -3858,8 +3883,14 @@ if __name__ == "__main__":
         else:
             log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
             sys.exit(1)
-    elif "--post-update" in sys.argv:
-        _apply_post_update()
-        shell()
+    elif len(sys.argv) > 1:
+        cmd, args = sys.argv[1].lower(), sys.argv[2:]
+        if not run_command(cmd, args):
+            print(f"Unknown command: {cmd}. Run 'servette' for the interactive shell and its command list.")
+            sys.exit(2)
     else:
         shell()
+
+
+if __name__ == "__main__":
+    main()

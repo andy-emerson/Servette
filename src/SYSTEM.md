@@ -1,85 +1,8 @@
 # SYSTEM
 
-*The environment: bootstrap into the managed venv, server lifecycle, certificates and the ACME client, systemd and host provisioning.*
+*The environment: server lifecycle, certificates and the ACME client, systemd and host provisioning.*
 
 *Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
-
-## Bootstrap
-
-```python
-# ── Bootstrap ─────────────────────────────────────────────────────────────────
-#
-# Every invocation from the system Python re-execs into the managed virtualenv.
-# On first run (or if the venv is missing), the venv is created and deps are
-# installed first. The user just runs `sudo python3 servette.py` — the
-# environment is managed invisibly.
-
-def _bootstrap():
-    if sys.prefix == _VENV_DIR:
-        return  # Already running inside the managed virtualenv
-
-    if not os.path.exists(_VENV_PY):
-        print("Setting up Servette...")
-
-        def _create_venv():
-            """Create the venv, returning the failure instead of raising.
-            `import venv` succeeding proves nothing on its own: Debian/Ubuntu
-            ship the venv module in the stdlib but split ensurepip's wheels
-            into the python3-venv package, so create(with_pip=True) is what
-            actually fails on a minimal host — recovery must key on that."""
-            try:
-                import venv as _venv_mod
-                _venv_mod.create(_VENV_DIR, with_pip=True, clear=True)
-                return None
-            except (Exception, SystemExit) as e:
-                # SystemExit is caught deliberately: Debian and Ubuntu patch
-                # their venv module to print apt instructions and *exit*
-                # rather than raise, and SystemExit is not an Exception —
-                # without this, the recovery below is dead code on the two
-                # platforms it exists for.
-                return e
-
-        error = _create_venv()
-        if error is not None:
-            # Install the distro package that completes venv support, then try
-            # once more. Each manager gets its own argv — apk's subcommand is
-            # 'add' and it has no '-y' flag.
-            pkg_managers = [
-                (("apt-get", "install", "-y"), f"python3.{sys.version_info.minor}-venv"),
-                (("dnf",     "install", "-y"), "python3-venv"),
-                (("apk",     "add"),           "py3-venv"),
-            ]
-            for argv, pkg in pkg_managers:
-                if shutil.which(argv[0]):
-                    result = subprocess.run([*argv, pkg])
-                    if result.returncode != 0:
-                        print(f"  Error: failed to install {pkg} via {argv[0]}")
-                        sys.exit(1)
-                    break
-            else:
-                print(f"  Error: failed to create virtual environment: {error}")
-                if _IS_MACOS:
-                    print("  This Python lacks venv/pip support. Install Python 3.11+ from")
-                    print("  python.org or Homebrew and run Servette with that python3.")
-                else:
-                    print("  No supported package manager found to fix it (tried apt-get, dnf, apk).")
-                sys.exit(1)
-            error = _create_venv()
-            if error is not None:
-                print(f"  Error: failed to create virtual environment: {error}")
-                sys.exit(1)
-
-        deps = ["cryptography>=41.0,<50.0"]
-        result = subprocess.run([_VENV_PY, "-m", "pip", "install"] + deps)
-        if result.returncode != 0:
-            print(f"  Error: failed to install dependencies")
-            sys.exit(1)
-        print()
-
-    os.execv(_VENV_PY, [_VENV_PY] + sys.argv)
-
-
-```
 
 ## Server lifecycle
 
@@ -320,28 +243,77 @@ def _chown_servette(path):
         subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
-def _systemd_unit(python_path, servette_path):
+def _operator_user():
+    """The human behind sudo: SUDO_USER when present, else the current user."""
+    return os.environ.get("SUDO_USER") or getpass.getuser()
+
+
+def _operator_chown_plan(path):
+    """The chown/chmod invocations _chown_operator runs, as argv lists —
+    separated from the running so the decision is testable without root.
+    Owner is the human behind sudo; group is `servette` with g+rX, which is
+    all the read-only serving path needs, granted to exactly one system user
+    instead of the world — a .env or .git a deploy drags in is never flipped
+    world-readable on the filesystem (the request path already refuses to
+    serve dotfiles; this keeps other local accounts out too). Explicit
+    `:servette` rather than the operator's own group, which need not exist
+    on hosts without user-private groups. Before the service user exists
+    (setup before enable, macOS session mode) ownership alone is set;
+    enable re-runs this once the user exists."""
+    user = _operator_user()
+    if _servette_user_exists():
+        return [["chown", "-R", f"{user}:servette", path],
+                ["chmod", "-R", "g+rX", path]]
+    return [["chown", "-R", user, path]]
+
+
+def _chown_operator(path):
+    """Apply _operator_chown_plan. Best-effort: a host without chown
+    semantics (macOS session mode) serves fine without it."""
+    if os.path.exists(path):
+        for argv in _operator_chown_plan(path):
+            subprocess.run(argv, check=False, capture_output=True)
+
+
+def _systemd_unit(python_path, package_dir):
     """The systemd unit for the service. Writes are confined to where Servette
-    actually writes — its own directory (config, certs, ACME account) and the ACME
+    actually writes — the data directory (config, certs, ACME account) and the ACME
     webroot (HTTP-01 challenge files during renewal); ProtectSystem=strict makes the
     rest of the filesystem read-only, and the unit runs as a least-privilege user
     holding only CAP_NET_BIND_SERVICE. The served directory ends up read-write only
-    because it lives under the server's own directory; the server never writes it.
-    The service's own code (servette.py and its .bak) and the managed venv are
-    pinned read-only on top of that writable directory — the serving process never
-    rewrites them, so a compromised one cannot patch the program it re-execs into."""
-    return f"""[Unit]
+    because it lives under the data directory; the server never writes it.
+    The package directory is pinned read-only on top: normally the code lives
+    outside the data directory and strict mode already covers it, but a checkout
+    deployment (SERVETTE_HOME=.) puts the code inside the writable tree, and the
+    pin holds there too — a compromised serving process cannot patch the program
+    systemd will restart it into. PYTHONPATH names the package's parent ONLY
+    when the package sits outside the interpreter's own site-packages (a
+    checkout) — a pip-installed package resolves without it, and an
+    unconditional PYTHONPATH would put a path entry ahead of the stdlib for
+    no benefit, widening what a write anywhere on that entry could shadow.
+
+    The leading version stamp is load-bearing, not decoration: a pip upgrade
+    changes no directive, so without the stamp an upgraded host's units would
+    never read as stale and the running service would keep the old code. With
+    it, any upgrade drifts every unit's text and the startup refresh restarts
+    the service onto the version the shell is running."""
+    parent = os.path.dirname(package_dir)
+    pythonpath = ("" if os.path.basename(parent) in ("site-packages", "dist-packages")
+                  else f"Environment=PYTHONPATH={parent}\n")
+    return f"""# generated by servette {__version__}
+[Unit]
 Description=Servette — The Simple Secure Server
 After=network.target
 
 [Service]
 User=servette
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment=SERVETTE_HOME={BASE_DIR}
+{pythonpath}AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths={BASE_DIR} {ACME_WEBROOT}
-ReadOnlyPaths={servette_path} -{_VENV_DIR} -{servette_path}.bak
+ReadOnlyPaths={package_dir}
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -349,7 +321,7 @@ ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictSUIDSGID=yes
 LockPersonality=yes
-ExecStart={python_path} {servette_path} --serve
+ExecStart={python_path} -m servette --serve
 Restart=always
 RestartSec=3
 StandardInput=null
@@ -372,14 +344,16 @@ def _netwatch_units():
     running, so of the three known managers (systemd-networkd on Ubuntu,
     NetworkManager on Raspberry Pi OS, dhcpcd on older Pi OS) exactly one acts;
     the whole check is a no-op while the route is healthy."""
-    service = """[Unit]
+    service = f"""# generated by servette {__version__}
+[Unit]
 Description=Servette network watchdog — recover a dropped default route
 
 [Service]
 Type=oneshot
 ExecStart=/bin/sh -c 'ip route get 1.1.1.1 >/dev/null 2>&1 && exit 0; for u in systemd-networkd NetworkManager dhcpcd; do systemctl try-restart "$u.service" 2>/dev/null || true; done'
 """
-    timer = """[Unit]
+    timer = f"""# generated by servette {__version__}
+[Unit]
 Description=Run the Servette network watchdog every 5 minutes
 
 [Timer]
@@ -548,6 +522,87 @@ def _ensure_swap():
             pass
 
 
+def _unit_python_path():
+    """The interpreter the unit's ExecStart names: the one running this shell.
+    Under a pip/venv install that is the environment's own python, and the
+    service must use the same one to see the same installed packages. Shared
+    by the writer and the drift check — two computations of this path could
+    disagree and manufacture phantom drift."""
+    return sys.executable
+
+
+def _unsafe_unit_path():
+    """The first unit-embedded path (data dir, package dir) carrying
+    whitespace, or None. systemd directive values split on whitespace, so
+    such a path would silently become two wrong grants — and a newline would
+    inject an arbitrary directive into the sandbox definition. Servette
+    refuses to write units for one rather than encode it wrongly."""
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    for p in (BASE_DIR, package_dir):
+        if re.search(r"\s", p):
+            return p
+    return None
+
+
+def _desired_units():
+    """What every unit file should contain, as {path: text}, computed from
+    this version of the code."""
+    netwatch_service, netwatch_timer = _netwatch_units()
+    return {
+        SERVICE_PATH:               _systemd_unit(_unit_python_path(),
+                                                    os.path.dirname(os.path.abspath(__file__))),
+        NETWATCH_PATH + ".service": netwatch_service,
+        NETWATCH_PATH + ".timer":   netwatch_timer,
+    }
+
+
+def _stale_units():
+    """Unit files that differ from what this version would write — including
+    ones missing entirely, so a release that adds a unit flags as stale on
+    hosts enabled before it existed. Empty when the service isn't installed
+    at all: nothing to refresh on a session-only host."""
+    if not _service_file_exists() or _unsafe_unit_path():
+        return []   # no units to manage — or units this environment must not write
+    stale = []
+    for path, text in _desired_units().items():
+        try:
+            with open(path) as f:
+                current = f.read()
+        except OSError:
+            current = None
+        if current != text:
+            stale.append(path)
+    return stale
+
+
+def _service_env_drift():
+    """Ways the enabled unit's environment differs from this shell's, as
+    human-readable strings; empty when they agree or no unit exists. A stale
+    unit is only auto-refreshed when this is empty: text drift with matching
+    environment means a version or shape change (safe to adopt silently),
+    while a different data directory or interpreter means the operator
+    launched from an environment the service was never enabled from — a
+    silent rewrite would repoint a live site's data or crash-loop it onto
+    another interpreter, so that adoption belongs to an explicit 'enable'.
+    A unit with no SERVETTE_HOME line predates the data directory and is
+    treated as drift for the same reason: migration is a decision."""
+    try:
+        with open(SERVICE_PATH) as f:
+            text = f.read()
+    except OSError:
+        return []
+    drift = []
+    m = re.search(r"^Environment=SERVETTE_HOME=(.*)$", text, re.M)
+    if m is None:
+        drift.append("the service unit predates the data directory")
+    elif m.group(1) != BASE_DIR:
+        drift.append(f"data directory: service uses {m.group(1)}, this shell uses {BASE_DIR}")
+    m = re.search(r"^ExecStart=(\S+)", text, re.M)
+    if m and m.group(1) != _unit_python_path():
+        drift.append(f"interpreter: service uses {m.group(1)}, this shell runs {_unit_python_path()}")
+    return drift
+
+
 def _write_unit_files():
     """Write (or refresh) the systemd unit, the network watchdog unit pair, and
     the file ownership they depend on. Returns True if a service file already
@@ -556,13 +611,14 @@ def _write_unit_files():
     the post-update path (silent), so a release that changes what the unit
     should contain reaches an already-enabled host without a separate manual
     'enable'."""
-    updating      = _service_file_exists()
-    servette_path = os.path.abspath(__file__)
-    python_path   = _VENV_PY if os.path.exists(_VENV_PY) else subprocess.run(
-        ["which", "python3"], capture_output=True, text=True
-    ).stdout.strip()
+    bad = _unsafe_unit_path()
+    if bad:
+        print(f"  Error: {bad!r} contains whitespace — a systemd unit cannot")
+        print("  carry such a path safely. Use a whitespace-free data directory")
+        print("  and install path.")
+        raise ValueError("unit path contains whitespace")
 
-    service = _systemd_unit(python_path, servette_path)
+    updating = _service_file_exists()
 
     # Create system user if needed
     if not _servette_user_exists():
@@ -572,14 +628,12 @@ def _write_unit_files():
         )
         print("Created system user 'servette'.")
 
-    with open(SERVICE_PATH, "w") as f:
-        f.write(service)
-
-    netwatch_service, netwatch_timer = _netwatch_units()
-    with open(NETWATCH_PATH + ".service", "w") as f:
-        f.write(netwatch_service)
-    with open(NETWATCH_PATH + ".timer", "w") as f:
-        f.write(netwatch_timer)
+    # One computation of the unit texts, shared with the staleness check —
+    # a writer that recomputed them independently could drift from the checker,
+    # making every shell launch rewrite units forever.
+    for path, text in _desired_units().items():
+        with open(path, "w") as f:
+            f.write(text)
 
     subprocess.run(["systemctl", "daemon-reload"],      check=True)
     subprocess.run(["systemctl", "enable", "servette"], check=True, capture_output=True)
@@ -593,7 +647,7 @@ def _write_unit_files():
             _chown_servette(_resolve(site.cert_file))
         if site.key_file:
             _chown_servette(_resolve(site.key_file))
-        _chown_servette(_resolve(site.serve_dir))
+        _chown_operator(_resolve(site.serve_dir))
     _chown_servette(os.path.join(BASE_DIR, "certs"))
     _chown_servette(os.path.join(BASE_DIR, ".acme-account.pem"))
     # Create the ACME webroot now so it exists when systemd applies ReadWritePaths
@@ -639,8 +693,10 @@ def cmd_enable():
                 log.info("Service started after enable")
                 cmd_status()
 
+    except ValueError:
+        pass  # the writer already printed the path refusal
     except PermissionError:
-        print("Error: enable requires sudo. Run: sudo python3 servette.py")
+        print("Error: enable requires sudo. Run: sudo servette")
     except FileNotFoundError:
         print("Error: enable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:

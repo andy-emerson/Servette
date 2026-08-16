@@ -40,9 +40,8 @@
     9 Markdown output   10 Toast + welcome dialog
   <script> JS:
     0 Icons   1 Doc model (parse/serialize)   2 Markdown   3 Sources (fetch)
-    4 Theme   5 CodeMirror   6 Cell DOM   6c Preview
-    6b Navigator (file accordion + search)   6d Agent (WebLLM, sight-only)
-    6e Call map (arc diagram)   9 Self-tests   10 Wiring + boot
+    4 Theme   5 CodeMirror   6 Cell DOM   6c Preview   6e Call map
+    6b Navigator (file accordion + search)   9 Self-tests   10 Wiring + boot
   (Each section is marked by a ════ banner; this list is its table of contents.)
 -->
 
@@ -306,7 +305,7 @@ body > * { position: relative; z-index: 1; }
 .lv-resizer { height: 7px; flex-shrink: 0; cursor: ns-resize; position: relative; }
 .lv-resizer::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: .5px; background: var(--border-faint); transition: background .15s; }
 .lv-resizer:hover::before, .lv-resizer.dragging::before { background: var(--border-medium); }
-/* Centered empty-state for a wholly empty panel/tab (ported from the oracle's .pane-placeholder). */
+/* Centered empty-state for a wholly empty panel/tab (ported from the notebook shell's .pane-placeholder). */
 .pane-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: 1; min-height: 140px; color: var(--text-tertiary); font-size: 12px; text-align: center; line-height: 1.6; padding: 20px 14px; }
 .pane-placeholder svg { width: 28px; height: 28px; opacity: 0.35; margin-bottom: 4px; }
 .pane-placeholder .pp-hint { font-size: 11px; opacity: 0.6; }
@@ -334,7 +333,7 @@ body > * { position: relative; z-index: 1; }
 
 .pane-note { font-size: 10px; color: var(--text-tertiary); font-style: italic; padding: 6px 14px; }
 
-/* settings panel — Preferences, Agentic Reading (ported back from the shell) */
+/* settings panel — Preferences (ported back from the shell) */
 .settings-body { padding: 14px; display: flex; flex-direction: column; gap: 0; }   /* sections self-space via header padding + divider */
 .settings-section { border-top: .5px solid var(--border-faint); }
 .settings-section:first-child { border-top: none; }
@@ -353,11 +352,6 @@ body > * { position: relative; z-index: 1; }
 .setting-toggle input[type="checkbox"]:checked, input.switch:checked { background: var(--fn-green-bg); border-color: var(--fn-green-border); }
 .setting-toggle input[type="checkbox"]:checked::after, input.switch:checked::after { left: auto; right: 2px; }
 .setting-toggle input[type="checkbox"]:disabled, input.switch:disabled { opacity: .5; cursor: default; }
-.agent-field-label { font-size: 12px; color: var(--text-secondary); }
-.agent-row { display: flex; align-items: center; gap: 10px; }
-.agent-row-label { font-size: 12px; color: var(--text-secondary); flex-shrink: 0; }
-.agent-select { flex: 1; min-width: 0; padding: 5px 8px; border: .5px solid var(--border-light); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); font-size: 12px; cursor: pointer; }
-.agent-select:disabled { opacity: .55; cursor: default; }
 .kv-desc { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }
 .kv-btn { flex-shrink: 0; border: .5px solid var(--border-light); background: var(--bg-secondary); color: var(--text-secondary); border-radius: 5px; font-size: 11px; padding: 3px 8px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
 .kv-btn:hover { color: var(--text-primary); border-color: var(--border-info); }
@@ -365,38 +359,6 @@ body > * { position: relative; z-index: 1; }
 .kv-btn.commit:hover { color: var(--fn-blue); border-color: var(--fn-blue-border); background: var(--fn-blue-bg); }
 .kv-btn svg { width: 12px; height: 12px; }
 
-/* VRAM allocation slider — dynamic width+color fill under a themed knob. */
-.vram-track { position: relative; display: flex; align-items: center; flex: 1; }
-.vram-track-bg { position: absolute; left: 8px; right: 8px; top: 50%; transform: translateY(-50%); height: 7px; border-radius: 6px; background: var(--bg-tertiary); pointer-events: none; }
-.vram-track-fill { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); height: 7px; border-radius: 6px; background: var(--fn-green); pointer-events: none; }
-.vram-track-fill.warn { background: var(--fn-amber); }
-.vram-track-fill.full { background: var(--fn-red); }
-.vram-range { -webkit-appearance: none; appearance: none; position: relative; z-index: 1; width: 100%; height: 20px; margin: 0; background: transparent; outline: none; cursor: pointer; }
-.vram-range::-webkit-slider-runnable-track { height: 7px; background: transparent; border: none; }
-.vram-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; margin-top: -5px; cursor: pointer; background: var(--bg-primary); border: 1px solid var(--border-medium); }
-.vram-range::-moz-range-track { height: 7px; background: transparent; border: none; }
-.vram-range::-moz-range-thumb { width: 15px; height: 15px; border-radius: 50%; cursor: pointer; background: var(--bg-primary); border: 1px solid var(--border-medium); }
-
-/* activity bar: push a button to the bottom (Settings) */
-.act-bottom { margin-top: auto; }
-
-/* assistant chat */
-.chat-msgs { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px; }
-.chat-notice { font-size: 11px; font-style: italic; color: var(--text-tertiary); text-align: center; padding: 2px 10px 6px; border-bottom: .5px solid var(--border-faint); flex-shrink: 0; }
-.chat-meta { font-size: 10px; color: var(--text-tertiary); margin-top: 4px; }
-.chat-msg { font-size: 12px; line-height: 1.5; padding: 7px 9px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; max-width: 94%; }
-.chat-msg.user { background: var(--bg-tertiary); color: var(--text-primary); align-self: flex-end; }
-.chat-msg.bot { background: var(--bg-secondary); color: var(--text-primary); align-self: flex-start; }
-.chat-from { display: block; font-size: 10px; font-weight: 700; letter-spacing: .02em; opacity: .5; margin-bottom: 3px; }
-.chat-input { display: flex; gap: 5px; padding: 8px; }
-/* Draggable divider between the messages and the input — drag up to grow the field. */
-.chat-resizer { height: 7px; flex-shrink: 0; cursor: ns-resize; position: relative; }
-.chat-resizer::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: .5px; background: var(--border-faint); transition: background .15s; }
-.chat-resizer:hover::before, .chat-resizer.dragging::before { background: var(--border-medium); }
-.chat-input textarea { flex: 1; resize: none; font-family: inherit; font-size: 12px; line-height: 1.4; padding: 6px 8px; border-radius: 6px; border: .5px solid var(--border-light); background: var(--bg-secondary); color: var(--text-primary); outline: none; }
-.chat-input button { flex-shrink: 0; border: .5px solid var(--border-light); background: none; color: var(--text-secondary); border-radius: 6px; padding: 0 10px; cursor: pointer; display: flex; align-items: center; }
-.chat-input button:hover { background: var(--bg-secondary); color: var(--text-primary); }
-.chat-input button svg { width: 15px; height: 15px; }
 
 /* outline */
 .ol-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
@@ -427,7 +389,7 @@ body > * { position: relative; z-index: 1; }
 #deps-body .dep-arrow { fill: var(--border-medium); }
 
 /* ════════════════════════════════════════════════════════════════════════════
- * 9. MARKDOWN OUTPUT  (ported from the oracle)
+ * 9. MARKDOWN OUTPUT  (ported from the notebook shell)
  * ════════════════════════════════════════════════════════════════════════════ */
 .out-md { color: var(--text-primary); white-space: normal; }
 /* Headings in the mono face, the front door's convention (h1–h3 there are
@@ -513,11 +475,10 @@ body > * { position: relative; z-index: 1; }
 
     <!-- left activity bar. Every visit starts the same way: both panes
          collapsed, INIT.md open, system theme, line numbers on — the viewer
-         deliberately remembers nothing about the user except the VRAM
-         measurement (a hardware fact) and that the welcome was shown. -->
+         deliberately remembers nothing about the user except that the
+         welcome was shown. -->
     <div id="left-activity-bar" class="activity-bar">
       <button class="activity-bar-btn" data-tab="outline" title="Navigator" data-ico="list"></button>
-      <button class="activity-bar-btn" data-tab="assistant" title="AI assistant" data-ico="message-code"></button>
       <button class="activity-bar-btn act-bottom" data-tab="settings" title="Settings" data-ico="settings"></button>
     </div>
 
@@ -527,10 +488,6 @@ body > * { position: relative; z-index: 1; }
         <div class="pane-header">Navigator</div>
         <div class="nav-search"><input id="nav-search" type="search" placeholder="Search src/*.md…" aria-label="Search the sources"></div>
         <div id="outline-list" style="flex:1;overflow-y:auto"></div>
-      </div>
-      <div class="pane-panel" id="panel-assistant" data-tab="assistant">
-        <div class="pane-header">AI assistant <span style="display:flex;gap:8px"><span class="mini" role="button" id="chat-copy" title="Copy conversation" data-ico="copy"></span><span class="mini" role="button" id="chat-clear" title="Clear conversation" data-ico="trash"></span></span></div>
-        <div id="assistant-body" style="flex:1;min-height:0;display:flex;flex-direction:column"></div>
       </div>
       <div class="pane-panel" id="panel-settings" data-tab="settings">
         <div class="pane-header">Settings</div>
@@ -551,12 +508,6 @@ body > * { position: relative; z-index: 1; }
                 </fieldset>
               </div>
               <label class="setting-toggle"><span>Line numbers</span><input type="checkbox" id="opt-linenums"></label>
-            </div>
-          </div>
-          <div class="settings-section" data-sec="agent">
-            <div class="settings-section-header"><span class="settings-chev" data-ico="chevron"></span><span>Agentic Reading</span></div>
-            <div class="settings-section-body">
-              <div id="agent-local"></div>
             </div>
           </div>
         </div>
@@ -594,7 +545,6 @@ body > * { position: relative; z-index: 1; }
   <!-- ───────────────────────── Status bar ───────────────────────── -->
   <div class="status-bar">
     <span class="status-spacer"></span>
-    <span class="status-item status-link" id="st-agent" title="AI assistant">Agent: idle</span>
   </div>
 </div>
 
@@ -604,9 +554,8 @@ body > * { position: relative; z-index: 1; }
     <button class="welcome-dialog__close" type="button" id="welcome-close">Close</button>
   </div>
   <div class="welcome-dialog__body">
-    <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files <code>servette.py</code> is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
-    <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files), the assistant, and Settings at the bottom — one panel at a time. On the right: the Preview pane (the open file as one plain rendered document) and the Call Map (the open file's functions and who calls whom — click a function to jump to it). Click an icon to open or close its panel. The viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
-    <p>There is also an optional <strong>reading assistant</strong> — Servette itself, answering for its own code. It runs entirely in your browser (WebLLM over WebGPU — nothing you type leaves your machine), and because the model is yours, the tokens are too: ask Servette about Servette as much as you like, with no accounts, no API keys, and no limits. Set it up in Settings → Agentic Reading; it reads whichever source files your question needs.</p>
+    <p>This is a <strong>view-only subset of the notebook interface Servette was written in</strong>. The cells are the authored Markdown sources (<code>src/*.md</code>) fetched straight from the repository — the same files the <code>servette</code> module is generated from — with the prose rendered, the rationale notes as callouts, and the Python highlighted.</p>
+    <p>The icon strips along each edge are the <strong>activity bars</strong>. On the left: the Navigator (the file list, each file's cells, and search across all five files) and Settings at the bottom — one panel at a time. On the right: the Preview pane (the open file as one plain rendered document) and the Call Map (the open file's functions and who calls whom — click a function to jump to it). Click an icon to open or close its panel. The viewer always starts with both sides closed and <code>INIT.md</code> open.</p>
     <p id="welcome-build" style="font-size:11px;color:var(--text-tertiary);margin-top:14px"></p>
   </div>
 </dialog>
@@ -616,7 +565,7 @@ body > * { position: relative; z-index: 1; }
 <script>
 "use strict";
 /* ════════════════════════════════════════════════════════════════════════════
- * 0. ICONS (inline SVG — no CDN dependency, unlike the oracle's icon webfont)
+ * 0. ICONS (inline SVG — no CDN dependency, unlike the notebook shell's icon webfont)
  * ════════════════════════════════════════════════════════════════════════════ */
 // Vendored from Tabler Icons (https://tabler.io/icons, MIT) @ v3.31.0, outline set,
 // inline so there's still no CDN/webfont dependency. svg() supplies the shared
@@ -638,7 +587,6 @@ const I = {
   'send':'<path d="M10 14l11 -11" /><path d="M21 3l-6.5 18a.55 .55 0 0 1 -1 0l-3.5 -7l-7 -3.5a.55 .55 0 0 1 0 -1l18 -6.5" />',  // tabler send
   'stop':'<path d="M5 5m0 2a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2z" />',  // tabler player-stop
   'settings':'<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z" /><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" />',  // tabler settings
-  'message-code':'<path d="M8 9h8" /><path d="M8 13h6" /><path d="M11.012 19.193l-3.012 1.807v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v6" /><path d="M20 21l2 -2l-2 -2" /><path d="M17 17l-2 2l2 2" />',  // tabler message-code
   'graph':'<path d="M7 18m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M7 6m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M17 6m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M7 8v8" /><path d="M9 18h6a2 2 0 0 0 2 -2v-5" /><path d="M14 14l3 -3l3 3" />',  // tabler git-branch (as a call-graph mark)
   'github':'<path d="M9 19c-4.3 1.4 -4.3 -2.5 -6 -3m12 5v-3.5c0 -1 .1 -1.4 -.5 -2c2.8 -.3 5.5 -1.4 5.5 -6a4.6 4.6 0 0 0 -1.3 -3.2a4.2 4.2 0 0 0 -.1 -3.2s-1.1 -.3 -3.5 1.3a12.3 12.3 0 0 0 -6.2 0c-2.4 -1.6 -3.5 -1.3 -3.5 -1.3a4.2 4.2 0 0 0 -.1 3.2a4.6 4.6 0 0 0 -1.3 3.2c0 4.6 2.7 5.7 5.5 6c-.6 .6 -.6 1.2 -.5 2v3.5" />',  // tabler brand-github
 };
@@ -674,8 +622,9 @@ function elem(tag, props={}, kids=[]) {
 let _uid = 0; const uid = () => ++_uid;
 // kind: '' (neutral success/info) or 'err' (red — a failed/rejected action).
 function toast(msg, kind) { const t = $('#toast'); t.textContent = msg; t.className = 'toast' + (kind ? ' ' + kind : ''); t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 1600); }
-// Centered empty-state node: faint icon + headline + optional dim hint. Used for
-// wholly empty tabs/panels (Variables, Tables, Outline, Assets, History, Agent).
+// Centered empty-state node: faint icon + headline + optional dim hint. Used
+// by the panels while their content loads or has nothing to show (Navigator,
+// Preview, Call Map).
 function panePlaceholder(icon, headline, hint) {
   const kids = [ elem('span', { html: svg(icon) }), elem('div', { text: headline }) ];
   if (hint) kids.push(elem('div', { class: 'pp-hint', text: hint }));
@@ -858,11 +807,9 @@ function refreshMarkdownCells(){
  *    crafted link cannot fetch outside this repo's src/.
  * ════════════════════════════════════════════════════════════════════════════ */
 // Bumped on every viewer change. The topbar's "src @ <ref>" names the ref the
-// CELLS were fetched from — it says nothing about which index.html is being
-// served. This stamp does: a stale deployment showed old behavior for four
-// review rounds while reading as current, because nothing on the page said
-// which viewer it was.
-const VIEWER_BUILD = '2026-08-10.1';
+// CELLS were fetched from, not which deployed index.html is serving them —
+// this stamp is the only thing on the page that identifies the viewer itself.
+const VIEWER_BUILD = '2026-08-15.1';
 const REPO  = 'andy-emerson/Servette';
 const FILES = ['INIT.md', 'SERVER.md', 'SYSTEM.md', 'SHELL.md', 'MAIN.md'];   // build.py order
 const _refParam = new URLSearchParams(location.search).get('ref') || 'main';
@@ -887,29 +834,22 @@ function expandFile(name, opts={}){
 function lsGet(k,d){ try { const v=localStorage.getItem(k); return v==null?d:v; } catch(e){ return d; } }
 function lsSet(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
 
-// Fetch every file concurrently, plus the README (the assistant's general
-// context — not rendered). A failed file degrades to an inline error callout
-// in ITS slot — the rest of the document stands; there is no separate status
-// indicator, the callouts are the signal.
+// Fetch every file concurrently. A failed file degrades to an inline error
+// callout in ITS slot — the rest of the document stands; there is no separate
+// status indicator, the callouts are the signal.
 async function fetchSources(){
-  const [files, readme] = await Promise.all([
-    Promise.all(FILES.map(async name => {
-      try {
-        const res = await fetch(RAW + name);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const raw = await res.text();
-        return { name, raw, doc: parse(raw) };
-      } catch(e){
-        return { name, raw: null, error: true,
-                 doc: parse('> **Could not load `src/' + name + '`** — ' + (e.message || e) +
-                            '. The rest of the document is unaffected.') };
-      }
-    })),
-    fetch(`https://raw.githubusercontent.com/${REPO}/${REF}/README.md`)
-      .then(r => r.ok ? r.text() : null).catch(() => null),
-  ]);
-  nb.files = files;
-  nb.readme = readme;
+  nb.files = await Promise.all(FILES.map(async name => {
+    try {
+      const res = await fetch(RAW + name);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const raw = await res.text();
+      return { name, raw, doc: parse(raw) };
+    } catch(e){
+      return { name, raw: null, error: true,
+               doc: parse('> **Could not load `src/' + name + '`** — ' + (e.message || e) +
+                          '. The rest of the document is unaffected.') };
+    }
+  }));
   nb.current = FILES[0];
 }
 
@@ -1037,7 +977,7 @@ function createCellEl(cell){
   if (cell.collapsed) cellEl.classList.add('collapsed');
   if (cell.type==='code'){
     // Display-only trim of leading and trailing blank lines (the literate
-    // style carries them in fences purely for servette.py's spacing); the
+    // style carries them in fences purely for the generated module's spacing); the
     // doc model keeps the exact bytes.
     body.appendChild(elem('pre',{class:'code-plain',text:cell.code.replace(/^\n+/,'').replace(/\n+$/,'')}));
     setTimeout(()=>upgradeCode(cellEl,cell),0);
@@ -1272,774 +1212,6 @@ function wireSearch(){
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
- * 6d. AGENT — local WebLLM (in-browser model manager + streaming chat), the
- *    shell's §6c with its remote-API half removed. It answers in the first
- *    person, as Servette itself, fetching the documents each question needs
- *    via the FETCH protocol (see the sight block); it edits and navigates
- *    nothing. Models are labeled by tier (Fast / Balanced / Expert). WebGPU
- *    + CDN required; without them the section explains itself and stays
- *    disabled.
- * ════════════════════════════════════════════════════════════════════════════ */
-/* Models: the shell's three Qwen2.5-Coder sizes (q4f16_1). One shared
- * MLCEngine holds one model at a time. Setup (GPU + install/activate) lives
- * in Settings → Agentic Reading; the AI assistant panel is the chat. */
-const WEBLLM_CDN = 'https://esm.run/@mlc-ai/web-llm';
-const AGENT_MODELS = [
-  // diskMB = download/cache size (shown in the dropdown); vramMB = memory to RUN
-  // (used for the GPU fit check). They differ: running needs more than the weights.
-  { id:'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC', family:'Qwen 2.5', tier:'Fast',     diskMB:800,  vramMB:1630 },
-  { id:'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC',   family:'Qwen 2.5', tier:'Balanced', diskMB:1600, vramMB:2505 },
-  { id:'Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC',   family:'Qwen 2.5', tier:'Expert',   diskMB:4300, vramMB:5107 },
-];
-const agent = { gpu:null, llm:null, engine:null, installed:new Set(), installedChecked:false, activeId:null, activeWindowSize:0, busyId:null, op:'', progress:'', generating:false, error:'', messages:[], cancel:null, vram:{testing:false,testedMB:0,resultMB:null,error:''} };
-function agentErr(e){ return (e&&e.message)?e.message:String(e); }
-function agentBusyText(){ const OP={disk:'Downloading… ',activate:'Loading… ',deactivate:'Unloading… '}; return (OP[agent.op]||'Working… ')+(agent.progress||''); }
-
-async function detectWebGPU(){
-  if (!('gpu' in navigator) || !navigator.gpu) return { supported:false, reason:'WebGPU not available in this browser' };
-  let adapter; try { adapter=await navigator.gpu.requestAdapter(); } catch(e){ return { supported:false, reason:'requestAdapter() failed: '+agentErr(e) }; }
-  if (!adapter) return { supported:false, reason:'No compatible GPU adapter (unavailable, blocked, or software-only)' };
-  let info={}; try { info=adapter.info||(adapter.requestAdapterInfo?await adapter.requestAdapterInfo():{})||{}; } catch(e){}
-  const lim=adapter.limits||{};
-  return { supported:true, vendor:info.vendor||'', maxBufferSize:lim.maxBufferSize||0 };
-}
-function agentModelFits(m){ const g=agent.gpu; if(!g||!g.supported) return false; const lim=g.maxBufferSize||0; if(!lim) return true; return m.vramMB*1048576<=lim; }
-async function agentEnsureModule(){ if(!agent.llm) agent.llm=await import(WEBLLM_CDN); return agent.llm; }
-async function agentEnsureEngine(){ await agentEnsureModule(); if(!agent.engine) agent.engine=new agent.llm.MLCEngine(); return agent.engine; }
-// THE single Cache API enumerator — one walk returns the set of installed
-// model ids (model weight URLs contain the id). Pass purgeKeep to ALSO delete
-// every model entry except that id ('' = purge all models) in the same pass.
-async function cacheWalk(purgeKeep){
-  const out={ installed:new Set() };
-  if(!('caches' in window)) return out;
-  try {
-    for(const name of await caches.keys()){
-      const c=await caches.open(name);
-      for(const req of await c.keys()){
-        const m=AGENT_MODELS.find(x=>req.url.includes(x.id));
-        if(!m) continue;
-        if(purgeKeep!==undefined && m.id!==purgeKeep){ await c.delete(req); continue; }
-        out.installed.add(m.id);
-      }
-    }
-  } catch(e){ console.error('[agent] cache walk failed',e); }
-  return out;
-}
-async function agentRefreshInstalled(){
-  agent.installed = (await cacheWalk()).installed;
-  agent.installedChecked=true; renderAgentLocal();
-}
-// Show only a clean percentage — WebLLM's p.text is verbose. Progress fires
-// many times per second: update the one status text node, don't rebuild the
-// whole settings panel per tick.
-function agentOnProgress(p){ agent.progress=(p&&p.progress!=null)?Math.round(p.progress*100)+'%':''; syncAgentStatusLine(); }
-function syncAgentStatusLine(){
-  const s=$('#agent-status-line'); if(!s || !agent.busyId) return;
-  s.textContent=agentBusyText();
-}
-// Set which model is on disk (the cache). '' = None. Enforces one-at-a-time:
-// unloads VRAM, purges every other cached model, then downloads the chosen one.
-// NEVER while a reply is streaming: unload() under a live WebGPU workload is a
-// device-loss crash (reported: switching tiers mid-reply took the browser
-// down) — the controls are disabled then, and this guard is the backstop.
-async function agentSetDisk(id){
-  if(agent.generating){ toast('Stop the current reply first','err'); return; }
-  if(agent.busyId) return;
-  agent.busyId=id||'none'; agent.op='disk'; agent.error=''; agent.progress=''; renderAgentLocal();
-  try {
-    if(agent.activeId){ try{ if(agent.engine) await agent.engine.unload(); }catch(e){} agent.activeId=null; }
-    await cacheWalk(id);
-    if(id){ const eng=await agentEnsureEngine(); eng.setInitProgressCallback(agentOnProgress); await eng.reload(id); await eng.unload(); }
-  } catch(e){ agent.error=agentErr(e); console.error('[WebLLM] set-disk failed',e); }
-  agent.installed=(await cacheWalk()).installed;
-  agent.busyId=null; agent.op=''; agent.progress=''; renderAgentLocal(); renderAgentTab();
-}
-// Picks context_window_size for a reload by scaling the saved VRAM allocation
-// against this tier's published vramMB cost (its cost AT a VRAM_FIGURES_CTX
-// window). An approximation backed by a probe/retry: a failed reload can take
-// the GPU device down with it, so every attempt gets a fresh engine. NO flat
-// fallback by design: if every attempt fails, the measurement has gone stale
-// and the honest move is to say so.
-async function agentPickContextWindow(id){
-  const freshReload=async(windowSize)=>{
-    agent.engine=null;
-    const eng=await agentEnsureEngine();
-    eng.setInitProgressCallback(agentOnProgress);
-    await eng.reload(id, { context_window_size: windowSize });
-  };
-  const allocMB=parseInt(lsGet('servette-src:qwenVramMB',''),10);
-  const tier=AGENT_MODELS.find(m=>m.id===id);
-  if(!allocMB || !tier || !tier.vramMB) throw new Error('No VRAM allocation — run Measure VRAM in Settings → Agentic Reading first.');
-  let candidate=Math.max(2048, Math.min(QWEN_MAX_CTX, Math.round(VRAM_FIGURES_CTX*allocMB/tier.vramMB)));
-  for(let attempt=0; attempt<4 && candidate>=2048; attempt++){
-    try{ await freshReload(candidate); return candidate; }
-    catch(e){ console.error('[WebLLM] context_window_size='+candidate+' failed, backing off',e); candidate=Math.floor(candidate*0.7); }
-  }
-  throw new Error('Could not fit a context window into your '+allocMB+' MB allocation — the VRAM measurement may be stale. Re-measure in Settings → Agentic Reading.');
-}
-// Load/unload the on-disk model into VRAM (the toggle). A successful
-// activation opens the assistant panel itself — the setup flow should end in
-// the chat, not in a settings row the reader has to know to leave.
-async function agentToggleVram(on){
-  if(agent.generating){ toast('Stop the current reply first','err'); return; }
-  if(agent.busyId) return;
-  const id=[...agent.installed][0]; if(on && !id) return;
-  agent.busyId=id||'vram'; agent.op=on?'activate':'deactivate'; agent.error=''; agent.progress=''; renderAgentLocal();
-  try {
-    if(on){
-      const windowSize=await agentPickContextWindow(id);
-      agent.activeId=id; agent.activeWindowSize=windowSize;
-    } else {
-      const eng=await agentEnsureEngine();
-      try{ await eng.unload(); }catch(e){}
-      agent.activeId=null; agent.activeWindowSize=0;
-    }
-  } catch(e){ agent.error=agentErr(e); console.error('[WebLLM] vram-toggle failed',e); }
-  agent.busyId=null; agent.op=''; agent.progress=''; renderAgentLocal(); renderAgentTab();
-  if(on && agent.activeId){ openTab('assistant'); toast('Servette is ready — ask it anything about the source'); }
-}
-// Empirically measures free VRAM by filling GPU buffers in chunks (the
-// documented pushErrorScope('out-of-memory') pattern) until one fails, then
-// frees them all. There is no WebGPU API to query free VRAM directly; this is
-// a snapshot, not a guarantee.
-async function measureVram(){
-  if(agent.vram.testing || agent.busyId) return;
-  if(agent.generating){ toast('Stop the current reply first','err'); return; }
-  if(!confirm("This intentionally fills your GPU's memory until it fails, to measure how much is free.\n\nClose other GPU-heavy tabs or apps first — this can slow or briefly freeze them while the test runs. On some systems the GPU context can be lost, which may require reloading this page.\n\nContinue?")) return;
-  if(agent.activeId) await agentToggleVram(false);
-  agent.vram={testing:true,testedMB:0,resultMB:null,error:''}; renderAgentLocal();
-  const chunkBytes=Math.min(128*1048576, Math.floor(((agent.gpu&&agent.gpu.maxBufferSize)||128*1048576)/2));
-  const MAX_CHUNKS=512;
-  let device=null; const buffers=[];
-  try {
-    const adapter=await navigator.gpu.requestAdapter();
-    if(!adapter) throw new Error('No compatible GPU adapter');
-    device=await adapter.requestDevice();
-    for(let i=0;i<MAX_CHUNKS;i++){
-      let buf, err;
-      try {
-        device.pushErrorScope('out-of-memory');
-        buf=device.createBuffer({ size:chunkBytes, usage:GPUBufferUsage.COPY_DST });
-        err=await device.popErrorScope();
-      } catch(e){ err=e; }
-      if(err){ if(buf){ try{ buf.destroy(); }catch(e){} } break; }
-      buffers.push(buf);
-      agent.vram.testedMB+=Math.round(chunkBytes/1048576);
-      const t=$('#vram-result-text'); if(t) t.textContent=agent.vram.testedMB+' MB filled so far…';
-    }
-    agent.vram.resultMB=agent.vram.testedMB;
-    lsSet('servette-src:qwenVramMeasuredMB', String(agent.vram.resultMB));
-    lsSet('servette-src:qwenVramMeasuredAt', String(Date.now()));
-  } catch(e){ agent.vram.error=agentErr(e); console.error('[VRAM test] failed',e); }
-  buffers.forEach(b=>{ try{ b.destroy(); }catch(e){} });
-  try{ device&&device.destroy(); }catch(e){}
-  agent.vram.testing=false; renderAgentLocal();
-}
-function vramAgeText(){
-  const at=parseInt(lsGet('servette-src:qwenVramMeasuredAt',''),10);
-  if(!at) return 'measured just now';
-  const mins=Math.round((Date.now()-at)/60000);
-  if(mins<2)   return 'measured just now';
-  if(mins<120) return 'measured '+mins+' min ago';
-  const hrs=Math.round(mins/60);
-  if(hrs<48)   return 'measured '+hrs+' h ago';
-  return 'measured '+Math.round(hrs/24)+' days ago';
-}
-function agentFailText(e){
-  const msg=agentErr(e);
-  if(e && e.name==='ContextWindowSizeExceededError')
-    return msg.split('\n')[0]+' Raise the VRAM allocation in Settings → Agentic Reading, or Clear this chat.';
-  return msg;
-}
-function syncAgentPill(){
-  if (agent.generating||agent.busyId) setAgent('loading');
-  else if (agent.activeId) setAgent('ready');
-  else if (agent.error) setAgent('error');
-  else setAgent('idle');
-}
-function setAgent(state){ setPill($('#st-agent'), state, 'Agent: '+(state==='loading'?'thinking':state)); }
-
-// The context_window_size WebLLM's published vram_required_MB figures are
-// computed at; purely the anchor for scaling an allocation into a window size.
-const VRAM_FIGURES_CTX = 4096;
-// Qwen2.5's architectural maximum window. Both the reload clamp and the
-// slider's token readout use it — on a large GPU the linear estimate can pass
-// this long before the allocation runs out, and a readout that kept counting
-// (~91k tokens on a 64 GB card) would promise a window the model cannot have.
-const QWEN_MAX_CTX = 32768;
-// Upper-end slider reserves, in absolute MB — what they protect (browser/OS
-// variance) costs roughly fixed MB regardless of GPU size.
-const VRAM_RESERVE_WARN   = 512;  // leave less free than this → yellow
-const VRAM_RESERVE_REJECT = 256;  // leave less free than this → red, Set disabled
-function vramZone(mb, maxMB, tier){
-  if(tier && tier.vramMB){ if(mb<tier.vramMB) return 'full'; if(mb<2*tier.vramMB) return 'warn'; }
-  if(maxMB-mb<VRAM_RESERVE_REJECT) return 'full';
-  if(maxMB-mb<VRAM_RESERVE_WARN) return 'warn';
-  return '';
-}
-
-function gpuStatusHTML(){
-  const g=agent.gpu;
-  if(!g) return '<span style="color:var(--text-tertiary)">Checking GPU…</span>';
-  if(g.supported){
-    const mb=g.maxBufferSize?('max buffer '+(g.maxBufferSize/1048576).toFixed(0)+' MB'):'GPU detected';
-    return '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px">'+
-      '<span style="color:var(--fn-green);font-weight:600;flex-shrink:0">● WebGPU available</span>'+
-      '<span style="color:var(--text-tertiary);font-size:11px;text-align:right">'+escapeHtml(mb)+'</span></div>';
-  }
-  return '<span style="color:var(--fn-amber);font-weight:600">○ WebGPU unavailable</span><div style="color:var(--text-tertiary);font-size:11px;margin-top:3px">'+escapeHtml(g.reason||'')+'</div><div style="color:var(--text-tertiary);font-size:11px;margin-top:3px">In-browser models are disabled.</div>';
-}
-// Settings → Agentic Reading: GPU status + on-disk model (dropdown) + VRAM
-// toggle + VRAM budget — the shell's local-model block, minus its API-agents
-// sibling.
-let _agentInfoOpen=false;
-function renderAgentLocal(){
-  const el=$('#agent-local'); if(!el) return;
-  el.innerHTML='';
-  const infoBtn=elem('button',{class:'kv-btn',style:'min-width:0;padding:1px 8px',text:'?',title:'Model requirements'});
-  infoBtn.onclick=()=>{ _agentInfoOpen=!_agentInfoOpen; renderAgentLocal(); };
-  el.appendChild(elem('div',{style:'display:flex;align-items:center;justify-content:space-between'},[
-    elem('div',{class:'agent-field-label',text:'WebLLM Agents'}), infoBtn ]));
-  if(_agentInfoOpen){
-    const tRow=(a,b,c,head)=>elem('div',{style:'display:flex;gap:8px;justify-content:space-between'+(head?';font-weight:600;color:var(--text-tertiary);text-transform:uppercase;font-size:10px;letter-spacing:.05em;margin-bottom:3px':'')},[
-      elem('span',{style:'flex:1',text:a}), elem('span',{style:'width:84px;text-align:right',text:b}), elem('span',{style:'width:84px;text-align:right',text:c}) ]);
-    const tbl=elem('div',{style:'margin:6px 0 8px;font-size:11px;color:var(--text-secondary);border:.5px solid var(--border-faint);border-radius:var(--radius-md);padding:8px 10px'});
-    tbl.appendChild(tRow('Model','Min cache','Min VRAM',true));
-    AGENT_MODELS.forEach(m=>{
-      const size=(m.id.match(/-(\d+(?:\.\d+)?B)-/)||[])[1]||'';
-      tbl.appendChild(tRow(size+' ('+m.tier+')', (m.diskMB>=1000?(m.diskMB/1000).toFixed(1)+' GB':m.diskMB+' MB'), m.vramMB+' MB'));
-    });
-    tbl.appendChild(elem('div',{class:'kv-desc',style:'margin-top:5px',text:'Min VRAM is the cost at a 4,096-token context window; a larger allocation buys a larger window.'}));
-    el.appendChild(tbl);
-  }
-  el.appendChild(elem('div',{style:'margin:7px 0 10px;font-size:12px;line-height:1.45;color:var(--text-secondary)',html:gpuStatusHTML()}));
-
-  const gpuOk=!!(agent.gpu&&agent.gpu.supported);
-  if(!gpuOk){ syncAgentPill(); return; }   // the status block above already says why nothing follows
-  if(agent.vram.resultMB==null && !agent.vram.testing){
-    const savedMeas=parseInt(lsGet('servette-src:qwenVramMeasuredMB',''),10);
-    if(savedMeas>0) agent.vram.resultMB=savedMeas;
-  }
-  const measured=agent.vram.resultMB!=null;
-  const onDisk=[...agent.installed][0]||'';
-  const active=!!agent.activeId, busy=!!agent.busyId;
-  if(agent.error) el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin:0 0 8px;word-break:break-word',text:agent.error}));
-
-  // The setup is LINEAR — four numbered steps, each enabled by the one
-  // before it, ending in the chat (activation opens it): measure → allocate
-  // → model → activate. No prose needed; the gating is the explanation.
-  // Everything is also disabled while a reply streams (see agentSetDisk).
-  const gen=agent.generating;
-  const step=(n,label)=>elem('div',{class:'agent-field-label',style:'margin-top:14px',text:n+' · '+label});
-
-  // 1 · Measure VRAM — see measureVram() for why this is an empirical test.
-  {
-    const v=agent.vram;
-    el.appendChild(step(1,'Measure VRAM'));
-    const measureBtn=elem('button',{class:'kv-btn',text:v.testing?'Measuring…':(measured?'Re-measure':'Measure VRAM')});
-    measureBtn.disabled=v.testing||busy||gen;
-    measureBtn.onclick=measureVram;
-    let resultText='';
-    if(v.testing) resultText=v.testedMB+' MB filled so far…';
-    else if(v.resultMB!=null) resultText='~'+v.resultMB+' MB free ('+vramAgeText()+')';
-    else resultText='Start here — nothing below unlocks without it.';
-    el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[measureBtn, elem('span',{class:'kv-desc',id:'vram-result-text',text:resultText})]));
-    if(v.error) el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin-top:4px;word-break:break-word',text:v.error}));
-  }
-
-  // 2 · Allocate (only exists once measured) — slider block appended below.
-  // 3 · Model on disk
-  const sel=elem('select',{class:'agent-select','aria-label':'On-disk model'}); sel.disabled=busy||!measured||gen;
-  sel.appendChild(elem('option',{value:'',text:'None'}));
-  AGENT_MODELS.forEach(m=>{
-    const fits=agentModelFits(m);
-    const o=elem('option',{value:m.id,text:m.tier+' ('+(m.diskMB/1000).toFixed(1)+' GB'+(fits?'':' · too large')+')'});
-    if(!fits && m.id!==onDisk) o.disabled=true;
-    sel.appendChild(o);
-  });
-  sel.value=onDisk;
-  sel.onchange=()=>agentSetDisk(sel.value);
-  // 4 · Activate
-  const cb=elem('input',{type:'checkbox',class:'switch',title:gen?'Stop the current reply first':(measured?'Load into VRAM':'Measure VRAM first')}); cb.checked=active; cb.disabled=busy||!onDisk||!measured||gen;
-  cb.onchange=()=>agentToggleVram(cb.checked);
-
-  {
-    const v=agent.vram;
-    if(v.resultMB!=null && !v.testing){
-      const savedMB=parseInt(lsGet('servette-src:qwenVramMB',''),10);
-      const maxMB=Math.max(512, v.resultMB);
-      const tierOnDisk=AGENT_MODELS.find(m=>m.id===onDisk)||null;
-      const zoneOf=mb=>vramZone(mb, maxMB, tierOnDisk);
-      let defaultMB=Math.round(maxMB*0.85);
-      if(tierOnDisk){
-        const gLo=2*tierOnDisk.vramMB, gHi=maxMB-VRAM_RESERVE_WARN;
-        if(gLo<=gHi) defaultMB=Math.max(gLo, Math.min(gHi, defaultMB));
-      }
-      const startMB=(savedMB && savedMB<=maxMB) ? savedMB : defaultMB;
-
-      const track=elem('div',{class:'vram-track'});
-      const bg=elem('div',{class:'vram-track-bg'});
-      const fill=elem('div',{class:'vram-track-fill'});
-      const slider=elem('input',{type:'range',class:'vram-range',min:'0',max:String(maxMB),step:'128','aria-label':'VRAM allocated to the local model (MB)'});
-      slider.value=startMB;
-      track.appendChild(bg); track.appendChild(fill); track.appendChild(slider);
-
-      const label=elem('span',{class:'kv-desc',style:'min-width:110px;text-align:right'});
-      const pctEl=elem('span');
-      const setBtn=elem('button',{class:'kv-btn commit',style:'min-width:72px;justify-content:center'});
-      // Fill width is a CSS calc() correcting for the knob's 8px travel inset;
-      // re-evaluated live by the browser so it can't go stale.
-      const sync=()=>{
-        const val=parseInt(slider.value,10);
-        const zone=zoneOf(val);
-        const pct=maxMB?Math.min(1,val/maxMB):0;
-        fill.style.width='calc('+(pct*100)+'% - '+(pct*16)+'px)';
-        fill.className='vram-track-fill'+(zone?' '+zone:'');
-        pctEl.textContent=Math.round(pct*100)+'%';
-        if(tierOnDisk){
-          const est=Math.round(VRAM_FIGURES_CTX*val/tierOnDisk.vramMB);
-          label.textContent = est>=QWEN_MAX_CTX ? '~'+QWEN_MAX_CTX.toLocaleString()+' tokens (model max)'
-                                                : '~'+est.toLocaleString()+' tokens';
-        } else label.textContent=val+' MB';
-        const isSaved=(val===parseInt(lsGet('servette-src:qwenVramMB',''),10));
-        setBtn.disabled=(zone==='full')||isSaved;
-        setBtn.innerHTML=isSaved?(svg('check')+'Saved'):'Set';
-      };
-      slider.oninput=sync;
-      setBtn.onclick=()=>{ lsSet('servette-src:qwenVramMB', slider.value); toast('VRAM budget set to '+slider.value+' MB'); sync(); };
-      sync();
-      if(startMB!==savedMB) lsSet('servette-src:qwenVramMB', String(startMB));
-      el.appendChild(elem('div',{class:'agent-field-label',style:'margin-top:14px;display:flex;justify-content:space-between'},[
-        elem('span',{text:'2 · Allocate to the model'}), pctEl ]));
-      el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[track,label,setBtn]));
-      if(tierOnDisk){
-        const anyGreen =(2*tierOnDisk.vramMB)<=(maxMB-VRAM_RESERVE_WARN);
-        const anySafe  =tierOnDisk.vramMB<=(maxMB-VRAM_RESERVE_REJECT);
-        if(!anySafe)       el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-red);margin-top:5px',text:'No workable allocation — this model does not fit on this machine alongside anything else.'}));
-        else if(!anyGreen) el.appendChild(elem('div',{style:'font-size:11px;color:var(--fn-amber);margin-top:5px',text:'No fully safe allocation on this GPU for this model — every position trades context room against headroom.'}));
-      }
-    }
-  }
-
-  // 3 · Model on disk — enabled by the measurement; selecting downloads.
-  el.appendChild(step(3,'Model on disk'));
-  el.appendChild(elem('div',{class:'agent-row',style:'margin-top:7px'},[ elem('span',{class:'agent-row-label',text:'Model'}), sel ]));
-
-  // 4 · Activate — enabled once a model is on disk; success opens the chat.
-  el.appendChild(step(4,'Activate'));
-  el.appendChild(elem('div',{class:'setting-toggle',style:'margin-top:7px'},[ elem('span',{text:'Load into VRAM and start chatting'}), cb ]));
-
-  {
-    let status, col='var(--text-tertiary)';
-    if(busy){ status=agentBusyText(); }
-    else if(active){ status='Active — ready to chat ('+agent.activeWindowSize+'-token context)'; col='var(--fn-green)'; }
-    else if(onDisk) status='On disk · flip Activate to load it';
-    else if(measured) status='Pick a model to download';
-    else status='Measure VRAM to begin';
-    el.appendChild(elem('div',{class:'kv-desc',id:'agent-status-line',style:'margin-top:10px;color:'+col,text:status}));
-  }
-  if(active){
-    const openBtn=elem('button',{class:'kv-btn commit',style:'margin-top:8px',text:'Open the assistant →'});
-    openBtn.onclick=()=>openTab('assistant');
-    el.appendChild(openBtn);
-  }
-  syncAgentPill();
-}
-
-/* ── Sight: fetch-on-demand ────────────────────────────────────────────────
- * A request starts with NO documents — just instructions (which carry the
- * catalog: every fetchable file with a description of what it holds), the
- * chat history, and the question. The model then either answers or replies
- * with a FETCH directive naming the documents it needs; the viewer resends
- * the same request with those documents included. Large documents arrive as
- * excerpts; a MORE directive escalates one to its whole text when the
- * excerpts fail. The reader never sees either directive — the bubble stays
- * on "Thinking…" through fetch rounds. Which file is open in the Navigator
- * no longer matters to the assistant.
- * Two fetch rounds maximum (a MORE spends one), and a byte budget on a round —
- * the full corpus (~169 KB ≈ 41k tokens) can never fit the 32,768 window,
- * so over-asking degrades to an explicit omission note, never an overflow.
- * No example sentences anywhere (a small model parrots examples as answers);
- * the FETCH format line is the one deliberate exception — it is the tool. */
-const FILE_DESC = {
-  'README.md': 'what Servette is: features, security posture, comparisons, quick start',
-  'INIT.md':   'the docstring, imports, version, module-level constants',
-  'SERVER.md': 'request handling: config and sites, scrypt auth, rate limiting, the file cache, the request handler, security headers, the HTTP(S) servers',
-  'SYSTEM.md': 'the environment: venv bootstrap, server lifecycle, certificates and the ACME client, systemd provisioning',
-  'SHELL.md':  'the interactive terminal interface: menus, config wizard, status displays',
-  'MAIN.md':   'the entry point',
-};
-function docContent(n){ return n==='README.md' ? nb.readme : (nb.files.find(f=>f.name===n)||{}).raw; }
-function locOf(n){ const c=docContent(n); return c ? c.split('\n').length : null; }
-// Built per request (not a constant) so the catalog can carry live line
-// counts — the model's basis for judging what a fetch will cost the reader.
-function sysViewer(){
-  const catalog=Object.keys(FILE_DESC).map(n=>{
-    const loc=locOf(n);
-    return '- '+n+(loc?' ('+loc.toLocaleString()+' lines)':'')+' — '+FILE_DESC[n];
-  }).join('\n');
-  return [
-    "You are Servette, a production static-site server written in one readable Python file, servette.py. The reader is browsing your source code and asking you questions. The code is you — answer as yourself, in the first person.",
-    "What you always know about yourself: you build on Python's standard-library http.server and add what the public internet demands — trusted HTTPS with automatic Let's Encrypt renewal, plain HTTP redirected up to HTTPS, security headers on every response, rate limiting, optional Basic Auth, live reload, and a hardened systemd service that survives reboots. You require Python 3.11 or newer and have exactly one dependency, the cryptography package, which you install for yourself into a private virtualenv on first run. You are ~3,000 lines of readable Python with no configuration language: copy the file to a server, run it, follow the interactive setup wizard. You were designed with the Raspberry Pi in mind. Your source is authored as literate markdown documents that compile into servette.py — those documents are what the reader is browsing.",
-    "These documents exist, and you may request any of them (line counts show what a request costs — reading is slow):",
-    catalog,
-    "FIRST decide whether the message needs a document. Conversation, and any question the background above already answers, gets a direct reply with NO request — every fetch makes the reader wait. Any factual question the background does NOT answer needs its document: the catalog only tells you WHICH document to request, never enough to answer from. Never fill a gap with a guess — if the background does not state it and no document you were given shows it, request the document.",
-    "When you do need documents, reply with ONLY one line and nothing else:",
-    "FETCH: name, name",
-    "The reader never sees that line; the same question comes back with those documents attached. Request only what the question needs.",
-    "Large documents arrive as EXCERPTS — the sections that match the question, with elisions marked. An elided section is never evidence a feature is missing: if the answer should be in the document but the excerpts do not show it, reply with ONLY one line — MORE: name — and the same question comes back with that whole document. Escalate only when the excerpts truly fail; the whole document is a slow read.",
-    "Answer IN YOUR OWN WORDS — never repeat or continue a document's text. Documents are reference, not reply material; the only verbatim quoting allowed is a short ```python fence when specific code settles the question. Ground answers in what you were given; never state what you have not been shown.",
-  ].join('\n');
-}
-const FETCHABLE = ['README.md', ...FILES];
-// A FETCH directive, or null. The directive counts when it stands on its OWN
-// LINE anywhere in the reply — small models wrap it in politeness ("I need to
-// access the README. Please fetch it:\nFETCH: README.md" was observed in the
-// field), and a begins-with rule left that dangling as a dead answer. A line
-// must still START with FETCH:, so prose that mentions fetching inline
-// ("I would FETCH: X") stays an answer.
-function parseFetch(text){
-  const m=/^[ \t]*FETCH\s*:\s*([^\n]+)/mi.exec(text||'');
-  if(!m) return null;
-  const names=m[1]
-    .split(/[,\s]+/).map(s=>s.trim()).filter(Boolean)
-    .map(s=>{
-      const stem=s.replace(/\.md$/i,'').toUpperCase();
-      return FETCHABLE.find(f=>f.replace(/\.md$/,'').toUpperCase()===stem)||null;
-    })
-    .filter(Boolean);
-  return names.length ? [...new Set(names)] : null;
-}
-// A MORE directive — the model escalating from excerpts to the whole document
-// — or null. Same own-line rule as FETCH, but it names ONE document.
-function parseMore(text){
-  const m=/^[ \t]*MORE\s*:\s*([^\n]+)/mi.exec(text||'');
-  if(!m) return null;
-  const stem=(m[1].trim().split(/[,\s]+/)[0]||'').replace(/\.md$/i,'').toUpperCase();
-  return FETCHABLE.find(f=>f.replace(/\.md$/,'').toUpperCase()===stem)||null;
-}
-// Which documents does the reader's message NAME? Matched conservatively —
-// the uppercase stem (SYSTEM) or any case with the .md suffix — because bare
-// lowercase "server"/"shell"/"main" are ordinary English. A named document is
-// pre-attached to round 1 mechanically: the field showed the model answering
-// "What does SYSTEM do?" from the catalog line instead of fetching, and no
-// judgment is needed when the reader already said which file they mean.
-function namedDocs(text){
-  return FETCHABLE.filter(n=>{
-    const stem=n.replace(/\.md$/,'');
-    return new RegExp('\\b'+stem+'\\b').test(text) || new RegExp('\\b'+stem+'\\.md\\b','i').test(text);
-  });
-}
-/* ── Cell-level retrieval ──────────────────────────────────────────────────
- * A large document is never sent whole: the viewer scores each of its cells
- * against the question's terms and sends the matching cells plus their
- * neighbors (a prose cell explains the code cell beside it), the file's
- * header cell for orientation, and explicit elision markers for everything
- * skipped. SHELL.md's ~15k tokens become ~3–6k — minutes become one. Small
- * documents go whole; a question whose terms match nothing gets the header
- * plus an honest none-matched note (no silent guessing material). */
-const EXCERPT_WHOLE_MAX = 16000;   // at or under this many chars, send the whole file
-const EXCERPT_CAP       = 24000;   // per-file excerpt budget (chars ≈ 6k tokens)
-const STOP = new Set(('the a an and or but of to in on for from is are was were be been do does did what how why '+
-  'where when which who whom with about without tell show me my you your it its this that these those there here '+
-  'they them their we our us i he she his her will would can could should shall may might must not no yes if then '+
-  'than as at by so such very more most less least into over under out up down off just also only even').split(' '));
-function questionTerms(q){
-  return [...new Set(((q||'').toLowerCase().match(/[a-z_][a-z0-9_]{2,}/g)||[]).filter(w=>!STOP.has(w)))];
-}
-// Strip markup that is noise to a language model — the README opens with a
-// <picture> logo and a row of CI badges, and the field showed the model
-// echoing exactly that block back as its "answer". Images, badge lines, and
-// raw HTML tags carry no meaning it can use; prose and code stay.
-function cleanForModel(content){
-  return content
-    .replace(/<picture>[\s\S]*?<\/picture>/gi, '')
-    .replace(/^\s*\[?!\[[^\]]*\]\([^)]*\)\]?(\([^)]*\))?\s*$/gm, '')
-    .replace(/<img[^>]*>/gi, '')
-    .replace(/\n{3,}/g, '\n\n').trim();
-}
-function excerptDoc(name, content, question, forceWhole){
-  content=cleanForModel(content);
-  if(forceWhole || content.length<=EXCERPT_WHOLE_MAX) return { name, content, excerpted:false };
-  const cells=parse(content).cells;
-  const terms=questionTerms(question);
-  const scores=cells.map(c=>{ const t=c.code.toLowerCase(); return terms.reduce((s,w)=>s+(t.includes(w)?1:0),0); });
-  if(!scores.some(s=>s>0)){
-    const head=cells.slice(0,2).map(cellBody).join('\n\n');
-    return { name, excerpted:true,
-             content: head+'\n\n… (none of '+name+'’s sections matched the question’s terms — the rest is elided; suggest more specific wording) …' };
-  }
-  const picked=new Set([0]);   // the header cell orients every excerpt
-  cells.forEach((c,i)=>{ if(scores[i]>0){ picked.add(i); if(i>0) picked.add(i-1); if(i<cells.length-1) picked.add(i+1); } });
-  const idx=[...picked].sort((a,b)=>a-b);
-  const size=i=>cellBody(cells[i]).length;
-  let total=idx.reduce((s,i)=>s+size(i),0);
-  while(total>EXCERPT_CAP && idx.length>1){
-    // shed lowest-score cells first (zero-score neighbors go before matches), later-in-file first on ties
-    const r=idx.filter(i=>i!==0).sort((a,b)=>(scores[a]-scores[b])||(b-a))[0];
-    idx.splice(idx.indexOf(r),1); total-=size(r);
-  }
-  const out=[]; let last=-1;
-  idx.forEach(i=>{
-    if(i>last+1) out.push('… (cells '+(last+2)+'–'+i+' of '+cells.length+' elided) …');
-    out.push(cellBody(cells[i])); last=i;
-  });
-  if(last<cells.length-1) out.push('… (cells '+(last+2)+'–'+cells.length+' elided) …');
-  return { name, excerpted:true, content: out.join('\n\n') };
-}
-// Resolve requested names to (possibly excerpted) contents under an overall
-// byte budget: requested order wins, the rest is omitted by name. Names in
-// `whole` (a MORE escalation) bypass excerpting and arrive complete.
-function resolveDocs(names, question, whole){
-  const BUDGET=90000; let used=0; const list=[], omitted=[];
-  names.forEach(n=>{
-    const content=docContent(n);
-    if(content==null){ omitted.push(n+' (unavailable)'); return; }
-    const d=excerptDoc(n, content, question, whole&&whole.has(n));
-    if(used+d.content.length>BUDGET){ omitted.push(n); return; }
-    used+=d.content.length; list.push(d);
-  });
-  return {list, omitted};
-}
-function assembleSight(text, history, docs, fetchesLeft){
-  docs=docs||{list:[],omitted:[]};
-  let system=sysViewer();
-  if(docs.list.length) system+='\n\nDocuments provided at your request (at ref '+REF+'):\n\n'+
-    docs.list.map(d=>'── '+d.name+(d.excerpted?' (excerpts)':'')+' ──\n\n'+d.content).join('\n\n');
-  if(docs.omitted.length) system+='\n\nOmitted for size: '+docs.omitted.join(', ')+' — request fewer documents at once.';
-  if(fetchesLeft<=0) system+='\n\nNo more documents can be provided for this reply — answer with what you have.';
-  return { system, messages:[...(history||[]), {role:'user',content:text}] };
-}
-
-/* ── Chat (the shell's assistant panel, local-only) ── */
-function decorateCodeBlocks(container){
-  container.querySelectorAll('pre').forEach(pre=>{
-    const code=pre.querySelector('code'); if(!code) return;
-    const raw=code.textContent;
-    const btn=elem('button',{class:'code-copy-btn',html:svg('copy'),title:'Copy'});
-    btn.onclick=()=>{ navigator.clipboard.writeText(raw).then(()=>toast('Copied')).catch(()=>toast('Copy failed','err')); };
-    pre.appendChild(btn);
-  });
-}
-function clearChat(){
-  if (agent.generating) return;
-  agent.messages=[]; renderAgentMessages();
-}
-function copyChat(){
-  if (!agent.messages.length){ toast('Conversation is empty'); return; }
-  const text=agent.messages.map(m=>(m.from||m.role)+': '+m.content).join('\n\n');
-  navigator.clipboard.writeText(text).then(()=>toast('Conversation copied')).catch(()=>toast('Copy failed','err'));
-}
-function fillBotBody(bodyEl, content){
-  bodyEl.innerHTML = content ? renderMarkdownHTML(content)
-    : '<span style="opacity:.55">Thinking…</span>';
-  decorateCodeBlocks(bodyEl);
-}
-// Seconds → "45s" / "4m 24s" / "1h 3m" — a thinking clock that only counts
-// seconds stops being informative right when the wait gets serious.
-function fmtDur(s){
-  if(s<60) return s+'s';
-  const m=Math.floor(s/60), sec=s%60;
-  if(m<60) return m+'m'+(sec?' '+sec+'s':'');
-  const h=Math.floor(m/60), min=m%60;
-  return h+'h'+(min?' '+min+'m':'');
-}
-// The thinking clock's expectation suffix. Calibrated from THIS session's
-// completed replies (chars sent / seconds taken) — silent until there is
-// data, since a made-up rate would just be a different kind of lie. And once
-// the clock passes the estimate it stops being a prediction: "about 2m
-// expected" showing at 3m is a lie too, so the label turns into the honest
-// observation instead.
-function estLabel(perf, plannedChars, elapsedSecs){
-  if(!perf || perf.secs<5) return '';
-  const est=Math.round(plannedChars/(perf.chars/perf.secs));
-  if(est<8) return '';
-  return elapsedSecs<=est ? ' · about '+fmtDur(est)+' expected' : ' · longer than expected';
-}
-function chatMsgEl(m){
-  const el=elem('div',{class:'chat-msg '+(m.role==='user'?'user':'bot')});
-  if(m.role==='assistant' && m.from) el.appendChild(elem('div',{class:'chat-from',text:m.from}));
-  const bodyEl=elem('div',{class:'out-md'});
-  if(m.role==='user') bodyEl.textContent=m.content;
-  else fillBotBody(bodyEl, m.content);
-  el.appendChild(bodyEl);
-  // Every reply carries its cost: how long it took, and which documents it
-  // fetched to answer — the honest account of why some answers are slow.
-  if(m.role==='assistant' && m.secs!=null)
-    el.appendChild(elem('div',{class:'chat-meta',text:fmtDur(m.secs)+(m.fetched&&m.fetched.length?' · read '+m.fetched.join(', '):'')}));
-  return el;
-}
-function renderAgentMessages(){
-  const box=$('#agent-messages'); if(!box) return;
-  if(_streamRaf){ cancelAnimationFrame(_streamRaf); _streamRaf=0; }
-  box.innerHTML='';
-  // The first thing in the window is always the meta notice — from the
-  // viewer, not from Servette or the reader.
-  box.appendChild(elem('div',{class:'chat-notice',text:'Servette’s assistant is a small AI model running in your browser. It can make mistakes — check important answers against the source — and reading a large source file on your GPU can take minutes; the clock under each reply shows where the time went.'}));
-  if(!agent.messages.length){ box.appendChild(panePlaceholder('message-code','Ask Servette about itself','It reads the files it needs to answer — on your GPU, as much as you like.')); return; }
-  agent.messages.forEach(m=>box.appendChild(chatMsgEl(m)));
-  box.scrollTop=box.scrollHeight;
-}
-// Streaming: repaint ONLY the last bubble, coalesced to one render per frame.
-let _streamRaf=0;
-function updateStreamingMessage(){
-  if(_streamRaf) return;
-  _streamRaf=requestAnimationFrame(()=>{
-    _streamRaf=0;
-    const box=$('#agent-messages'); if(!box) return;
-    const last=box.lastElementChild, m=agent.messages[agent.messages.length-1];
-    if(!last || !m || m.role!=='assistant') return;
-    const nearBottom=(box.scrollHeight-box.scrollTop-box.clientHeight)<40;
-    const body=last.querySelector('.out-md'); if(body) fillBotBody(body, m.content);
-    if(nearBottom) box.scrollTop=box.scrollHeight;
-  });
-}
-function renderAgentTab(){
-  const body=$('#assistant-body'); if(!body) return;
-  if(!agent.activeId){
-    const loading=!!agent.busyId;
-    body.innerHTML='';
-    body.appendChild(panePlaceholder('message-code', loading?'Loading model…':'No agent active', loading?'See Settings → Agentic Reading':'Activate a model in Settings → Agentic Reading'));
-    return;
-  }
-  body.innerHTML='';
-  const msgs=elem('div',{class:'chat-msgs',id:'agent-messages',role:'log','aria-live':'polite','aria-label':'Conversation'});
-  const ta=elem('textarea',{rows:'1',placeholder:'Ask Servette about its source…',id:'agent-input','aria-label':'Message Servette'});
-  const send=elem('button',{html:svg(agent.generating?'stop':'send'),title:agent.generating?'Stop':'Send',id:'agent-send'});
-  const submit=()=>{ if(!agent.generating){ agentSend(ta.value); ta.value=''; } };
-  send.onclick=()=>{ if(agent.generating) agentCancel(); else submit(); };
-  ta.addEventListener('keydown',e=>{
-    if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); submit(); }
-    else if(e.key==='Escape'&&agent.generating){ e.preventDefault(); agentCancel(); }
-  });
-  const resizer=elem('div',{class:'chat-resizer',title:'Drag to resize'});
-  let dy0=0, h0=0, floorH=0;
-  const onMove=e=>{ ta.style.height=Math.max(floorH, Math.min(body.offsetHeight*0.5, h0+(dy0-e.clientY)))+'px'; };
-  const onUp=()=>{ resizer.classList.remove('dragging'); document.body.style.cursor=''; document.body.style.userSelect=''; document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp); };
-  resizer.addEventListener('mousedown',e=>{ if(!floorH) floorH=ta.offsetHeight||34; dy0=e.clientY; h0=ta.offsetHeight; resizer.classList.add('dragging'); document.body.style.cursor='ns-resize'; document.body.style.userSelect='none'; document.addEventListener('mousemove',onMove); document.addEventListener('mouseup',onUp); e.preventDefault(); });
-  body.appendChild(msgs); body.appendChild(resizer); body.appendChild(elem('div',{class:'chat-input'},[ta,send]));
-  renderAgentMessages();
-}
-function syncSendButton(){
-  const b=$('#agent-send'); if(!b) return;
-  b.innerHTML=svg(agent.generating?'stop':'send'); b.title=agent.generating?'Stop':'Send';
-}
-async function agentSend(text){
-  text=(text||'').trim();
-  if(!text || agent.generating) return;
-  if(!agent.activeId || !agent.engine) return;
-  // Full chat history rides along — it is cheap now that documents are
-  // fetched on demand rather than sent up front. Clear is the reader's lever.
-  const history=agent.messages.filter(m=>(m.role==='user'||m.role==='assistant')&&m.content)
-    .map(m=>({role:m.role,content:m.content}));
-  const myCancel=agent.cancel={ turnStart:agent.messages.length, text, cancelled:false };
-  agent.messages.push({role:'user',from:'user',content:text});
-  agent.generating=true; renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
-  try { await agentSendLocal(text, history, myCancel); }
-  catch(e){ if(!myCancel.cancelled) console.error('[agent] send failed',e); }
-  if (agent.cancel===myCancel){ agent.generating=false; agent.cancel=null; syncAgentPill(); syncSendButton(); renderAgentLocal(); }
-}
-// "Pulled back" cancel: the whole turn is dropped as if it never happened and
-// the typed text goes back in the input for editing.
-async function agentCancel(){
-  const c=agent.cancel; if(!c || c.cancelled) return;
-  c.cancelled=true;
-  if (agent.engine) agent.engine.interruptGenerate().catch(()=>{});
-  agent.messages.length=c.turnStart;
-  agent.generating=false;
-  renderAgentMessages(); syncAgentPill(); syncSendButton(); renderAgentLocal();
-  const ta=$('#agent-input'); if(ta){ ta.value=c.text; ta.focus(); }
-}
-// One streamed completion. The reply shows live UNLESS it is a FETCH or MORE
-// directive — those are machinery, invisible to the reader; the bubble stays
-// on "Thinking…" through them. (Display is held for the first few characters
-// so a directive's prefix never flashes into view.)
-async function streamOnce(system, messages, idx, myCancel){
-  const convo=[{role:'system',content:system}, ...messages];
-  // max_tokens caps decode time — on a slow GPU an uncapped ramble is the
-  // difference between 30 seconds and 3 minutes. ~500 words of answer.
-  const chunks=await agent.engine.chat.completions.create({ messages:convo, stream:true, max_tokens:768 });
-  let acc='';
-  for await (const chunk of chunks){
-    if (myCancel.cancelled) return null;
-    acc += (chunk&&chunk.choices&&chunk.choices[0]&&chunk.choices[0].delta&&chunk.choices[0].delta.content)||'';
-    // The moment a directive line exists, this reply is machinery: pull any
-    // already-streamed preamble back off the screen and sit on "Thinking…".
-    if(/^[ \t]*(FETCH|MORE)\s*:/mi.test(acc)){
-      if(agent.messages[idx].content){ agent.messages[idx].content=''; renderAgentMessages(); }
-    } else if(acc.length>=8 || acc.includes('\n')){
-      agent.messages[idx].content=acc;
-      updateStreamingMessage();
-    }
-  }
-  return acc;
-}
-// The fetch loop: ask with no documents; if the model replies FETCH, resend
-// the same question with the requested documents attached; if it replies
-// MORE, resend with that document whole. Two rounds max, shared.
-async function agentSendLocal(text, history, myCancel){
-  if (myCancel.cancelled) return;
-  agent.messages.push({role:'assistant',from:'Servette',content:''});
-  const idx=agent.messages.length-1;
-  renderAgentMessages();
-  const MAX_FETCH_ROUNDS=2;
-  // Documents the reader named are attached up front — no judgment round.
-  const named=namedDocs(text);
-  const whole=new Set();   // names escalated to whole documents via MORE
-  let docs=named.length ? resolveDocs(named, text, whole) : null;
-  // The thinking clock: live seconds in the pending bubble (so a long prefill
-  // is visibly not a freeze), the total stamped on the reply when it lands.
-  const t0=performance.now();
-  const secsNow=()=>Math.round((performance.now()-t0)/1000);
-  let plannedChars=0, sentChars=0;
-  const tick=setInterval(()=>{
-    const m=agent.messages[idx];
-    if(!m || m.content){ return; }
-    const box=$('#agent-messages'); const last=box&&box.lastElementChild;
-    const span=last&&last.querySelector('.out-md span');
-    if(span) span.textContent='Thinking… '+fmtDur(secsNow())+estLabel(agent.perf, plannedChars, secsNow());
-  },1000);
-  try {
-    let finalText='';
-    for(let round=0;;round++){
-      const { system, messages } = assembleSight(text, history, docs, MAX_FETCH_ROUNDS-round);
-      plannedChars=system.length+messages.reduce((s,m)=>s+m.content.length,0);
-      sentChars+=plannedChars;
-      const reply=await streamOnce(system, messages, idx, myCancel);
-      if (reply==null) return;   // cancelled
-      const req  = round<MAX_FETCH_ROUNDS ? parseFetch(reply) : null;
-      const more = !req && round<MAX_FETCH_ROUNDS ? parseMore(reply) : null;
-      if (!req && !more){
-        finalText = /^[ \t]*(FETCH|MORE)\s*:/mi.test(reply)
-          ? "I couldn't settle that within my document budget — try asking about one thing at a time."
-          : reply;
-        break;
-      }
-      if (more) whole.add(more);
-      // Merge with anything already attached (pre-attached named documents
-      // must survive a follow-up fetch; a MORE re-resolves its excerpt as the
-      // whole document); bubble stays on "Thinking…".
-      docs=resolveDocs([...new Set([...(docs?docs.list.map(d=>d.name):[]), ...(req||[]), ...(more?[more]:[])])], text, whole);
-    }
-    agent.messages[idx].content=finalText||'(empty response)';
-    agent.messages[idx].secs=secsNow();
-    agent.messages[idx].fetched=docs?docs.list.map(d=>d.name+(d.excerpted?' (parts)':'')):[];
-    renderAgentMessages();
-  } catch(e){ if(!myCancel.cancelled){ agent.messages[idx].content='⚠️ '+agentFailText(e); agent.messages[idx].secs=secsNow(); console.error('[WebLLM] generate failed',e); renderAgentMessages(); } }
-  finally {
-    clearInterval(tick);
-    agent.perf=agent.perf||{chars:0,secs:0};
-    agent.perf.chars+=sentChars; agent.perf.secs+=Math.max(1,secsNow());
-  }
-}
-async function initAgent(){
-  renderAgentTab();
-  agent.gpu = await detectWebGPU();
-  renderAgentLocal();
-  if(agent.gpu && agent.gpu.supported) agentRefreshInstalled();
-}
-
-/* ════════════════════════════════════════════════════════════════════════════
  * 9. SELF-TESTS — doc-model byte-exactness and cell classification, plus a
  *    live check: every successfully fetched file round-trips byte-exact
  *    (serialize(doc) === the bytes fetched). Results toast; details go to the
@@ -2065,26 +1237,7 @@ function runSelfTests(){
     try{ ok('round-trip src/'+f.name, serialize(f.doc)===f.raw, 'serialize(doc) !== fetched bytes'); }
     catch(e){ ok('round-trip src/'+f.name,false,'threw '+e.message); }
   });
-  // the FETCH directive parser (the assistant's retrieval protocol)
   try {
-    const f1=parseFetch('FETCH: SERVER.md, README.md');
-    ok('FETCH parses', !!f1 && f1.join(',')==='SERVER.md,README.md');
-    const f2=parseFetch('  fetch: shell');
-    ok('FETCH normalizes case and suffix', !!f2 && f2.join(',')==='SHELL.md');
-    // observed in the field: the directive wrapped in politeness, on its own line
-    const f3=parseFetch('To answer accurately, I need the README. Please fetch it:\nFETCH: README.md');
-    ok('FETCH after preamble parses', !!f3 && f3.join(',')==='README.md');
-    ok('FETCH inline in prose is an answer', parseFetch('I would FETCH: SERVER.md if I could.')===null);
-    ok('FETCH unknown name → null', parseFetch('FETCH: nonsense')===null);
-    // the MORE escalation — one name, same own-line discipline
-    ok('MORE parses one name', parseMore('MORE: shell')==='SHELL.md');
-    ok('MORE after preamble parses', parseMore('The excerpts lack it.\nMORE: SERVER.md')==='SERVER.md');
-    ok('MORE inline in prose is an answer', parseMore('I would say MORE: SERVER.md matters.')===null);
-    ok('MORE unknown name → null', parseMore('MORE: nonsense')===null);
-    // named-document pre-attach — conservative matching, like the old interceptor's
-    ok('named: uppercase stem', namedDocs('What does SYSTEM do?').join(',')==='SYSTEM.md');
-    ok('named: lowercase bare stem passes', namedDocs('what does the system do?').length===0);
-    ok('named: .md any case', namedDocs('is shell.md big?').join(',')==='SHELL.md');
     // Navigator landmarks: all code cells, only heading-led md cells
     ok('nav: code cells are landmarks', navCell({type:'code',code:'x=1'})===true);
     ok('nav: heading md cells are landmarks', navCell({type:'md',code:'## Config\n\nprose'})===true);
@@ -2095,34 +1248,7 @@ function runSelfTests(){
        && codeLabel('\n# Named after a leading blank\nx=1')==='Named after a leading blank'
        && codeLabel('#!/usr/bin/env python3\nx=1')==='#!/usr/bin/env python3'
        && codeLabel('config = Config()')==='config = Config()');
-    // the thinking clock's formatter
-    ok('duration format', fmtDur(59)==='59s' && fmtDur(61)==='1m 1s' && fmtDur(264)==='4m 24s' && fmtDur(3600)==='1h' && fmtDur(3780)==='1h 3m');
-    // …and its expectation suffix: silent without data, a prediction while it
-    // holds, the honest observation once the clock passes it
-    const perf={chars:6000,secs:60};   // 100 chars/s → 3000 chars ≈ 30s
-    ok('estimate: silent without data', estLabel(null,3000,5)==='' && estLabel({chars:100,secs:2},3000,5)==='');
-    ok('estimate: prediction while under', estLabel(perf,3000,10)===' · about 30s expected');
-    ok('estimate: honest once exceeded', estLabel(perf,3000,31)===' · longer than expected');
-    ok('estimate: tiny reads stay quiet', estLabel(perf,300,1)==='');
-  } catch(e){ ok('FETCH parser',false,e.message); }
-  // cell-level excerpting — pure functions over a synthetic oversized doc
-  try {
-    ok('terms drop stopwords', questionTerms('Why is the scrypt limiter here?').join(',')==='scrypt,limiter');
-    const pad='```python\n'+'# filler line to pad the synthetic document past the threshold\n'.repeat(8)+'```\n\n';
-    const big='# HEAD\n\nintro prose\n\n'+pad.repeat(30)+'```python\ndef scrypt_check():\n    pass\n```\n\n'+pad.repeat(30);
-    const ex=excerptDoc('BIG.md', big, 'why scrypt?');
-    ok('excerpt: oversized file excerpts', ex.excerpted===true && ex.content.length<big.length);
-    ok('excerpt: match kept, elisions marked', ex.content.includes('scrypt_check') && ex.content.includes('elided'));
-    ok('excerpt: header orients', ex.content.includes('# HEAD'));
-    ok('excerpt: no match → honest note', excerptDoc('BIG.md', big, 'zebra quantum').content.includes('matched the question'));
-    ok('excerpt: small file goes whole', excerptDoc('S.md', '# tiny\n', 'anything').excerpted===false);
-    const esc=excerptDoc('BIG.md', big, 'why scrypt?', true);
-    ok('excerpt: MORE forces whole', esc.excerpted===false && !esc.content.includes('elided'));
-    // model-noise stripping — the README's logo/badges block, observed echoed as an "answer"
-    const dirty='<picture>\n<img src="x.svg">\n</picture>\n\n[![Tests](https://b.svg)](https://a)\n![Python](https://s.io/b.svg)\n\nReal prose stays.\n';
-    const cleaned=cleanForModel(dirty);
-    ok('clean: images and badges stripped, prose kept', !cleaned.includes('picture') && !cleaned.includes('b.svg') && cleaned.includes('Real prose stays.'));
-  } catch(e){ ok('excerpting',false,e.message); }
+  } catch(e){ ok('navigator/labels',false,e.message); }
   // the call-map extractor — pure function over a synthetic literate doc
   try {
     const d=parse('prose\n\n```python\ndef alpha():\n    return beta() + 1\n\ndef beta():\n    return 2\n\ndef gamma():\n    x = "beta"   # a name in a string, not a call\n    return alpha()\n```\n');
@@ -2149,8 +1275,6 @@ function switchTab(name){
   $$('#left-pane .pane-panel').forEach(p=>p.classList.toggle('active',p.dataset.tab===name));
 }
 function leftTabHooks(tab){
-  if (tab==='settings'){ renderAgentLocal(); if(!agent.installedChecked && agent.gpu && agent.gpu.supported) agentRefreshInstalled(); }
-  if (tab==='assistant') renderAgentTab();
 }
 function toggleLeftTab(tab){
   const btn=$('#left-activity-bar .activity-bar-btn[data-tab="'+tab+'"]');
@@ -2285,9 +1409,6 @@ function wire(){
   $('#btn-collapse-all').onclick=collapseAll;
   wireThemePicker();
   wireSearch();
-  $('#chat-clear').onclick=clearChat;
-  $('#chat-copy').onclick=copyChat;
-  $('#st-agent').onclick=()=>openTab('assistant');
   const ln=$('#opt-linenums'); ln.checked=nb.opts.lineNumbers;
   ln.onchange=()=>{ nb.opts.lineNumbers=ln.checked; renderNotebook(); };   // session-only
   setupLeftPane(); setupRightPane(); wireActivityBars();
@@ -2313,15 +1434,13 @@ async function boot(){
   $$('[title]:not([aria-label])').forEach(el=>el.setAttribute('aria-label', el.title));
   wire();
   initSettingsSections();
-  setAgent('idle');
   await fetchSources();
   renderNotebook();
   loadMarked();
-  initAgent();
   // expose for console / automation (the browser-verify run reads these; the
   // self-tests live here too — run NB.runSelfTests() in the console)
-  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests, assembleSight, parseFetch, parseMore, resolveDocs,
-                get files(){return nb.files;}, get agent(){return agent;} };
+  window.NB = { parse, serialize, renderMarkdownHTML, runSelfTests,
+                get files(){return nb.files;} };
 }
 boot();
 </script>

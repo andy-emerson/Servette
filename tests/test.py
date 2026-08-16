@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-test.py — Automated tests for servette.py
+test.py — Automated tests for the servette package
 
-Run from inside the managed virtualenv:
-    .servette-env/bin/python3 test.py
-
-Or, after first-run bootstrap:
-    sudo python3 servette.py   # triggers bootstrap
-    .servette-env/bin/python3 test.py
+Run with any Python 3.11+ that has the one dependency:
+    python3 -m venv .venv && .venv/bin/pip install cryptography
+    .venv/bin/python3 tests/test.py
 """
 
 import base64
@@ -31,9 +28,10 @@ import time
 import urllib.error
 import urllib.request
 
-# test.py lives in tests/; the repo root (containing servette.py and servette.toml) is its parent.
+# test.py lives in tests/; the repo root (containing the servette/ package) is its parent.
 SERVETTE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, SERVETTE_DIR)  # so `import servette` resolves to the file under test
+sys.path.insert(0, SERVETTE_DIR)  # so `import servette` resolves to the package under test
+os.environ["SERVETTE_HOME"] = SERVETTE_DIR  # data dir = the repo, as a dev checkout runs
 TEST_PORT    = 8443
 BASE_URL     = f"https://127.0.0.1:{TEST_PORT}"
 TEST_HTML    = "<!DOCTYPE html><html><body><p>Servette test</p></body></html>"
@@ -343,8 +341,9 @@ serve_dir = "b"
 
         # Migration under a Python without cryptography must defer rather than
         # persist an empty domain (which would demote the site to the
-        # domainless catch-all: no HSTS, no renewal). The venv re-exec re-runs
-        # the migration with cryptography available.
+        # domainless catch-all: no HSTS, no renewal). A later load with
+        # cryptography available completes it — under a pip install the
+        # dependency is always present, so this is defense in depth.
         with open(s.Config.CONFIG_FILE, "w") as f:
             f.write(f'serve_dir = "myserve"\ncert_file = "{cert_path}"\nkey_file = "{key_path}"\n')
         saved_crypto = sys.modules.get("cryptography")
@@ -686,14 +685,6 @@ serve_dir = "b"
     check("printable path kept",  s._loggable("/a/b?c=1")  == "/a/b?c=1")
     check("non-ASCII kept as-is", s._loggable("/café") == "/café")
 
-    section("_is_downgrade (update version floor)")
-
-    check("older patch is a downgrade",            s._is_downgrade("0.26.219", "0.26.3"))
-    check("newer patch is not a downgrade",        not s._is_downgrade("0.26.3", "0.26.219"))
-    check("equal version is not a downgrade",      not s._is_downgrade("1.2.3", "1.2.3"))
-    check("a higher major is not a downgrade",     not s._is_downgrade("0.26.219", "1.0.0"))
-    check("an uncomparable version never blocks",  not s._is_downgrade("1.2.3", "2.0rc1"))
-
     section("_format_uptime")
 
     check("Seconds",  s._format_uptime(45)    == "45s")
@@ -778,79 +769,6 @@ serve_dir = "b"
         os.umask(saved_umask)
         shutil.rmtree(kd, ignore_errors=True)
 
-    section("release.py: signs matching artifacts, refuses everything else")
-
-    # Drive src/release.py's prepare() against a miniature fixture repo whose
-    # pinned public key is a test keypair's, so the happy path can actually sign.
-    import importlib.util
-    src_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
-    if src_dir not in sys.path:
-        sys.path.insert(0, src_dir)
-    spec = importlib.util.spec_from_file_location("release", os.path.join(src_dir, "release.py"))
-    release = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(release)
-
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as _EdPriv
-    from cryptography.hazmat.primitives.serialization import (
-        Encoding as _Enc, PublicFormat as _PubF, PrivateFormat as _PrivF, NoEncryption as _NoEnc)
-    rkey     = _EdPriv.generate()
-    rpub_hex = rkey.public_key().public_bytes(_Enc.Raw, _PubF.Raw).hex()
-
-    fix = tempfile.mkdtemp()
-    os.makedirs(os.path.join(fix, "src"))
-    fence = "```python"
-    init_md = (f"{fence}\n__version__ = \"9.9.9\"\n"
-               f"_SIGNING_PUBLIC_KEY = \"{rpub_hex}\"\n```\n")
-    with open(os.path.join(fix, "src", "INIT.md"), "w") as f:
-        f.write(init_md)
-    for name in ("SERVER.md", "SYSTEM.md", "SHELL.md", "MAIN.md"):
-        with open(os.path.join(fix, "src", name), "w") as f:
-            f.write(f"{fence}\n```\n")
-    import build as _build_mod
-    with open(os.path.join(fix, "servette.py"), "w") as f:
-        f.write(_build_mod.build(os.path.join(fix, "src")))
-    key_pem = os.path.join(fix, "key.pem")
-    with open(key_pem, "wb") as f:
-        f.write(rkey.private_bytes(_Enc.PEM, _PrivF.PKCS8, _NoEnc()))
-    out = os.path.join(fix, "dist")
-
-    version = release.prepare(fix, key_pem, out)
-    check("prepare returns the fixture version", version == "9.9.9")
-    check("dist holds both assets",
-          all(os.path.isfile(os.path.join(out, n)) for n in
-              ("servette.py", "servette.py.sig")))
-    sig_ok = True
-    try:
-        rkey.public_key().verify(open(os.path.join(out, "servette.py.sig"), "rb").read(),
-                                 open(os.path.join(out, "servette.py"), "rb").read())
-    except Exception:
-        sig_ok = False
-    check("The signature verifies against the pinned key", sig_ok)
-
-    with open(os.path.join(fix, "servette.py"), "a") as f:
-        f.write("# drift\n")
-    try:
-        release.prepare(fix, key_pem, out)
-        refused = ""
-    except SystemExit as e:
-        refused = str(e)
-    check("Drifted servette.py is refused", "drifted" in refused)
-    with open(os.path.join(fix, "servette.py"), "w") as f:
-        f.write(_build_mod.build(os.path.join(fix, "src")))
-
-    wrong_pem = os.path.join(fix, "wrong.pem")
-    with open(wrong_pem, "wb") as f:
-        f.write(_EdPriv.generate().private_bytes(_Enc.PEM, _PrivF.PKCS8, _NoEnc()))
-    try:
-        release.prepare(fix, wrong_pem, out)
-        refused = ""
-    except SystemExit as e:
-        refused = str(e)
-    check("A key that doesn't match the pinned public key is refused",
-          "does not match" in refused)
-    shutil.rmtree(fix, ignore_errors=True)
-
-
 def run_dispatch_tests(s):
     # Covers two seams the live-server tests can't reach:
     #   - the port-80 _RedirectHandler (HTTP->HTTPS redirect + ACME HTTP-01 challenge
@@ -860,61 +778,6 @@ def run_dispatch_tests(s):
     # Full Let's Encrypt issuance and systemd integration need external
     # infrastructure and remain integration-territory, intentionally uncovered.
     import builtins, io, contextlib
-
-    section("Bootstrap: Debian's SystemExit venv failure triggers package recovery")
-
-    # Debian/Ubuntu patch their venv module to print apt instructions and
-    # *exit* — via SystemExit, which is not an Exception — instead of raising.
-    # Drive _bootstrap through exactly that failure: venv.create exits like
-    # Debian's does, the package-manager recovery must run, the retried
-    # creation must succeed, and the re-exec must be reached. Before the fix
-    # the SystemExit escaped _create_venv and the recovery was dead code on
-    # the platforms it exists for.
-    import venv as venv_mod
-    calls = {"create": 0, "run": [], "execv": None}
-    tmp_venv = os.path.join(tempfile.mkdtemp(), "venv")
-
-    def fake_create(path, with_pip=True, clear=False):
-        calls["create"] += 1
-        if calls["create"] == 1:
-            raise SystemExit(1)              # what Debian's patched venv does
-        os.makedirs(os.path.join(path, "bin"), exist_ok=True)
-
-    def fake_run(argv, **kw):
-        calls["run"].append(list(argv))
-        return subprocess.CompletedProcess(argv, 0)
-
-    def fake_execv(path, argv):
-        calls["execv"] = (path, argv)
-        raise RuntimeError("stop-at-exec")   # halt where _bootstrap would re-exec
-
-    saved_boot = (venv_mod.create, s.subprocess.run, s.shutil.which, s.os.execv,
-                  s._VENV_DIR, s._VENV_PY)
-    try:
-        venv_mod.create  = fake_create
-        s.subprocess.run = fake_run
-        s.shutil.which   = lambda name: f"/usr/bin/{name}"
-        s.os.execv       = fake_execv
-        s._VENV_DIR = tmp_venv
-        s._VENV_PY  = os.path.join(tmp_venv, "bin", "python3")
-        halted = False
-        with contextlib.redirect_stdout(io.StringIO()):
-            try:
-                s._bootstrap()
-            except RuntimeError as e:
-                halted = str(e) == "stop-at-exec"
-    finally:
-        (venv_mod.create, s.subprocess.run, s.shutil.which, s.os.execv,
-         s._VENV_DIR, s._VENV_PY) = saved_boot
-
-    apt = [argv for argv in calls["run"] if argv and argv[0] == "apt-get"]
-    check("SystemExit from venv.create reaches the recovery, not the exit",
-          calls["create"] == 2)
-    check("Recovery installs the distro venv package via apt-get",
-          len(apt) == 1 and apt[0][:3] == ["apt-get", "install", "-y"]
-          and apt[0][3].endswith("-venv"))
-    check("Bootstrap proceeds to the re-exec after recovery", halted)
-    shutil.rmtree(os.path.dirname(tmp_venv), ignore_errors=True)
 
     def redirect_request(method, path, headers=None):
         """Drive one request through _RedirectHandler on an ephemeral port."""
@@ -998,7 +861,7 @@ def run_dispatch_tests(s):
                    ("cmd_status", "cmd_start", "stop_server", "cmd_pull", "cmd_restore_site")}
     saved_input = builtins.input
     try:
-        s.cmd_status       = lambda: calls.append("status")
+        s.cmd_status       = lambda json_mode=False: calls.append("status")
         s.cmd_start        = lambda: calls.append("start")
         s.stop_server      = lambda: calls.append("stop")
         s.cmd_pull         = lambda site: calls.append(("pull", site))
@@ -1022,70 +885,213 @@ def run_dispatch_tests(s):
     check("'pull 99' (bad site index) does not call cmd_pull", len(pull_calls) == 1)
     check("'quit' stops server and exits", calls[-1] == "stop")
 
-    section("Post-update reload")
+    section("One-shot CLI: run_command and set")
 
-    # _apply_post_update runs immediately after 'update' re-execs into the new
-    # file. Drive it with the real file-system checks stubbed out (they need
-    # root/systemd) and verify it refreshes the unit and restarts only when a
-    # service is actually enabled — and that a refresh failure is contained
-    # rather than raised.
-    saved = {n: getattr(s, n) for n in
-             ("_service_file_exists", "_write_unit_files", "_service_is_active", "_reload_server")}
+    # The read half: status --json / sites --json parse and carry the shape
+    # external tooling depends on.
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        handled = s.run_command("status", ["--json"])
+    data = json.loads(buf.getvalue())
+    check("status --json is handled and parses",  handled and isinstance(data, dict))
+    check("status --json carries version/running/sites/issues",
+          {"version", "running", "mode", "sites", "issues", "warnings"} <= set(data))
+    check("status --json reports the running version", data["version"] == s.__version__)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        s.run_command("sites", ["--json"])
+    sites = json.loads(buf.getvalue())
+    check("sites --json lists every site with its shape",
+          len(sites) == len(s.config.sites)
+          and {"index", "domain", "serve_dir", "auth", "cert_days", "publish"} <= set(sites[0]))
+    saved_walkers = (s._cache_warnings, s._service_is_active)
+    walked = []
     try:
-        calls = []
-        s._service_file_exists = lambda: True
-        s._write_unit_files    = lambda: calls.append("write") or True
-        s._service_is_active   = lambda: True
-        s._reload_server       = lambda: calls.append("reload")
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s._apply_post_update()
-        check("Enabled service: unit refreshed and reloaded", calls == ["write", "reload"])
-        check("Prints the version it reloaded to", f"v{s.__version__}" in buf.getvalue())
-
-        calls = []
-        s._service_file_exists = lambda: False
+        s._cache_warnings    = lambda: walked.append("walk") or []
+        s._service_is_active = lambda: walked.append("systemctl") or False
         with contextlib.redirect_stdout(io.StringIO()):
-            s._apply_post_update()
-        check("No service enabled: unit left untouched", calls == [])
-
-        s._service_file_exists = lambda: True
-        s._write_unit_files    = lambda: (_ for _ in ()).throw(subprocess.CalledProcessError(1, "x"))
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s._apply_post_update()  # must not raise
-        check("A failed unit refresh is contained, not raised",
-              "Could not refresh" in buf.getvalue())
+            s.run_command("sites", ["--json"])
+        check("sites --json pays no status-wide cost (no walk, no systemctl)",
+              walked == [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.run_command("status", ["--json"])
+        check("status --json still gathers the full snapshot", set(walked) == {"walk", "systemctl"})
     finally:
-        for n, fn in saved.items():
-            setattr(s, n, fn)
+        s._cache_warnings, s._service_is_active = saved_walkers
+    check("An unknown command is not handled (the argv form exits 2 on this)",
+          s.run_command("bogus", []) is False)
 
-    section("Restore command")
-    # cmd_restore swaps servette.py.bak back into place and consumes it. Drive it
-    # against a throwaway servette.py/.bak by pointing the module's __file__ there
-    # and auto-confirming the prompt; no service, no real file is touched.
-    rdir = tempfile.mkdtemp()
-    sv   = os.path.join(rdir, "servette.py")
-    bak  = sv + ".bak"
-    with open(sv, "w")  as f: f.write('__version__ = "9.9.9"\n')
-    with open(bak, "w") as f: f.write('__version__ = "8.8.8"\n')
-    saved = {n: getattr(s, n) for n in ("__file__", "_prompt", "_service_is_active", "_server_running")}
+    # The write half: set validates every pair before applying any.
+    saved_set   = {n: getattr(s.config, n) for n in ("port", "trusted_proxy")}
+    saved_site  = (s.config.sites[0].publish_url, s.config.sites[0].publish_key)
+    saved_save  = s.Config.save
+    save_count  = []
     try:
-        s.__file__           = sv
-        s._prompt            = lambda *a, **k: True
-        s._service_is_active = lambda: False
-        s._server_running    = lambda: False
+        s.Config.save = lambda self: save_count.append(1)
+        good_key = "ab" * 32
         with contextlib.redirect_stdout(io.StringIO()):
-            s.cmd_restore()
-        check("restore swaps the backup into place", open(sv).read().strip() == '__version__ = "8.8.8"')
-        check("restore consumes the backup",         not os.path.exists(bak))
+            s.cmd_set(["0", "publish_url=https://cdn.example/bundle.tar.gz",
+                       f"publish_key={good_key}", "port=8444"])
+        check("set applies validated site and host pairs",
+              s.config.sites[0].publish_url == "https://cdn.example/bundle.tar.gz"
+              and s.config.sites[0].publish_key == good_key
+              and s.config.port == 8444)
+        check("set saves once per successful call", save_count == [1])
 
-        # With no backup present, restore is a no-op that leaves the file alone.
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["port=99999", "trusted_proxy=10.0.0.1"])
+        check("set rejects a bad pair and applies nothing from the call",
+              "port" in buf.getvalue() and s.config.port == 8444
+              and s.config.trusted_proxy == saved_set["trusted_proxy"]
+              and save_count == [1])
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["publish_key=nothex"])
+        check("set rejects a malformed publish key",
+              "64 hex" in buf.getvalue() and s.config.sites[0].publish_key == good_key)
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["password=hunter2"])
+        check("set refuses unknown keys (password is interactive-only)",
+              "Unknown or malformed" in buf.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["dir=/etc"])
+        check("set refuses a dir outside the data directory",
+              "must live under" in buf.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["dir=no-such-folder-xyz"])
+        check("set refuses a dir that doesn't exist (mirrors the interactive rule)",
+              "not found" in buf.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["99", "username=x"])
+        check("set refuses a site index that doesn't exist", "No site 99" in buf.getvalue())
+
+        # Without root, the config write fails with a hint, not a traceback.
+        s.Config.save = lambda self: (_ for _ in ()).throw(PermissionError())
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["port=8445"])
+        check("set without root hints at sudo instead of dying",
+              "requires sudo" in buf.getvalue())
+        s.Config.save = lambda self: save_count.append(1)
+    finally:
+        s.Config.save = saved_save
+        for n, v in saved_set.items():
+            setattr(s.config, n, v)
+        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_site
+
+    # Every save restores the service user's read access — a root-owned 0600
+    # config from `sudo servette set` would otherwise kill the running service.
+    saved_chown = s._chown_servette
+    chowned = []
+    try:
+        s._chown_servette = lambda path: chowned.append(path)
+        s.config.save()
+        check("save() re-chowns the config for the service user",
+              chowned == [s.config.CONFIG_FILE])
+    finally:
+        s._chown_servette = saved_chown
+
+    # One-shot dispatch: --serve is positional, so a stray flag in a command's
+    # arguments stays an argument instead of silently becoming the server.
+    saved_argv  = sys.argv
+    saved_main  = {n: getattr(s, n) for n in ("run_command", "start_server")}
+    try:
+        routed = []
+        s.run_command  = lambda cmd, args: routed.append((cmd, args)) or True
+        s.start_server = lambda: routed.append("SERVE")
+        sys.argv = ["servette", "status", "--serve"]
+        s.main()
+        check("A trailing --serve stays a command argument",
+              routed == [("status", ["--serve"])])
+    finally:
+        sys.argv = saved_argv
+        for n, v in saved_main.items():
+            setattr(s, n, v)
+
+    section("Startup refresh (stale units)")
+
+    # The package manager delivers new code but cannot touch systemd units;
+    # _startup_refresh reconciles at shell launch. The version stamp makes a
+    # pip upgrade (which changes no directive) read as stale, and the
+    # environment-drift gate keeps a stale unit from being adopted by a shell
+    # launched from a different data dir or interpreter.
+    udir = tempfile.mkdtemp()
+    saved = {n: getattr(s, n) for n in
+             ("SERVICE_PATH", "NETWATCH_PATH", "_service_file_exists",
+              "_write_unit_files", "_service_is_active", "_reload_server")}
+    try:
+        s.SERVICE_PATH  = os.path.join(udir, "servette.service")
+        s.NETWATCH_PATH = os.path.join(udir, "servette-netwatch")
+        s._service_file_exists = lambda: os.path.exists(s.SERVICE_PATH)
+        check("No service installed: nothing is stale", s._stale_units() == [])
+
+        texts = s._desired_units()
+        for path, unit_text in texts.items():
+            with open(path, "w") as f:
+                f.write(unit_text)
+        check("Exactly what this version writes: nothing is stale", s._stale_units() == [])
+        check("Every unit carries the generating version stamp",
+              all(t.startswith(f"# generated by servette {s.__version__}\n")
+                  for t in texts.values()))
+        check("Matching environment: no drift", s._service_env_drift() == [])
+
+        # A pip upgrade changes no directive — the stamp alone must flag it,
+        # or an upgraded host's service would keep running the old code.
+        saved_ver = s.__version__
+        s.__version__ = "9.9.9"
+        stale = s._stale_units()
+        s.__version__ = saved_ver
+        check("A version change alone marks every unit stale", len(stale) == 3)
+
+        os.remove(s.NETWATCH_PATH + ".timer")
+        check("A missing unit file is stale (a release that adds one)",
+              s.NETWATCH_PATH + ".timer" in s._stale_units())
+
+        calls = []
+        s._write_unit_files  = lambda: calls.append("write") or True
+        s._service_is_active = lambda: True
+        s._reload_server     = lambda: calls.append("reload")
         with contextlib.redirect_stdout(io.StringIO()):
-            s.cmd_restore()
-        check("restore with no backup leaves file unchanged", open(sv).read().strip() == '__version__ = "8.8.8"')
+            s._startup_refresh()
+        check("Stale units, matching environment: refreshed and reloaded",
+              calls == ["write", "reload"])
+
+        # Environment drift: stale, but never silently adopted.
+        with open(s.SERVICE_PATH, "w") as f:
+            f.write("# generated by servette 0.0.0\n[Unit]\n[Service]\n"
+                    "Environment=SERVETTE_HOME=/somewhere/else\n"
+                    f"ExecStart={s._unit_python_path()} -m servette --serve\n")
+        check("A different data directory reads as drift",
+              any("data directory" in d for d in s._service_env_drift()))
+        calls = []
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s._startup_refresh()
+        check("Drifted environment: reported, units left untouched",
+              calls == [] and "different environment" in buf.getvalue())
+
+        # A unit that predates the data directory is drift too — migration
+        # is the operator's decision, made through an explicit 'enable'.
+        with open(s.SERVICE_PATH, "w") as f:
+            f.write("[Unit]\n[Service]\nExecStart=/usr/bin/python3 /root/servette.py --serve\n")
+        check("A pre-data-dir unit reads as drift",
+              any("predates" in d for d in s._service_env_drift()))
+
+        # Stale with matching environment but no root: fails soft with a hint.
+        for path, unit_text in texts.items():
+            with open(path, "w") as f:
+                f.write(unit_text)
+        with open(s.SERVICE_PATH, "w") as f:
+            f.write(texts[s.SERVICE_PATH].replace(s.__version__, "0.0.0", 1))
+        s._write_unit_files = lambda: (_ for _ in ()).throw(PermissionError())
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s._startup_refresh()
+        check("A refresh that needs root fails soft with a hint",
+              "run 'enable'" in buf.getvalue())
     finally:
         for n, v in saved.items():
             setattr(s, n, v)
-        shutil.rmtree(rdir, ignore_errors=True)
+        shutil.rmtree(udir, ignore_errors=True)
 
     section("Placeholder page: marker rules")
 
@@ -1165,7 +1171,7 @@ def run_dispatch_tests(s):
         s.urllib.request.urlopen    = saved_urlopen
         shutil.rmtree(setup_dir, ignore_errors=True)
 
-    section("Placeholder page: post-update refreshes only marked placeholders")
+    section("Placeholder page: startup refresh rewrites only marked placeholders")
 
     pu_marked   = tempfile.mkdtemp(dir=s.BASE_DIR)
     pu_owned    = tempfile.mkdtemp(dir=s.BASE_DIR)
@@ -1182,10 +1188,10 @@ def run_dispatch_tests(s):
         if two_sites:
             s.config.sites[1].serve_dir = pu_owned
         with contextlib.redirect_stdout(io.StringIO()):
-            s._apply_post_update()
-        check("Post-update refreshes the marked page to the embedded placeholder",
+            s._startup_refresh()
+        check("Startup refresh rewrites the marked page to the embedded placeholder",
               open(os.path.join(pu_marked, "index.html"), "rb").read() == s._PLACEHOLDER_PAGE)
-        check("Post-update leaves the operator page alone",
+        check("Startup refresh leaves the operator page alone",
               open(os.path.join(pu_owned, "index.html"), "rb").read() == b"operator content")
     finally:
         for n, v in saved_pu.items():
@@ -2330,16 +2336,8 @@ def run_server_tests(s, serve_dir):
           resp.status == 200 and "application/json" in resp.headers.get("Content-Type", ""))
     data = json.loads(resp.body)
     check("Reports the running version", data["running"] == s.__version__)
-    check("No backup present → backup is null", data["backup"] is None)
-
-    bak_path = os.path.abspath(s.__file__) + ".bak"
-    with open(bak_path, "w") as f:
-        f.write('__version__ = "1.2.3"\n')
-    try:
-        data = json.loads(req("GET", "/.well-known/servette", auth=("testuser", "testpass")).body)
-        check("Existing .bak's version is reported", data["backup"] == "1.2.3")
-    finally:
-        os.remove(bak_path)
+    check("Reports nothing else — the running version is the whole body",
+          set(data) == {"running"})
 
     check("HEAD with credentials → 200 with an empty body",
           req("HEAD", "/.well-known/servette", auth=("testuser", "testpass")).status == 200
@@ -2564,9 +2562,8 @@ def run_install_tests(s, tmpdir):
     section("Service file content")
 
     # Test the real generated unit, not a reconstructed copy.
-    servette_path = os.path.abspath(s.__file__)
-    python_path   = s._VENV_PY if os.path.exists(s._VENV_PY) else "python3"
-    service = s._systemd_unit(python_path, servette_path)
+    package_dir = os.path.dirname(os.path.abspath(s.__file__))
+    service     = s._systemd_unit(sys.executable, package_dir)
     check("Service runs as the least-privilege user",  "User=servette" in service)
     check("Capabilities bounded to net-bind only",     "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" in service)
     check("NoNewPrivileges is set",                    "NoNewPrivileges=yes" in service)
@@ -2574,18 +2571,40 @@ def run_install_tests(s, tmpdir):
     check("Private /tmp",                              "PrivateTmp=yes" in service)
     check("Writes confined to BASE_DIR + ACME webroot",
           f"ReadWritePaths={s.BASE_DIR} {s.ACME_WEBROOT}" in service)
+    check("The service resolves the same data dir the enabling shell did",
+          f"Environment=SERVETTE_HOME={s.BASE_DIR}" in service)
     ro_line = next((l for l in service.splitlines() if l.startswith("ReadOnlyPaths=")), "")
-    check("The source file is pinned read-only within the writable dir (#47)",
-          servette_path in ro_line)
-    check("The managed venv is pinned read-only",
-          s._VENV_DIR in ro_line)
+    check("The package is pinned read-only — holds even for a checkout inside the data dir (#47)",
+          package_dir in ro_line)
+    check("The service starts the package with the enabling shell's interpreter",
+          f"ExecStart={sys.executable} -m servette --serve" in service)
+    check("PYTHONPATH resolves -m servette for checkout deployments",
+          f"Environment=PYTHONPATH={os.path.dirname(package_dir)}" in service)
+    pip_unit = s._systemd_unit(sys.executable, "/v/lib/python3.11/site-packages/servette")
+    check("A pip-installed package gets no PYTHONPATH (nothing to widen)",
+          "PYTHONPATH" not in pip_unit)
+
+    # Paths systemd cannot carry are refused, not encoded wrongly.
+    saved_base = s.BASE_DIR
+    saved_sfe  = s._service_file_exists
+    try:
+        s.BASE_DIR = "/tmp/has space"
+        check("A whitespace path is flagged unsafe for units",
+              s._unsafe_unit_path() == "/tmp/has space")
+        s._service_file_exists = lambda: True
+        check("Unsafe paths short-circuit staleness (no rewrite loop)",
+              s._stale_units() == [])
+    finally:
+        s.BASE_DIR = saved_base
+        s._service_file_exists = saved_sfe
+    check("A clean path is not flagged", s._unsafe_unit_path() is None)
 
     # Validate the real unit with systemd-analyze where available (Ubuntu CI has it;
     # skipped on macOS / non-systemd hosts). Catches typo'd or unknown directives.
     if shutil.which("systemd-analyze"):
         unit_path = os.path.join(tmpdir, "servette.service")
         with open(unit_path, "w") as f:
-            f.write(s._systemd_unit(sys.executable, os.path.abspath(s.__file__)))
+            f.write(s._systemd_unit(sys.executable, package_dir))
         out  = subprocess.run(["systemd-analyze", "verify", unit_path], capture_output=True, text=True)
         text = (out.stdout + out.stderr).lower()
         check("systemd-analyze verify: no unknown directives",
@@ -2618,6 +2637,40 @@ def run_install_tests(s, tmpdir):
             text = (out.stdout + out.stderr).lower()
             check(f"systemd-analyze verify {name}: no unknown directives",
                   "unknown lvalue" not in text and "unknown key name" not in text)
+
+    section("Site content ownership (operator, not service)")
+
+    # The servette user only reads site content; the operator must be able to
+    # scp into the folder without sudo. _operator_user picks the human behind
+    # sudo when there is one.
+    saved_sudo = os.environ.get("SUDO_USER")
+    try:
+        os.environ["SUDO_USER"] = "deploybot"
+        check("Under sudo, the site folder goes to the invoking user",
+              s._operator_user() == "deploybot")
+        os.environ.pop("SUDO_USER")
+        import getpass as _getpass
+        check("Without sudo, it goes to the current user",
+              s._operator_user() == _getpass.getuser())
+
+        # The plan grants read to the servette group alone — never the world,
+        # so a .env/.git dragged into a site isn't flipped world-readable.
+        os.environ["SUDO_USER"] = "deploybot"
+        saved_exists = s._servette_user_exists
+        s._servette_user_exists = lambda: True
+        plan = s._operator_chown_plan("/data/site")
+        check("With the service user: owner operator, group servette, g+rX only",
+              plan == [["chown", "-R", "deploybot:servette", "/data/site"],
+                       ["chmod", "-R", "g+rX", "/data/site"]])
+        check("No world-readable bit anywhere in the plan",
+              not any("a+rX" in " ".join(argv) for argv in plan))
+        s._servette_user_exists = lambda: False
+        check("Before the service user exists: ownership only",
+              s._operator_chown_plan("/data/site") == [["chown", "-R", "deploybot", "/data/site"]])
+        s._servette_user_exists = saved_exists
+    finally:
+        if saved_sudo is not None:
+            os.environ["SUDO_USER"] = saved_sudo
 
     section("Swap recommendation (supply and demand)")
 
@@ -2847,17 +2900,6 @@ def run_install_tests(s, tmpdir):
         sock_a.close()
         sock_b.close()
         cap_srv.server_close()
-
-    section("Update downloads pinned to GitHub")
-
-    check("HTTPS github.com asset accepted",
-          s._release_asset_url_ok("https://github.com/a/b/releases/download/v1/servette.py"))
-    check("Other host rejected",
-          not s._release_asset_url_ok("https://evil.example/servette.py"))
-    check("Plain HTTP rejected",
-          not s._release_asset_url_ok("http://github.com/a/b/servette.py"))
-    check("Userinfo spoof rejected",
-          not s._release_asset_url_ok("https://github.com@evil.example/servette.py"))
 
     section("In-service cert reload exits for systemd")
 

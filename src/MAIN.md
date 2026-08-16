@@ -17,19 +17,25 @@ One `Config` for the whole process, created here at the bottom of the file rathe
 
 ```python
 
+# The data directory must exist before the singleton loads from it. Unwritable
+# (not root on a fresh host) is not fatal: config falls back to defaults and
+# read-only commands still work — the first privileged command creates it.
+try:
+    os.makedirs(BASE_DIR, exist_ok=True)
+except OSError:
+    pass
+
 # The config singleton
 config = Config()
 
 ```
 
-Three ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. A completed self-update relaunches with `--post-update`: apply what the new version needs, then hand over to the shell. A person just runs the file — and gets the shell.
+Three ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. `servette <command>` runs one shell command and exits — the form external tooling drives (over SSH, which is the authentication), sharing the interactive shell's dispatcher so the two surfaces cannot drift; it exits 2 on an unknown command, and deliberately skips the startup refresh so `status --json` output stays parseable. Bare `servette` is the interactive shell. (`python -m servette` is the same entry through `__main__.py`.)
 
 ```python
 # The entry point
-if __name__ == "__main__":
-    _bootstrap()  # no-op if already in venv; otherwise re-execs into venv
-
-    if "--serve" in sys.argv:
+def main():
+    if sys.argv[1:2] == ["--serve"]:
         start_server()
         try:
             _watch_server()
@@ -38,9 +44,15 @@ if __name__ == "__main__":
         else:
             log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
             sys.exit(1)
-    elif "--post-update" in sys.argv:
-        _apply_post_update()
-        shell()
+    elif len(sys.argv) > 1:
+        cmd, args = sys.argv[1].lower(), sys.argv[2:]
+        if not run_command(cmd, args):
+            print(f"Unknown command: {cmd}. Run 'servette' for the interactive shell and its command list.")
+            sys.exit(2)
     else:
         shell()
+
+
+if __name__ == "__main__":
+    main()
 ```

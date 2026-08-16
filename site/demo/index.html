@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<!-- servette:demo — Servette's placeholder page. This marker is how `update`
-     tells its own page from yours: with it present the page is refreshed on
-     update, without it the file is left alone. Delete this line to adopt the
-     page as your own and Servette will never touch it again. -->
+<!-- site/demo — the website's live demo: the connection self-test at
+     demo.servette.org, linked from the home page. Its checks are deliberate
+     duplicates of site/pub/selftest/index.html's — no build step shares
+     them, so a change to either page's checks belongs in both. -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -284,8 +284,8 @@
     own site</b> — these results describe only the one you reached. Off the
     request path it runs as a <b>supervised service</b> that restarts on boot,
     <b>drops privileges</b> once the ports are bound, <b>renews its certificate</b>
-    automatically, verifies <b>signed updates</b> against a pinned key, and takes
-    a <b>backup</b> before every change it makes to itself. And nothing above
+    automatically, and accepts new site content only as <b>signed bundles</b> the
+    operator pulls on purpose. And nothing above
     happens while it is answering you: by design, <b>no request ever reaches a
     write</b>. <a href="https://servette.org">servette.org</a> describes the whole of it.
   </p>

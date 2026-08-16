@@ -12,7 +12,7 @@
 
 ---
 
-Servette is a production nanoserver. The `http.server` module in Python's standard library is the canonical nanoserver: it serves a folder in one command and, by its own documentation, is not built for production. Servette builds on that same `http.server` and adds everything the public internet demands: a trusted certificate that renews itself, HTTP redirected up to HTTPS, security headers on every response, rate limiting, password protection (optional), and a hardened service that survives reboots. No configuration language to learn, automatic certificate management, and a single dependency it installs for you. Copy one file to a server, run it, follow the wizard, done.
+Servette is a production nanoserver. The `http.server` module in Python's standard library is the canonical nanoserver: it serves a folder in one command and, by its own documentation, is not built for production. Servette builds on that same `http.server` and adds everything the public internet demands: a trusted certificate that renews itself, HTTP redirected up to HTTPS, security headers on every response, rate limiting, password protection (optional), and a hardened service that survives reboots. No configuration language to learn, automatic certificate management, and a single dependency the install brings with it. Install the package, run `servette`, follow the wizard, done.
 
 Most ways to serve a website sit at an extreme. **General-purpose servers** (nginx, Apache, Caddy) do *everything*: any site at any scale, once you have configured them. **Development servers** (`http.server`) do *one thing*: serve a folder right now, and stop there. **Managed platforms** (GitHub Pages, Netlify, Vercel) do it *for* you, on infrastructure and terms that are theirs, not yours.
 
@@ -25,23 +25,23 @@ The tools closest in spirit are small and focused, like Servette. Here is how a 
 | **Built for** | static sites | dynamic web apps | static sites | static sites |
 | Automatic trusted HTTPS | ✓ | ✗ | ✓ | ✗ |
 | Hardened for production | ✓ | ✗ | ✗ | ~ |
-| Readable source | ~3,000 lines | ~4,600 lines | binary | binary |
+| Readable source | ~3,900 lines | ~4,600 lines | binary | binary |
 | Actively maintained | ✓ | ✓ | ✗ | ✓ |
 | Runs on a Raspberry Pi out of the box | ✓ | ✓ | ✗ | ✗ |
 
-All of these are excellent at what they are built for. None of them do what Servette does: serve a static site you own, securely, on the public internet, from a single file you can read.
+All of these are excellent at what they are built for. None of them do what Servette does: serve a static site you own, securely, on the public internet, from a single module you can read.
 
 ---
 
 ## Who is Servette for?
 
-**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable file (~3,000 lines of Python, no hidden machinery) that you can follow top to bottom in an afternoon.
+**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~3,900 lines of Python, no hidden machinery) that you can follow top to bottom in an afternoon.
 
 **People with a real site that needs a real server.** Development servers (like `http.server`) are perfect while you build, but they are not meant to face the internet (no trusted HTTPS, no auth, gone when you close the terminal). Servette is built to stay up: a trusted certificate that renews itself, and a hardened service that survives reboots.
 
-**People who want to own what they serve.** Managed platforms host it for you, on their infrastructure and their terms. Servette runs on your own server, with your own certificate, behind a password if you want one. Copy a file, answer a few questions, walk away.
+**People who want to own what they serve.** Managed platforms host it for you, on their infrastructure and their terms. Servette runs on your own server, with your own certificate, behind a password if you want one. Install it, answer a few questions, walk away.
 
-**Raspberry Pi users.** Servette was designed with the Pi in mind. If you can SSH in and run a Python script, you can have a real HTTPS site live in under ten minutes (trusted certificate, automatic renewal, and a server that survives reboots).
+**Raspberry Pi users.** Servette was designed with the Pi in mind. If you can SSH in and install a Python package, you can have a real HTTPS site live in under ten minutes (trusted certificate, automatic renewal, and a server that survives reboots).
 
 ---
 
@@ -52,7 +52,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 | HTTPS by default | Your site is encrypted, browsers show the padlock, and plain-HTTP requests are redirected up to HTTPS |
 | Basic Auth | Optional username and password to restrict access |
 | Rate limiting | Stops bots from hammering the server; makes password guessing impractical |
-| Live reload | Edit any file and changes appear immediately, no restart required |
+| Instant content updates | Edit any file and the change is served immediately — files are read fresh from disk, no restart required |
 | Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |
 | Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
@@ -74,44 +74,38 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
 2. **Open ports 80 and 443** in the provider's firewall panel (on Lightsail: the instance's **Networking** tab). This is separate from the OS firewall and is the step people miss — 80 carries the HTTP→HTTPS redirect and Let's Encrypt validation, 443 serves the site.
 3. **Attach a static IP** so the address survives restarts.
 4. **Point your domain at it** — an `A` record to the static IP, before requesting a certificate.
-5. **Copy your files over and SSH in:**
+5. **SSH in and install Servette:**
    ```
-   scp -i your-key.pem servette.py user@YOUR.IP:~
-   scp -i your-key.pem -r mysite/ user@YOUR.IP:~/site
    ssh -i your-key.pem user@YOUR.IP
+   sudo python3 -m venv /opt/servette
+   sudo /opt/servette/bin/pip install "servette @ git+https://github.com/andy-emerson/Servette"
+   sudo ln -s /opt/servette/bin/servette /usr/local/bin/servette
    ```
+   (Once Servette has its first PyPI release this becomes `pip install servette`; the venv keeps the install isolated either way, and `pipx install --global servette` does the same job where pipx ≥ 1.5 is available.)
 
 ### Deploy on your own machine (e.g. a Raspberry Pi)
 
 1. **Install a Linux OS and enable SSH** (the Raspberry Pi Imager can set this up before first boot).
 2. **Forward ports 80 and 443** on your router to the machine, and point a domain's `A` record at your public IP (a dynamic-DNS service keeps the record current if your home IP changes). Skip this to run on your LAN only, with a self-signed certificate.
-3. **Copy your files over:**
-   ```
-   scp servette.py user@YOUR.LOCAL.IP:~
-   scp -r mysite/ user@YOUR.LOCAL.IP:~/site
-   ```
+3. **SSH in and install Servette** — the same three lines as the VPS shape above.
 
 ### Run setup
 
-Servette serves the `site/` folder next to `servette.py` — setup creates it if it's missing and offers to write Servette's placeholder page when it's empty, so a fresh copy serves a real page immediately; replace it with your own files when ready.
-
-One permission first. Recent Linux images create your home directory closed to other users (Ubuntu 21.04+ and Debian 12 default it to `0750`/`0700`), and the background service runs as its own unprivileged `servette` user — which must be able to *pass through* your home directory to reach `~/site`. Grant pass-through (it lets the service enter, not list or read anything else of yours):
+Servette keeps everything it serves and everything it saves in its data directory, `/var/lib/servette` — setup creates the `site/` folder there, owns it to *you* (the service only reads it), and offers to write Servette's placeholder page when it's empty, so a fresh install serves a real page immediately. From the server:
 
 ```
-sudo chmod o+x "$HOME"
+sudo servette   # then, at the prompt: setup
 ```
 
-Skip this and everything looks fine right up until the service serves 404s for files that exist. Then, from the server:
+`sudo` is needed because setup writes a systemd unit and creates a restricted `servette` user — the server runs as that user, not root. The wizard sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), sets an optional password, then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically. Copy your site in whenever you like:
 
 ```
-sudo python3 servette.py   # then, at the prompt: setup
+scp -r mysite/* user@YOUR.IP:/var/lib/servette/site/
 ```
-
-`sudo` is needed because setup writes a systemd unit and creates a restricted `servette` user — the server runs as that user, not root. On first run Servette installs its one dependency (`cryptography`) into a private virtualenv; you never run `pip`. The wizard sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), sets an optional password, then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically.
 
 ### Operate it
 
-Re-run `sudo python3 servette.py` any time to return to the shell:
+Re-run `sudo servette` any time for the interactive shell — or run any command below as `sudo servette <command>` and it executes once and exits, which is how scripts and external tools drive Servette (there is deliberately no network admin API):
 
 | Command | What it does |
 |---|---|
@@ -119,15 +113,15 @@ Re-run `sudo python3 servette.py` any time to return to the shell:
 | `config` | View and edit settings |
 | `start` / `stop` | Start or stop the server |
 | `enable` / `disable` | Add or remove the background service |
-| `status` | Show whether the server is running |
+| `status [--json]` | Show whether the server is running |
 | `log [n]` | Show recent activity |
-| `update` | Download the latest signed release of Servette |
-| `restore` | Roll back to the previous version |
+| `sites [--json]` | List configured sites |
+| `set [n] k=v ...` | Change settings non-interactively (`sudo servette set 0 publish_url=…`) |
 | `pull [n]` | Pull new site content from a site's publish channel |
 | `restore-site [n]` | Roll back a site's content to before its last pull |
 | `help` · `quit` | Command list · exit |
 
-**Update your site** by copying new files over (`scp -r mysite/ user@your.server.ip:~/site`) — changes appear immediately, no restart. **Update Servette** with `update`; it pulls the latest signed release, verifies it, and reloads automatically — restarting the background service too, if you're running as one. Your `servette.toml` is never touched by an update.
+**Update your site** by copying new files over (`scp -r mysite/* user@your.server.ip:/var/lib/servette/site/`) — changes appear immediately, no restart. **Update Servette** the way you update any pip-installed tool (`sudo /opt/servette/bin/pip install -U "servette @ git+https://github.com/andy-emerson/Servette"` — just `-U servette` once the PyPI release exists); the next `sudo servette` notices a stale service unit and refreshes it. **Roll back** by installing the version you want (`pip install servette==x.y.z`). Your `servette.toml` is never touched by an update.
 
 > If you set a password, `servette.toml` holds its hash — sharing the file gives a recipient material for an offline cracking attempt.
 
@@ -137,7 +131,11 @@ One machine can serve several sites, each with its own folder, certificate, and 
 
 Every site has an index, shown by `sites` and starting at `0` — the one `setup` created. Commands that act on a single site take that index and default to `0`: `dir [n]`, `cert [n]`, `publish [n]`, and `username [n]` / `password [n]` under `config`, plus `pull [n]` and `restore-site [n]` from the main shell. So `cert 1` requests a certificate for the second site, and `pull 2` updates the third site's content from its channel.
 
-**Update each site's content** in its own folder — `scp -r siteB/ user@your.server.ip:~/siteB`, the path you named when you added it. The single `~/site` in the quickstart above is just site `0`'s folder.
+**Update each site's content** in its own folder — the path you named when you added it. The single `/var/lib/servette/site` in the quickstart above is just site `0`'s folder.
+
+### Publish without copying files (optional)
+
+Each site can have a **publish channel**: build a signed bundle of your site in the browser at [servette.org/pub/](https://servette.org/pub/), host the `.tar.gz` + `.sig` pair at any HTTPS URL, and run `pull` — Servette fetches the bundle, verifies its signature against that site's `publish_key`, and swaps the content in atomically; `restore-site` undoes the last pull. Configure it with `config` → `publish [n]`. `sudo servette pull [n]` runs one-shot, so a cron line gives you hands-off deploys — and the trigger always stays on your box: Servette never accepts content pushed from the network. With a password set, your site also answers `GET /.well-known/servette` with `{"running": "<version>"}` to logged-in clients — the version readout the publish tool's self-test page shows.
 
 ### If something's wrong
 
@@ -150,9 +148,9 @@ Every site has an index, shown by `sites` and starting at `0` — the one `setup
 
 | Path | What it is |
 |---|---|
-| `servette.py` | The entire product — server, system, and shell in one file. Generated from `src/`; not edited by hand |
-| `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into `servette.py` |
-| `tests/test.py` | The whole test suite, run by CI on Python 3.11 and 3.14 |
+| `servette/` | The installable package: `__init__.py` is the entire product — server, system, and shell in one module, generated from `src/` and not edited by hand — beside a stub `__main__.py` |
+| `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into the module |
+| `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 and 3.14) and Debian 12 |
 | `site/` | The Servette website's source, and the folder a checkout serves by default; `site/demo/` is the live demo page servette.org links, `site/src/` is a browsable view of the literate sources, `site/pub/` is the client-side publish tool, and `site/assets/` holds the logos this README displays |
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
@@ -160,4 +158,4 @@ Every site has an index, shown by `sites` and starting at `0` — the one `setup
 | `CONTRIBUTING.md` · `SECURITY.md` | How to contribute, and how to report a vulnerability |
 | `LICENSE` | MIT |
 
-A comprehensive tutorial will live at the project site once it exists; until then, the deploy guide above is the complete walkthrough.
+The deploy guide above is the complete walkthrough; [servette.org](https://servette.org) carries the live demo, a browsable view of the sources, and the publish tool.

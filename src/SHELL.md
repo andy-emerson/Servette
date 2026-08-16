@@ -45,10 +45,10 @@ _COMMANDS = [
     ("stop",             "stop the server"),
     ("enable",           "enable Servette as a system service"),
     ("disable",          "remove the system service"),
-    ("status",           "show whether the server is running"),
+    ("status [--json]",  "show whether the server is running"),
+    ("sites [--json]",   "list configured sites"),
+    ("set [n] k=v ...",  "change settings non-interactively"),
     ("log [n]",          "show the last n log entries"),
-    ("update",           "download the latest version of servette.py"),
-    ("restore",          "roll back to the previous version (undoes the last update)"),
     ("pull [n]",         "check a site's publish channel and pull new content now"),
     ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
     ("help",             "show this message"),
@@ -687,225 +687,11 @@ def cmd_log(n=20):
             print("journalctl not found. Is this a systemd system?")
 
 
-RELEASES_API_URL    = "https://api.github.com/repos/andy-emerson/servette/releases/latest"
-_SIGNING_PUBLIC_KEY = "abb8854be0b82df813f3b052296a26573063fc6314ea2701d54354605e6f15db"
-_VERSION_RE         = re.compile(rb"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.M)
-```
-
-> Ceiling on a downloaded release asset — servette.py, the one asset 'update'
-> fetches. It is an order of magnitude under this; the cap exists so a hostile
-> or broken response is bounded before the signature check, not to constrain
-> growth.
-
-```python
-_MAX_SOURCE_BYTES   = 4 * 1024 * 1024
-
-def _parse_version(source_bytes):
-    """Extract __version__ from servette.py source bytes. Returns the string or None."""
-    m = _VERSION_RE.search(source_bytes)
-    return m.group(1).decode() if m else None
-
-
-def _is_downgrade(current, candidate):
-    """True when candidate is an older version than current. Versions compare as
-    tuples of their dot-separated integers; if either carries a non-numeric part
-    it can't be ordered, so this returns False — an uncomparable version never
-    blocks an update."""
-    def parse(v):
-        try:
-            return tuple(int(p) for p in v.split("."))
-        except ValueError:
-            return None
-    a, b = parse(current), parse(candidate)
-    return a is not None and b is not None and b < a
-
-
-def _release_asset_url_ok(url):
-    """True when a release-asset URL is HTTPS on github.com. Update downloads are
-    pinned to the release host so a poisoned API response can't redirect the fetch
-    elsewhere — the Ed25519 signature is the real gate; this narrows the fetch."""
-    parts = urlsplit(url)
-    return parts.scheme == "https" and parts.netloc == "github.com"
-
-
-def _fetch_release():
-    """The latest-release JSON from the GitHub API. Returns (release, None) on
-    success, (None, why) on failure — quiet either way, so each caller keeps
-    its own spinner and message prefix."""
-    try:
-        req = urllib.request.Request(
-            RELEASES_API_URL,
-            headers={"User-Agent": f"servette/{__version__}", "Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read()), None
-    except Exception as e:
-        return None, str(e)
-
-
-def _download_verified_asset(release, name):
-    """Download release asset `name` and its .sig companion and verify the
-    signature. Returns (bytes, None) on success, (None, why) on failure.
-
-    This is the one copy of the trust chain every release artifact goes
-    through — today that is servette.py for 'update' (the demo.html asset it
-    once also served was retired in #70): asset URLs pinned to github.com,
-    the download capped at _MAX_SOURCE_BYTES *before* the Ed25519 check
-    against the pinned _SIGNING_PUBLIC_KEY."""
-    assets   = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
-    sig_name = name + ".sig"
-    if name not in assets or sig_name not in assets:
-        return None, f"release is missing {name} or {sig_name} assets"
-    if not all(_release_asset_url_ok(assets[n]) for n in (name, sig_name)):
-        return None, "asset URL is not on github.com"
-    try:
-        data = urllib.request.urlopen(assets[name], timeout=30).read(_MAX_SOURCE_BYTES + 1)
-        if len(data) > _MAX_SOURCE_BYTES:
-            return None, f"{name} asset exceeds {_MAX_SOURCE_BYTES // 1024} KB"
-        sig = urllib.request.urlopen(assets[sig_name], timeout=15).read(4096)
-    except Exception as e:
-        return None, str(e)
-    try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        from cryptography.exceptions import InvalidSignature
-        Ed25519PublicKey.from_public_bytes(bytes.fromhex(_SIGNING_PUBLIC_KEY)).verify(sig, data)
-    except InvalidSignature:
-        return None, "signature verification failed"
-    except Exception as e:
-        return None, f"could not verify signature: {e}"
-    return data, None
-
-def _offer_restart(version):
-    """Apply a freshly swapped servette.py (from update or restore): restart the
-    service if it's managed, otherwise tell the user how — this shell still holds the
-    old code in memory, so it can't relaunch itself into the new file."""
-    if _service_is_active():
-        if _prompt("Restart the servette service now?"):
-            try:
-                subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
-                print(f"  Service restarted on {version}.")
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print(f"  Restart failed — run 'sudo systemctl restart servette' yourself ({e}).")
-        else:
-            print("  Run 'sudo systemctl restart servette' when ready.")
-    elif _server_running():
-        print("  This shell is still running the old version — exit and rerun Servette to apply.")
-    else:
-        print(f"  Restart to run version {version}: 'start', or 'sudo systemctl restart servette'.")
-
-
-def cmd_update():
-    servette_path = os.path.abspath(__file__)
-
-    with _spinner("Checking for update..."):
-        release, why = _fetch_release()
-    if release is None:
-        print(f"  Update failed: {why}")
-        return
-
-    new_version = release.get("tag_name", "").lstrip("v")
-    if not new_version:
-        print("  Update failed: could not read version from release.")
-        return
-
-    if new_version == __version__:
-        print(f"  Already up to date ({__version__}).")
-        return
-
-    # 'update' only moves forward. A signed but older release — a stale "latest"
-    # from the API, or a downgrade a network attacker slipped past TLS — must not
-    # roll the server back to a version with known holes. 'restore' is the
-    # deliberate path back to the previous version.
-    if _is_downgrade(__version__, new_version):
-        print(f"  Update declined: {new_version} is older than the running {__version__}.")
-        print("  Use 'restore' to roll back to the previous version on purpose.")
-        return
-
-    # Gate on major version bump
-    try:
-        cur_major = int(__version__.split(".")[0])
-        new_major = int(new_version.split(".")[0])
-    except (ValueError, IndexError):
-        cur_major = new_major = 0
-
-    if new_major != cur_major:
-        print(f"  Major version change: {__version__} → {new_version}")
-        print("  This may include breaking changes. Review before upgrading.")
-        if not _prompt("Continue?"):
-            print("  Update cancelled.")
-            return
-
-    # Download and verify through the shared trust chain (asset presence,
-    # github.com pinning, size cap before the Ed25519 check).
-    with _spinner(f"Downloading {new_version}..."):
-        new_source, why = _download_verified_asset(release, "servette.py")
-    if new_source is None:
-        print(f"  Update failed: {why}.")
-        return
-
-    file_version = _parse_version(new_source)
-    if file_version != new_version:
-        print(f"  Update failed: release tag {new_version!r} doesn't match file version {file_version!r}.")
-        return
-
-    try:
-        compile(new_source, "servette.py", "exec")
-    except SyntaxError as e:
-        print(f"  Update failed: downloaded file has a syntax error: {e}")
-        return
-
-    bak_path = servette_path + ".bak"
-    tmp_path = servette_path + ".new"
-    with open(tmp_path, "wb") as f:
-        f.write(new_source)
-    os.chmod(tmp_path, os.stat(servette_path).st_mode)
-    shutil.copy2(servette_path, bak_path)
-    os.replace(tmp_path, servette_path)
-
-    print(f"  Updated {__version__} → {new_version}.")
-    print(f"  Previous version saved to {bak_path}.")
-
-    if _server_running() and not _service_is_active():
-        # A session-mode server runs in this very process; re-executing would
-        # kill it without warning, so fall back to telling the operator how to
-        # apply the update themselves.
-        print("  This shell is still running the old version — exit and rerun Servette to apply.")
-        return
-
-    print("  Reloading...")
-    os.execv(_VENV_PY, [_VENV_PY, servette_path, "--post-update"])
-
-
-def _apply_post_update():
-    """Runs once, immediately after 'update' re-execs into the freshly swapped
-    file — the first thing this fresh process does. If the service was already
-    enabled, silently refresh its unit (and the network watchdog's) to this
-    version's shape and restart it: an update should never leave an enabled
-    host on a stale unit, and should never need a separate manual 'enable' to
-    pick up host-provisioning changes a release adds."""
-    print(f"  Reloaded as v{__version__}.")
-    if _service_file_exists():
-        try:
-            _write_unit_files()
-            if _service_is_active():
-                _reload_server()
-        except (PermissionError, FileNotFoundError, subprocess.CalledProcessError) as e:
-            print(f"  Could not refresh the service unit: {e}")
-    # Refresh any site still serving the marked placeholder, so a release that
-    # changes the page reaches hosts that never published their own — including
-    # pages seeded by older releases that fetched a demo from GitHub: they
-    # carry the same marker, and the refresh rewrites them from the embedded
-    # page below. Operator pages (no marker) are untouched.
-    for s in config.sites:
-        if _is_placeholder(os.path.join(_resolve(s.serve_dir), "index.html")):
-            if _seed_placeholder(s.serve_dir):
-                print(f"  Placeholder page refreshed in {s.serve_dir}.")
-
-
 # The marker string keeps its historical name: pages seeded by earlier
 # releases (which fetched a richer demo page from GitHub as a release asset)
-# carry "servette:demo", and they must stay recognizable so an update can
-# refresh them into the embedded placeholder below.
+# carry "servette:demo". The marker distinguishes Servette's own placeholder
+# from operator content — a marked page is Servette's to rewrite, an
+# unmarked one is never touched.
 _PLACEHOLDER_MARKER = "servette:demo"
 
 # The page setup seeds into an empty site (#70): embedded, so setup finishes
@@ -973,7 +759,7 @@ def _is_placeholder(index_path):
     permanently. The rule is visible in the file itself, not hidden in state."""
     try:
         with open(index_path, "rb") as f:
-            return _PLACEHOLDER_MARKER.encode() in f.read(_MAX_SOURCE_BYTES)
+            return _PLACEHOLDER_MARKER.encode() in f.read(1024 * 1024)  # placeholder is ~2 KB; cap bounds a huge index.html
     except OSError:
         return False
 
@@ -995,45 +781,6 @@ def _seed_placeholder(serve_dir):
         return False
     return True
 
-
-def cmd_restore():
-    """Roll back to the version saved by the last 'update'. The backup is single-shot:
-    only ever one servette.py.bak exists, and a successful restore consumes it."""
-    servette_path = os.path.abspath(__file__)
-    bak_path      = servette_path + ".bak"
-
-    if not os.path.exists(bak_path):
-        print("  Nothing to restore — no servette.py.bak. ('update' saves one each time it runs.)")
-        return
-
-    try:
-        with open(bak_path, "rb") as f:
-            bak_source = f.read()
-    except OSError as e:
-        print(f"  Restore failed: cannot read {bak_path} ({e}).")
-        return
-
-    # Refuse to restore a corrupt backup — better to keep the working file in place.
-    try:
-        compile(bak_source, "servette.py", "exec")
-    except SyntaxError as e:
-        print(f"  Restore failed: the backup has a syntax error ({e}).")
-        return
-
-    bak_version = _parse_version(bak_source) or "unknown"
-    if not _prompt(f"Restore {__version__} → {bak_version} from servette.py.bak? The backup is then removed."):
-        print("  Restore cancelled.")
-        return
-
-    # Atomically move the backup into place (keeping the live file's mode). The rename
-    # consumes the backup, so only ever one is kept and it's spent on use.
-    os.chmod(bak_path, os.stat(servette_path).st_mode)
-    os.replace(bak_path, servette_path)
-
-    print(f"  Restored {__version__} → {bak_version}.")
-    _offer_restart(bak_version)
-
-
 ```
 
 ## Site content publishing
@@ -1041,12 +788,12 @@ def cmd_restore():
 ```python
 # ── Site content publishing ─────────────────────────────────────────────────
 #
-# The content-side sibling of self-update: a signed tar.gz bundle, pulled from
-# publish_url, verified against publish_key (a keypair distinct from
-# Servette's own release-signing key), and swapped into serve_dir with the
-# same single-shot .bak/restore pattern 'update'/'restore' already give the
-# code. Pull-only — this box never accepts an inbound push of content, only
-# fetches from a URL it already trusts.
+# The update channel for a site's *content*: a signed tar.gz bundle, pulled
+# from publish_url, verified against publish_key, and swapped into serve_dir
+# with a single-shot .bak — 'restore-site' rolls back to it, and a successful
+# restore consumes it. Pull-only — this box never accepts an inbound push of
+# content, only fetches from a URL it already trusts. (Servette's own code
+# updates travel through the package manager, not through Servette.)
 
 _MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
 
@@ -1086,7 +833,8 @@ def _extract_bundle(data, dest_dir):
 
 def _swap_site_content(new_dir, serve_dir):
     """Atomically replace the live serve_dir with new_dir's contents, keeping
-    a single-shot backup — the same one-step-back pattern as servette.py.bak.
+    a single-shot backup: serve_dir.bak holds the one previous state, and a
+    successful restore-site consumes it.
     new_dir must be on the same filesystem as serve_dir (both under BASE_DIR)
     so the renames are atomic; the only unavoidable risk window is the two
     renames themselves, each a single fast syscall back to back — proportionate
@@ -1187,8 +935,8 @@ def cmd_pull(site):
 
 
 def cmd_restore_site(site):
-    """Roll back to the content saved by the last successful publish. Mirrors
-    cmd_restore exactly: single-shot, consumed on use."""
+    """Roll back to the content saved by the last successful publish. The
+    backup is single-shot: one is kept, and a successful restore consumes it."""
     live_dir = _resolve(site.serve_dir).rstrip(os.sep)
     bak_dir  = live_dir + ".bak"
 
@@ -1345,7 +1093,39 @@ def _runtime_stats(service_active):
     return rows
 
 
-def cmd_status():
+def _site_rows():
+    """The per-site rows machine consumers read — shared by _status_data and
+    `sites --json`, which deliberately pays only for this list: no systemctl
+    round-trip, no cache-warning walk over every site's tree."""
+    return [{
+        "index":     i,
+        "domain":    site.domain,
+        "serve_dir": site.serve_dir,
+        "auth":      bool(site.username),
+        "cert_days": _cert_days_remaining(_resolve(site.cert_file)),
+        "publish":   bool(site.publish_url and site.publish_key),
+    } for i, site in enumerate(config.sites)]
+
+
+def _status_data():
+    """The status snapshot as data — the shape `status --json` prints, for
+    external tooling. cert_days is None when no certificate is readable."""
+    service_active = _service_is_active()
+    running        = service_active or _server_running()
+    return {
+        "version":  __version__,
+        "running":  running,
+        "mode":     "service" if service_active else ("session" if running else None),
+        "sites":    _site_rows(),
+        "issues":   _production_issues(),
+        "warnings": _cache_warnings(),
+    }
+
+
+def cmd_status(json_mode=False):
+    if json_mode:
+        print(json.dumps(_status_data(), indent=2))
+        return
     service_active = _service_is_active()
     running        = service_active or _server_running()
     W              = _PAD
@@ -1422,6 +1202,7 @@ def cmd_setup():
         if _is_within_base_dir(serve_path):
             try:
                 os.makedirs(serve_path, exist_ok=True)
+                _chown_operator(serve_path)  # root created it; the operator owns it
                 print(f"  Created {serve_path}.")
             except OSError as e:
                 print(f"  Could not create {serve_path}: {e}")
@@ -1462,10 +1243,213 @@ def cmd_setup():
 ## Main shell loop
 
 ```python
+# ── Non-interactive configuration ────────────────────────────────────────────
+#
+# `set [n] key=value ...` is the write half of the tooling surface (`status
+# --json` and `sites --json` are the read half): external tools drive it over
+# SSH, which is the authentication — no network admin API exists, by design.
+# Validation mirrors the interactive config sub-shell's rules; every pair is
+# validated against scratch objects before any is applied, so a bad pair
+# never leaves the config half-written.
+
+def _set_host_value(target, key, value):
+    """Validate one host-level pair and apply it to target (config, or a
+    scratch object during the validation pass). Returns an error string,
+    empty on success."""
+    if key == "port":
+        if not (value.isdigit() and 0 < int(value) < 65536):
+            return "port must be 1-65535"
+        target.port = int(value)
+    elif key == "email":
+        target.email = value
+    elif key in ("rate_limit", "auth_rate_limit"):
+        if not (value.isdigit() and int(value) > 0):
+            return f"{key} must be a positive integer"
+        setattr(target, key, int(value))
+    elif key == "cache_size_mb":
+        if not (value.isdigit() and int(value) > 0):
+            return "cache_size_mb must be a positive integer"
+        target.cache_size_mb = int(value)
+    elif key == "trusted_proxy":
+        if value:
+            try:
+                ipaddress.ip_address(value)
+            except ValueError:
+                return "trusted_proxy must be an IP address (or empty to clear)"
+        target.trusted_proxy = value
+    return ""
+
+
+def _set_site_value(target, key, value):
+    """Validate one per-site pair and apply it to target (the chosen site, or
+    a scratch Site during the validation pass). Returns an error string,
+    empty on success."""
+    if key == "dir":
+        resolved = os.path.realpath(_resolve(value))
+        if not os.path.isdir(resolved):
+            return f"directory not found: {resolved}"
+        if not _is_within_base_dir(resolved):
+            return f"dir must live under {BASE_DIR} (the publish swap and the service sandbox depend on it)"
+        if _serve_dir_exposes_secrets(resolved):
+            return "dir would serve Servette's own config and keys — refused"
+        target.serve_dir = value
+    elif key == "username":
+        target.username = value
+    elif key == "publish_url":
+        if value and not value.startswith("https://"):
+            return "publish_url must be https:// (or empty to clear)"
+        target.publish_url = value
+    elif key == "publish_key":
+        v = value.strip().lower()
+        if v and not (len(v) == 64 and all(c in "0123456789abcdef" for c in v)):
+            return "publish_key must be 64 hex characters (a 32-byte Ed25519 public key)"
+        target.publish_key = v
+    return ""
+
+
+_SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
+                  "cache_size_mb", "trusted_proxy")
+_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key")
+
+
+def _set_usage():
+    print("  Usage: set [n] key=value ...")
+    print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
+    print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
+
+
+def cmd_set(args):
+    """`set [n] key=value ...` — non-interactive configuration for tooling.
+    The optional leading index picks the site for site keys (default 0).
+    Deliberately absent: password (a secret on argv leaks into shell history
+    and the process table — set it interactively), and domain (bound up with
+    certificate issuance — run 'config cert')."""
+    site = config.sites[0]
+    if args and args[0].isdigit():
+        idx = int(args[0])
+        if idx >= len(config.sites):
+            print(f"  No site {idx} — 'sites' lists {len(config.sites)}.")
+            return
+        site, args = config.sites[idx], args[1:]
+    pairs = []
+    for token in args:
+        key, eq, value = token.partition("=")
+        key = key.strip().lower()
+        if not eq or key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
+            print(f"  Unknown or malformed: {token!r}")
+            _set_usage()
+            return
+        pairs.append((key, value))
+    if not pairs:
+        _set_usage()
+        return
+    scratch_host, scratch_site = Config.__new__(Config), Site()
+    for key, value in pairs:
+        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
+               else _set_site_value(scratch_site, key, value))
+        if err:
+            print(f"  {key}: {err}")
+            return
+    for key, value in pairs:
+        if key in _SET_HOST_KEYS:
+            _set_host_value(config, key, value)
+        else:
+            _set_site_value(site, key, value)
+    try:
+        config.save()
+    except PermissionError:
+        print("  Error: writing the config requires sudo. Run: sudo servette set ...")
+        return
+    print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
+
+
 # ── Main shell loop ───────────────────────────────────────────────────────────
+
+def _startup_refresh():
+    """What 'update' once did after swapping versions, done at every shell
+    launch instead: code now arrives through the package manager, which can
+    neither refresh a stale systemd unit nor rewrite an outdated placeholder
+    page — so the shell notices on its next run. Prints nothing when nothing
+    is stale, and fails soft: a refresh that needs root just says so.
+
+    Auto-refresh is gated on the environment matching: a stale unit whose
+    data directory or interpreter differs from this shell's is reported and
+    left alone — rewriting it would repoint a live service at this shell's
+    environment, which only an explicit 'enable' may do."""
+    if _stale_units():
+        drift = _service_env_drift()
+        if drift:
+            print("  The enabled service was set up from a different environment:")
+            for d in drift:
+                print(f"    - {d}")
+            print("  Leaving it untouched — run 'enable' to re-provision from this shell.")
+        else:
+            try:
+                _write_unit_files()
+                if _service_is_active():
+                    _reload_server()
+                print(f"  Service refreshed to v{__version__}.")
+            except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
+                print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
+    for s in config.sites:
+        index_path = os.path.join(_resolve(s.serve_dir), "index.html")
+        if _is_placeholder(index_path):
+            try:
+                with open(index_path, "rb") as f:
+                    current = f.read()
+            except OSError:
+                continue
+            if current != _PLACEHOLDER_PAGE and _seed_placeholder(s.serve_dir):
+                print(f"  Placeholder page refreshed in {s.serve_dir}.")
+
+
+def run_command(cmd, args):
+    """Dispatch one command by name; False for a name it doesn't know. Shared
+    verbatim by the interactive loop and the one-shot `servette <command>`
+    argv form — one dispatcher, so the two surfaces can never drift. quit and
+    help stay in the interactive loop: they are about the loop itself."""
+    if cmd == "setup":
+        cmd_setup()
+    elif cmd == "config":
+        cmd_config()
+    elif cmd == "enable":
+        cmd_enable()
+    elif cmd == "disable":
+        cmd_disable()
+    elif cmd == "start":
+        cmd_start()
+    elif cmd == "stop":
+        cmd_stop()
+    elif cmd == "status":
+        cmd_status(json_mode="--json" in args)
+    elif cmd == "sites":
+        if "--json" in args:
+            print(json.dumps(_site_rows(), indent=2))
+        else:
+            _config_sites()
+    elif cmd == "set":
+        cmd_set(args)
+    elif cmd == "log":
+        try:
+            cmd_log(int(args[0]) if args else 20)
+        except ValueError:
+            print("Usage: log [number]")
+    elif cmd == "pull":
+        site = _config_site_arg(args)
+        if site is not None:
+            cmd_pull(site)
+    elif cmd == "restore-site":
+        site = _config_site_arg(args)
+        if site is not None:
+            cmd_restore_site(site)
+    else:
+        return False
+    return True
+
 
 def shell():
     _banner("Servette — The Simple Secure Server")
+    _startup_refresh()
     print(HELP)
 
     while True:
@@ -1482,44 +1466,13 @@ def shell():
         cmd   = parts[0].lower()
         args  = parts[1:]
 
-        if cmd == "setup":
-            cmd_setup()
-        elif cmd == "config":
-            cmd_config()
-        elif cmd == "enable":
-            cmd_enable()
-        elif cmd == "disable":
-            cmd_disable()
-        elif cmd == "start":
-            cmd_start()
-        elif cmd == "stop":
-            cmd_stop()
-        elif cmd == "status":
-            cmd_status()
-        elif cmd == "log":
-            try:
-                cmd_log(int(args[0]) if args else 20)
-            except ValueError:
-                print("Usage: log [number]")
-        elif cmd == "update":
-            cmd_update()
-        elif cmd == "restore":
-            cmd_restore()
-        elif cmd == "pull":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_pull(site)
-        elif cmd == "restore-site":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_restore_site(site)
-        elif cmd in ("help", "?"):
+        if cmd in ("help", "?"):
             print(HELP)
         elif cmd in ("quit", "exit"):
             stop_server()
             print("Goodbye.")
             break
-        else:
+        elif not run_command(cmd, args):
             print(f"Unknown command: {cmd}. Type 'help' for a list of commands.")
 
 

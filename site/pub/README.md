@@ -16,9 +16,9 @@ that closed #42's post-publish-verification fork: a page on
 `/selftest/` — on the operator's own origin it runs the full checks the
 demo page runs, after every `pull`, plus the one check only it can make:
 the version-discovery row (`/.well-known/servette`, password-gated), which
-shows "running vX · backup vY" with the operator's own session. It carries
+shows "running vX" with the operator's own session. It carries
 no `servette:demo` marker (published, it is the operator's content;
-`update` must never touch it), and its checks duplicate
+Servette's placeholder refresh must never touch it), and its checks duplicate
 `site/demo/index.html`'s — there is no build step to share them, so a
 change to either page's checks belongs in both.
 
@@ -43,6 +43,5 @@ Constraints the page is built to, all load-bearing:
 
 Linked from the home-page footer as the path form (`pub/`), which is alive
 the moment the site deploys with the tool beside it; the `pub.servette.org`
-subdomain additionally needs DNS and site config on the serving box. #42's
-rule was no link until the tool exists — it exists, and link and tool
-arrive in the same merge.
+subdomain additionally needs DNS and site config on the serving box (#42's
+rule: no link without the tool).

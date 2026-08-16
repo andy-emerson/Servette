@@ -989,7 +989,8 @@ def _publish_sig_url(url):
     carries a query string (e.g. a pre-signed download link), landing '.sig'
     after the query instead of after the file extension."""
     parts = urlsplit(url)
-    return urlunsplit(parts._replace(path=parts.path + ".sig"))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path + ".sig",
+                       parts.query, parts.fragment))
 
 
 ```
@@ -1538,7 +1539,9 @@ def cmd_set(args):
     if not pairs:
         _set_usage()
         return
-    scratch_host, scratch_site = Config.__new__(Config), Site()
+    class _ScratchHost:
+        pass
+    scratch_host, scratch_site = _ScratchHost(), Site()
     for key, value in pairs:
         err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
                else _set_site_value(scratch_site, key, value))

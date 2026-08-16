@@ -695,13 +695,11 @@ def cmd_log(n=20):
 _PLACEHOLDER_MARKER = "servette:demo"
 
 # The page setup seeds into an empty site (#70): embedded, so setup finishes
-# with something to serve even with no network beyond ACME — the GitHub fetch,
-# its signed demo.html release asset, and the "could not reach GitHub"
-# degradation path are all gone. Deliberately small and script-free: the full
-# connection self-test now travels through the publish channel instead
-# (site/pub/selftest/ in the repository), one publish away for any operator
-# who wants it. Only the theme is kept — logo, colors, type — over the
-# traditional "under construction" prose.
+# with something to serve, and no network is involved. Deliberately small
+# and script-free: the full connection self-test is not this page's job —
+# the server itself serves it at the reserved /selftest/ path (see
+# _SELFTEST_PAGE in Server). Only the theme is kept — logo, colors, type —
+# over the traditional "under construction" prose.
 _PLACEHOLDER_PAGE = """<!DOCTYPE html>
 <!-- servette:demo — Servette's placeholder page. This marker is how 'update'
      tells its own page from yours: with it present the page is refreshed on

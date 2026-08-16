@@ -3,8 +3,9 @@
      bundles entirely in this browser. Constraints, all load-bearing (ruling
      in DECISIONS.md, "The publish tool's custody constraints"):
 
-     - Dependency-free. This page handles the operator's private signing
-       key, so it loads no third-party script — the pipeline is browser
+     - Dependency-free, and network-silent. This page handles the
+       operator's private signing key, so it loads no third-party script
+       and makes no network request at all — the pipeline is browser
        primitives only (WebCrypto Ed25519, CompressionStream, a hand-rolled
        ustar writer emitting only the entry types _extract_bundle accepts).
        The CDN allowance the other site pages get does not apply here.
@@ -342,12 +343,11 @@
       <span class="badge badge-dim" id="sign-badge">waiting</span>
     </div>
     <div class="card-body">
-      <label class="check-row hint" style="margin-top:0">
-        <input type="checkbox" id="chk-selftest" checked>
-        <span>include the self-test page at <b>/selftest/</b> — the connection
-        checks the demo page runs, plus a version readout behind your password
-        gate, re-runnable on your own domain after every pull</span>
-      </label>
+      <p class="hint" style="margin-top:0">Nothing to bundle for verification:
+        Servette itself serves the connection self-test at <b>/selftest/</b> on
+        your site — including a version readout behind your password gate — and
+        your own <code>selftest/</code> content, if you ship any, takes
+        precedence. Run it after every pull.</p>
       <div class="btn-row">
         <button class="action primary" id="btn-sign" type="button" disabled>Build &amp; sign bundle</button>
       </div>
@@ -643,27 +643,19 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
     folder:  null,   // the picked folder's name, for the bundle's file name
     starter: false,  // true when publishing the demo starter site instead of a folder
     remembered: false,  // whether the in-memory key is the one resident in IndexedDB
-    selftestHtml: null, // cached self-test page template, fetched from ./selftest/
   };
 
-  // The self-test page lives as its own page beside this one (./selftest/) —
-  // servable and previewable there — and is fetched same-origin when a
-  // bundle wants it. The only request this page ever makes, and it carries
-  // nothing: no key material, no file contents, just a GET for a template
-  // this site already serves.
-  async function selftestTemplate() {
-    if (state.selftestHtml) return state.selftestHtml;
-    // Resolved against this page's own directory, not the URL as loaded:
-    // Servette serves a directory index without redirecting to the slash
-    // form, so at servette.org/pub a naive relative 'selftest/' would
-    // resolve to /selftest/ at the site root and 404.
-    let dir = location.pathname;
-    if (dir.endsWith('/index.html')) dir = dir.slice(0, -'index.html'.length);
-    if (!dir.endsWith('/')) dir += '/';
-    const r = await fetch(dir + 'selftest/', { cache: 'no-store' });
-    if (!r.ok) throw new Error(`could not load the self-test page template (HTTP ${r.status})`);
-    return (state.selftestHtml = await r.text());
-  }
+  // The starter site's front page, inline: this page makes no network
+  // requests at all (the server itself serves the self-test at /selftest/,
+  // so there is nothing to fetch or bundle for verification).
+  const STARTER_HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+    + "<title>It's working.</title></head>"
+    + '<body style="font-family:system-ui;display:grid;place-items:center;min-height:100vh;margin:0;background:#0d1117;color:#e6edf3">'
+    + '<main style="text-align:center"><h1>It&#8217;s working.</h1>'
+    + '<p>This site is served by Servette. Replace this page with your own content,<br>'
+    + 'or <a href="/selftest/" style="color:#58a6ff">run the connection self-test</a>.</p>'
+    + '</main></body></html>';
 
   function setBadge(el, cls, text) { el.className = 'badge ' + cls; el.textContent = text; }
   function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
@@ -861,33 +853,16 @@ restore-site     <span class="c"># one step back, if you ever want the previous 
         entries.push({ path, bytes });
       };
 
-      // The self-test travels inside the bundle (the #42 ruling): published
-      // to the operator's own origin, it can read what a cross-origin probe
-      // from this page never could. A folder that already has a /selftest/
-      // of its own is the operator's choice — theirs is kept, never replaced.
+      // Nothing is injected: the server itself serves /selftest/, and an
+      // operator's own selftest/ content shadows it by existing.
       let note;
-      const wantSelftest = $('chk-selftest').checked;
       if (state.starter) {
-        const tpl = new TextEncoder().encode(await selftestTemplate());
-        add('index.html', tpl);
-        if (wantSelftest) add('selftest/index.html', tpl);
-        note = 'The demo starter site: the self-test page as the front page' +
-               (wantSelftest ? ', and again at /selftest/ for after you replace it.' : '.');
+        add('index.html', new TextEncoder().encode(STARTER_HTML));
+        note = 'The starter site: one page, linking the self-test your server already serves.';
       } else {
         for (const { path, file } of state.files)
           add(path, new Uint8Array(await file.arrayBuffer()));
-        if (!wantSelftest) {
-          note = 'Self-test page not included.';
-        } else if (state.files.some((e) => e.path === 'selftest' || e.path.startsWith('selftest/'))) {
-          // Either shape — a selftest/ directory or a plain file named
-          // selftest — already claims the path; injecting alongside a plain
-          // file would even put a file and a directory of the same name in
-          // one tar, which the server rightly rejects at extraction.
-          note = 'Your folder already claims /selftest/ — the bundle keeps yours.';
-        } else {
-          add('selftest/index.html', new TextEncoder().encode(await selftestTemplate()));
-          note = 'Self-test page included at /selftest/.';
-        }
+        note = 'After the pull, verify at /selftest/ — served by Servette itself.';
       }
       $('sign-note').textContent = note;
       const gz  = await gzipBytes(buildTar(entries));

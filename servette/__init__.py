@@ -1245,10 +1245,7 @@ class _TLSThreadingHTTPServer(_CappedThreadingHTTPServer):
                                              do_handshake_on_connect=False), addr
 
 
-# ── Server lifecycle ──────────────────────────────────────────────────────────
-#
-# Each server is a ThreadingHTTPServer run by serve_forever() in a daemon thread;
-# stop_server() calls shutdown() on it from the shell thread to stop gracefully.
+# Server state
 
 _https_server         = None  # the running HTTPS ThreadingHTTPServer (None when stopped)
 _https_thread         = None  # the thread running its serve_forever loop
@@ -1257,14 +1254,13 @@ _server_start_time    = None
 _watchdog_thread      = None
 _sweep_thread         = None
 _sweep_stop           = threading.Event()
-_last_renewal_attempt = {}  # domain -> monotonic timestamp of the last renewal attempt;
-                            # per-domain so one site's failure-triggered backoff
-                            # can't delay another's renewal
+_last_renewal_attempt = {}  # domain -> monotonic timestamp of the last renewal attempt
 
 _TLS_VERSIONS = {"1.2": ssl.TLSVersion.TLSv1_2, "1.3": ssl.TLSVersion.TLSv1_3}
 ACME_RETRIES  = 3
 
 
+# The liveness test
 def _server_running():
     """True when the HTTPS server is actually serving — the thread must be alive,
     not merely the server object constructed, so a crashed serve loop reads as
@@ -1272,6 +1268,7 @@ def _server_running():
     return _https_thread is not None and _https_thread.is_alive()
 
 
+# The watchdog pass
 def _cert_watchdog_tick():
     """One renewal/reload pass over every configured site's certificate. Each
     site's pass is wrapped in its own try/except: one site's failure can't skip
@@ -1307,6 +1304,7 @@ def _cert_watchdog_tick():
                           site.domain or "a self-signed site")
 
 
+# The watchdog thread
 def _cert_watchdog():
     """Auto-renew Let's Encrypt certs before expiry; detect externally-rotated certs."""
     while _server_running():
@@ -1316,6 +1314,7 @@ def _cert_watchdog():
         _cert_watchdog_tick()
 
 
+# Starting
 def start_server():
     global _server_start_time, _watchdog_thread, _sweep_thread, \
         _https_server, _https_thread, _http_server
@@ -1338,9 +1337,7 @@ def start_server():
                     sys.exit(1)
                 return
 
-    # Build the HTTPS server, failing closed if the socket can't bind or a cert is
-    # unreadable — better than a live process that serves nothing. Both surface here
-    # synchronously: the bind happens in the constructor, the certs in _build_site_ssl_contexts.
+    # fail closed: a bad bind or an unreadable cert surfaces here, synchronously
     try:
         https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_site_ssl_contexts())
     except Exception as e:
@@ -1350,7 +1347,7 @@ def start_server():
             sys.exit(1)
         return
 
-    # The port-80 redirect is best-effort (needs privilege and a free port).
+    # the port-80 redirect is best-effort (needs privilege and a free port)
     try:
         redirect = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
     except OSError as e:
@@ -1398,6 +1395,7 @@ def start_server():
         print(_c(f"  {warning}", "yellow"))
 
 
+# Stopping
 def stop_server():
     global _server_start_time, _sweep_thread, _https_server, _https_thread, _http_server
 
@@ -1425,6 +1423,7 @@ def stop_server():
     print("Session server stopped.")
 
 
+# The service watch
 def _watch_server(poll=5, grace=30):
     """Block until the HTTPS server has been dead for `grace` seconds.
 
@@ -1448,8 +1447,7 @@ def _watch_server(poll=5, grace=30):
         time.sleep(poll)
 
 
-# ── Service management ────────────────────────────────────────────────────────
-
+# Service probes
 def _service_file_exists():
     return os.path.exists(SERVICE_PATH)
 
@@ -1470,12 +1468,14 @@ def _servette_user_exists():
     return result.returncode == 0
 
 
+# Ownership: the service user
 def _chown_servette(path):
     """Chown path to servette:servette if the user exists and the path exists."""
     if _servette_user_exists() and os.path.exists(path):
         subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
+# Ownership: the operator
 def _operator_user():
     """The human behind sudo: SUDO_USER when present, else the current user."""
     return os.environ.get("SUDO_USER") or getpass.getuser()
@@ -1508,6 +1508,7 @@ def _chown_operator(path):
             subprocess.run(argv, check=False, capture_output=True)
 
 
+# The systemd unit
 def _systemd_unit(python_path, package_dir):
     """The systemd unit for the service. Writes are confined to where Servette
     actually writes — the data directory (config, certs, ACME account) and the ACME
@@ -1567,6 +1568,7 @@ WantedBy=multi-user.target
 """
 
 
+# The network watchdog units
 def _netwatch_units():
     """The (service, timer) unit pair for the network watchdog.
 
@@ -1599,6 +1601,7 @@ WantedBy=timers.target
     return service, timer
 
 
+# Reading /proc/meminfo
 _SWAP_PATH = "/swapfile"
 
 
@@ -1619,11 +1622,13 @@ def _meminfo():
 # The unpredictable part of demand: an allowance for the single-process spike
 # nobody plans for, sized to the largest one observed in production (fwupd
 # ballooning to ~656 MB virtual on a 414 MB host, hourly, for weeks).
+# The swap bounds
 _SPIKE_ALLOWANCE_KB = 700 * 1024
 _SWAP_MIN_MB        = 512
 _SWAP_MAX_MB        = 2048
 
 
+# Rounding an estimate
 def _round_up_2sig(n):
     """Round a positive integer up to two significant digits (1148 → 1200).
 
@@ -1633,6 +1638,7 @@ def _round_up_2sig(n):
     return -(-int(n) // mag) * mag
 
 
+# The recommendation
 def _swap_recommendation(mem_kb, avail_kb, cache_mb):
     """Recommended total swap in bytes for this host, or None when demand fits in RAM.
 
@@ -1673,6 +1679,7 @@ def _swap_offer(rec_mb, ours, active_mb):
     return f"a {active_mb} MB swapfile", f"keep {active_mb}"
 
 
+# The flash-wear note
 def _root_on_sd_card():
     """True when the root filesystem sits on an SD/eMMC device (/dev/mmcblk*),
     where swap writes add flash wear worth mentioning before the operator decides."""
@@ -1684,6 +1691,7 @@ def _root_on_sd_card():
         return False
 
 
+# The swap offer
 def _ensure_swap():
     """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
     if _IS_MACOS:
@@ -1751,6 +1759,7 @@ def _ensure_swap():
             pass
 
 
+# The unit interpreter
 def _unit_python_path():
     """The interpreter the unit's ExecStart names: the one running this shell.
     Under a pip/venv install that is the environment's own python, and the
@@ -1760,6 +1769,11 @@ def _unit_python_path():
     return sys.executable
 
 
+# A systemd directive value splits on whitespace, so a path carrying any would
+# silently become two wrong grants — and a newline would inject an arbitrary
+# directive into the sandbox definition. Servette refuses to write units for
+# such a path rather than encode it wrongly.
+# The whitespace refusal
 def _unsafe_unit_path():
     """The first unit-embedded path (data dir, package dir) carrying
     whitespace, or None. systemd directive values split on whitespace, so
@@ -1773,6 +1787,7 @@ def _unsafe_unit_path():
     return None
 
 
+# The desired units
 def _desired_units():
     """What every unit file should contain, as {path: text}, computed from
     this version of the code."""
@@ -1804,6 +1819,7 @@ def _stale_units():
     return stale
 
 
+# The environment-drift gate
 def _service_env_drift():
     """Ways the enabled unit's environment differs from this shell's, as
     human-readable strings; empty when they agree or no unit exists. A stale
@@ -1832,6 +1848,7 @@ def _service_env_drift():
     return drift
 
 
+# Writing the units
 def _write_unit_files():
     """Write (or refresh) the systemd unit, the network watchdog unit pair, and
     the file ownership they depend on. Returns True if a service file already
@@ -1849,7 +1866,6 @@ def _write_unit_files():
 
     updating = _service_file_exists()
 
-    # Create system user if needed
     if not _servette_user_exists():
         subprocess.run(
             ["useradd", "--system", "--no-create-home", "--shell", "/sbin/nologin", "servette"],
@@ -1857,9 +1873,7 @@ def _write_unit_files():
         )
         print("Created system user 'servette'.")
 
-    # One computation of the unit texts, shared with the staleness check —
-    # a writer that recomputed them independently could drift from the checker,
-    # making every shell launch rewrite units forever.
+    # one computation of the unit texts, shared with the staleness check
     for path, text in _desired_units().items():
         with open(path, "w") as f:
             f.write(text)
@@ -1869,7 +1883,7 @@ def _write_unit_files():
     subprocess.run(["systemctl", "enable", "--now", "servette-netwatch.timer"],
                    check=True, capture_output=True)
 
-    # Chown files the service process needs to read, across every site
+    # chown files the service process needs to read, across every site
     _chown_servette(config.CONFIG_FILE)
     for site in config.sites:
         if site.cert_file:
@@ -1884,7 +1898,7 @@ def _write_unit_files():
     os.makedirs(ACME_WEBROOT, exist_ok=True)
     _chown_servette(ACME_WEBROOT)
 
-    # Warn if any site's serve_dir isn't world-readable
+    # warn if any site's serve_dir isn't world-readable
     for site in config.sites:
         if not site.serve_dir:
             continue
@@ -1898,6 +1912,7 @@ def _write_unit_files():
     return updating
 
 
+# enable
 def cmd_enable():
     try:
         updating = _write_unit_files()
@@ -1932,6 +1947,7 @@ def cmd_enable():
         print(f"Error during enable: {e}")
 
 
+# disable
 def cmd_disable():
     if not _service_file_exists():
         cmd_status()
@@ -1960,8 +1976,7 @@ def cmd_disable():
         print(f"Error during disable: {e}")
 
 
-# ── Certificate management ────────────────────────────────────────────────────
-
+# The spinner
 def _spin(message, stop_event):
     frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     i = 0
@@ -1996,6 +2011,7 @@ class _spinner:
         return False
 
 
+# Writing private keys
 def _write_private_key(path, data):
     """Write key material with 0600 set at file creation, not chmod'd after:
     under a permissive umask, write-then-chmod leaves a window where another
@@ -2007,6 +2023,7 @@ def _write_private_key(path, data):
         f.write(data)
 
 
+# The self-signed certificate
 def _generate_self_signed_cert(cert_path, key_path):
     """Generate a self-signed certificate and write it to cert_path/key_path."""
     from cryptography import x509 as _x509
@@ -2049,6 +2066,7 @@ def _generate_self_signed_cert(cert_path, key_path):
     log.info("Generated self-signed certificate at %s", cert_path)
 
 
+# Waiting for the port
 def _wait_for_port_free(port, timeout=15):
     import socket as _socket
     deadline = time.monotonic() + timeout
@@ -2066,6 +2084,7 @@ def _wait_for_port_free(port, timeout=15):
     return False
 
 
+# Reloading
 def _reload_server():
     """Reload the server to pick up a new certificate."""
     if "--serve" in sys.argv:
@@ -2087,6 +2106,7 @@ def _reload_server():
         start_server()
 
 
+# base64url
 def _b64url(data):
     """base64url without padding — the encoding JOSE/ACME uses everywhere."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -2097,6 +2117,7 @@ def _b64url_int(n):
     return _b64url(n.to_bytes((n.bit_length() + 7) // 8 or 1, "big"))
 
 
+# The response holder
 class _Resp:
     """A tiny HTTP response holder so the ACME client can read status/headers/body
     uniformly whether urllib returned success or raised HTTPError."""
@@ -2122,6 +2143,7 @@ class _ACMEError(Exception):
         self.failed = failed or set()
 
 
+# The ACME client
 class _ACMEClient:
     """A minimal ACME (RFC 8555) client — just enough of the protocol for HTTP-01
     issuance with a single account key, replacing the certbot `acme` + `josepy`
@@ -2142,7 +2164,7 @@ class _ACMEClient:
             self._dir = self._request(self._url).json()
         return self._dir
 
-    # ── HTTP + nonce ──
+    # HTTP + nonce
     def _request(self, url, data=None, method=None):
         headers = {"User-Agent": "servette"}
         if data is not None:
@@ -2157,7 +2179,7 @@ class _ACMEClient:
             self._nonce = resp.headers["Replay-Nonce"]
         return resp
 
-    # ── JWS ──
+    # JWS
     def _jwk(self):
         nums = self._key.public_key().public_numbers()
         return {"e": _b64url_int(nums.e), "kty": "RSA", "n": _b64url_int(nums.n)}
@@ -2202,7 +2224,7 @@ class _ACMEClient:
     def _post_as_get(self, url):
         return self._post(url, None)
 
-    # ── protocol steps ──
+    # protocol steps
     def new_account(self, email):
         payload = {"termsOfServiceAgreed": True}
         if email:
@@ -2262,6 +2284,7 @@ class _ACMEClient:
                     pass
 
 
+# Issuance
 def _obtain_trusted_cert(domain, site):
     """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
     minimal ACME client (_ACMEClient) on stdlib urllib + cryptography, and store it
@@ -2298,7 +2321,7 @@ def _obtain_trusted_cert(domain, site):
         ))
         _chown_servette(ACCOUNT_KEY_FILE)
 
-    # Start a temporary HTTP listener on port 80 if the main server isn't running
+    # start a temporary port-80 listener if the main server isn't running
     tmp_server = None
     if not _server_running():
         try:
@@ -2393,6 +2416,7 @@ def _obtain_trusted_cert(domain, site):
         tmp_server.server_close()
 
 
+# Loading a certificate
 def _load_cert(cert_path):
     """Return a cryptography X.509 certificate object, or None on failure."""
     try:
@@ -2403,6 +2427,7 @@ def _load_cert(cert_path):
         return None
 
 
+# The domain a certificate names
 def _is_real_domain(s):
     if s in ("localhost", "servette"):
         return False
@@ -2437,6 +2462,7 @@ def _domain_from_cert(cert_path):
     return None
 
 
+# Days to expiry
 def _cert_days_remaining(cert_path):
     cert = _load_cert(cert_path)
     if cert is None:

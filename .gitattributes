@@ -1,14 +1,19 @@
 # GitHub Linguist overrides: the language bar should describe Servette — the
-# Python program — not the project website that happens to live beside it.
+# Python program — not the web pages that live beside it.
 #
-# site/ is the site's own presentation (HTML/JS pages, no build step), marked
-# as documentation so Linguist leaves it out of the language statistics.
-# The Python that remains counted is the program and its tooling: servette.py,
-# src/build.py, src/release.py, tests/test.py. src/*.md was never counted —
-# Linguist treats Markdown as prose.
-site/** linguist-documentation
+# The bar reads Python because the program is Python: servette/__init__.py (the
+# module, generated from the literate sources in src/), src/build.py, and
+# tests/test.py. src/*.md is where that module is authored, but it is left as
+# Markdown deliberately — counting it as Python too would count the same code
+# twice, once as source and once as generated output.
+#
+# site/ is the project website (HTML/JS pages, no build step) and tests/viewer/
+# is that site's end-to-end harness — JavaScript testing a web page, not part
+# of the program. Both are marked documentation so they stay out of the bar.
+site/**         linguist-documentation
+tests/viewer/** linguist-documentation
 
-# servette.py is generated from src/*.md, but it IS the program — reviewed,
-# signed, and shipped as the release artifact — so it must stay counted even
-# if a Linguist heuristic ever starts reading its generated-file banner.
-servette.py -linguist-generated
+# The module is generated, but it IS the program — reviewed, and shipped as the
+# release artifact — so it must stay counted even if a Linguist heuristic ever
+# starts reading its generated-file banner.
+servette/__init__.py -linguist-generated

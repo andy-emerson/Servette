@@ -2491,8 +2491,7 @@ def _cert_days_remaining(cert_path):
     return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
 
 
-# Menus are generated so the right-hand column always begins at the same place
-# (2-space indent + a 22-wide label) as the status and config displays.
+# Menu metrics
 _PAD = 22
 
 
@@ -2515,10 +2514,7 @@ def _section(title):
     print(_section_text(title), end="")
 
 
-# Ordered like systemctl's own manual: runtime control (start/stop) before
-# persistence (enable/disable) — Servette wraps systemd, and its audience
-# already has that convention's intuition. Onboarding, then runtime control,
-# then persistence, then observability, then maintenance, then meta.
+# The commands
 _COMMANDS = [
     ("setup",            "guided walkthrough for getting started"),
     ("config",           "view and edit settings"),
@@ -2537,12 +2533,7 @@ _COMMANDS = [
 ]
 HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _COMMANDS)
 
-# Ordered: sites first (list/add/remove — the multi-site entry points), then
-# what a site serves and how it's reached (dir/port/cert/email — email is the
-# ACME registration address, grouped with the certificate it belongs to), then
-# access control, then traffic shaping, then advanced/rarely-touched security
-# tuning, then meta. dir/cert/publish/username/password take an optional site
-# index (default 0) — same [n] convention as the top-level 'log [n]'.
+# The config commands
 _CONFIG_COMMANDS = [
     ("sites",           "list configured sites"),
     ("add-site",        "add a new site (folder, domain, password, publish channel)"),
@@ -2566,6 +2557,7 @@ _CONFIG_COMMANDS = [
 CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
 
 
+# Safe input
 def _input(prompt, default=""):
     """input() that answers `default` on Ctrl-D / Ctrl-C instead of letting the
     exception traceback out of a command and kill the shell. The default lets
@@ -2581,8 +2573,7 @@ def _prompt(question):
     return _input(f"  {question} [y/n]: ").strip().lower() == "y"
 
 
-# ── Config sub-shell ──────────────────────────────────────────────────────────
-
+# The settings display
 def _config_show():
     def val(v):
         return v if v else "(not set)"
@@ -2635,6 +2626,7 @@ def _config_sites():
     print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
 
 
+# serve_dir containment
 def _is_within_base_dir(path):
     """True if path (already resolved) is BASE_DIR itself or somewhere under
     it. serve_dir must satisfy this: the publish pipeline's atomic swap
@@ -2662,6 +2654,7 @@ def _serve_dir_exposes_secrets(path):
     return real == base or real == certs or real.startswith(certs + os.sep)
 
 
+# add-site
 def _config_add_site():
     """Add a site — the same questions cmd_setup asks for the very first one
     (domain, password), plus the folder question the first site gets for free
@@ -2758,6 +2751,7 @@ def _config_add_site():
         _reload_server()
 
 
+# remove-site
 def _config_remove_site(args):
     if not args:
         print("  Usage: remove-site <site index>")
@@ -2787,6 +2781,7 @@ def _config_remove_site(args):
         _reload_server()
 
 
+# dir
 def _config_dir(site):
     dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
     if dirs:
@@ -2812,6 +2807,7 @@ def _config_dir(site):
     print("  → saved")
 
 
+# The generic setter
 def _config_set(attr, label, cast=str, validate=None, error="invalid value", hint=None):
     current = getattr(config, attr)
     if hint:
@@ -2831,6 +2827,7 @@ def _config_set(attr, label, cast=str, validate=None, error="invalid value", hin
         print(f"  → {error}, unchanged")
 
 
+# cert
 def _config_cert(site):
     cert_path = _resolve(site.cert_file)
     if os.path.exists(cert_path):
@@ -2868,6 +2865,7 @@ def _config_cert(site):
             _reload_server()
 
 
+# username and password
 def _config_username(site):
     current   = site.username
     new_value = _input(f"  username [{current}]: ").strip()
@@ -2906,6 +2904,7 @@ def _config_password(site):
     print("  → saved")
 
 
+# limits and cache
 def _config_limits():
     _config_set("rate_limit",      "rate_limit",      int, error="invalid number", hint="Requests per minute per IP")
     _config_set("auth_rate_limit", "auth_rate_limit", int, error="invalid number", hint="Failed login attempts per minute per IP")
@@ -2938,6 +2937,7 @@ def _config_cache():
                 "invalid number", hint="In-memory file cache limit in MB (e.g. 32 on a Raspberry Pi)")
 
 
+# proxy
 def _config_trusted_proxy():
     current = config.trusted_proxy
     print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
@@ -2952,6 +2952,7 @@ def _config_trusted_proxy():
     print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
 
 
+# publish
 def _config_publish(site):
     print(f"\n  Current watch URL: {site.publish_url or '(not set)'}")
     print("  Where signed content bundles (a .tar.gz plus its .sig) are pulled from —")
@@ -2980,6 +2981,7 @@ def _config_publish(site):
         print("  → unchanged")
 
 
+# tls
 def _config_tls():
     print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
     print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
@@ -3006,6 +3008,7 @@ def _config_tls():
     print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
 
 
+# The site-index argument
 def _config_site_arg(args):
     """Resolve dir/cert/username/password/publish's optional site-index
     argument to a Site, defaulting to site 0 — same [n] convention as the
@@ -3024,6 +3027,7 @@ def _config_site_arg(args):
     return config.sites[idx]
 
 
+# config
 def cmd_config():
     _config_show()
     print(CONFIG_HELP)
@@ -3095,6 +3099,7 @@ def cmd_config():
             print(CONFIG_HELP)
 
 
+# start
 def cmd_start():
     if _service_file_exists():
         if _service_is_active():
@@ -3120,6 +3125,7 @@ def cmd_start():
                 cmd_enable()
 
 
+# stop
 def cmd_stop():
     stopped = False
 
@@ -3144,6 +3150,7 @@ def cmd_stop():
         cmd_status()
 
 
+# log
 def cmd_log(n=20):
     try:
         result = subprocess.run(
@@ -3159,6 +3166,7 @@ def cmd_log(n=20):
             print("journalctl not found. Is this a systemd system?")
 
 
+# The placeholder page
 # The marker string keeps its historical name: pages seeded by earlier
 # releases (which fetched a richer demo page from GitHub as a release asset)
 # carry "servette:demo". The marker distinguishes Servette's own placeholder
@@ -3222,6 +3230,7 @@ _PLACEHOLDER_PAGE = """<!DOCTYPE html>
 """.encode()
 
 
+# Recognizing the placeholder
 def _is_placeholder(index_path):
     """True when index_path exists and carries the servette:demo marker — i.e. it
     is Servette's own placeholder, safe to refresh. An operator's page (no marker)
@@ -3251,18 +3260,17 @@ def _seed_placeholder(serve_dir):
         return False
     return True
 
-# ── Site content publishing ─────────────────────────────────────────────────
-#
 # The update channel for a site's *content*: a signed tar.gz bundle, pulled
 # from publish_url, verified against publish_key, and swapped into serve_dir
 # with a single-shot .bak — 'restore-site' rolls back to it, and a successful
 # restore consumes it. Pull-only — this box never accepts an inbound push of
 # content, only fetches from a URL it already trusts. (Servette's own code
 # updates travel through the package manager, not through Servette.)
-
+# The bundle ceiling
 _MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
 
 
+# Extracting a bundle
 def _extract_bundle(data, dest_dir):
     """Extract a tar.gz byte string into dest_dir (must not yet exist).
 
@@ -3296,6 +3304,7 @@ def _extract_bundle(data, dest_dir):
             tf.extractall(dest_dir, members=members)
 
 
+# The content swap
 def _swap_site_content(new_dir, serve_dir):
     """Atomically replace the live serve_dir with new_dir's contents, keeping
     a single-shot backup: serve_dir.bak holds the one previous state, and a
@@ -3318,6 +3327,7 @@ _publish_lock = threading.Lock()  # serializes site-content mutation across ever
                                    # multiple unguarded filesystem ops, not one.
 
 
+# The .sig companion
 def _publish_sig_url(url):
     """url's own '.sig' companion, with '.sig' appended to the path rather than
     the whole URL — naive string concatenation breaks for a publish_url that
@@ -3327,6 +3337,7 @@ def _publish_sig_url(url):
     return urlunsplit(parts._replace(path=parts.path + ".sig"))
 
 
+# Checking the channel
 def _check_for_content_update(site):
     """Pull, verify, and swap in a new site bundle for `site` if its publish
     channel is configured. No-ops silently (not an error) if publish_url/
@@ -3381,6 +3392,7 @@ def _check_for_content_update(site):
     return "published"
 
 
+# pull
 def cmd_pull(site):
     """Manually check the publish channel for new site content and pull it in."""
     if not (site.publish_url and site.publish_key):
@@ -3423,6 +3435,7 @@ def cmd_restore_site(site):
     print("  Site content restored from backup.")
 
 
+# Formatting uptime
 def _format_uptime(seconds):
     s = int(seconds)
     if s < 60:
@@ -3435,6 +3448,7 @@ def _format_uptime(seconds):
         return f"{s // 86400}d {(s % 86400) // 3600}h"
 
 
+# Production issues
 def _production_issues():
     """Return a list of strings describing conditions that prevent production
     readiness, across every configured site. Single-site installs (still the
@@ -3472,6 +3486,7 @@ def _production_issues():
     return issues
 
 
+# Cache warnings
 def _cache_warnings():
     """Warn when a site, or any single file within it, is too big for the shared
     in-memory cache. Single-site installs see exactly today's unlabeled messages;
@@ -3505,6 +3520,7 @@ def _cache_warnings():
     return warnings
 
 
+# Runtime stats
 def _runtime_stats(service_active):
     """Runtime stats for the running server as (label, value) rows — uptime, memory,
     PID — omitting any that aren't available. Service mode reads from systemd;
@@ -3558,6 +3574,7 @@ def _runtime_stats(service_active):
     return rows
 
 
+# The site rows
 def _site_rows():
     """The per-site rows machine consumers read — shared by _status_data and
     `sites --json`, which deliberately pays only for this list: no systemctl
@@ -3587,6 +3604,7 @@ def _status_data():
     }
 
 
+# status
 def cmd_status(json_mode=False):
     if json_mode:
         print(json.dumps(_status_data(), indent=2))
@@ -3637,8 +3655,7 @@ def cmd_status(json_mode=False):
     print()
 
 
-# ── Setup wizard ──────────────────────────────────────────────────────────────
-
+# setup
 def cmd_setup():
     with _spinner("Detecting public IP..."):
         try:
@@ -3698,15 +3715,10 @@ def cmd_setup():
         print("  Run 'start' when you're ready.")
 
 
-# ── Non-interactive configuration ────────────────────────────────────────────
-#
 # `set [n] key=value ...` is the write half of the tooling surface (`status
 # --json` and `sites --json` are the read half): external tools drive it over
 # SSH, which is the authentication — no network admin API exists, by design.
-# Validation mirrors the interactive config sub-shell's rules; every pair is
-# validated against scratch objects before any is applied, so a bad pair
-# never leaves the config half-written.
-
+# Host pairs
 def _set_host_value(target, key, value):
     """Validate one host-level pair and apply it to target (config, or a
     scratch object during the validation pass). Returns an error string,
@@ -3735,6 +3747,7 @@ def _set_host_value(target, key, value):
     return ""
 
 
+# Site pairs
 def _set_site_value(target, key, value):
     """Validate one per-site pair and apply it to target (the chosen site, or
     a scratch Site during the validation pass). Returns an error string,
@@ -3762,6 +3775,7 @@ def _set_site_value(target, key, value):
     return ""
 
 
+# The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
 _SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key")
@@ -3773,6 +3787,7 @@ def _set_usage():
     print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
 
 
+# set
 def cmd_set(args):
     """`set [n] key=value ...` — non-interactive configuration for tooling.
     The optional leading index picks the site for site keys (default 0).
@@ -3818,8 +3833,7 @@ def cmd_set(args):
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 
 
-# ── Main shell loop ───────────────────────────────────────────────────────────
-
+# The startup refresh
 def _startup_refresh():
     """What 'update' once did after swapping versions, done at every shell
     launch instead: code now arrives through the package manager, which can
@@ -3858,6 +3872,7 @@ def _startup_refresh():
                 print(f"  Placeholder page refreshed in {s.serve_dir}.")
 
 
+# The dispatcher
 def run_command(cmd, args):
     """Dispatch one command by name; False for a name it doesn't know. Shared
     verbatim by the interactive loop and the one-shot `servette <command>`
@@ -3902,6 +3917,7 @@ def run_command(cmd, args):
     return True
 
 
+# The shell
 def shell():
     _banner("Servette — The Simple Secure Server")
     _startup_refresh()

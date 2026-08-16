@@ -4,10 +4,12 @@
 
 *Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
-> Menus are generated so the right-hand column always begins at the same place
-> (2-space indent + a 22-wide label) as the status and config displays.
+## Menus and prompts
+
+Menus are generated so the right-hand column always begins at the same place (2-space indent + a 22-wide label) as the status and config displays. The full-width banner is reserved for the two moments a user enters a new mode: the shell launching, the setup wizard.
 
 ```python
+# Menu metrics
 _PAD = 22
 
 
@@ -32,12 +34,10 @@ def _section(title):
 
 ```
 
-> Ordered like systemctl's own manual: runtime control (start/stop) before
-> persistence (enable/disable) — Servette wraps systemd, and its audience
-> already has that convention's intuition. Onboarding, then runtime control,
-> then persistence, then observability, then maintenance, then meta.
+The command list is ordered like systemctl's own manual: runtime control (start/stop) before persistence (enable/disable) — Servette wraps systemd, and its audience already has that convention's intuition. Onboarding, then runtime control, then persistence, then observability, then maintenance, then meta.
 
 ```python
+# The commands
 _COMMANDS = [
     ("setup",            "guided walkthrough for getting started"),
     ("config",           "view and edit settings"),
@@ -58,14 +58,10 @@ HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d i
 
 ```
 
-> Ordered: sites first (list/add/remove — the multi-site entry points), then
-> what a site serves and how it's reached (dir/port/cert/email — email is the
-> ACME registration address, grouped with the certificate it belongs to), then
-> access control, then traffic shaping, then advanced/rarely-touched security
-> tuning, then meta. dir/cert/publish/username/password take an optional site
-> index (default 0) — same [n] convention as the top-level 'log [n]'.
+The config sub-shell's commands, ordered: sites first (list/add/remove — the multi-site entry points), then what a site serves and how it's reached (dir/port/cert/email — email is the ACME registration address, grouped with the certificate it belongs to), then access control, then traffic shaping, then advanced security tuning, then meta. `dir`/`cert`/`publish`/`username`/`password` take an optional site index (default 0) — the same `[n]` convention as the top-level `log [n]`.
 
 ```python
+# The config commands
 _CONFIG_COMMANDS = [
     ("sites",           "list configured sites"),
     ("add-site",        "add a new site (folder, domain, password, publish channel)"),
@@ -89,6 +85,12 @@ _CONFIG_COMMANDS = [
 CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
 
 
+```
+
+Input that can't kill the shell: Ctrl-D and Ctrl-C answer the default instead of letting the exception traceback out of a command.
+
+```python
+# Safe input
 def _input(prompt, default=""):
     """input() that answers `default` on Ctrl-D / Ctrl-C instead of letting the
     exception traceback out of a command and kill the shell. The default lets
@@ -108,9 +110,10 @@ def _prompt(question):
 
 ## Config sub-shell
 
-```python
-# ── Config sub-shell ──────────────────────────────────────────────────────────
+The settings display: host-level rows once, then each site's own block.
 
+```python
+# The settings display
 def _config_show():
     def val(v):
         return v if v else "(not set)"
@@ -163,6 +166,12 @@ def _config_sites():
     print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
 
 
+```
+
+The two predicates every serve_dir edit runs through: it must sit inside the data directory (the publish swap and the systemd sandbox both depend on that), and it must not be a folder that holds Servette's own secrets.
+
+```python
+# serve_dir containment
 def _is_within_base_dir(path):
     """True if path (already resolved) is BASE_DIR itself or somewhere under
     it. serve_dir must satisfy this: the publish pipeline's atomic swap
@@ -190,6 +199,12 @@ def _serve_dir_exposes_secrets(path):
     return real == base or real == certs or real.startswith(certs + os.sep)
 
 
+```
+
+Adding a site asks the same questions setup asks for the first one, plus the folder question — and its inline comments carry the two traps this function is shaped around: certificate names that must not collide across remove/add sequences, and a fallback pair that must exist on disk before ACME is even attempted.
+
+```python
+# add-site
 def _config_add_site():
     """Add a site — the same questions cmd_setup asks for the very first one
     (domain, password), plus the folder question the first site gets for free
@@ -286,6 +301,12 @@ def _config_add_site():
         _reload_server()
 
 
+```
+
+Removal discards config only — files on disk are never touched — and the last site can't be removed.
+
+```python
+# remove-site
 def _config_remove_site(args):
     if not args:
         print("  Usage: remove-site <site index>")
@@ -315,6 +336,12 @@ def _config_remove_site(args):
         _reload_server()
 
 
+```
+
+Changing a site's directory runs the same containment and secrets checks as add-site.
+
+```python
+# dir
 def _config_dir(site):
     dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
     if dirs:
@@ -340,6 +367,12 @@ def _config_dir(site):
     print("  → saved")
 
 
+```
+
+One generic prompt-validate-save for the simple host-level settings; the settings with more shape get their own functions below.
+
+```python
+# The generic setter
 def _config_set(attr, label, cast=str, validate=None, error="invalid value", hint=None):
     current = getattr(config, attr)
     if hint:
@@ -359,6 +392,12 @@ def _config_set(attr, label, cast=str, validate=None, error="invalid value", hin
         print(f"  → {error}, unchanged")
 
 
+```
+
+The certificate prompt: a domain means ACME issuance; blank means a fresh self-signed pair.
+
+```python
+# cert
 def _config_cert(site):
     cert_path = _resolve(site.cert_file)
     if os.path.exists(cert_path):
@@ -396,6 +435,12 @@ def _config_cert(site):
             _reload_server()
 
 
+```
+
+Clearing the username clears the password with it — auth is one switch, not two half-states. The password never echoes and is stored only as its scrypt hash.
+
+```python
+# username and password
 def _config_username(site):
     current   = site.username
     new_value = _input(f"  username [{current}]: ").strip()
@@ -434,6 +479,12 @@ def _config_password(site):
     print("  → saved")
 
 
+```
+
+The traffic and caching prompts.
+
+```python
+# limits and cache
 def _config_limits():
     _config_set("rate_limit",      "rate_limit",      int, error="invalid number", hint="Requests per minute per IP")
     _config_set("auth_rate_limit", "auth_rate_limit", int, error="invalid number", hint="Failed login attempts per minute per IP")
@@ -466,6 +517,12 @@ def _config_cache():
                 "invalid number", hint="In-memory file cache limit in MB (e.g. 32 on a Raspberry Pi)")
 
 
+```
+
+The reverse-proxy setting explains its own default: blank means X-Forwarded-For is ignored, which is correct when Servette faces the internet directly.
+
+```python
+# proxy
 def _config_trusted_proxy():
     current = config.trusted_proxy
     print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
@@ -480,6 +537,12 @@ def _config_trusted_proxy():
     print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
 
 
+```
+
+The publish channel's two halves: the watch URL (https only) and the Ed25519 public key that verifies what it serves.
+
+```python
+# publish
 def _config_publish(site):
     print(f"\n  Current watch URL: {site.publish_url or '(not set)'}")
     print("  Where signed content bundles (a .tar.gz plus its .sig) are pulled from —")
@@ -508,6 +571,12 @@ def _config_publish(site):
         print("  → unchanged")
 
 
+```
+
+TLS floor and optional cipher override; both take effect on the next server start.
+
+```python
+# tls
 def _config_tls():
     print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
     print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
@@ -534,6 +603,12 @@ def _config_tls():
     print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
 
 
+```
+
+The `[n]` site-index convention, resolved in one place.
+
+```python
+# The site-index argument
 def _config_site_arg(args):
     """Resolve dir/cert/username/password/publish's optional site-index
     argument to a Site, defaulting to site 0 — same [n] convention as the
@@ -552,6 +627,12 @@ def _config_site_arg(args):
     return config.sites[idx]
 
 
+```
+
+The sub-shell loop itself: show the settings, then dispatch until `back`.
+
+```python
+# config
 def cmd_config():
     _config_show()
     print(CONFIG_HELP)
@@ -623,6 +704,14 @@ def cmd_config():
             print(CONFIG_HELP)
 
 
+```
+
+## Runtime commands
+
+`start` prefers the installed service; without one it starts a session server and offers to make it permanent.
+
+```python
+# start
 def cmd_start():
     if _service_file_exists():
         if _service_is_active():
@@ -648,6 +737,12 @@ def cmd_start():
                 cmd_enable()
 
 
+```
+
+`stop` stops whichever is running — service, session server, or both.
+
+```python
+# stop
 def cmd_stop():
     stopped = False
 
@@ -672,6 +767,12 @@ def cmd_stop():
         cmd_status()
 
 
+```
+
+`log` reads the service's journal; session mode's log is the terminal itself.
+
+```python
+# log
 def cmd_log(n=20):
     try:
         result = subprocess.run(
@@ -687,6 +788,14 @@ def cmd_log(n=20):
             print("journalctl not found. Is this a systemd system?")
 
 
+```
+
+## The placeholder page
+
+The page setup seeds into an empty site, embedded so no network is involved. The `servette:demo` marker is the ownership rule made visible in the file itself: a marked page is Servette's to refresh, an unmarked one is never touched, and deleting the marker adopts the page permanently.
+
+```python
+# The placeholder page
 # The marker string keeps its historical name: pages seeded by earlier
 # releases (which fetched a richer demo page from GitHub as a release asset)
 # carry "servette:demo". The marker distinguishes Servette's own placeholder
@@ -750,6 +859,12 @@ _PLACEHOLDER_PAGE = """<!DOCTYPE html>
 """.encode()
 
 
+```
+
+Recognizing and seeding, each honoring the marker rule.
+
+```python
+# Recognizing the placeholder
 def _is_placeholder(index_path):
     """True when index_path exists and carries the servette:demo marker — i.e. it
     is Servette's own placeholder, safe to refresh. An operator's page (no marker)
@@ -783,19 +898,24 @@ def _seed_placeholder(serve_dir):
 
 ## Site content publishing
 
-```python
-# ── Site content publishing ─────────────────────────────────────────────────
-#
-# The update channel for a site's *content*: a signed tar.gz bundle, pulled
-# from publish_url, verified against publish_key, and swapped into serve_dir
-# with a single-shot .bak — 'restore-site' rolls back to it, and a successful
-# restore consumes it. Pull-only — this box never accepts an inbound push of
-# content, only fetches from a URL it already trusts. (Servette's own code
-# updates travel through the package manager, not through Servette.)
+> The update channel for a site's *content*: a signed tar.gz bundle, pulled
+> from publish_url, verified against publish_key, and swapped into serve_dir
+> with a single-shot .bak — 'restore-site' rolls back to it, and a successful
+> restore consumes it. Pull-only — this box never accepts an inbound push of
+> content, only fetches from a URL it already trusts. (Servette's own code
+> updates travel through the package manager, not through Servette.)
 
+```python
+# The bundle ceiling
 _MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
 
 
+```
+
+Extraction validates everything before writing anything: containment, entry types, and the uncompressed total.
+
+```python
+# Extracting a bundle
 def _extract_bundle(data, dest_dir):
     """Extract a tar.gz byte string into dest_dir (must not yet exist).
 
@@ -829,6 +949,12 @@ def _extract_bundle(data, dest_dir):
             tf.extractall(dest_dir, members=members)
 
 
+```
+
+The swap is two renames back to back on the same filesystem, with the previous state kept as the single-shot backup.
+
+```python
+# The content swap
 def _swap_site_content(new_dir, serve_dir):
     """Atomically replace the live serve_dir with new_dir's contents, keeping
     a single-shot backup: serve_dir.bak holds the one previous state, and a
@@ -851,6 +977,12 @@ _publish_lock = threading.Lock()  # serializes site-content mutation across ever
                                    # multiple unguarded filesystem ops, not one.
 
 
+```
+
+The `.sig` companion is appended to the URL's path, not the whole URL, so a query string survives.
+
+```python
+# The .sig companion
 def _publish_sig_url(url):
     """url's own '.sig' companion, with '.sig' appended to the path rather than
     the whole URL — naive string concatenation breaks for a publish_url that
@@ -860,6 +992,12 @@ def _publish_sig_url(url):
     return urlunsplit(parts._replace(path=parts.path + ".sig"))
 
 
+```
+
+The whole pull pipeline in order — capped fetch, signature check, validated extraction, atomic swap — each failure mapped to a status string the command turns into one printed line.
+
+```python
+# Checking the channel
 def _check_for_content_update(site):
     """Pull, verify, and swap in a new site bundle for `site` if its publish
     channel is configured. No-ops silently (not an error) if publish_url/
@@ -914,6 +1052,12 @@ def _check_for_content_update(site):
     return "published"
 
 
+```
+
+The two commands over that pipeline: pull now, and roll back to the single-shot backup.
+
+```python
+# pull
 def cmd_pull(site):
     """Manually check the publish channel for new site content and pull it in."""
     if not (site.publish_url and site.publish_key):
@@ -956,6 +1100,14 @@ def cmd_restore_site(site):
     print("  Site content restored from backup.")
 
 
+```
+
+## Status
+
+Uptime as humans read it.
+
+```python
+# Formatting uptime
 def _format_uptime(seconds):
     s = int(seconds)
     if s < 60:
@@ -968,6 +1120,12 @@ def _format_uptime(seconds):
         return f"{s // 86400}d {(s % 86400) // 3600}h"
 
 
+```
+
+`_production_issues` is the project's model for understatement: it lists what is wrong rather than implying everything is fine — per site, plus the host-level swap check.
+
+```python
+# Production issues
 def _production_issues():
     """Return a list of strings describing conditions that prevent production
     readiness, across every configured site. Single-site installs (still the
@@ -1005,6 +1163,12 @@ def _production_issues():
     return issues
 
 
+```
+
+The cache warnings walk every site's tree, so they run only where a human is reading the answer.
+
+```python
+# Cache warnings
 def _cache_warnings():
     """Warn when a site, or any single file within it, is too big for the shared
     in-memory cache. Single-site installs see exactly today's unlabeled messages;
@@ -1038,6 +1202,12 @@ def _cache_warnings():
     return warnings
 
 
+```
+
+Runtime stats come from systemd in service mode, from `/proc` and the in-process start time in session mode.
+
+```python
+# Runtime stats
 def _runtime_stats(service_active):
     """Runtime stats for the running server as (label, value) rows — uptime, memory,
     PID — omitting any that aren't available. Service mode reads from systemd;
@@ -1091,6 +1261,12 @@ def _runtime_stats(service_active):
     return rows
 
 
+```
+
+The machine-readable half: per-site rows shared by `status --json` and `sites --json` — the latter deliberately pays only for this list — and the full status snapshot.
+
+```python
+# The site rows
 def _site_rows():
     """The per-site rows machine consumers read — shared by _status_data and
     `sites --json`, which deliberately pays only for this list: no systemctl
@@ -1120,6 +1296,12 @@ def _status_data():
     }
 
 
+```
+
+The human-facing status display over the same data.
+
+```python
+# status
 def cmd_status(json_mode=False):
     if json_mode:
         print(json.dumps(_status_data(), indent=2))
@@ -1174,9 +1356,10 @@ def cmd_status(json_mode=False):
 
 ## Setup wizard
 
-```python
-# ── Setup wizard ──────────────────────────────────────────────────────────────
+Three steps — folder, certificate, password — reusing the config sub-shell's own prompts, and ending with the offer to enable and start. Setup must never finish with nothing to serve.
 
+```python
+# setup
 def cmd_setup():
     with _spinner("Detecting public IP..."):
         try:
@@ -1238,18 +1421,16 @@ def cmd_setup():
 
 ```
 
-## Main shell loop
+## Non-interactive configuration
+
+> `set [n] key=value ...` is the write half of the tooling surface (`status
+> --json` and `sites --json` are the read half): external tools drive it over
+> SSH, which is the authentication — no network admin API exists, by design.
+
+Validation mirrors the interactive sub-shell's rules; every pair is validated against scratch objects before any is applied, so a bad pair never leaves the config half-written.
 
 ```python
-# ── Non-interactive configuration ────────────────────────────────────────────
-#
-# `set [n] key=value ...` is the write half of the tooling surface (`status
-# --json` and `sites --json` are the read half): external tools drive it over
-# SSH, which is the authentication — no network admin API exists, by design.
-# Validation mirrors the interactive config sub-shell's rules; every pair is
-# validated against scratch objects before any is applied, so a bad pair
-# never leaves the config half-written.
-
+# Host pairs
 def _set_host_value(target, key, value):
     """Validate one host-level pair and apply it to target (config, or a
     scratch object during the validation pass). Returns an error string,
@@ -1278,6 +1459,10 @@ def _set_host_value(target, key, value):
     return ""
 
 
+```
+
+```python
+# Site pairs
 def _set_site_value(target, key, value):
     """Validate one per-site pair and apply it to target (the chosen site, or
     a scratch Site during the validation pass). Returns an error string,
@@ -1305,6 +1490,12 @@ def _set_site_value(target, key, value):
     return ""
 
 
+```
+
+The vocabulary `set` accepts, and its usage line.
+
+```python
+# The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
 _SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key")
@@ -1316,6 +1507,12 @@ def _set_usage():
     print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
 
 
+```
+
+The command itself. Two keys are deliberately absent: password (a secret on argv leaks into shell history and the process table) and domain (bound up with certificate issuance).
+
+```python
+# set
 def cmd_set(args):
     """`set [n] key=value ...` — non-interactive configuration for tooling.
     The optional leading index picks the site for site keys (default 0).
@@ -1361,8 +1558,14 @@ def cmd_set(args):
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 
 
-# ── Main shell loop ───────────────────────────────────────────────────────────
+```
 
+## Main shell loop
+
+What `update` once did after swapping versions now happens at every shell launch: the package manager can neither refresh a stale systemd unit nor rewrite an outdated placeholder page, so the shell notices on its next run.
+
+```python
+# The startup refresh
 def _startup_refresh():
     """What 'update' once did after swapping versions, done at every shell
     launch instead: code now arrives through the package manager, which can
@@ -1401,6 +1604,12 @@ def _startup_refresh():
                 print(f"  Placeholder page refreshed in {s.serve_dir}.")
 
 
+```
+
+One dispatcher, shared verbatim by the interactive loop and the one-shot `servette <command>` argv form, so the two surfaces can never drift.
+
+```python
+# The dispatcher
 def run_command(cmd, args):
     """Dispatch one command by name; False for a name it doesn't know. Shared
     verbatim by the interactive loop and the one-shot `servette <command>`
@@ -1445,6 +1654,12 @@ def run_command(cmd, args):
     return True
 
 
+```
+
+The interactive loop: banner, startup refresh, help, then dispatch until quit.
+
+```python
+# The shell
 def shell():
     _banner("Servette — The Simple Secure Server")
     _startup_refresh()

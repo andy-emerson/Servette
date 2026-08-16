@@ -279,7 +279,14 @@ pre { min-width: 0; }
 
 /* The tab strip. These are the site's navigation — each one swaps the whole
    main region, so they carry the same weight nav links would. */
-.tabs { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto; }
+/* Pushed to the right edge, so the wordmark and its beta pill keep the left
+   and the navigation is not crowded against them. On a narrow header the
+   strip wraps to its own line, where auto margins would strand it. */
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+
+@media (max-width: 720px) {
+  .tabs { margin-left: 0; }
+}
 
 .tab {
   font-family: var(--mono);
@@ -523,22 +530,31 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 
 /* ── Steps ─────────────────────────────────────────────────────── */
 
-.steps { --min: 300px; --gap: 20px; counter-reset: step; }
+/* One step per row, each the full width of the column. Read top to bottom
+   they are the order you do them in, which three side-by-side cards only
+   implied — and the width lets the instruction sit beside the commands it
+   produces instead of above a narrow strip of them. */
+.steps { grid-template-columns: 1fr; --gap: 16px; counter-reset: step; }
 
-/* Column, so the code block absorbs the extra height the grid hands a short
-   card — otherwise the three cards stretch to match but their panels do not. */
 .step {
   min-width: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
 }
 
-.step__head { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.step__head { padding: 18px 22px; border-right: 1px solid var(--border); }
 .step__head h3 { font-size: 17px; margin-bottom: 4px; }
+
+/* Below the split, the head stacks over its commands and the divider moves
+   with it. */
+@media (max-width: 760px) {
+  .step { grid-template-columns: 1fr; }
+  .step__head { border-right: none; border-bottom: 1px solid var(--border); }
+}
 
 .step__head h3::before {
   counter-increment: step;
@@ -549,7 +565,6 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 .step__head p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
 
 .step pre {
-  flex: 1;
   margin: 0;
   padding: 18px 20px;
   font-size: 12.5px;
@@ -825,8 +840,8 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
     <nav class="tabs" role="tablist" aria-label="Sections">
       <button class="tab" type="button" role="tab" aria-selected="true"  aria-controls="page-home"     id="tabbtn-home">Home</button>
       <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-compares" id="tabbtn-compares">How it Compares</button>
-      <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-use"      id="tabbtn-use">How to Use it</button>
       <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-works"    id="tabbtn-works">How it Works</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="page-use"      id="tabbtn-use">How to Use it</button>
     </nav>
     <!-- The theme toggle lived here; dark is now the default and the toggle
          is retired from the chrome. Its wiring (readPref/paint/setPref and
@@ -847,7 +862,7 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
         <span class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></span>
       </div>
       <p class="pill">One module · HTTPS by default · No config language</p>
-      <h1>Everything necessary to do one thing well.</h1>
+      <h1>A production server small enough to read.</h1>
       <p class="hero-lead">Servette is a production nanoserver: a single readable Python module that serves a static site on the public internet with a trusted certificate that renews itself, security headers on every response, rate limiting, and a hardened service that survives reboots.</p>
       <p class="hero-sub">No configuration language to learn, and a single dependency the install brings with it. Install the package, run the wizard, done.</p>
       <div class="install-line">
@@ -976,14 +991,14 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
         <p><button class="btn btn--outline btn--s" type="button" data-goto="how-it-compares">Compare it →</button></p>
       </div>
       <div class="card">
-        <h3>How to Use it</h3>
-        <p>Getting a site live: installing the package, running the wizard, leaving it running, and the full command reference for the interactive shell.</p>
-        <p><button class="btn btn--outline btn--s" type="button" data-goto="how-to-use-it">Get started →</button></p>
-      </div>
-      <div class="card">
         <h3>How it Works</h3>
         <p>The developer's view: the design principles, the architecture map, what each region of the module does, and how to work on Servette itself.</p>
         <p><button class="btn btn--outline btn--s" type="button" data-goto="how-it-works">Read the design →</button></p>
+      </div>
+      <div class="card">
+        <h3>How to Use it</h3>
+        <p>Getting a site live: installing the package, running the wizard, leaving it running, and the full command reference for the interactive shell.</p>
+        <p><button class="btn btn--outline btn--s" type="button" data-goto="how-to-use-it">Get started →</button></p>
       </div>
     </div>
   </section>
@@ -1219,200 +1234,6 @@ figcaption { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--t
 
 </div>
 
-<!-- ══ How to Use it ═══════════════════════════════════════════════ -->
-
-<div class="panel" id="page-use" role="tabpanel" aria-labelledby="tabbtn-use" tabindex="-1" hidden>
-
-  <section class="wrap section">
-    <div class="sec-head">
-      <p class="eyebrow">Getting started</p>
-      <h2>How to use it</h2>
-      <p>Servette needs Python 3.11 or newer and a server you can SSH into. It installs like any Python tool — one package, bringing its one dependency, <code>cryptography</code>, with it. No configuration language, and nothing to build.</p>
-    </div>
-
-    <div class="autogrid steps">
-      <div class="step">
-        <div class="step__head">
-          <h3>Install the package</h3>
-          <p>An isolated venv, and a command on your PATH. (Plain <code>pip install servette</code> once the first PyPI release lands.)</p>
-        </div>
-        <pre><span class="cmt"># on your server</span>
-sudo python3 -m venv /opt/servette
-sudo /opt/servette/bin/pip install \
-  "servette @ git+https://github.com/andy-emerson/Servette"
-sudo ln -s /opt/servette/bin/servette \
-  /usr/local/bin/servette
-</pre>
-      </div>
-      <div class="step">
-        <div class="step__head">
-          <h3>Run the wizard</h3>
-          <p>It asks for a domain, an email, and an optional password.</p>
-        </div>
-        <pre>sudo servette
-
-servette&gt; <span class="hi">setup</span>
-</pre>
-      </div>
-      <div class="step">
-        <div class="step__head">
-          <h3>Leave it running</h3>
-          <p>Installed as a system service, it restarts itself.</p>
-        </div>
-        <pre>servette&gt; <span class="hi">enable</span>
-servette&gt; <span class="hi">status</span>
-
-<span class="acc">running</span> · https://example.com
-</pre>
-      </div>
-    </div>
-
-    <div class="prose">
-      <p>The wizard issues a Let's Encrypt certificate, redirects plain HTTP up to HTTPS, and installs a systemd service so the server comes back after a reboot. Renewal happens on its own: a background watchdog renews the certificate once it is inside thirty days of expiring, so it never lapses and you never touch it.</p>
-      <p><code>sudo</code> is needed only for the interactive shell, which writes the systemd unit and creates the service user. The server itself runs as an unprivileged <code>servette</code> user with no login shell.</p>
-      <p class="aside">Serving over a self-signed certificate works too, for a local network or a machine without a public domain. The browser will warn once; everything else behaves the same.</p>
-    </div>
-  </section>
-
-  <section class="wrap section">
-    <div class="sec-head">
-      <p class="eyebrow">Reference</p>
-      <h2>The shell</h2>
-      <p>Running <code>servette</code> without arguments drops you into an interactive shell; <code>servette &lt;command&gt;</code> runs one command and exits, which is how scripts drive it. Everything is a command — there is no config file to hand-edit, and nothing that requires restarting the server to take effect.</p>
-    </div>
-
-    <div class="autogrid cmds">
-      <div class="cmdbox">
-        <p class="cmdbox__label">Main shell</p>
-        <dl class="cmdlist">
-          <div><dt>setup</dt><dd>guided walkthrough for getting started</dd></div>
-          <div><dt>config</dt><dd>view and edit settings</dd></div>
-          <div><dt>start / stop</dt><dd>start or stop the server</dd></div>
-          <div><dt>enable / disable</dt><dd>install or remove the system service</dd></div>
-          <div><dt>status [--json]</dt><dd>show whether the server is running</dd></div>
-          <div><dt>log [n]</dt><dd>show the last n log entries</dd></div>
-          <div><dt>sites [--json]</dt><dd>list configured sites</dd></div>
-          <div><dt>set [n] k=v …</dt><dd>change settings non-interactively</dd></div>
-          <div><dt>pull [n]</dt><dd>pull a site's new content now</dd></div>
-          <div><dt>restore-site [n]</dt><dd>roll back a site's content</dd></div>
-          <div><dt>help / quit</dt><dd>show commands, or exit</dd></div>
-        </dl>
-      </div>
-      <div class="cmdbox">
-        <p class="cmdbox__label">config sub-shell</p>
-        <dl class="cmdlist">
-          <div><dt>sites</dt><dd>list configured sites</dd></div>
-          <div><dt>add-site</dt><dd>add a site (folder, domain, password, channel)</dd></div>
-          <div><dt>remove-site &lt;n&gt;</dt><dd>remove a site</dd></div>
-          <div><dt>dir [n]</dt><dd>directory to serve</dd></div>
-          <div><dt>port</dt><dd>HTTPS port</dd></div>
-          <div><dt>cert [n]</dt><dd>SSL certificate and key</dd></div>
-          <div><dt>email</dt><dd>ACME registration address</dd></div>
-          <div><dt>publish [n]</dt><dd>publish channel and signing key</dd></div>
-          <div><dt>username / password</dt><dd>optional login for a site</dd></div>
-          <div><dt>limits</dt><dd>rate limits</dd></div>
-          <div><dt>cache</dt><dd>browser cache policy</dd></div>
-          <div><dt>proxy</dt><dd>trusted proxy IP for X-Forwarded-For</dd></div>
-          <div><dt>tls</dt><dd>minimum TLS version and cipher suites</dd></div>
-          <div><dt>csp / perms</dt><dd>Content-Security-Policy, Permissions-Policy</dd></div>
-          <div><dt>show / back</dt><dd>print settings, or return to the main shell</dd></div>
-        </dl>
-      </div>
-    </div>
-
-    <div class="prose">
-      <p>Settings live in <code>/var/lib/servette/servette.toml</code>, written <code>0600</code> — everything Servette keeps lives under <code>/var/lib/servette</code>, and <code>SERVETTE_HOME</code> moves it. Every field has a default, and the file is re-read whenever it changes — so a setting takes effect on the next request, not the next restart.</p>
-    </div>
-  </section>
-
-  <section class="wrap section">
-    <div class="sec-head">
-      <p class="eyebrow">Publishing</p>
-      <h2>Updating your site</h2>
-      <p>Edit files in the served folder and the change is live on the next request — there is no build step and no restart. For a site you publish from somewhere else, Servette can fetch a signed bundle when you ask it to.</p>
-    </div>
-
-    <div class="autogrid" style="--min: 290px; --gap: 20px;">
-      <div class="card">
-        <h3>Your files, your folder</h3>
-        <p>The site lives in <code>/var/lib/servette/site/</code>, and you own it — copy files up as yourself, no root: <code>scp -r mysite/* you@server:/var/lib/servette/site/</code>. The service only reads the folder.</p>
-      </div>
-      <div class="card">
-        <h3>Edit in place</h3>
-        <p>Change a file in the served folder. The next request sees it — Servette checks each file's modification time as it serves. Nothing to reload, nothing to invalidate.</p>
-      </div>
-      <div class="card">
-        <h3>Pull a signed bundle</h3>
-        <p>Point a site at a publish channel, then run <code>pull</code>. Servette fetches the bundle, verifies its Ed25519 signature, extracts it to a staging directory, and swaps it in atomically.</p>
-      </div>
-      <div class="card">
-        <h3>Roll it back</h3>
-        <p><code>restore-site</code> undoes the last pull — one backup is kept, and restoring consumes it. Servette itself rolls back the way any pip-installed tool does: <code>pip install servette==x.y.z</code> pins the version you want.</p>
-      </div>
-    </div>
-
-    <div class="prose">
-      <p>Each site's publish channel has its own Ed25519 key pair, so one site's key grants nothing over another. Code travels a different channel entirely — pip delivers it — and no content key can touch it.</p>
-      <p class="aside">Publishing is always operator-triggered — from the shell, over SSH. No network-reachable trigger exists, and no HTTP request can cause Servette to write anything.</p>
-    </div>
-  </section>
-
-  <section class="wrap section">
-    <div class="sec-head">
-      <p class="eyebrow">Signing your bundles</p>
-      <h2>The publish tool</h2>
-      <p>A bundle has to be built and signed before Servette will pull it. The publish tool does both, in your browser — it is where a publish channel's key pair comes from.</p>
-    </div>
-
-    <div class="autogrid" style="--min: 290px; --gap: 20px;">
-      <div class="card">
-        <h3>Point it at a folder</h3>
-        <p>Pick your site folder and it builds the <code>.tar.gz</code>, signs it with your key, and hands back the bundle and its <code>.sig</code> — plus the public key hex to paste into <code>config &gt; publish</code>.</p>
-      </div>
-      <div class="card">
-        <h3>Your key never leaves</h3>
-        <p>The page makes no network request at all, and keeps nothing extractable. Signing happens with your browser's own WebCrypto — the private half of the key is yours to hold, and to lose.</p>
-      </div>
-      <div class="card">
-        <h3>Then host the pair anywhere</h3>
-        <p>Put the two files wherever you like — a GitHub release, object storage — and run <code>pull</code> on the server. The trigger stays with the person who owns the machine.</p>
-      </div>
-    </div>
-
-    <div class="prose">
-      <p><a class="btn btn--primary btn--l" href="pub/">Open the publish tool →</a></p>
-    </div>
-  </section>
-
-  <section class="wrap section">
-    <div class="sec-head">
-      <p class="eyebrow">Before your own HTML</p>
-      <h2>Your site is never empty</h2>
-      <p>Setup seeds the new site folder with a small placeholder page — script-free, written by Servette itself when you say yes — so a fresh install has something real to serve the moment it starts. For a deeper check there is the connection self-test: a page that probes the live connection from the visitor's own browser and reports what it actually observed, rather than asserting that everything is fine.</p>
-    </div>
-
-    <div class="autogrid" style="--min: 290px; --gap: 20px;">
-      <div class="card">
-        <h3>It answers on the first request</h3>
-        <p>Finish <code>setup</code> and load the site. The placeholder rendering over HTTPS means the server, the certificate, and the HTTP-to-HTTPS redirect are all working end to end.</p>
-      </div>
-      <div class="card">
-        <h3>The self-test probes, then reports</h3>
-        <p>It makes real requests from the browser and prints what came back: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped, never passed. Every Servette serves it at <a href="selftest/"><code>/selftest/</code></a> — including the one serving this website, so that link runs the checks against this server, in your browser, right now.</p>
-      </div>
-      <div class="card">
-        <h3>Then you replace it</h3>
-        <p>The placeholder is a stand-in, not a fixture. Drop your own <code>index.html</code> and assets into the site folder — Servette serves whatever is there, with no build step and no restart.</p>
-      </div>
-    </div>
-
-    <div class="prose">
-      <p class="aside">Nothing ships as a folder to copy: the placeholder is embedded in Servette, and the wizard offers to write it. If you point Servette at a folder of your own instead, that is what it serves, and there is nothing to remove.</p>
-    </div>
-  </section>
-
-</div>
-
 <!-- ══ How it Works ════════════════════════════════════════════════ -->
 
 <div class="panel" id="page-works" role="tabpanel" aria-labelledby="tabbtn-works" tabindex="-1" hidden>
@@ -1420,7 +1241,7 @@ servette&gt; <span class="hi">status</span>
   <section class="wrap section">
     <div class="sec-head">
       <p class="eyebrow">Design philosophy</p>
-      <h2>Five principles, and one rule for using them</h2>
+      <h2>Everything necessary to do one thing well.</h2>
       <p>Servette's identity is a small set of non-negotiable principles — invariants, not preferences. Every design decision serves one of them, and a change that serves none is out of scope by definition. They are the lens for the only question that matters: <em>should this exist in Servette?</em></p>
     </div>
 
@@ -1622,6 +1443,192 @@ python3 -m venv .venv &amp;&amp; .venv/bin/pip install cryptography
     <div class="prose">
       <p>Prefer understatement. <code>_production_issues()</code> is the model: it lists what is wrong rather than implying everything is fine. The failure mode to guard against is never fabrication — it is a claim quietly stronger than its evidence.</p>
       <p class="aside">Development happens on one short-lived branch per merge, via pull request; <code>main</code> is protected against direct and force pushes. <code>__version__</code> never moves during ordinary development — it changes only when cutting a release, which is a maintainer task because publishing needs the private signing key.</p>
+    </div>
+  </section>
+
+</div>
+
+<!-- ══ How to Use it ═══════════════════════════════════════════════ -->
+
+<div class="panel" id="page-use" role="tabpanel" aria-labelledby="tabbtn-use" tabindex="-1" hidden>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Getting started</p>
+      <h2>How to use it</h2>
+      <p>Servette needs Python 3.11 or newer and a server you can SSH into. It installs like any Python tool — one package, bringing its one dependency, <code>cryptography</code>, with it. No configuration language, and nothing to build.</p>
+    </div>
+
+    <div class="autogrid steps">
+      <div class="step">
+        <div class="step__head">
+          <h3>Install the package</h3>
+          <p>An isolated venv, and a command on your PATH. (Plain <code>pip install servette</code> once the first PyPI release lands.)</p>
+        </div>
+        <pre><span class="cmt"># on your server</span>
+sudo python3 -m venv /opt/servette
+sudo /opt/servette/bin/pip install \
+  "servette @ git+https://github.com/andy-emerson/Servette"
+sudo ln -s /opt/servette/bin/servette \
+  /usr/local/bin/servette
+</pre>
+      </div>
+      <div class="step">
+        <div class="step__head">
+          <h3>Run the wizard</h3>
+          <p>It asks for a domain, an email, and an optional password.</p>
+        </div>
+        <pre>sudo servette
+
+servette&gt; <span class="hi">setup</span>
+</pre>
+      </div>
+      <div class="step">
+        <div class="step__head">
+          <h3>Leave it running</h3>
+          <p>Installed as a system service, it restarts itself.</p>
+        </div>
+        <pre>servette&gt; <span class="hi">enable</span>
+servette&gt; <span class="hi">status</span>
+
+<span class="acc">running</span> · https://example.com
+</pre>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p>The wizard issues a Let's Encrypt certificate, redirects plain HTTP up to HTTPS, and installs a systemd service so the server comes back after a reboot. Renewal happens on its own: a background watchdog renews the certificate once it is inside thirty days of expiring, so it never lapses and you never touch it.</p>
+      <p><code>sudo</code> is needed only for the interactive shell, which writes the systemd unit and creates the service user. The server itself runs as an unprivileged <code>servette</code> user with no login shell.</p>
+      <p>Into an empty site folder, setup offers to write a small placeholder page — embedded in Servette, script-free — so the site answers on the very first request. That page rendering over HTTPS is itself the end-to-end proof: the server, the certificate, and the HTTP-to-HTTPS redirect all working. Drop in your own <code>index.html</code> whenever you are ready, and Servette will not touch a page you have made your own.</p>
+      <p class="aside">Serving over a self-signed certificate works too, for a local network or a machine without a public domain. The browser will warn once; everything else behaves the same.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Reference</p>
+      <h2>The shell</h2>
+      <p>Running <code>servette</code> without arguments drops you into an interactive shell; <code>servette &lt;command&gt;</code> runs one command and exits, which is how scripts drive it. Everything is a command — there is no config file to hand-edit, and nothing that requires restarting the server to take effect.</p>
+    </div>
+
+    <div class="autogrid cmds">
+      <div class="cmdbox">
+        <p class="cmdbox__label">Main shell</p>
+        <dl class="cmdlist">
+          <div><dt>setup</dt><dd>guided walkthrough for getting started</dd></div>
+          <div><dt>config</dt><dd>view and edit settings</dd></div>
+          <div><dt>start / stop</dt><dd>start or stop the server</dd></div>
+          <div><dt>enable / disable</dt><dd>install or remove the system service</dd></div>
+          <div><dt>status [--json]</dt><dd>show whether the server is running</dd></div>
+          <div><dt>log [n]</dt><dd>show the last n log entries</dd></div>
+          <div><dt>sites [--json]</dt><dd>list configured sites</dd></div>
+          <div><dt>set [n] k=v …</dt><dd>change settings non-interactively</dd></div>
+          <div><dt>pull [n]</dt><dd>pull a site's new content now</dd></div>
+          <div><dt>restore-site [n]</dt><dd>roll back a site's content</dd></div>
+          <div><dt>help / quit</dt><dd>show commands, or exit</dd></div>
+        </dl>
+      </div>
+      <div class="cmdbox">
+        <p class="cmdbox__label">config sub-shell</p>
+        <dl class="cmdlist">
+          <div><dt>sites</dt><dd>list configured sites</dd></div>
+          <div><dt>add-site</dt><dd>add a site (folder, domain, password, channel)</dd></div>
+          <div><dt>remove-site &lt;n&gt;</dt><dd>remove a site</dd></div>
+          <div><dt>dir [n]</dt><dd>directory to serve</dd></div>
+          <div><dt>port</dt><dd>HTTPS port</dd></div>
+          <div><dt>cert [n]</dt><dd>SSL certificate and key</dd></div>
+          <div><dt>email</dt><dd>ACME registration address</dd></div>
+          <div><dt>publish [n]</dt><dd>publish channel and signing key</dd></div>
+          <div><dt>username / password</dt><dd>optional login for a site</dd></div>
+          <div><dt>limits</dt><dd>rate limits</dd></div>
+          <div><dt>cache</dt><dd>browser cache policy</dd></div>
+          <div><dt>proxy</dt><dd>trusted proxy IP for X-Forwarded-For</dd></div>
+          <div><dt>tls</dt><dd>minimum TLS version and cipher suites</dd></div>
+          <div><dt>csp / perms</dt><dd>Content-Security-Policy, Permissions-Policy</dd></div>
+          <div><dt>show / back</dt><dd>print settings, or return to the main shell</dd></div>
+        </dl>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p>Settings live in <code>/var/lib/servette/servette.toml</code>, written <code>0600</code> — everything Servette keeps lives under <code>/var/lib/servette</code>, and <code>SERVETTE_HOME</code> moves it. Every field has a default, and the file is re-read whenever it changes — so a setting takes effect on the next request, not the next restart.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Publishing</p>
+      <h2>Updating your site</h2>
+      <p>Two routes, and the difference is whether you have a shell on the machine. Both end in the same place — files in the served folder — and neither needs a build step or a restart.</p>
+    </div>
+
+    <div class="sub-head">
+      <h3>1 · Copy the files up</h3>
+      <p>The direct route, when the server is yours to SSH into.</p>
+    </div>
+
+    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+      <div class="card">
+        <h3>The folder is yours</h3>
+        <p>The site lives in <code>/var/lib/servette/site/</code>, owned by you rather than by root — so copy into it as yourself: <code>scp -r mysite/* you@server:/var/lib/servette/site/</code>. The service only ever reads it.</p>
+      </div>
+      <div class="card">
+        <h3>The next request sees it</h3>
+        <p>Servette checks each file's modification time as it serves, so a changed file is live on the following request. Nothing to reload, nothing to invalidate, no restart.</p>
+      </div>
+    </div>
+
+    <div class="sub-head" style="margin-top: 40px;">
+      <h3>2 · Publish a signed bundle</h3>
+      <p>For content that comes from somewhere else — a build on your laptop, a release — where shipping a change should not require a shell on the server. Three steps, and the tool for the first one is on this site.</p>
+    </div>
+
+    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+      <div class="card card--ours">
+        <h3>Build and sign it</h3>
+        <p>The <a href="pub/">publish tool</a> turns a folder into a <code>.tar.gz</code> and signs it, in your browser. Out come the bundle, its <code>.sig</code>, and the public key hex to paste into <code>config &gt; publish</code>. The page makes no network request, and the private half of the key never leaves it.</p>
+      </div>
+      <div class="card">
+        <h3>Host the pair anywhere</h3>
+        <p>Put the two files wherever you like — a GitHub release, object storage, any URL the server can reach. Nothing about that host is trusted; the signature is what is trusted.</p>
+      </div>
+      <div class="card">
+        <h3>Pull it on the server</h3>
+        <p><code>pull</code> fetches the bundle, verifies its signature against the key you configured, extracts it to a staging directory, and swaps it in atomically. A bad signature is refused before anything is written.</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p><strong>Undoing a pull.</strong> <code>restore-site</code> puts the previous content back — one backup is kept, and a successful restore consumes it. Servette's own code rolls back separately, the way any pip-installed tool does: <code>pip install servette==x.y.z</code>.</p>
+      <p>Each site's publish channel has its own Ed25519 key pair, so one site's key grants nothing over another. Code travels a different channel entirely — pip delivers it — and no content key can touch it.</p>
+      <p class="aside">Either route keeps the trigger with the operator: both run from a shell, over SSH. No network-reachable trigger exists, and no HTTP request can cause Servette to write anything.</p>
+    </div>
+  </section>
+
+  <section class="wrap section">
+    <div class="sec-head">
+      <p class="eyebrow">Verifying</p>
+      <h2>Check what you actually deployed</h2>
+      <p>Every Servette serves a connection self-test at the reserved <code>/selftest/</code> path, from inside the program — so it is there on a fresh install, with nothing to add and nothing to copy into your folder. It probes the live connection from a browser and reports what came back, rather than asserting that everything is fine.</p>
+    </div>
+
+    <div class="autogrid" style="--min: 290px; --gap: 20px;">
+      <div class="card card--ours">
+        <h3>It reports, it does not reassure</h3>
+        <p>Real requests, and what actually came back: the security headers, a <code>304</code> on revalidation, <code>405</code> on a POST, <code>404</code> on a missing file, <code>403</code> on a traversal attempt. Anything it cannot judge from a browser is marked skipped — never passed.</p>
+      </div>
+      <div class="card">
+        <h3>It runs where your visitors are</h3>
+        <p>The checks execute in the browser, over the same connection a visitor gets and behind the same password if the site has one. It measures the deployment as reached from outside, not the server's opinion of itself.</p>
+      </div>
+      <div class="card">
+        <h3>Your content still wins</h3>
+        <p>The path is reserved, not defended: put anything named <code>selftest</code> in your site root and yours is served instead. The self-test occupies the path only while you are not using it.</p>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p><a class="btn btn--primary btn--l" href="selftest/">Run it against this server →</a></p>
     </div>
   </section>
 

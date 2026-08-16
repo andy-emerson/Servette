@@ -57,6 +57,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 | Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 | Automatic recovery | A dead server process is restarted by systemd within seconds; a watchdog timer recovers a dropped network route |
+| An error page that diagnoses | A missing path returns `404` with a page that reports the live connection — the certificate, the headers, and whether your site root is published at all — instead of a bare `Not found.` Drop in your own `404.html` and it takes over |
 
 **Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette), and that is by design, not a limitation to work around; see [Scope & non-goals](DESIGN.md#scope--non-goals) for what is out of scope and why.
 
@@ -142,13 +143,14 @@ Each site can have a **publish channel**: build a signed bundle of your site in 
 - **Site unreachable** → confirm ports 80 and 443 are open in the provider firewall / router (not just the OS firewall).
 - **Let's Encrypt won't issue** → your domain must already resolve to this server's IP (`dig +short yourdomain.com`); Let's Encrypt validates over port 80. If `www.` has no DNS record, Servette falls back to a bare-domain certificate and tells you.
 - **Browser warns about the certificate** → expected with a self-signed cert; add a domain, then `config` → `cert`.
-- **Anything else** → `log` in the shell (or `journalctl -u servette`).
+- **A page 404s that shouldn't** → open the URL and read the error page: it reports whether your site root is published at all, which separates a wrong path from content that never landed. `GET /` showing `200` means the site is fine and the path is wrong.
+- **Anything else** → `log` in the shell (or `journalctl -u servette`), and open any missing path on your own site — the default error page runs the connection checks and reports what it found.
 
 ## Repository map
 
 | Path | What it is |
 |---|---|
-| `servette/` | The installable package: `__init__.py` is the entire product — server, system, and shell in one module, generated from `src/` and not edited by hand — beside a stub `__main__.py` and `selftest.html`, the embedded connection self-test every install serves at `/selftest/` |
+| `servette/` | The installable package: `__init__.py` is the entire product — server, system, and shell in one module, generated from `src/` and not edited by hand — beside a stub `__main__.py` and `selftest.html`, the embedded diagnostic page every install serves in two roles — at `/selftest/` when asked for, and as the default `404` error page |
 | `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into the module |
 | `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 and 3.14) and Debian 12 |
 | `site/` | The Servette website's source, and the folder a checkout serves by default; `site/src/` is a browsable view of the literate sources, `site/pub/` is the client-side publish tool, and `site/assets/` holds the logos this README displays |

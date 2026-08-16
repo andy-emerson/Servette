@@ -34,6 +34,13 @@ jobs:
         run: apt-get update -qq && apt-get install -y -qq python3 python3-venv
       - name: Verify the built package is in sync with src/
         run: python3 src/build.py --check
+      # The website publishes exact line counts to back "readable in an
+      # afternoon" — a headline figure, a per-section table, and three region
+      # paragraphs. They are a measurement claim, so they are only as good as
+      # their latest run, and they drifted 106 lines unnoticed once because
+      # nothing re-ran them. This is that run.
+      - name: Verify the website's line counts match src/
+        run: python3 src/build.py --check-counts
       - name: Install the package into a venv (exercises pyproject.toml)
         run: |
           python3 -m venv .venv

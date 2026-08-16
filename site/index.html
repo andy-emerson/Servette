@@ -1609,7 +1609,7 @@ servette&gt; <span class="hi">status</span>
     <div class="sec-head">
       <p class="eyebrow">Verifying</p>
       <h2>Check what you actually deployed</h2>
-      <p>Every Servette serves a connection self-test at the reserved <code>/selftest/</code> path, from inside the program — so it is there on a fresh install, with nothing to add and nothing to copy into your folder. It probes the live connection from a browser and reports what came back, rather than asserting that everything is fine.</p>
+      <p>Your install serves a connection self-test at the reserved <code>/selftest/</code> path, from inside the program — so it is there on a fresh install, with nothing to add and nothing to copy into your folder. Visit <strong>your own</strong> <code>/selftest/</code> and it probes that connection from the browser and reports what came back, rather than asserting that everything is fine. It is same-origin by construction: it can only ever report on the server that served it, which is what lets it read headers a cross-origin checker never could.</p>
     </div>
 
     <div class="autogrid" style="--min: 290px; --gap: 20px;">
@@ -1628,7 +1628,8 @@ servette&gt; <span class="hi">status</span>
     </div>
 
     <div class="prose">
-      <p><a class="btn btn--primary btn--l" href="selftest/">Run it against this server →</a></p>
+      <p>Nothing here tests <em>your</em> server — it cannot. The link below runs the checks against this one, so you can see the report you would get before installing anything.</p>
+      <p><a class="btn btn--outline btn--l" href="selftest/">See it run on this server →</a></p>
     </div>
   </section>
 
@@ -1659,10 +1660,14 @@ servette&gt; <span class="hi">status</span>
            page deploys with the pages beside it, while subdomains wait on
            DNS — and #42's rule is no dead links. Each is named for what it
            does, not for the directory it happens to live in. -->
+      <!-- The self-test is deliberately not listed here. It is same-origin by
+           construction, so this site's copy only ever reports on this site —
+           it does nothing for a visitor, and listing it as a service promises
+           a check of their server that it cannot perform. Their own install
+           serves its own. -->
       <div class="footer-links">
         <a href="src/">Read the source</a>
         <a href="pub/">Sign a site bundle</a>
-        <a href="selftest/">Test this connection</a>
       </div>
     </div>
     <div>

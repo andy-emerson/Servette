@@ -226,13 +226,13 @@ def _config_add_site():
     if _serve_dir_exposes_secrets(_resolve(folder)):
         print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
-    # The same seeding offer setup makes for the first site (#37): a new site
-    # with no index.html would 404 on its own domain with no way to tell the
-    # server from the content. Declining blocks nothing.
+    # Nothing is written and nothing is offered: a site with no index.html
+    # answers its own domain with the embedded diagnostic page, which says the
+    # server is up and that nothing is published yet. Setup still never leaves
+    # a site with nothing to serve (#37) — it just no longer needs to put a
+    # file in the operator's folder to keep that promise.
     if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
-        if _prompt("No index.html here — write Servette's placeholder page so the site works immediately?"):
-            if _seed_placeholder(folder):
-                print("  Placeholder installed as index.html — replace it with your own site when ready.")
+        print("  No index.html yet — the site will answer with Servette's diagnostic page until you publish one.")
 
     site = Site({"serve_dir": folder})
     config.sites.append(site)
@@ -790,112 +790,6 @@ def cmd_log(n=20):
 
 ```
 
-## The placeholder page
-
-The page setup seeds into an empty site, embedded so no network is involved. The `servette:demo` marker is the ownership rule made visible in the file itself: a marked page is Servette's to refresh, an unmarked one is never touched, and deleting the marker adopts the page permanently.
-
-```python
-# The placeholder page
-# The marker string keeps its historical name: pages seeded by earlier
-# releases (which fetched a richer demo page from GitHub as a release asset)
-# carry "servette:demo". The marker distinguishes Servette's own placeholder
-# from operator content — a marked page is Servette's to rewrite, an
-# unmarked one is never touched.
-_PLACEHOLDER_MARKER = "servette:demo"
-
-# The page setup seeds into an empty site (#70): embedded, so setup finishes
-# with something to serve, and no network is involved. Deliberately small
-# and script-free: the full connection self-test is not this page's job —
-# the server itself serves it at the reserved /selftest/ path (see
-# _SELFTEST_PAGE in Server). Only the theme is kept — logo, colors, type —
-# over the traditional "under construction" prose.
-_PLACEHOLDER_PAGE = """<!DOCTYPE html>
-<!-- servette:demo — Servette's placeholder page. This marker is how 'update'
-     tells its own page from yours: with it present the page is refreshed on
-     update, without it the file is left alone. Delete this line to adopt the
-     page as your own and Servette will never touch it again. -->
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Under construction</title>
-<style>
-  :root {
-    --bg: #0e0e0e; --text: #e8e8e8; --muted: #555; --green: #5A8466;
-    /* No web fonts, no scripts: a placeholder loads nothing at all. */
-    --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
-            'Liberation Mono', 'Courier New', monospace;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: var(--bg); color: var(--text); font-family: var(--mono);
-    min-height: 100vh; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 1.1rem;
-    padding: 2rem; text-align: center;
-  }
-  .logo { font-size: 3rem; font-weight: 500; line-height: 1; }
-  .logo .ette { color: var(--green); }
-  .logo .cursor { animation: blink 1.1s steps(1) infinite; }
-  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
-  .status {
-    color: var(--muted); font-size: 0.75rem;
-    letter-spacing: 0.08em; text-transform: uppercase;
-  }
-  p { color: var(--muted); font-size: 0.8rem; line-height: 1.7; max-width: 44ch; }
-  a { color: var(--green); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
-</style>
-</head>
-<body>
-  <div class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-  <div class="status">under construction</div>
-  <p>There is a server here, but its operator hasn't published a site yet.
-     Check back soon.</p>
-  <p>Served by <a href="https://github.com/andy-emerson/servette">Servette</a>
-     — The Simple, Secure, Static-Site Server.</p>
-</body>
-</html>
-""".encode()
-
-
-```
-
-Recognizing and seeding, each honoring the marker rule.
-
-```python
-# Recognizing the placeholder
-def _is_placeholder(index_path):
-    """True when index_path exists and carries the servette:demo marker — i.e. it
-    is Servette's own placeholder, safe to refresh. An operator's page (no marker)
-    is never touched; an operator who deletes the marker has adopted the page
-    permanently. The rule is visible in the file itself, not hidden in state."""
-    try:
-        with open(index_path, "rb") as f:
-            return _PLACEHOLDER_MARKER.encode() in f.read(1024 * 1024)  # placeholder is ~2 KB; cap bounds a huge index.html
-    except OSError:
-        return False
-
-
-def _seed_placeholder(serve_dir):
-    """Write the embedded placeholder as serve_dir/index.html when that is safe:
-    the file is absent, or still a marked placeholder. Returns True when it was
-    written. Written via rename so a reader never sees a partial file."""
-    index_path = os.path.join(_resolve(serve_dir), "index.html")
-    if os.path.exists(index_path) and not _is_placeholder(index_path):
-        return False   # operator content — never overwrite
-    tmp = index_path + ".new"
-    try:
-        with open(tmp, "wb") as f:
-            f.write(_PLACEHOLDER_PAGE)
-        os.replace(tmp, index_path)
-    except OSError as e:
-        print(f"  Could not write the placeholder page: {e}")
-        return False
-    return True
-
-```
-
 ## Site content publishing
 
 > The update channel for a site's *content*: a signed tar.gz bundle, pulled
@@ -1372,11 +1266,11 @@ def cmd_setup():
 
     site = config.sites[0]  # the site setup provisions; 'add-site' handles the rest
 
-    # Step 1 — the folder. Setup must never finish with nothing to serve (#37):
-    # create the folder if missing, and offer the embedded placeholder when it
-    # has no index.html — a real page on the operator's own domain, with no
-    # network involved (#70). The connection self-test that once played this
-    # role now arrives through the publish channel instead.
+    # Step 1 — the folder. Setup must never finish with nothing to serve (#37),
+    # and no longer needs to write a file to keep that promise: it creates the
+    # folder if missing, and a folder with no index.html answers its domain
+    # with the embedded diagnostic page. The page names the reserved path it
+    # also lives at, which is how an operator learns /selftest/ exists.
     print()
     print("  Step 1 — Site folder")
     serve_path = _resolve(site.serve_dir)
@@ -1394,10 +1288,9 @@ def cmd_setup():
         if os.path.exists(os.path.join(serve_path, "index.html")):
             print(f"  Serving {serve_path}.")
         else:
-            print(f"  {serve_path} has no index.html yet.")
-            if _prompt("Write Servette's placeholder page so the site works immediately?"):
-                if _seed_placeholder(site.serve_dir):
-                    print("  Placeholder installed as index.html — replace it with your own site when ready.")
+            print(f"  {serve_path} has no index.html yet — until you publish one, the")
+            print("  site answers with Servette's diagnostic page: it reports that the")
+            print("  server is up and what the connection is actually sending.")
 
     print()
     print("  Step 2 — SSL certificate")
@@ -1565,16 +1458,16 @@ def cmd_set(args):
 
 ## Main shell loop
 
-What `update` once did after swapping versions now happens at every shell launch: the package manager can neither refresh a stale systemd unit nor rewrite an outdated placeholder page, so the shell notices on its next run.
+What `update` once did after swapping versions now happens at every shell launch: the package manager cannot refresh a stale systemd unit, so the shell notices on its next run.
 
 ```python
 # The startup refresh
 def _startup_refresh():
     """What 'update' once did after swapping versions, done at every shell
-    launch instead: code now arrives through the package manager, which can
-    neither refresh a stale systemd unit nor rewrite an outdated placeholder
-    page — so the shell notices on its next run. Prints nothing when nothing
-    is stale, and fails soft: a refresh that needs root just says so.
+    launch instead: code now arrives through the package manager, which cannot
+    refresh a stale systemd unit — so the shell notices on its next run.
+    Prints nothing when nothing is stale, and fails soft: a refresh that needs
+    root just says so.
 
     Auto-refresh is gated on the environment matching: a stale unit whose
     data directory or interpreter differs from this shell's is reported and
@@ -1595,16 +1488,6 @@ def _startup_refresh():
                 print(f"  Service refreshed to v{__version__}.")
             except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
                 print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
-    for s in config.sites:
-        index_path = os.path.join(_resolve(s.serve_dir), "index.html")
-        if _is_placeholder(index_path):
-            try:
-                with open(index_path, "rb") as f:
-                    current = f.read()
-            except OSError:
-                continue
-            if current != _PLACEHOLDER_PAGE and _seed_placeholder(s.serve_dir):
-                print(f"  Placeholder page refreshed in {s.serve_dir}.")
 
 
 ```

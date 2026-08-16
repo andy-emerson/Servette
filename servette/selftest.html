@@ -495,6 +495,10 @@
         return { ok: r.status === 404 && ct.includes('text/html'),
                  obs: '→ ' + r.status + ', ' + ct }; } },
 
+    // Skipped when this page *is* the root: the row above already reported
+    // that exact request, and two identical GET / rows disagreeing on PASS
+    // and FAIL reads as a contradiction rather than a diagnosis.
+    ...(location.pathname === '/' ? [] : [
     { req: 'GET /', run: async () => {
         const s = (await fetch('/', { cache: 'no-store' })).status;
         if (s === 200)
@@ -502,6 +506,7 @@
         if (s === 401)
           return { ok: null, obs: '→ 401 — home page needs a password' };
         return { ok: false, obs: '→ ' + s + ' — nothing is published at the root' }; } },
+    ]),
   ];
 
   const checks = [

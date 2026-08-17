@@ -2,7 +2,7 @@
 
 *The environment: server lifecycle, certificates and the ACME client, systemd and host provisioning.*
 
-*Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
+*Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown, never the module; the committed copy exists to be read, and `--check` holds it equal to the sources.*
 
 ## Server lifecycle
 
@@ -269,6 +269,35 @@ def _servette_user_exists():
     return result.returncode == 0
 
 
+def _servette_uid():
+    """The servette user's uid, or None when it does not exist."""
+    try:
+        import pwd as _pwd
+        return _pwd.getpwnam("servette").pw_uid
+    except (ImportError, KeyError):
+        return None
+
+
+def _servette_gid():
+    """The servette group's gid, or None when it does not exist."""
+    try:
+        import grp as _grp
+        return _grp.getgrnam("servette").gr_gid
+    except (ImportError, KeyError):
+        return None
+
+
+def _serve_dir_readable(path):
+    """Whether the service could plausibly read this serve_dir: world r+x, or
+    group r+x where the group actually is servette. The old check demanded
+    world bits and told the operator to add them with a+rX — advice that undid
+    the deliberate group-only grant _operator_chown_plan had just applied."""
+    st = os.stat(path)
+    if st.st_mode & 0o005 == 0o005:
+        return True
+    return st.st_mode & 0o050 == 0o050 and st.st_gid == _servette_gid()
+
+
 ```
 
 Files the service process must read — config, certificates, the ACME account — are owned by the `servette` user.
@@ -277,8 +306,18 @@ Files the service process must read — config, certificates, the ACME account �
 # Ownership: the service user
 def _chown_servette(path):
     """Chown path to servette:servette if the user exists and the path exists."""
-    if _servette_user_exists() and os.path.exists(path):
-        subprocess.run(["chown", "-R", "servette:servette", path], check=True)
+    if not (_servette_user_exists() and os.path.exists(path)):
+        return
+    # Only root and the service user itself may actually run this: root gives
+    # the file away, and the service user's own call is a permitted same-owner
+    # no-op (renewal re-chowns what it already owns). Any other caller is an
+    # unprivileged session or dev context where chown cannot succeed — found
+    # when a non-root save() crashed the whole program at Config() import,
+    # because check=True turned "cannot give files away" into a fatal error on
+    # any host where the servette user exists.
+    if os.geteuid() != 0 and os.geteuid() != _servette_uid():
+        return
+    subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
 ```
@@ -292,7 +331,7 @@ def _operator_user():
     return os.environ.get("SUDO_USER") or getpass.getuser()
 
 
-def _operator_chown_plan(path):
+def _operator_chown_plan(path, strip_world=False):
     """The chown/chmod invocations _chown_operator runs, as argv lists —
     separated from the running so the decision is testable without root.
     Owner is the human behind sudo; group is `servette` with g+rX, which is
@@ -303,53 +342,76 @@ def _operator_chown_plan(path):
     `:servette` rather than the operator's own group, which need not exist
     on hosts without user-private groups. Before the service user exists
     (setup before enable, macOS session mode) ownership alone is set;
-    enable re-runs this once the user exists."""
+    enable re-runs this once the user exists.
+
+    strip_world removes world bits as well. For a tree the OPERATOR filled,
+    modes are theirs and only the group grant is added — but a tree Servette
+    itself wrote (a pulled bundle, extracted at 644/755) must also honour the
+    promise above, and leaving extraction's world bits in place would be this
+    program handing every local account what it deliberately scopes to one."""
     user = _operator_user()
     if _servette_user_exists():
         return [["chown", "-R", f"{user}:servette", path],
-                ["chmod", "-R", "g+rX", path]]
+                ["chmod", "-R", "g+rX,o-rwx" if strip_world else "g+rX", path]]
     return [["chown", "-R", user, path]]
 
 
-def _chown_operator(path):
+def _chown_operator(path, strip_world=False):
     """Apply _operator_chown_plan. Best-effort: a host without chown
     semantics (macOS session mode) serves fine without it."""
     if os.path.exists(path):
-        for argv in _operator_chown_plan(path):
+        for argv in _operator_chown_plan(path, strip_world):
             subprocess.run(argv, check=False, capture_output=True)
 
 
 ```
 
-The systemd unit is the service's sandbox definition; its docstring carries the reasoning line by line — the write confinement, the read-only package pin, the conditional `PYTHONPATH`, and the version stamp that makes upgrades read as stale units.
+The systemd unit is the service's sandbox definition; its docstring carries the reasoning line by line — the write confinement, the read-only module pin, the conditional `PYTHONPATH`, and the version stamp that makes upgrades read as stale units.
 
 ```python
 # The systemd unit
-def _systemd_unit(python_path, package_dir):
+def _systemd_unit(python_path, module_path):
     """The systemd unit for the service. Writes are confined to where Servette
     actually writes — the data directory (config, certs, ACME account) and the ACME
     webroot (HTTP-01 challenge files during renewal); ProtectSystem=strict makes the
     rest of the filesystem read-only, and the unit runs as a least-privilege user
     holding only CAP_NET_BIND_SERVICE. The served directory ends up read-write only
     because it lives under the data directory; the server never writes it.
-    The package directory is pinned read-only on top: normally the code lives
-    outside the data directory and strict mode already covers it, but a checkout
-    deployment (SERVETTE_HOME=.) puts the code inside the writable tree, and the
-    pin holds there too — a compromised serving process cannot patch the program
-    systemd will restart it into. PYTHONPATH names the package's parent ONLY
-    when the package sits outside the interpreter's own site-packages (a
-    checkout) — a pip-installed package resolves without it, and an
-    unconditional PYTHONPATH would put a path entry ahead of the stdlib for
-    no benefit, widening what a write anywhere on that entry could shadow.
+    The module is pinned read-only on top: normally the code lives outside
+    the data directory and strict mode already covers it, but two deployments
+    put the code inside the writable tree — a checkout (SERVETTE_HOME=.) and
+    the runtime copy made when the service user cannot read where Servette is
+    installed — and the pin holds for both, so a compromised serving process
+    cannot patch the program systemd will restart it into. PYTHONPATH names the
+    module's directory ONLY when it sits outside the interpreter's own
+    site-packages (a checkout, or that same runtime copy) — a pip-installed
+    module the service can reach resolves without it, and an unconditional
+    PYTHONPATH would put a path entry ahead of the stdlib for no benefit,
+    widening what a write anywhere on that entry could shadow.
+
+    The remaining restrictions cost the service nothing it uses: no devices
+    beyond the private stubs, no clock/hostname changes, no kernel log reads,
+    no other processes' /proc entries, no realtime scheduling, no namespaces,
+    one syscall architecture. PYTHONDONTWRITEBYTECODE stops the interpreter
+    attempting __pycache__ writes into the read-only pin. Deliberately absent,
+    pending validation on real hardware: MemoryDenyWriteExecute and
+    SystemCallFilter (cffi loads a compiled extension), ProtectHome (breaks an
+    install that IS reachable under /home), and UMask=0077 (a renewed
+    certificate would become unreadable to the unelevated status command).
 
     The leading version stamp is load-bearing, not decoration: a pip upgrade
     changes no directive, so without the stamp an upgraded host's units would
     never read as stale and the running service would keep the old code. With
     it, any upgrade drifts every unit's text and the startup refresh restarts
     the service onto the version the shell is running."""
-    parent = os.path.dirname(package_dir)
+    parent = os.path.dirname(module_path)
     pythonpath = ("" if os.path.basename(parent) in ("site-packages", "dist-packages")
                   else f"Environment=PYTHONPATH={parent}\n")
+    # For the runtime copy the pin covers the whole of it: the copied
+    # dependencies and the PYTHONPATH root are exactly as much "the program
+    # systemd will restart the service into" as the module beside them, and a
+    # pin on the module alone would leave them outside it.
+    readonly = parent if parent == RUNTIME_DIR else module_path
     return f"""# generated by servette {__version__}
 [Unit]
 Description=Servette — The Simple Secure Server
@@ -358,12 +420,13 @@ After=network.target
 [Service]
 User=servette
 Environment=SERVETTE_HOME={BASE_DIR}
+Environment=PYTHONDONTWRITEBYTECODE=1
 {pythonpath}AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths={BASE_DIR} {ACME_WEBROOT}
-ReadOnlyPaths={package_dir}
+ReadOnlyPaths={readonly}
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -371,6 +434,14 @@ ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictSUIDSGID=yes
 LockPersonality=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
+RestrictRealtime=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
 ExecStart={python_path} -m servette --serve
 Restart=always
 RestartSec=3
@@ -625,19 +696,322 @@ def _ensure_swap():
 
 ```
 
-## The unit files on disk
+## The service's runtime
+
+The shell runs as the operator; the service runs as `servette`, an unprivileged system user. Where the program is installed decides whether that user can reach it at all — and a per-user install (`pip install --user`, `pipx`) puts it under a home directory that Debian and Ubuntu create mode `0750`, which the service user cannot traverse. Nothing about that is visible at install time: the unit writes, `systemctl enable` succeeds, and the failure arrives at the next boot as `ModuleNotFoundError` on a restart loop.
+
+So `enable` measures reachability rather than assuming it, and when the program is out of reach it puts a copy where the service can read it. That copy also makes the service independent of the operator's account: it keeps serving if the home directory is unmounted, re-permissioned, or the account is removed.
+
+```python
+# The service runtime
+# Where the program is copied when the service user cannot reach where it is
+# installed. Under the data directory, so it is covered by the same backup and
+# the same removal as everything else Servette owns.
+RUNTIME_DIR = os.path.join(BASE_DIR, "runtime")
+
+# The program's own distribution name, for telling it apart from its
+# dependencies. A literal, not derived from __name__: under `python -m
+# servette` — which is exactly how the unit's ExecStart runs — a single-file
+# module executes as __main__, and deriving the name from that would make the
+# service look up the metadata of a distribution called __main__.
+_SELF = "servette"
+
+# What the program is written against, for the one case where installed metadata
+# cannot say: a checkout, which has no dist-info of its own to read. It must
+# match pyproject.toml's dependencies exactly, and the suite checks that it does
+# — a dependency added there and not here would give a service whose runtime
+# copy is missing a module.
+_DECLARED_DEPENDENCIES = ("cryptography",)
+
+
+def _reachable_by_service(path):
+    """Whether the unprivileged servette user could read path.
+
+    It owns nothing and belongs to no group but its own, so the question is
+    only about the world bits: execute on every directory along the way, read
+    on the file itself. Conservative by construction — a false 'no' costs a
+    copy into the data directory, while a false 'yes' costs a service that
+    cannot start, which is the failure this exists to prevent."""
+    path = os.path.abspath(path)
+    try:
+        if not os.stat(path).st_mode & 0o004:      # world-readable leaf
+            return False
+        while True:
+            parent = os.path.dirname(path)
+            if parent == path:                     # reached the root
+                return True
+            if not os.stat(parent).st_mode & 0o001:   # world-traversable
+                return False
+            path = parent
+    except OSError:
+        return False
+
+
+def _installed_runtime_reachable():
+    """Whether the service could run the program exactly where it is installed.
+    Both halves must hold: the interpreter systemd would exec, and the module
+    file it would import."""
+    return (_reachable_by_service(sys.executable)
+            and _reachable_by_service(os.path.abspath(__file__)))
+
+
+_python_minor_cache = {}
+
+
+def _python_minor(path):
+    """The 'major.minor' an interpreter reports, or None if it cannot be run.
+
+    Cached per path: an interpreter's version cannot change within one process
+    run, and the staleness chain asks several times per shell launch — without
+    the cache, a host on the runtime copy re-spawned every candidate
+    interpreter each time."""
+    if path not in _python_minor_cache:
+        try:
+            out = subprocess.run(
+                [path, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+                capture_output=True, text=True, timeout=10)
+            _python_minor_cache[path] = (out.stdout.strip()
+                                         if out.returncode == 0 else None)
+        except (OSError, subprocess.SubprocessError):
+            _python_minor_cache[path] = None
+    return _python_minor_cache[path]
+
+
+def _system_python():
+    """A reachable interpreter of the same minor version as this one, or None.
+
+    Same minor version is not a preference: cryptography ships a compiled
+    extension built against one ABI, and the runtime copy carries that build.
+    An interpreter that cannot load it would give a service that starts and
+    then fails on the first certificate operation, so no match is a refusal
+    rather than a best effort."""
+    want = "%d.%d" % sys.version_info[:2]
+    seen = set()
+    for cand in (getattr(sys, "_base_executable", None),
+                 f"/usr/bin/python{want}",
+                 f"/usr/local/bin/python{want}",
+                 "/usr/bin/python3"):
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        if os.path.isfile(cand) and _reachable_by_service(cand) \
+                and _python_minor(cand) == want:
+            return cand
+    return None
+
+
+def _required_distributions():
+    """Every distribution the program needs at run time, transitively.
+
+    Read from installed metadata rather than a list kept here, because a
+    dependency's own dependencies are not this program's to remember:
+    cryptography declares cffi, cffi declares pycparser, and cffi's compiled
+    backend is a bare .so beside the packages. A list would have named
+    cryptography and stopped.
+
+    Two exclusions. Requirements guarded by an extra are for building or
+    testing a dependency, not running it. Requirements that are not installed
+    were excluded by their own environment markers when pip resolved them —
+    pip has already evaluated those, so absence is the answer.
+
+    A checkout has no dist-info of its own, so there the walk starts from what
+    the program is written against instead; every dependency of THAT still comes
+    from metadata, which is where the transitive ones live."""
+    try:
+        importlib.metadata.distribution(_SELF)
+        want = [_SELF]
+    except importlib.metadata.PackageNotFoundError:
+        want = list(_DECLARED_DEPENDENCIES)
+    seen, out = set(), []
+    while want:
+        name = want.pop(0)
+        key = re.sub(r"[-_.]+", "-", name).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            reqs = importlib.metadata.distribution(name).requires or []
+        except importlib.metadata.PackageNotFoundError:
+            continue        # not installed: a marker ruled it out, or a checkout
+        if name != _SELF:
+            out.append(name)
+        for req in reqs:
+            if "extra ==" in req:
+                continue
+            dep = re.split(r"[<>=!~;\[\s(]", req, 1)[0].strip()
+            if dep:
+                want.append(dep)
+    return out
+
+
+def _distribution_paths(name):
+    """Where a distribution's importable top-level names live on disk.
+
+    top_level.txt when the wheel carries one — that is what names cffi's
+    _cffi_backend.so, which no package directory would reveal — and the
+    normalized distribution name when it does not, which is the modern wheel's
+    case. find_spec resolves each without importing it, so locating a
+    dependency never runs its module-level code."""
+    try:
+        dist = importlib.metadata.distribution(name)
+    except importlib.metadata.PackageNotFoundError:
+        return []
+    tops = (dist.read_text("top_level.txt") or "").split() \
+        or [re.sub(r"[-.]+", "_", name)]
+    paths = []
+    for top in tops:
+        try:
+            spec = importlib.util.find_spec(top)
+        except (ImportError, ValueError):
+            continue
+        if spec is None:
+            continue
+        locations = getattr(spec, "submodule_search_locations", None)
+        if locations:
+            paths.append(locations[0])          # a package directory
+        elif spec.origin and os.path.isfile(spec.origin):
+            paths.append(spec.origin)           # a single module, .py or .so
+    return paths
+
+
+def _runtime_sources():
+    """Every path the runtime copy must contain: the program — one module
+    file — then each top-level name of each distribution it requires."""
+    paths = [os.path.abspath(__file__)]
+    for name in _required_distributions():
+        paths.extend(_distribution_paths(name))
+    return paths
+
+
+def _provision_runtime():
+    """Copy the program and everything it imports into the data directory.
+
+    Root-owned, world-readable, writable by nobody but root — the service reads
+    it and the unit pins it ReadOnlyPaths on top, so a compromised serving
+    process cannot patch the program systemd will restart it into.
+
+    Built beside the live copy and swapped in, rather than written over it: a
+    half-copied runtime is a program that does not exist. The swap is two
+    renames, so a lazy import landing exactly between them would fail — the
+    service is restarted onto this runtime immediately afterwards, which is the
+    same moment it would have picked up the new code anyway."""
+    new, old = RUNTIME_DIR + ".new", RUNTIME_DIR + ".old"
+    for path in (new, old):
+        shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(new)
+    for src in _runtime_sources():
+        dest = os.path.join(new, os.path.basename(src))
+        if os.path.isdir(src):
+            shutil.copytree(src, dest)
+        else:
+            shutil.copy2(src, dest)
+
+    for root, _dirs, files in os.walk(new):
+        os.chmod(root, 0o755)
+        for f in files:
+            os.chmod(os.path.join(root, f), 0o644)
+    os.chmod(new, 0o755)
+
+    if os.path.exists(RUNTIME_DIR):
+        os.replace(RUNTIME_DIR, old)
+    os.replace(new, RUNTIME_DIR)
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def _verify_runtime(python_path, module_path):
+    """Run the program the way the unit will, as the user the unit will use.
+    None when it works, else what went wrong, in the child's own words.
+
+    This is the check that makes the rest of this section safe to trust. Every
+    part of it is inference — which paths the service user can read, which
+    distributions are required, which interpreter matches the compiled
+    extension — and inference about another user's view of the filesystem is
+    exactly the kind of thing that is wrong quietly. So before a unit is
+    written, the conclusion is executed: import the program and the certificate
+    machinery, from the paths the unit names, as `servette`. A host where that
+    fails is a host that would have restart-looped after the next reboot.
+
+    Falls back to running as this user when nothing can drop privileges, which
+    still proves the imports resolve; the path permissions are then covered
+    only by _reachable_by_service."""
+    parent = os.path.dirname(module_path)
+    # SERVETTE_HOME matches what the unit will carry: importing servette loads
+    # the config, and without this the probe reads the DEFAULT data directory —
+    # judging the service against a config it will never see.
+    env = {"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
+           "SERVETTE_HOME": BASE_DIR}
+    if os.path.basename(parent) not in ("site-packages", "dist-packages"):
+        env["PYTHONPATH"] = parent
+    probe = [python_path, "-c", "import servette, cryptography.x509"]
+    quoted = " ".join(shlex.quote(a) for a in probe)
+    # As the service user by whichever means the host has, unprivileged last so a
+    # host with neither still gets the import checked. Each dropper is named by
+    # absolute path: they live in /usr/sbin, which the probe's own minimal PATH
+    # does not carry, and a PATH miss would read as the runtime being broken.
+    # No dropper is tried at all without root — runuser and su cannot drop
+    # privilege the process does not hold, and their refusals ("may not be used
+    # by non-root users") would be reported as the runtime's problem.
+    candidates = []
+    if os.geteuid() == 0:
+        for tool, argv in (("runuser", ["-u", "servette", "--"] + probe),
+                           ("su", ["-s", "/bin/sh", "servette", "-c", quoted])):
+            found = shutil.which(tool) or shutil.which(tool, path="/usr/sbin:/sbin:/bin:/usr/bin")
+            if found:
+                candidates.append([found] + argv)
+    candidates.append(probe)
+
+    last = "could not run the program as the servette user"
+    for argv in candidates:
+        try:
+            r = subprocess.run(argv, env=env, cwd="/", capture_output=True,
+                               text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            last = str(e)
+            continue          # this way of dropping privilege is unavailable
+        if r.returncode == 0:
+            return None
+        err = (r.stderr or r.stdout).strip().splitlines()
+        if not err:
+            last = f"exited {r.returncode} without saying why"
+            continue
+        # A tool that cannot become the service user is this method failing, not
+        # the runtime failing — fall through and try the next one.
+        if any(t in err[-1] for t in ("user servette", "unknown user", "may not run",
+                                      "Authentication", "must be run from a terminal")):
+            last = err[-1]
+            continue
+        return err[-1]
+    return last
+
+
+```
 
 What the units should say is computed in exactly one place and compared against what disk says, so the startup refresh, the staleness check, and `enable` can never disagree with each other. A writer that recomputed the texts independently of the checker could drift from it and rewrite units on every shell launch.
 
 ```python
 # The unit interpreter
 def _unit_python_path():
-    """The interpreter the unit's ExecStart names: the one running this shell.
-    Under a pip/venv install that is the environment's own python, and the
-    service must use the same one to see the same installed packages. Shared
-    by the writer and the drift check — two computations of this path could
-    disagree and manufacture phantom drift."""
-    return sys.executable
+    """The interpreter the unit's ExecStart names: normally the one running
+    this shell. Under a pip/venv install that is the environment's own python,
+    and the service must use the same one to see the same installed packages.
+    Shared by the writer and the drift check — two computations of this path
+    could disagree and manufacture phantom drift.
+
+    Where the service user cannot reach that interpreter, the shell's own
+    cannot be named at all and a same-version system one stands in, against the
+    runtime copy. None means there is none to stand in, which refuses the
+    write."""
+    if _installed_runtime_reachable():
+        return sys.executable
+    return _system_python()
+
+
+def _unit_module_path():
+    """The module file the unit imports the program from, and pins read-only:
+    where it is installed when the service can read that, otherwise the copy in
+    the data directory."""
+    here = os.path.abspath(__file__)
+    return here if _installed_runtime_reachable() else os.path.join(RUNTIME_DIR, "servette.py")
 
 
 ```
@@ -650,14 +1024,15 @@ def _unit_python_path():
 ```python
 # The whitespace refusal
 def _unsafe_unit_path():
-    """The first unit-embedded path (data dir, package dir) carrying
-    whitespace, or None. systemd directive values split on whitespace, so
-    such a path would silently become two wrong grants — and a newline would
+    """The first unit-embedded path (data dir, module file, interpreter)
+    carrying whitespace, or None. systemd directive values split on whitespace,
+    so such a path would silently become two wrong grants — and a newline would
     inject an arbitrary directive into the sandbox definition. Servette
-    refuses to write units for one rather than encode it wrongly."""
-    package_dir = os.path.dirname(os.path.abspath(__file__))
-    for p in (BASE_DIR, package_dir):
-        if re.search(r"\s", p):
+    refuses to write units for one rather than encode it wrongly. The
+    interpreter is in scope because ExecStart names it, and it is the one of
+    the three that can sit under a home directory the operator named."""
+    for p in (BASE_DIR, _unit_module_path(), _unit_python_path()):
+        if p and re.search(r"\s", p):
             return p
     return None
 
@@ -674,7 +1049,7 @@ def _desired_units():
     netwatch_service, netwatch_timer = _netwatch_units()
     return {
         SERVICE_PATH:               _systemd_unit(_unit_python_path(),
-                                                    os.path.dirname(os.path.abspath(__file__))),
+                                                    _unit_module_path()),
         NETWATCH_PATH + ".service": netwatch_service,
         NETWATCH_PATH + ".timer":   netwatch_timer,
     }
@@ -685,7 +1060,8 @@ def _stale_units():
     ones missing entirely, so a release that adds a unit flags as stale on
     hosts enabled before it existed. Empty when the service isn't installed
     at all: nothing to refresh on a session-only host."""
-    if not _service_file_exists() or _unsafe_unit_path():
+    if not _service_file_exists() or _unsafe_unit_path() \
+            or _unit_python_path() is None:
         return []   # no units to manage — or units this environment must not write
     stale = []
     for path, text in _desired_units().items():
@@ -728,8 +1104,12 @@ def _service_env_drift():
     elif m.group(1) != BASE_DIR:
         drift.append(f"data directory: service uses {m.group(1)}, this shell uses {BASE_DIR}")
     m = re.search(r"^ExecStart=(\S+)", text, re.M)
-    if m and m.group(1) != _unit_python_path():
-        drift.append(f"interpreter: service uses {m.group(1)}, this shell runs {_unit_python_path()}")
+    wanted = _unit_python_path()
+    # None is not drift: this environment cannot name an interpreter the service
+    # could reach, so it has nothing to compare — the refusal belongs to the
+    # writer, which says so in words.
+    if m and wanted and m.group(1) != wanted:
+        drift.append(f"interpreter: service uses {m.group(1)}, this shell runs {wanted}")
     return drift
 
 
@@ -763,6 +1143,33 @@ def _write_unit_files():
         )
         print("Created system user 'servette'.")
 
+    # The runtime is settled before the unit texts, which name what it decides —
+    # and proved before those texts reach disk, so a service that cannot import
+    # its own program is refused here rather than discovered at the next reboot.
+    if _installed_runtime_reachable():
+        # Nothing to copy — and a copy left by an earlier install the service
+        # could not reach would now be a second, stale program on the host.
+        shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
+    else:
+        if _unit_python_path() is None:
+            want = "%d.%d" % sys.version_info[:2]
+            print("  Error: Servette is installed where the service user cannot read")
+            print(f"  it, and no Python {want} was found outside it to run a copy with.")
+            print(f"  Install Servette for a Python this system also has outside your")
+            print("  home directory, or into a virtual environment under /opt.")
+            raise ValueError("no reachable interpreter for the service")
+        print(f"  Copying Servette to {RUNTIME_DIR} — the service user cannot read")
+        print("  where it is installed.")
+        _provision_runtime()
+
+    problem = _verify_runtime(_unit_python_path(), _unit_module_path())
+    if problem:
+        print("  Error: the service user cannot run Servette from")
+        print(f"  {_unit_module_path()}:")
+        print(f"    {problem}")
+        print("  Refusing to install a service that would fail to start. ")
+        raise ValueError(f"runtime unusable by the service user: {problem}")
+
     # one computation of the unit texts, shared with the staleness check
     for path, text in _desired_units().items():
         with open(path, "w") as f:
@@ -788,16 +1195,15 @@ def _write_unit_files():
     os.makedirs(ACME_WEBROOT, exist_ok=True)
     _chown_servette(ACME_WEBROOT)
 
-    # warn if any site's serve_dir isn't world-readable
+    # warn if any site's serve_dir isn't readable by the service — through its
+    # group, or world bits the operator chose themselves
     for site in config.sites:
         if not site.serve_dir:
             continue
         serve_path = _resolve(site.serve_dir)
-        if os.path.isdir(serve_path):
-            mode = os.stat(serve_path).st_mode
-            if not (mode & 0o005 == 0o005):  # world read+execute on directory
-                print(f"  Warning: '{serve_path}' may not be readable by the servette user.")
-                print(f"  Fix with: chmod -R a+rX {serve_path}")
+        if os.path.isdir(serve_path) and not _serve_dir_readable(serve_path):
+            print(f"  Warning: '{serve_path}' may not be readable by the servette user.")
+            print(f"  Fix with: chown -R :servette {serve_path} && chmod -R g+rX {serve_path}")
 
     return updating
 
@@ -837,7 +1243,7 @@ def cmd_enable():
     except ValueError:
         pass  # the writer already printed the path refusal
     except PermissionError:
-        print("Error: enable requires sudo. Run: sudo servette")
+        print("Error: enable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
         print("Error: enable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
@@ -867,11 +1273,14 @@ def cmd_disable():
                 os.remove(NETWATCH_PATH + suffix)
             except OSError:
                 pass
+        # The runtime copy exists for the service; with no service it is a
+        # second program sitting on the host with nothing running it.
+        shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
         subprocess.run(["systemctl", "daemon-reload"], check=True)
         print("Servette service disabled.")
         log.info("Systemd service disabled")
     except PermissionError:
-        print("Error: disable requires sudo. Run: sudo python3 servette.py")
+        print("Error: disable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
         print("Error: disable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:

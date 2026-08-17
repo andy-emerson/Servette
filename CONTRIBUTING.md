@@ -4,10 +4,10 @@ Contributions are welcome — written by hand, written with an AI agent, or
 anywhere in between. The bar is the same either way: the code is judged,
 not who or what typed it. Three things to know before you push:
 
-- **The module is generated.** Never hand-edit `servette/__init__.py`.
-  Edit the Markdown sources under `src/`, run `python3 src/build.py`, and
-  commit both; `python3 src/build.py --check` (which CI also runs) fails
-  the build on drift. See [Building](DESIGN.md#building).
+- **The module is generated.** Never hand-edit `servette.py`: edit the
+  Markdown sources under `src/`, run `python3 src/build.py`, and commit
+  both — `build.py --check` (which CI runs) fails on drift. See
+  [Building](DESIGN.md#building).
 - **The bar.** One scoped change, a test that can fail, the suite green
   (and CodeQL clean for security-relevant work), docs updated in the same
   branch as their own doc-pass commit. Scope questions are settled by

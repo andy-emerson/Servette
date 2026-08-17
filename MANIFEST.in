@@ -1,0 +1,8 @@
+# The sdist carries the literate sources and the backend that builds them —
+# that IS the source distribution. The generated servette.py is included too
+# (fresh: the backend regenerates it during build_sdist), so an sdist reader
+# sees the module without running anything.
+graft src
+include MANIFEST.in
+recursive-exclude src __pycache__
+recursive-exclude src *.pyc

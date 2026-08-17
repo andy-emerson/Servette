@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -28,9 +29,13 @@ import time
 import urllib.error
 import urllib.request
 
-# test.py lives in tests/; the repo root (containing the servette/ package) is its parent.
+# test.py lives in tests/; the repo root is its parent. servette.py is
+# generated, not committed, so the suite builds it first — the same transform
+# the package backend runs, so what is tested is what ships.
 SERVETTE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, SERVETTE_DIR)  # so `import servette` resolves to the package under test
+subprocess.run([sys.executable, os.path.join(SERVETTE_DIR, "src", "build.py"),
+                "--output", os.path.join(SERVETTE_DIR, "servette.py")], check=True)
+sys.path.insert(0, SERVETTE_DIR)  # so `import servette` resolves to the module under test
 os.environ["SERVETTE_HOME"] = SERVETTE_DIR  # data dir = the repo, as a dev checkout runs
 TEST_PORT    = 8443
 BASE_URL     = f"https://127.0.0.1:{TEST_PORT}"
@@ -853,6 +858,15 @@ def run_dispatch_tests(s):
 
     section("Shell — command dispatch")
 
+    # Routing is under test here, not elevation policy (which has its own
+    # section). Dispatch is exercised as root, because as an unprivileged user
+    # run_command correctly elevates pull/restore-site instead of dispatching —
+    # and on CI runners, whose sudo is passwordless, that spawned REAL elevated
+    # children while the stubs sat unused. Caught by CI's non-root run; the
+    # suite had only ever been run as root locally.
+    saved_dispatch_euid = s.os.geteuid
+    s.os.geteuid = lambda: 0
+
     # Spy on the handlers so we verify routing without their side effects, and
     # feed scripted input. 'quit' calls stop_server, so stub it to keep the
     # live test server up for the integration tests that follow.
@@ -884,6 +898,8 @@ def run_dispatch_tests(s):
     pull_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "pull"]
     check("'pull 99' (bad site index) does not call cmd_pull", len(pull_calls) == 1)
     check("'quit' stops server and exits", calls[-1] == "stop")
+    s.os.geteuid = saved_dispatch_euid
+
 
     section("One-shot CLI: run_command and set")
 
@@ -967,12 +983,14 @@ def run_dispatch_tests(s):
             s.cmd_set(["99", "username=x"])
         check("set refuses a site index that doesn't exist", "No site 99" in buf.getvalue())
 
-        # Without root, the config write fails with a hint, not a traceback.
+        # Reaching cmd_set without root now means elevation did not happen —
+        # run_command elevates first, so this is the sudo-unavailable backstop.
+        # It must still fail with a usable sentence rather than a traceback.
         s.Config.save = lambda self: (_ for _ in ()).throw(PermissionError())
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["port=8445"])
-        check("set without root hints at sudo instead of dying",
-              "requires sudo" in buf.getvalue())
+        check("set without root fails with a hint, not a traceback",
+              "needs root" in buf.getvalue())
         s.Config.save = lambda self: save_count.append(1)
     finally:
         s.Config.save = saved_save
@@ -1088,6 +1106,9 @@ def run_dispatch_tests(s):
             s._startup_refresh()
         check("A refresh that needs root fails soft with a hint",
               "run 'enable'" in buf.getvalue())
+        # Option A (#99): the hint must not tell the operator to type sudo —
+        # enable elevates itself, and sudo-in-the-message is the retired world.
+        check("...and the hint never says sudo", "sudo" not in buf.getvalue())
     finally:
         for n, v in saved.items():
             setattr(s, n, v)
@@ -1097,7 +1118,7 @@ def run_dispatch_tests(s):
 
     # Setup must still never finish with nothing to serve (#37), but it no
     # longer keeps that promise by writing a file: a folder with no index.html
-    # answers its domain with the embedded diagnostic page. So Step 1 creates
+    # answers its domain with the embedded error page. So Step 1 creates
     # the missing folder, writes nothing into it, and says what will answer.
     # urlopen is stubbed to raise, so the public-IP lookup falls back as before
     # and nothing here can reach the network.
@@ -1122,8 +1143,8 @@ def run_dispatch_tests(s):
         check("Setup creates the missing serve_dir", os.path.isdir(setup_dir))
         check("Setup writes nothing into the empty folder",
               os.listdir(setup_dir) == [])
-        check("Setup says the diagnostic page will answer until they publish",
-              "diagnostic page" in out)
+        check("Setup says the error page will answer until they publish",
+              "error page" in out)
         check("Setup no longer offers to install a placeholder",
               "placeholder" not in out.lower())
 
@@ -1173,6 +1194,242 @@ def run_dispatch_tests(s):
             site.serve_dir = sd
         shutil.rmtree(pu_marked, ignore_errors=True)
         shutil.rmtree(pu_owned, ignore_errors=True)
+
+    section("Root is requested, not required of the operator")
+
+    # Servette needs root for the systemd unit, the service user, the config the
+    # service reads, and the site folders it serves. It asks sudo for that itself
+    # rather than making the operator prefix every invocation — which is what
+    # forced the console script onto sudo's secure_path, and so forced an install
+    # to put it there.
+    check("Read-only commands never elevate",
+          not any(s._needs_root(c) for c in ("status", "sites", "log")))
+    check("Privileged commands do",
+          all(s._needs_root(c) for c in
+              ("setup", "config", "enable", "disable", "set", "pull", "restore-site")))
+
+    # start and stop are the conditional pair: root for the systemd path, but a
+    # session server lives in *this* process, where an elevated child could
+    # neither keep it alive after exiting nor reach the parent's to stop it.
+    saved_sfe, saved_isact, saved_srun = \
+        s._service_file_exists, s._service_is_active, s._server_running
+    try:
+        s._service_file_exists = lambda: True
+        s._service_is_active   = lambda: True
+        s._server_running      = lambda: False
+        check("start elevates when a unit is installed", s._needs_root("start"))
+        check("stop elevates when the service is what is running",
+              s._needs_root("stop"))
+
+        s._service_file_exists = lambda: False
+        s._service_is_active   = lambda: False
+        check("start stays put with no unit to drive", not s._needs_root("start"))
+
+        s._service_is_active = lambda: True
+        s._server_running    = lambda: True
+        check("stop stays put while a session server runs here",
+              not s._needs_root("stop"))
+    finally:
+        s._service_file_exists, s._service_is_active, s._server_running = \
+            saved_sfe, saved_isact, saved_srun
+
+    # A configured host keeps servette.toml at mode 600 for the service user, so
+    # an operator who has not elevated cannot read it. Two things must hold: the
+    # program still reaches its dispatcher (the crash this replaced happened at
+    # import, before any command could elevate), and it does not pass the
+    # stand-in defaults off as the operator's settings.
+    # Mode 000 would not reproduce it here — this suite may run as root, for whom
+    # permissions are advisory — so the denial is injected instead: a module-level
+    # `open` shadows the builtin for Servette's own code, and only while the
+    # config is being read.
+    unreadable_home = tempfile.mkdtemp()
+    unreadable_cfg  = os.path.join(unreadable_home, "servette.toml")
+    with open(unreadable_cfg, "w", encoding="utf-8") as f:
+        f.write('port = 8443\n')
+    saved_cfg_file = s.Config.CONFIG_FILE
+
+    def _denied(*a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    try:
+        s.Config.CONFIG_FILE = unreadable_cfg
+        s.open = _denied
+        try:
+            probe = s.Config()
+        finally:
+            del s.open                  # back to the builtin
+        check("An unreadable config is not a fatal one", probe.unreadable)
+        check("An unreadable config stands in defaults, not the file's values",
+              probe.port == 443)
+
+        # Construction tolerates the unreadable file; the live RELOAD must not.
+        # Adopting defaults there would swap a protected site's real config —
+        # auth and all — for no-auth defaults because a file's ownership broke.
+        # Demonstrated live during review: a running 401 became 404 (request
+        # processed with no challenge) the instant the config went unreadable.
+        good = s.Config()   # a readable one, from the real (readable) test config
+        good.sites[0].username = "op"
+        good.sites[0].password_hash = "deadbeef"
+        good._mtime = 0                              # force "changed on disk"
+        good.CONFIG_FILE = unreadable_cfg            # now points at the unreadable file
+        s.open = _denied
+        raised = adopted = None
+        try:
+            good.reload_if_changed()                 # must keep the last good config
+            adopted = good.unreadable
+        except SystemExit:
+            raised = "exit"
+        finally:
+            s.__dict__.pop("open", None)
+        check("A reload of an unreadable config neither exits nor adopts defaults",
+              raised is None and good.sites[0].username == "op")
+        check("...and keeps the authenticated site's password", good.sites[0].password_hash == "deadbeef")
+    finally:
+        s.Config.CONFIG_FILE = saved_cfg_file
+        s.__dict__.pop("open", None)
+        shutil.rmtree(unreadable_home, ignore_errors=True)
+
+    # The shell's defaults-stand-in affordance must never reach the SERVE path:
+    # the defaults carry no password, so serving them would open a protected
+    # site because a file's ownership broke. Demonstrated live during review —
+    # a 0600 root-owned config served "OPERATOR-ONLY CONTENT" at 200 with no
+    # credentials. --serve now refuses instead.
+    saved_start, saved_argv = s.start_server, sys.argv[:]
+    saved_unreadable_serve = s.config.unreadable
+    started = []
+    try:
+        s.start_server = lambda: started.append(True)
+        s.config.unreadable = True
+        sys.argv[:] = ["servette", "--serve"]
+        code = None
+        logging.disable(logging.CRITICAL)
+        try:
+            s.main()
+        except SystemExit as e:
+            code = e.code
+        finally:
+            logging.disable(logging.NOTSET)
+        check("--serve with an unreadable config exits nonzero", code == 1)
+        check("...without ever starting the server", not started)
+    finally:
+        s.start_server = saved_start
+        sys.argv[:] = saved_argv
+        s.config.unreadable = saved_unreadable_serve
+
+    # The one-shot form is documented as the way scripts drive Servette, and a
+    # script's first move is a pipe: `servette status | head` must end at the
+    # consumer's convenience, not in a BrokenPipeError traceback. A subprocess
+    # is required — the handler dup2s over the true stdout fd, which no
+    # StringIO can stand in for. The pipe's read end is closed BEFORE the child
+    # runs, so its first write raises EPIPE deterministically; the first
+    # version piped through `head -c 5`, and status output small enough to fit
+    # the 64K pipe buffer meant head could exit after the child had already
+    # finished writing — no SIGPIPE, a flaky pass. 141 is 128+SIGPIPE: what
+    # the shell reports for any tool that dies on a closed pipe.
+    pipe_r, pipe_w = os.pipe()
+    os.close(pipe_r)
+    env_pipe = dict(os.environ, SERVETTE_HOME=SERVETTE_DIR)
+    r = subprocess.run(
+        [sys.executable, os.path.join(SERVETTE_DIR, "servette.py"), "status"],
+        stdout=pipe_w, stderr=subprocess.PIPE, env=env_pipe, timeout=60)
+    os.close(pipe_w)
+    check("A closed stdout ends the one-shot quietly, exit 141",
+          r.returncode == 141 and b"Traceback" not in r.stderr)
+
+    # _needs_root reads the live singleton, so drive that flag directly rather
+    # than swapping the whole config out from under the rest of the suite.
+    saved_unreadable = s.config.unreadable
+    try:
+        s.config.unreadable = True
+        check("Read-only commands elevate when the config is out of reach",
+              all(s._needs_root(c) for c in ("status", "sites", "log")))
+    finally:
+        s.config.unreadable = saved_unreadable
+
+    saved_run, saved_euid = s.subprocess.run, s.os.geteuid
+    captured = []
+    sudo_status = [0]
+
+    class _Done:                      # stands in for a CompletedProcess
+        def __init__(self, rc): self.returncode = rc
+
+    # These tests are about the argv handed to sudo, so sudo's PRESENCE is
+    # controlled, not inherited: Debian 12's CI container ships no sudo, and
+    # _elevate correctly took its sudo-is-not-installed branch there — leaving
+    # captured empty and this section crashing on captured[0] instead of
+    # testing anything. The absent-sudo branch gets its own test below.
+    saved_which = s.shutil.which
+    try:
+        s.shutil.which = lambda name, *a, **k: (
+            "/usr/bin/sudo" if name == "sudo" else saved_which(name, *a, **k))
+
+        def _fake_run(argv, *a, **k):
+            captured.append(argv)
+            return _Done(sudo_status[0])
+        s.subprocess.run = _fake_run
+
+        with contextlib.redirect_stderr(io.StringIO()) as buf:
+            s._elevate("enable", [])
+        argv = captured[0]
+        # An absolute interpreter is the whole mechanism: sudo resolves it
+        # without consulting PATH, so nothing has to live on secure_path.
+        check("Elevation names an absolute interpreter, not a PATH lookup",
+              argv[0] == "sudo" and os.path.isabs(argv[argv.index("-m") - 1]))
+        check("Elevation re-runs the same command as a module",
+              argv[argv.index("-m") + 1:] == ["servette", "enable"])
+        check("Elevation says what it is doing before prompting",
+              "needs root" in buf.getvalue())
+
+        # sudo resets the environment. Losing SERVETTE_HOME would point the
+        # elevated run at a different data directory than the operator is in —
+        # worse than not elevating at all.
+        captured.clear()
+        os.environ["SERVETTE_HOME"] = "/tmp/servette-elevate-probe"
+        with contextlib.redirect_stdout(io.StringIO()):
+            s._elevate("set", ["port=8443"])
+        check("Elevation carries SERVETTE_HOME across sudo",
+              "--preserve-env=SERVETTE_HOME" in captured[0])
+        check("Elevation passes the command's own arguments through",
+              captured[0][-3:] == ["servette", "set", "port=8443"])
+
+        # A refused password must not read as success to whatever is driving
+        # `servette <command>` over SSH: the work happened in the child, so its
+        # status is the only honest one to exit with.
+        sudo_status[0] = 1
+        with contextlib.redirect_stderr(io.StringIO()):
+            s._elevate("enable", [])
+        check("A failed elevation is remembered as a failure",
+              s._elevated_status == 1)
+        sudo_status[0] = 0
+        with contextlib.redirect_stderr(io.StringIO()):
+            s._elevate("enable", [])
+        check("A successful one is not", s._elevated_status == 0)
+
+        # A host with no sudo at all — Debian's CI container is one — must be
+        # told plainly, spawn nothing, and register the failure.
+        captured.clear()
+        s.shutil.which = lambda name, *a, **k: (
+            None if name == "sudo" else saved_which(name, *a, **k))
+        with contextlib.redirect_stderr(io.StringIO()) as nobuf:
+            s._elevate("enable", [])
+        check("Without sudo, elevation explains and spawns nothing",
+              "sudo is not installed" in nobuf.getvalue() and captured == [])
+        check("...and the one-shot would exit nonzero", s._elevated_status == 1)
+
+        # Already root: the dispatcher must do the work, not re-invoke itself.
+        captured.clear()
+        s.os.geteuid = lambda: 0
+        s._service_is_active, s._server_running = (lambda: True), (lambda: False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.run_command("stop", [])
+        check("Running as root does the work instead of re-invoking sudo",
+              captured and not any(a and a[0] == "sudo" for a in captured)
+              and captured[0][:2] == ["systemctl", "stop"])
+    finally:
+        s.subprocess.run, s.os.geteuid = saved_run, saved_euid
+        s.shutil.which = saved_which
+        s._service_is_active, s._server_running = saved_isact, saved_srun
+        os.environ.pop("SERVETTE_HOME", None)
 
     section("Site management (add/remove/select)")
 
@@ -1654,6 +1911,45 @@ def run_dispatch_tests(s):
     finally:
         shutil.rmtree(extract_root, ignore_errors=True)
 
+    section("Ownership plans")
+
+    # The plan is computed apart from the run so this is testable without root.
+    saved_sue = s._servette_user_exists
+    try:
+        s._servette_user_exists = lambda: True
+        plan = s._operator_chown_plan("/x", strip_world=True)
+        check("strip_world removes world bits in the same chmod",
+              ["chmod", "-R", "g+rX,o-rwx", "/x"] in plan)
+        plan = s._operator_chown_plan("/x")
+        check("...and an operator-filled tree keeps its own modes (g+rX only)",
+              ["chmod", "-R", "g+rX", "/x"] in plan
+              and not any("o-rwx" in " ".join(argv) for argv in plan))
+    finally:
+        s._servette_user_exists = saved_sue
+
+    # The serve_dir readability warning must accept the group-only grant the
+    # plan just made — the old check demanded world bits and told the operator
+    # to add them, undoing the grant two lines above it.
+    probe_dir = tempfile.mkdtemp()
+    saved_gid = s._servette_gid
+    try:
+        os.chmod(probe_dir, 0o755)
+        check("World-readable serve_dir passes", s._serve_dir_readable(probe_dir))
+        os.chmod(probe_dir, 0o750)
+        s._servette_gid = lambda: os.stat(probe_dir).st_gid
+        check("Group-only serve_dir passes when the group is servette",
+              s._serve_dir_readable(probe_dir))
+        s._servette_gid = lambda: -1
+        check("...and fails when it is some other group",
+              not s._serve_dir_readable(probe_dir))
+        os.chmod(probe_dir, 0o700)
+        s._servette_gid = lambda: os.stat(probe_dir).st_gid
+        check("Owner-only serve_dir fails regardless",
+              not s._serve_dir_readable(probe_dir))
+    finally:
+        s._servette_gid = saved_gid
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
     section("Atomic site-content swap and restore")
 
     saved_serve_dir = s.config.sites[0].serve_dir
@@ -1690,12 +1986,18 @@ def run_dispatch_tests(s):
               open(os.path.join(s.config.sites[0].serve_dir + ".bak", "marker.txt")).read() == "v2")
 
         saved_input = builtins.input
+        saved_chownop_r = s._chown_operator
+        restore_chowns = []
         try:
             builtins.input = lambda prompt="": "y"
+            s._chown_operator = lambda path, strip_world=False: restore_chowns.append((path, strip_world))
             with contextlib.redirect_stdout(io.StringIO()):
                 s.cmd_restore_site(s.config.sites[0])
         finally:
             builtins.input = saved_input
+            s._chown_operator = saved_chownop_r
+        check("Restore re-establishes operator ownership (the backup came from a pull)",
+              (s._resolve(s.config.sites[0].serve_dir).rstrip(os.sep), True) in restore_chowns)
         check("Restore: live content reverts to the backup (v2)",
               open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
         check("Restore: backup is consumed",
@@ -1761,10 +2063,25 @@ def run_dispatch_tests(s):
 
         urllib.request.urlopen = lambda url, timeout=None: (
             _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        result = s._check_for_content_update(s.config.sites[0])
+        # The tree a pull swaps in was extracted by this process — root, when
+        # the command elevated — so the pull must re-establish operator
+        # ownership itself, with world bits stripped: without it every pull
+        # left the site root-owned and world-readable.
+        saved_chownop = s._chown_operator
+        chown_calls = []
+        s._chown_operator = lambda path, strip_world=False: chown_calls.append((path, strip_world))
+        try:
+            result = s._check_for_content_update(s.config.sites[0])
+        finally:
+            s._chown_operator = saved_chownop
         check("Correctly signed bundle is published",
               open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
         check("Returns 'published'", result == "published")
+        live2 = s._resolve(s.config.sites[0].serve_dir).rstrip(os.sep)
+        check("Pull re-establishes operator ownership, world bits stripped",
+              (live2, True) in chown_calls)
+        check("...and on the backup it left behind",
+              (live2 + ".bak", True) in chown_calls)
 
         other_key = Ed25519PrivateKey.generate()
         bad_sig   = other_key.sign(bundle_bytes)
@@ -1772,9 +2089,16 @@ def run_dispatch_tests(s):
             _FakeResp(bad_sig) if url.endswith(".sig") else _FakeResp(bundle_bytes))
         with open(os.path.join(s.config.sites[0].serve_dir, "index.html"), "w") as f:
             f.write("unchanged")
+        chown_calls.clear()
+        s._chown_operator = lambda path, strip_world=False: chown_calls.append((path, strip_world))
         logging.disable(logging.CRITICAL)
-        result = s._check_for_content_update(s.config.sites[0])
+        try:
+            result = s._check_for_content_update(s.config.sites[0])
+        finally:
+            s._chown_operator = saved_chownop
         logging.disable(logging.NOTSET)
+        check("A rejected bundle re-establishes nothing (nothing changed)",
+              chown_calls == [])
         check("Bundle signed by the wrong key is rejected, content unchanged",
               open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "unchanged")
         check("Returns 'bad-signature'", result == "bad-signature")
@@ -2185,12 +2509,12 @@ def run_server_tests(s, serve_dir):
           req("GET", path="/nonexistent.html").status == 404)
 
     # With no 404.html of the operator's own, a miss is answered by the
-    # embedded diagnostic page rather than a bare line of text: every server
-    # needs an error page, and this one also reports that the server is up and
-    # what it is actually sending. The status stays 404 — the path really is
-    # not there — and the body is HTML so the page can run.
+    # embedded error page rather than a bare line of text: every server needs an
+    # error page, and this one also reports that the server is up and what it is
+    # actually sending. The status stays 404 — the path really is not there —
+    # and the body is HTML so the page can run.
     resp = req("GET", path="/nonexistent.html")
-    check("Default 404 body is the embedded diagnostic page",
+    check("Default 404 body is the embedded error page",
           resp.status == 404 and b"notfound-path" in resp.body)
     check("Default 404 is served as HTML",
           "text/html" in resp.headers.get("Content-Type", ""))
@@ -2208,24 +2532,22 @@ def run_server_tests(s, serve_dir):
     check("Default 404 revalidates to 304",
           bool(etag_404) and req("GET", path="/nonexistent.html",
                                  headers={"If-None-Match": etag_404}).status == 304)
-    # Same bytes as the asked-for page: one file in two roles, so one ETag.
-    check("Default 404 body is the same page /selftest/ serves",
-          resp.body == req("GET", path="/selftest/").body)
-    check("/selftest/ still answers 200 where it was asked for",
-          req("GET", path="/selftest/").status == 200)
+    # The page has one role now, so no path is exempt from being a miss: what
+    # was the reserved 200 path is an ordinary 404 like any other.
+    check("The former reserved path is an ordinary miss",
+          req("GET", path="/selftest/").status == 404)
+    check("...answered by the same page, byte for byte",
+          req("GET", path="/selftest/").body == resp.body)
 
     # An error page must never sit in a shared cache with a positive lifetime:
     # the operator publishes the file that was missing and cached clients would
-    # keep the 404. Under max-age the 404 role is downgraded to no-cache, while
-    # the asked-for page at /selftest/ keeps the site's policy.
+    # keep the 404.
     saved_policy, saved_age = s.config.cache_policy, s.config.cache_max_age
     s.config.cache_policy, s.config.cache_max_age = "max-age", 3600
     try:
         cc_404 = req("GET", path="/nonexistent.html").headers.get("Cache-Control", "")
         check("Default 404 is not cached with a positive max-age",
               "max-age" not in cc_404 and "no-cache" in cc_404)
-        check("/selftest/ keeps the site's max-age policy",
-              "max-age=3600" in req("GET", path="/selftest/").headers.get("Cache-Control", ""))
     finally:
         s.config.cache_policy, s.config.cache_max_age = saved_policy, saved_age
 
@@ -2244,7 +2566,7 @@ def run_server_tests(s, serve_dir):
     os.remove(custom_404_path)
     s._file_cache.clear()
 
-    check("Removing 404.html restores the diagnostic page as the default body",
+    check("Removing 404.html restores the embedded page as the default body",
           b"notfound-path" in req("GET", path="/nonexistent.html").body)
 
     section("403 — path traversal")
@@ -2370,59 +2692,24 @@ def run_server_tests(s, serve_dir):
     s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
-    section("Reserved self-test path")
+    section("The embedded error page under auth")
 
-    # The embedded page serves at /selftest/ unless the operator's content
-    # shadows it; it rides the site's own auth like everything else.
-    resp = req("GET", "/selftest/")
-    check("GET /selftest/ serves the embedded page",
-          resp.status == 200 and b"Self-test" in resp.body
-          and "text/html" in resp.headers.get("Content-Type", ""))
-    check("All three path forms serve it",
-          req("GET", "/selftest").status == 200
-          and req("GET", "/selftest/index.html").status == 200)
-    check("HEAD /selftest/ answers with an empty body",
-          req("HEAD", "/selftest/").status == 200 and req("HEAD", "/selftest/").body == b"")
-
-    # The embedded response honors the caching contract the page's own
-    # checks probe for (it fetches its served URL expecting ETag + 304).
-    resp = req("GET", "/selftest/")
-    etag = resp.headers.get("ETag", "")
-    check("Embedded page carries ETag and Cache-Control",
-          bool(etag) and bool(resp.headers.get("Cache-Control")))
-    check("If-None-Match revalidates to 304",
-          req("GET", "/selftest/", headers={"If-None-Match": etag}).status == 304)
-
-    shadow_dir = os.path.join(s._resolve(s.config.sites[0].serve_dir), "selftest")
-    os.makedirs(shadow_dir, exist_ok=True)
-    try:
-        with open(os.path.join(shadow_dir, "index.html"), "w") as f:
-            f.write("<!DOCTYPE html><p>operator selftest</p>")
-        check("Operator content shadows the reserved path",
-              b"operator selftest" in req("GET", "/selftest/").body)
-    finally:
-        shutil.rmtree(shadow_dir, ignore_errors=True)
-    check("Unshadowed again after removal", b"Self-test" in req("GET", "/selftest/").body)
-
-    # A plain file named selftest claims the path too — either shape wins.
-    shadow_file = os.path.join(s._resolve(s.config.sites[0].serve_dir), "selftest")
-    try:
-        with open(shadow_file, "w") as f:
-            f.write("plain-file selftest")
-        check("A plain file named selftest shadows the no-slash form",
-              b"plain-file selftest" in req("GET", "/selftest").body)
-        check("...and wins on the slash form too — the embedded page never serves beside it",
-              b"plain-file selftest" in req("GET", "/selftest/").body)
-    finally:
-        os.remove(shadow_file)
+    # It is a response like any other: it rides the site's own gate. An error
+    # page that answered past auth would leak the server's identity, its
+    # headers, and whether the site is published to anyone who guessed a wrong
+    # path on a private site.
+    check("HEAD on a miss answers with an empty body",
+          req("HEAD", "/nonexistent.html").status == 404
+          and req("HEAD", "/nonexistent.html").body == b"")
 
     s.config.sites[0].username = "testuser"
     s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")
     try:
-        check("On an auth site the page is behind the same gate",
-              req("GET", "/selftest/").status == 401)
-        check("...and serves with credentials",
-              req("GET", "/selftest/", auth=("testuser", "testpass")).status == 200)
+        check("On an auth site a miss is challenged, not diagnosed",
+              req("GET", "/nonexistent.html").status == 401)
+        got = req("GET", "/nonexistent.html", auth=("testuser", "testpass"))
+        check("...and serves the page with credentials",
+              got.status == 404 and b"notfound-path" in got.body)
     finally:
         s.config.sites[0].username      = ""
         s.config.sites[0].password_hash = ""
@@ -2629,6 +2916,24 @@ def run_install_tests(s, tmpdir):
     except Exception as e:
         check(f"_chown_servette silently skips nonexistent path (raised {e})", False)
 
+    # An unprivileged process cannot give files away: on a host where the
+    # servette user EXISTS, a non-root _chown_servette must skip, not raise —
+    # check=True on the chown turned that into a crash at Config() import
+    # (save() runs it), found by running the suite as a non-root user.
+    saved_chk_euid, saved_chk_sue = s.os.geteuid, s._servette_user_exists
+    chk_file = os.path.join(tmpdir, "chown-skip-probe")
+    open(chk_file, "w").write("x")
+    try:
+        s._servette_user_exists = lambda: True
+        s.os.geteuid = lambda: 12345          # neither root nor the service user
+        try:
+            s._chown_servette(chk_file)
+            check("Unprivileged _chown_servette skips instead of raising", True)
+        except Exception as e:
+            check(f"Unprivileged _chown_servette skips instead of raising (raised {e})", False)
+    finally:
+        s.os.geteuid, s._servette_user_exists = saved_chk_euid, saved_chk_sue
+
     # _chown_servette: no-ops when servette user does not exist
     if not s._servette_user_exists():
         tmp_file = os.path.join(tmpdir, "chown-test.txt")
@@ -2643,8 +2948,8 @@ def run_install_tests(s, tmpdir):
     section("Service file content")
 
     # Test the real generated unit, not a reconstructed copy.
-    package_dir = os.path.dirname(os.path.abspath(s.__file__))
-    service     = s._systemd_unit(sys.executable, package_dir)
+    module_path = os.path.abspath(s.__file__)
+    service     = s._systemd_unit(sys.executable, module_path)
     check("Service runs as the least-privilege user",  "User=servette" in service)
     check("Capabilities bounded to net-bind only",     "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" in service)
     check("NoNewPrivileges is set",                    "NoNewPrivileges=yes" in service)
@@ -2655,15 +2960,217 @@ def run_install_tests(s, tmpdir):
     check("The service resolves the same data dir the enabling shell did",
           f"Environment=SERVETTE_HOME={s.BASE_DIR}" in service)
     ro_line = next((l for l in service.splitlines() if l.startswith("ReadOnlyPaths=")), "")
-    check("The package is pinned read-only — holds even for a checkout inside the data dir (#47)",
-          package_dir in ro_line)
+    check("The module is pinned read-only — holds even for a checkout inside the data dir (#47)",
+          module_path in ro_line)
+    for directive in ("PrivateDevices=yes", "ProtectClock=yes", "ProtectHostname=yes",
+                      "ProtectKernelLogs=yes", "ProtectProc=invisible",
+                      "RestrictRealtime=yes", "RestrictNamespaces=yes",
+                      "SystemCallArchitectures=native",
+                      "Environment=PYTHONDONTWRITEBYTECODE=1"):
+        check(f"Unit carries {directive.split('=')[0]}", directive in service)
     check("The service starts the package with the enabling shell's interpreter",
           f"ExecStart={sys.executable} -m servette --serve" in service)
     check("PYTHONPATH resolves -m servette for checkout deployments",
-          f"Environment=PYTHONPATH={os.path.dirname(package_dir)}" in service)
-    pip_unit = s._systemd_unit(sys.executable, "/v/lib/python3.11/site-packages/servette")
+          f"Environment=PYTHONPATH={os.path.dirname(module_path)}" in service)
+    pip_unit = s._systemd_unit(sys.executable, "/v/lib/python3.11/site-packages/servette.py")
     check("A pip-installed package gets no PYTHONPATH (nothing to widen)",
           "PYTHONPATH" not in pip_unit)
+
+    section("The runtime the service can reach")
+
+    # The service runs as an unprivileged user that owns nothing and is in no
+    # group but its own. A per-user install sits under a home directory Debian
+    # and Ubuntu create mode 0750, which that user cannot traverse — so the unit
+    # would name an interpreter and a package it cannot read, and the host would
+    # restart-loop on ModuleNotFoundError after the next reboot.
+    # Not under tmpdir: mkdtemp makes 0700 directories, which would make every
+    # path below one unreachable and the negative cases pass for the wrong
+    # reason. This tree is traversable from / down, so each mode change below is
+    # the only thing the answer can turn on.
+    reach = tempfile.mkdtemp()
+    home  = os.path.join(reach, "home")
+    leaf  = os.path.join(home, "pkg", "mod.py")
+    try:
+        os.makedirs(os.path.join(home, "pkg"))
+        with open(leaf, "w") as f:
+            f.write("x = 1\n")
+        subprocess.run(["chmod", "-R", "a+rX", reach], check=True)
+        check("A traversable path is reachable by the service user",
+              s._reachable_by_service(leaf))
+        os.chmod(home, 0o750)                        # what `useradd -m` gives
+        check("...and a 0750 home hides everything under it",
+              not s._reachable_by_service(leaf))
+        os.chmod(home, 0o755)
+        os.chmod(leaf, 0o640)
+        check("...as does a file the service user cannot read",
+              not s._reachable_by_service(leaf))
+        check("A path that does not exist is not reachable",
+              not s._reachable_by_service(os.path.join(reach, "nope", "mod.py")))
+    finally:
+        shutil.rmtree(reach, ignore_errors=True)
+
+    # What gets copied is read from installed metadata, not from a list here:
+    # cryptography declares cffi, cffi declares pycparser, and cffi's compiled
+    # backend is a bare .so beside the packages. A hand-kept list said
+    # "cryptography" and produced a runtime that could not import it.
+    required = s._required_distributions()
+    check("The dependency closure is resolved, not remembered",
+          any(d.lower() == "cryptography" for d in required))
+    check("...and the program itself is not one of its own dependencies",
+          not any(d.lower() == "servette" for d in required))
+    for dist in required:
+        if dist.lower() == "cffi":
+            check("A distribution's bare compiled module is found too, not just its package",
+                  any(p.endswith(".so") for p in s._distribution_paths(dist)))
+
+    # The seed for a checkout, which has no dist-info of its own to read, must
+    # be what the package actually declares — a dependency added to pyproject
+    # and not here would give a runtime missing a module.
+    declared = re.findall(r'"([A-Za-z0-9_.\-]+)\s*[><=!~]',
+                          re.search(r"dependencies\s*=\s*\[(.*?)\]",
+                                    open(os.path.join(SERVETTE_DIR, "pyproject.toml"),
+                                         encoding="utf-8").read(), re.S).group(1))
+    check("The checkout seed matches pyproject's dependencies",
+          [d.lower() for d in declared] == [d.lower() for d in s._DECLARED_DEPENDENCIES])
+
+    # Provisioning: the whole closure, root-owned, world-readable, and replaced
+    # wholesale so an older version cannot leave a module behind.
+    saved_rt, saved_base_rt = s.RUNTIME_DIR, s.BASE_DIR
+    try:
+        s.RUNTIME_DIR = os.path.join(tmpdir, "runtime")
+        os.makedirs(os.path.join(s.RUNTIME_DIR, "stale_leftover"), exist_ok=True)
+        s._provision_runtime()
+        landed = set(os.listdir(s.RUNTIME_DIR))
+        check("The runtime holds the program", "servette.py" in landed)
+        wanted = {os.path.basename(p) for p in s._runtime_sources()}
+        check("...and every path the closure named", wanted <= landed)
+        check("...and nothing an earlier version left", "stale_leftover" not in landed)
+        modes = []
+        for root, _d, files in os.walk(s.RUNTIME_DIR):
+            modes.append(os.stat(root).st_mode & 0o777)
+            modes += [os.stat(os.path.join(root, f)).st_mode & 0o777 for f in files]
+        check("The service can read all of it", all(m & 0o004 for m in modes))
+        check("...and write none of it", all(not m & 0o022 for m in modes))
+        check("No temporary tree is left beside it",
+              not os.path.exists(s.RUNTIME_DIR + ".new")
+              and not os.path.exists(s.RUNTIME_DIR + ".old"))
+
+        # Which paths the unit names follows from reachability, one predicate
+        # shared by the writer and the drift check.
+        saved_reach, saved_syspy = s._installed_runtime_reachable, s._system_python
+        try:
+            s._installed_runtime_reachable = lambda: False
+            s._system_python = lambda: "/usr/bin/python3"
+            check("Unreachable: the unit imports from the runtime copy",
+                  s._unit_module_path() == os.path.join(s.RUNTIME_DIR, "servette.py"))
+            check("...with an interpreter outside the install",
+                  s._unit_python_path() == "/usr/bin/python3")
+            unit = s._systemd_unit(s._unit_python_path(), s._unit_module_path())
+            check("...on PYTHONPATH, since the copy is not site-packages",
+                  f"Environment=PYTHONPATH={s.RUNTIME_DIR}" in unit)
+            check("...and the WHOLE copy pinned read-only, dependencies included",
+                  f"ReadOnlyPaths={s.RUNTIME_DIR}\n" in unit)
+            check("An interpreter path with whitespace is refused, not encoded",
+                  s._unsafe_unit_path() is None)
+            s._system_python = lambda: "/home/my user/.venv/bin/python"
+            check("...including when it is the interpreter that carries it",
+                  s._unsafe_unit_path() == "/home/my user/.venv/bin/python")
+            s._system_python = lambda: None
+            check("No matching interpreter means nothing is stale to rewrite",
+                  s._stale_units() == [])
+        finally:
+            s._installed_runtime_reachable = saved_reach
+            s._system_python = saved_syspy
+    finally:
+        s.RUNTIME_DIR, s.BASE_DIR = saved_rt, saved_base_rt
+        shutil.rmtree(os.path.join(tmpdir, "runtime"), ignore_errors=True)
+
+    # An interpreter of another minor version cannot load the cryptography build
+    # the runtime copy carries, so it is refused rather than named.
+    saved_minor = s._python_minor
+    try:
+        s._python_minor = lambda p: "2.7"
+        check("A version-mismatched interpreter is refused, not used",
+              s._system_python() is None)
+    finally:
+        s._python_minor = saved_minor
+    check("This interpreter reports its own version",
+          s._python_minor(sys.executable) == "%d.%d" % sys.version_info[:2])
+    check("An interpreter that cannot run reports nothing",
+          s._python_minor(os.path.join(tmpdir, "not-a-python")) is None)
+
+    # Every part of the reasoning above is inference about another user's view of
+    # the filesystem, so the conclusion is executed before a unit is written:
+    # import the program and the certificate machinery, from the paths the unit
+    # names, as the service user where the host can drop privileges.
+    check("A runtime that works verifies",
+          s._verify_runtime(sys.executable, os.path.abspath(s.__file__)) is None)
+
+    # The probe must judge the service against the config the unit will carry,
+    # which means the same SERVETTE_HOME — without it, a shell run with a
+    # non-default data directory verified against the default one's config.
+    saved_probe_run = s.subprocess.run
+    probe_envs = []
+    class _Ok:
+        returncode, stdout, stderr = 0, "", ""
+    try:
+        s.subprocess.run = lambda *a, **k: probe_envs.append(k.get("env")) or _Ok()
+        s._verify_runtime(sys.executable, os.path.abspath(s.__file__))
+        check("The probe carries the unit's own SERVETTE_HOME",
+              probe_envs and all(e and e.get("SERVETTE_HOME") == s.BASE_DIR
+                                 for e in probe_envs))
+    finally:
+        s.subprocess.run = saved_probe_run
+    # The broken runtime is a PLANTED broken module, not a missing directory:
+    # PYTHONPATH outranks site-packages, so the plant wins on any interpreter —
+    # including CI's venv, where servette is pip-installed and a merely-missing
+    # path let the probe resolve the installed copy and verify clean. The plant
+    # lives in its own world-traversable directory, not under tmpdir: mkdtemp
+    # makes 0700 homes, and when the suite runs as root the privilege-dropped
+    # probe could not even see a plant buried there — it reported the module
+    # missing instead of broken.
+    bad_rt = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(bad_rt, "servette.py"), "w") as f:
+            f.write("raise ImportError('unusable-runtime-probe')\n")
+        os.chmod(bad_rt, 0o755)
+        os.chmod(os.path.join(bad_rt, "servette.py"), 0o644)
+        problem = s._verify_runtime(sys.executable, os.path.join(bad_rt, "servette.py"))
+        check("...and one whose module cannot import does not",
+              isinstance(problem, str) and "unusable-runtime-probe" in problem)
+    finally:
+        shutil.rmtree(bad_rt, ignore_errors=True)
+
+    # The refusal is what makes verification worth running: a host that would
+    # restart-loop after the next reboot must be turned away here, with no unit
+    # written and no systemctl called.
+    saved_w = {n: getattr(s, n) for n in
+               ("_servette_user_exists", "_installed_runtime_reachable",
+                "_verify_runtime", "_service_file_exists", "_unsafe_unit_path")}
+    saved_sub = s.subprocess.run
+    ran = []
+    try:
+        s._servette_user_exists       = lambda: True
+        s._installed_runtime_reachable = lambda: True
+        s._verify_runtime             = lambda p, d: "ModuleNotFoundError: no servette"
+        s._service_file_exists        = lambda: False
+        s._unsafe_unit_path           = lambda: None
+        s.subprocess.run              = lambda argv, *a, **k: ran.append(argv)
+        refused = None
+        with contextlib.redirect_stdout(io.StringIO()) as wbuf:
+            try:
+                s._write_unit_files()
+            except ValueError as e:
+                refused = str(e)
+        check("A runtime the service cannot use refuses the write",
+              refused is not None and "unusable" in refused)
+        check("...before systemd is touched", ran == [])
+        check("...and says what the service could not do",
+              "ModuleNotFoundError" in wbuf.getvalue())
+    finally:
+        for n, v in saved_w.items():
+            setattr(s, n, v)
+        s.subprocess.run = saved_sub
 
     # A unit the writer refuses must not take the shell launch down with it:
     # _startup_refresh calls the writer on every interactive start, and the
@@ -2710,7 +3217,7 @@ def run_install_tests(s, tmpdir):
     if shutil.which("systemd-analyze"):
         unit_path = os.path.join(tmpdir, "servette.service")
         with open(unit_path, "w") as f:
-            f.write(s._systemd_unit(sys.executable, package_dir))
+            f.write(s._systemd_unit(sys.executable, module_path))
         out  = subprocess.run(["systemd-analyze", "verify", unit_path], capture_output=True, text=True)
         text = (out.stdout + out.stderr).lower()
         check("systemd-analyze verify: no unknown directives",
@@ -3139,8 +3646,23 @@ def run_platform_tests(s):
 
     saved_flag = s._IS_MACOS
     try:
-        # _ensure_swap: inert on macOS even when RAM numbers would recommend swap
         s._IS_MACOS = True
+        # Session mode never elevates: the data directory is the operator's own
+        # and there is no systemd, so a sudo prompt would be for nothing — the
+        # bug this pins was every privileged-on-Linux command demanding a
+        # password on macOS and then writing root-owned files into ~/.servette.
+        check("macOS: no command elevates",
+              not any(s._needs_root(c) for c in
+                      ("setup", "config", "set", "pull", "restore-site", "start", "stop")))
+        saved_unreadable_mac = s.config.unreadable
+        try:
+            s.config.unreadable = True
+            check("...except to read a config the sudo era left root-owned",
+                  s._needs_root("status"))
+        finally:
+            s.config.unreadable = saved_unreadable_mac
+
+        # _ensure_swap: inert on macOS even when RAM numbers would recommend swap
         saved_meminfo = s._meminfo
         s._meminfo = lambda: (512 * 1024, 100 * 1024, 0)   # small-RAM host: would offer swap on Linux
         try:
@@ -3197,6 +3719,373 @@ def run_platform_tests(s):
         s._IS_MACOS = saved_flag
 
 
+# The write primitives. A module base is required for the ambiguous names, so
+# text.replace() is not mistaken for os.replace(); extractall and the pathlib
+# writers are unambiguous and counted wherever they appear.
+_WRITE_MODULES = {"os", "shutil", "tarfile", "path"}
+_WRITE_CALLS   = {"makedirs", "mkdir", "remove", "unlink", "rmdir", "replace",
+                  "rename", "rmtree", "copytree", "copy2", "copyfile", "chmod",
+                  "chown", "symlink", "truncate"}
+_WRITE_ANYWHERE = {"extractall", "write_text", "write_bytes"}
+
+
+def _writing_functions(module_src):
+    """Every function in the program that writes to the filesystem, as
+    {name: {primitives}}. Read from the syntax tree rather than by grep, so a
+    write cannot hide behind a line break or an unusual spelling."""
+    import ast
+    found = {}
+    for node in ast.walk(ast.parse(module_src)):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        writes = set()
+        for n in ast.walk(node):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            if isinstance(f, ast.Attribute) and f.attr in _WRITE_ANYWHERE:
+                writes.add(f.attr)
+            elif isinstance(f, ast.Attribute) and f.attr in _WRITE_CALLS:
+                base = f.value
+                root = base.id if isinstance(base, ast.Name) else (
+                    base.attr if isinstance(base, ast.Attribute) else None)
+                if root in _WRITE_MODULES:
+                    writes.add(f.attr)
+            elif isinstance(f, ast.Name) and f.id == "open":
+                mode = ""
+                if len(n.args) > 1 and isinstance(n.args[1], ast.Constant):
+                    mode = n.args[1].value or ""
+                for kw in n.keywords:
+                    if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                        mode = kw.value.value or ""
+                if any(c in mode for c in "wax+"):
+                    writes.add("open-for-write")
+        if writes:
+            found[node.name] = writes
+    return found
+
+
+def run_invariant_tests(s, serve_dir, tmpdir):
+    """The three claims the documents lean on hardest, each pinned so the
+    sentence and the check move together. Verified by hand once and tracked by
+    nothing since, which is how a true sentence becomes a stale one (#93)."""
+    sys.path.insert(0, os.path.join(SERVETTE_DIR, "src"))
+    import build
+
+    section("Invariant: writes are where the design says they are")
+
+    # The detector first, on source written to trip it: a pin that cannot fail
+    # pins nothing, and the ambiguous names are the risk in both directions.
+    probe_src = (
+        "def writes():\n    os.replace(a, b)\n\n"
+        "def also_writes():\n    open(p, 'w')\n\n"
+        "def unpacks():\n    tar.extractall(d)\n\n"
+        "def reads_only():\n    open(p, 'rb')\n\n"
+        "def just_a_string():\n    return s.replace('a', 'b')\n")
+    found = _writing_functions(probe_src)
+    check("The write detector sees os.replace, a write-mode open, and extractall",
+          set(found) == {"writes", "also_writes", "unpacks"})
+    check("...and does not mistake str.replace or a read for a write",
+          "just_a_string" not in found and "reads_only" not in found)
+
+    module_src = build.build(os.path.join(SERVETTE_DIR, "src"))
+    writers = _writing_functions(module_src)
+
+    # The whole write surface, frozen. A new writer anywhere in the program
+    # fails this until it is added here — which is the point: it forces someone
+    # to say which of the claims below it belongs to.
+    expected = {
+        # Site content: the publish pipeline, and nothing else.
+        "_check_for_content_update", "_swap_site_content", "cmd_restore_site",
+        # A site FOLDER, created empty — setup must never leave nothing to serve.
+        "cmd_setup",
+        # Servette's own state: config, certificates, the ACME account.
+        "save", "_generate_self_signed_cert", "_ensure_default_cert",
+        "_obtain_trusted_cert", "issue",
+        # The host, at install time and as root.
+        "_write_unit_files", "_provision_runtime", "cmd_disable", "_ensure_swap",
+        # Staging: unpacks a verified bundle into a temporary directory.
+        "_extract_bundle",
+        # Removes a site's own generated certificate when the site goes.
+        "_config_add_site",
+    }
+    surprise = set(writers) - expected
+    missing  = expected - set(writers)
+    check("The program's write surface is exactly what is pinned here",
+          not surprise and not missing)
+    if surprise:
+        print(f"      new writers, unclaimed by any invariant: {sorted(surprise)}")
+    if missing:
+        print(f"      pinned writers that no longer write: {sorted(missing)}")
+
+    # And of those, the ones that touch a site's content.
+    content_writers = {"_check_for_content_update", "_swap_site_content",
+                       "cmd_restore_site"}
+    check("Site content is written only by the publish channel",
+          content_writers <= set(writers)
+          and not (content_writers & {"cmd_setup"}))
+
+    section("Invariant: no request ever reaches a write")
+
+    # Not argued from the code — attempted. Every write primitive is made to
+    # raise, then a battery of requests runs. Anything that tried to write would
+    # fail its own response, so the statuses are the evidence.
+    denied = []
+
+    def _deny(name):
+        def fail(*a, **k):
+            denied.append(name)
+            raise AssertionError(f"a request reached {name}")
+        return fail
+
+    saved_os = {n: getattr(s.os, n) for n in
+                ("makedirs", "mkdir", "remove", "unlink", "rmdir", "replace",
+                 "rename", "chmod", "chown")}
+    saved_sh = {n: getattr(s.shutil, n) for n in ("rmtree", "copytree", "copy2")}
+    real_open = open
+
+    def guarded_open(f, mode="r", *a, **k):
+        if any(c in mode for c in "wax+"):
+            denied.append(f"open({mode})")
+            raise AssertionError(f"a request opened {f} for writing")
+        return real_open(f, mode, *a, **k)
+
+    with open(os.path.join(serve_dir, "index.html"), "w") as f:
+        f.write(TEST_HTML)
+    s._file_cache.clear()
+    before = sorted((p, os.stat(os.path.join(dp, p)).st_mtime)
+                    for dp, _d, fs in os.walk(serve_dir) for p in fs)
+    try:
+        for n, fn in saved_os.items():
+            setattr(s.os, n, _deny(f"os.{n}"))
+        for n, fn in saved_sh.items():
+            setattr(s.shutil, n, _deny(f"shutil.{n}"))
+        s.open = guarded_open
+
+        battery = [
+            ("GET",  "/",                     200),
+            ("GET",  "/index.html",            200),
+            ("HEAD", "/index.html",            200),
+            ("GET",  "/nothing-here",          404),   # the embedded error page
+            ("POST", "/index.html",            405),
+            ("GET",  "/../etc/passwd",         403),
+            ("GET",  "/.well-known/servette",  404),   # no password on this site
+        ]
+        statuses = []
+        for method, path, want in battery:
+            got = req(method, path=path)
+            statuses.append((method, path, got.status, want))
+        etag = req("GET", path="/index.html").headers.get("ETag", "")
+        cond = req("GET", path="/index.html", headers={"If-None-Match": etag}).status
+        gz   = req("GET", path="/index.html", headers={"Accept-Encoding": "gzip"}).status
+
+        check("Every kind of response completes with no write attempted",
+              all(g == w for _m, _p, g, w in statuses) and not denied)
+        for m, p, g, w in statuses:
+            if g != w:
+                print(f"      {m} {p} → {g}, expected {w}")
+        check("...including a revalidation and a compressed response",
+              cond == 304 and gz == 200 and not denied)
+
+        # The guards themselves, proven live — otherwise the section above
+        # passes just as well with them doing nothing at all. Probed with calls
+        # that write nothing even when permitted: driving a real writer through
+        # them left half-written temp files in the data directory.
+        caught = 0
+        for attempt in (lambda: s.os.remove(os.path.join(tmpdir, "nothing")),
+                        lambda: s.open(os.path.join(tmpdir, "nothing"), "w")):
+            try:
+                attempt()
+            except AssertionError:
+                caught += 1
+            except Exception:
+                pass
+        check("The guards are real: a write outside the request path is caught",
+              caught == 2)
+        denied.clear()
+    finally:
+        for n, fn in saved_os.items():
+            setattr(s.os, n, fn)
+        for n, fn in saved_sh.items():
+            setattr(s.shutil, n, fn)
+        s.__dict__.pop("open", None)
+
+    after = sorted((p, os.stat(os.path.join(dp, p)).st_mtime)
+                   for dp, _d, fs in os.walk(serve_dir) for p in fs)
+    check("...and the served directory is byte-for-byte untouched", before == after)
+
+    section("Invariant: the wheel is Python only")
+
+    # The error page is inlined at build time so an operator cannot delete it.
+    # That only holds while nothing rides along as data — and with the program
+    # as one module, "nothing beside it" is now structural: py-modules ships
+    # exactly the named file, so the first check is that pyproject still says
+    # py-modules and not packages.
+    with open(os.path.join(SERVETTE_DIR, "pyproject.toml"), encoding="utf-8") as f:
+        py_settings = [l.split("#", 1)[0] for l in f.read().splitlines()]
+    check("The program ships as a single module (py-modules, not packages)",
+          any("py-modules" in l and "servette" in l for l in py_settings)
+          and not any(l.strip().startswith("packages") for l in py_settings))
+
+    with open(os.path.join(SERVETTE_DIR, "pyproject.toml"), encoding="utf-8") as f:
+        # Declarations only. A comment saying there is no package data is not a
+        # declaration of package data — the first version of this check read the
+        # words rather than the settings, and failed on the comment explaining
+        # why the setting is absent.
+        settings = [l.split("#", 1)[0] for l in f.read().splitlines()]
+    check("pyproject declares no package data to carry",
+          not any("package-data" in l or "include-package-data" in l for l in settings))
+
+    # `build` cannot be probed by importing it: this suite puts src/ on the path,
+    # where build.py is Servette's own. Asking the interpreter to run the module
+    # resolves it the way the release does.
+    #
+    # A stale ./build/lib from an older layout fails the wheel check below —
+    # setuptools sweeps leftovers into the wheel. That is a true positive (the
+    # wheel really would carry them); `rm -rf build` is the fix, and this very
+    # check is what caught the residue when the layout changed.
+    probe = subprocess.run([sys.executable, "-m", "build", "--version"],
+                           capture_output=True, text=True, cwd=SERVETTE_DIR)
+    if probe.returncode == 0:
+        out = os.path.join(tmpdir, "wheel")
+        r = subprocess.run([sys.executable, "-m", "build", "--wheel",
+                            "--no-isolation", "--outdir", out, SERVETTE_DIR],
+                           capture_output=True, text=True)
+        wheels = [w for w in os.listdir(out)] if os.path.isdir(out) else []
+        if r.returncode == 0 and wheels:
+            import zipfile
+            with zipfile.ZipFile(os.path.join(out, wheels[0])) as z:
+                names = z.namelist()
+            program = [n for n in names if not n.split("/")[0].endswith(".dist-info")]
+            check("The built wheel's program is exactly servette.py",
+                  program == ["servette.py"])
+            if program != ["servette.py"]:
+                print(f"      wheel carries: {program}")
+        else:
+            print("  ‣ skipped building a wheel: python -m build failed here "
+                  f"(exit {r.returncode})")
+    else:
+        print("  ‣ skipped building a wheel: the `build` module is not installed. "
+              "The two checks above still hold the invariant.")
+
+
+def run_doc_check_tests(tmpdir):
+    """The docs checker, checked. A gate nothing exercises is a gate that can
+    quietly stop gating: an over-eager pattern gets it switched off, and a
+    too-narrow one passes everything. Both failure modes are tested here."""
+    section("The docs checker (build.py --check-docs)")
+
+    sys.path.insert(0, os.path.join(SERVETTE_DIR, "src"))
+    import build
+
+    hay = "def _needs_root(cmd):\n    pass\n--check-counts\n"
+
+    # It must judge only the shapes it can judge. Prose, header names and TOML
+    # keys live in backticks too, and guessing at them is what produces the
+    # false positives that get a check turned off for good.
+    check("A real file resolves",
+          build.token_problem("README.md", "DESIGN.md", SERVETTE_DIR, hay) is None)
+    check("A file named from the document beside it resolves",
+          build.token_problem("build.py", "src/SHELL.md", SERVETTE_DIR, hay) is None)
+    check("A file named by basename alone resolves",
+          build.token_problem("test.py", "DESIGN.md", SERVETTE_DIR, hay) is None)
+    check("A file that no longer exists is caught",
+          build.token_problem("src/diagnostics.html", "DESIGN.md", SERVETTE_DIR, hay)
+          == "no such file in the repository")
+    check("An identifier in the program resolves",
+          build.token_problem("_needs_root()", "DESIGN.md", SERVETTE_DIR, hay) is None)
+    check("An identifier that does not exist is caught",
+          build.token_problem("_gone_away", "DESIGN.md", SERVETTE_DIR, hay)
+          == "not in the program, the build, or the suite")
+    check("A flag a tool accepts resolves",
+          build.token_problem("--check-counts", "DESIGN.md", SERVETTE_DIR, hay) is None)
+    check("A flag no tool accepts is caught",
+          build.token_problem("--invented", "DESIGN.md", SERVETTE_DIR, hay)
+          == "no tool accepts that flag")
+    for prose in ("HSTS", "TLS", "Cache-Control", "pip install servette",
+                  "serve_dir", "/var/lib/servette", "~/.local/bin",
+                  "https://servette.org"):
+        if prose == "serve_dir":
+            continue        # a real config key AND a real identifier; judged
+        check(f"Not judged: `{prose}`",
+              build.token_problem(prose, "DESIGN.md", SERVETTE_DIR, hay) is None)
+
+    # Fenced code is the thing being documented, not a claim about it.
+    md = "before\n\n```python\n_only_in_a_fence = 1\n```\n\n> a comment\nafter\n"
+    check("Fenced code is not scanned",
+          "_only_in_a_fence" not in build._prose_only(md))
+    check("Prose around a fence is",
+          "before" in build._prose_only(md) and "after" in build._prose_only(md))
+    check("A blockquote is code for src/*.md and dropped there",
+          "a comment" not in build._prose_only(md, drop_blockquotes=True)
+          and "a comment" in build._prose_only(md))
+
+    # GitHub hyphenates per space, not per run of spaces, so a heading with an
+    # ampersand anchors with the gap it leaves.
+    check("An anchor slug matches GitHub's, ampersand and all",
+          build._slug("## Scope & non-goals") == "scope--non-goals")
+    check("...and a plain heading's",
+          build._slug("### Releasing (maintainer task)") == "releasing-maintainer-task")
+
+    # `log [n]` in the README and ("log [n]", …) in the shell are one claim.
+    check("Command names are read without their argument specs",
+          build._command_names('_COMMANDS = [\n    ("log [n]", "x"),\n'
+                               '    ("setup", "y"),\n]\n', "_COMMANDS")
+          == {"log", "setup"})
+    check("A renamed command list reads as empty rather than as agreement",
+          build._command_names("nothing here", "_COMMANDS") == set())
+
+    # Litter must not satisfy the checker — in tracked mode. The tracked set is
+    # INJECTED, because whether the host has git must not decide what this test
+    # asserts: Debian's CI container ships no git, its checkout is a downloaded
+    # tarball with no .git, and there the checker legitimately runs in its
+    # filesystem-fallback mode — where this file resolving is the documented
+    # behavior, not the failure. Both modes are pinned.
+    litter = os.path.join(SERVETTE_DIR, "litter-probe-only.md")
+    with open(litter, "w") as f:
+        f.write("x")
+    saved_tracked = dict(build._TRACKED_CACHE)
+    try:
+        build._TRACKED_CACHE[SERVETTE_DIR] = {"README.md"}    # tracked mode
+        check("Tracked mode: an untracked file at the root does not resolve",
+              build.token_problem("litter-probe-only.md", "DESIGN.md",
+                                  SERVETTE_DIR, "") == "no such file in the repository")
+        build._TRACKED_CACHE[SERVETTE_DIR] = None             # no git to ask
+        check("Fallback mode (no git): the filesystem answers instead",
+              build.token_problem("litter-probe-only.md", "DESIGN.md",
+                                  SERVETTE_DIR, "") is None)
+    finally:
+        build._TRACKED_CACHE.clear()
+        build._TRACKED_CACHE.update(saved_tracked)
+        os.remove(litter)
+
+    # The interpreter-version probe runs once per path, not per ask — the
+    # staleness chain asks several times per launch, and each ask used to
+    # spawn every candidate interpreter again.
+    probe_calls = []
+    fake = os.path.join(tmpdir, "never-a-python")
+    import servette as s_mod
+    saved_srun2 = s_mod.subprocess.run
+    def counting_run(argv, **k):
+        probe_calls.append(argv)
+        raise OSError("no such interpreter")
+    try:
+        s_mod.subprocess.run = counting_run
+        r1 = s_mod._python_minor(fake)
+        r2 = s_mod._python_minor(fake)
+        check("A failed interpreter probe is asked once and remembered",
+              r1 is None and r2 is None and len(probe_calls) == 1)
+    finally:
+        s_mod.subprocess.run = saved_srun2
+
+    # And the gate itself, against the real repository.
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc = build.check_docs(os.path.join(SERVETTE_DIR, "src"), SERVETTE_DIR)
+    check("Every name the documents state resolves", rc == 0)
+    if rc != 0:
+        print(out.getvalue())
+
+
 def main():
     print("\n──────────────────────────────────────────────────────")
     print("  Servette Test Suite")
@@ -3211,6 +4100,8 @@ def main():
         run_cert_tests(s, tmpdir)
         run_install_tests(s, tmpdir)
         run_platform_tests(s)
+        run_invariant_tests(s, serve_dir, tmpdir)
+        run_doc_check_tests(tmpdir)
     finally:
         teardown(tmpdir, saved_config, config_path, s)
 

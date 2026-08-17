@@ -2,11 +2,13 @@
 
 *Shebang docstring, version, imports, and module-level constants.*
 
-*Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
+*Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown, never the module; the committed copy exists to be read, and `--check` holds it equal to the sources.*
 
-> GENERATED FILE — do not edit. servette/__init__.py is built from the
-> Markdown sources in src/ by src/build.py; edit those and rebuild. Hand
-> edits here are overwritten by the next build and fail CI's `build.py --check`.
+> GENERATED FILE — do not edit by hand. servette.py is generated from the
+> Markdown sources in src/ — by the package build (src/_literate_backend.py)
+> whenever pip or `python -m build` runs, or by hand with src/build.py. Edit
+> the sources and regenerate; edits here are overwritten by the next build
+> and fail CI's `build.py --check`.
 
 The module opens by introducing itself: what it does, how it is run, and the three sections everything below belongs to. `__version__` is the single version of record — the package build reads it from here.
 
@@ -18,7 +20,7 @@ Servette — The Simple Secure Static Site Server
 Servette serves a directory of static files over HTTPS with optional Basic Auth
 and essential security headers. Run it:
 
-    sudo servette
+    servette
 
 Architecture:
     Server              — config, rate limiting, file cache, the request handler, and the HTTP servers
@@ -30,7 +32,7 @@ __version__ = "0.26.219"
 
 ```
 
-Every import is Python standard library. The one third-party dependency, `cryptography`, is imported where it is used — it may not exist until the venv bootstrap has installed it.
+Every import is Python standard library. The one third-party dependency, `cryptography`, is imported where it is used, so importing the module itself never requires it — the shell can start, explain itself, and run its read-only commands on a host where the dependency is missing or broken.
 
 ```python
 # Imports — standard library only
@@ -42,6 +44,8 @@ import gzip
 import hashlib
 import hmac
 import http.server
+import importlib.metadata
+import importlib.util
 import io
 import ipaddress
 import json
@@ -50,6 +54,7 @@ import tarfile
 import tomllib
 import os
 import re
+import shlex
 import shutil
 import ssl
 import subprocess

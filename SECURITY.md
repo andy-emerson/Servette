@@ -12,7 +12,7 @@ the impact you see. Expect an acknowledgement, an honest assessment of
 scope and severity, and a fix in a new release with credit if you'd like
 it — best-effort from a single maintainer, so please allow a reasonable
 window before disclosing publicly. Only the latest release receives
-security fixes; stay current via pip.
+security fixes; stay current with `pipx upgrade servette`.
 
 ## Scope
 

@@ -1,6 +1,8 @@
-# GENERATED FILE — do not edit. servette/__init__.py is built from the
-# Markdown sources in src/ by src/build.py; edit those and rebuild. Hand
-# edits here are overwritten by the next build and fail CI's `build.py --check`.
+# GENERATED FILE — do not edit by hand. servette.py is generated from the
+# Markdown sources in src/ — by the package build (src/_literate_backend.py)
+# whenever pip or `python -m build` runs, or by hand with src/build.py. Edit
+# the sources and regenerate; edits here are overwritten by the next build
+# and fail CI's `build.py --check`.
 # The docstring and version
 """
 Servette — The Simple Secure Static Site Server
@@ -8,7 +10,7 @@ Servette — The Simple Secure Static Site Server
 Servette serves a directory of static files over HTTPS with optional Basic Auth
 and essential security headers. Run it:
 
-    sudo servette
+    servette
 
 Architecture:
     Server              — config, rate limiting, file cache, the request handler, and the HTTP servers
@@ -27,6 +29,8 @@ import gzip
 import hashlib
 import hmac
 import http.server
+import importlib.metadata
+import importlib.util
 import io
 import ipaddress
 import json
@@ -35,6 +39,7 @@ import tarfile
 import tomllib
 import os
 import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -166,28 +171,49 @@ class Config:
     def __init__(self):
         self._mtime = None
         try:
-            self._load()
+            # Only construction tolerates an unreadable file: it must reach the
+            # dispatcher so a privileged command can elevate and read again as
+            # root. The reload path (below) must not, or it would swap a
+            # protected site's live config for no-auth defaults.
+            self._load(tolerate_unreadable=True)
         except _ConfigInvalid as e:
             print(f"Error: {e}.")
             print(f"Fix or delete {self.CONFIG_FILE} and try again.")
             sys.exit(1)
 
-    def _load(self):
+    def _load(self, tolerate_unreadable=False):
         # Everything that can be refused is parsed and validated before any
         # attribute of self changes: _load also runs against the LIVE config on
         # the reload path, and raising after a partial mutation would leave the
         # server on a config that never existed on disk.
         data = {}
         existed = os.path.exists(self.CONFIG_FILE)
+        self.unreadable = False
         if existed:
             try:
                 with open(self.CONFIG_FILE, "rb") as f:
                     data = tomllib.load(f)
             except tomllib.TOMLDecodeError as e:
                 raise _ConfigInvalid(f"servette.toml is not valid TOML ({e})")
+            except OSError:
+                # The file is there and we may not read it — the normal state on
+                # a configured host, where servette.toml is the service user's
+                # and mode 600, seen by an operator who has not elevated yet.
+                # On construction this is not fatal: defaults stand in so the
+                # program can reach its dispatcher, which elevates and asks
+                # again as root, and the flag stops those defaults being
+                # reported as the operator's settings. But on the live reload
+                # path adopting defaults would silently drop this site's auth
+                # and every other setting because a file's ownership broke — so
+                # there it is refused exactly like an invalid file, keeping the
+                # last good config. self is unmutated at this point, so raising
+                # here honours the reload invariant.
+                if not tolerate_unreadable:
+                    raise _ConfigInvalid("servette.toml exists but cannot be read")
+                self.unreadable = True
 
         site_tables = data.get("site", [])
-        migrating   = existed and not site_tables
+        migrating   = existed and not site_tables and not self.unreadable
         if site_tables:
             sites = [Site(t) for t in site_tables]
         else:
@@ -218,12 +244,12 @@ class Config:
                         import cryptography  # noqa — availability probe only
                         legacy.domain = _domain_from_cert(cert_path) or ""
                     except ImportError:
-                        # Running under the system Python, before _bootstrap()
-                        # re-execs into the venv: _domain_from_cert would return
-                        # None and the migration would persist an empty domain,
-                        # silently demoting the site to the domainless catch-all
-                        # (no HSTS, no renewal). Defer the migration entirely;
-                        # the re-exec'd process runs it with cryptography there.
+                        # cryptography is missing — a broken or partial install.
+                        # _domain_from_cert would return None and the migration
+                        # would persist an empty domain, silently demoting the
+                        # site to the domainless catch-all (no HSTS, no
+                        # renewal). Defer the migration entirely; a later run
+                        # with the dependency present performs it.
                         migrating = False
             sites = [legacy]
 
@@ -707,35 +733,23 @@ def _security_headers(site):
 # Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
-# The reserved diagnostic page (DECISIONS.md: "The self-test is server-
-# delivered, client-executed"): authored as src/selftest.html and inlined here
-# by build.py, so it is part of the module rather than a file beside it. That
-# is deliberate — a page shipped as package data can be deleted on the box,
-# and deleting it would silently take the default 404 body with it. There is
-# no read at import and no missing-file case to degrade through.
-_SELFTEST_PATHS = ("/selftest", "/selftest/", "/selftest/index.html")
-_SELFTEST_PAGE = """<!DOCTYPE html>
-<!-- servette/selftest.html — the diagnostic page, shipped inside the module
-     and served in two roles (see DECISIONS.md, "The self-test is
-     server-delivered, client-executed"):
-
-       /selftest/  at 200 — the connection self-test, asked for on purpose.
-       any miss    at 404 — the default error page, where the site publishes
-                            no 404.html of its own.
+# The default 404 body (DECISIONS.md: "The error page is server-delivered,
+# client-executed"): authored as src/404.html and inlined by build.py, so it is
+# part of the module rather than a file beside it. That is deliberate — a page
+# shipped as package data can be deleted on the box, and deleting it would
+# silently take the default 404 body with it. There is no read at import and no
+# missing-file case to degrade through.
+_NOT_FOUND_PAGE = """<!DOCTYPE html>
+<!-- src/404.html — Servette's default 404 body, inlined into the module by
+     build.py (see DECISIONS.md, "The error page is server-delivered,
+     client-executed"). Served for any miss where the site publishes no
+     404.html of its own.
 
      Every server needs an error page, and a bare "Not found." spends a whole
-     response saying only that the reader was wrong. In the 404 role this page
-     also reports that the server is up, which host answered, what it is
-     sending, and whether the site has anything published at all — the
-     diagnosis is free, since the request was already made.
-
-     One file serves both roles because the checks are the same; the bytes are
-     identical, so both responses share an ETag. The role is read from
-     location.pathname (SELFTEST_PATHS below), which the server keeps in step:
-     it answers 200 only on those paths. In the 404 role the page drops the
-     paragraph describing Servette's wider features — an operator's error page
-     is not this project's billboard — and keeps only the modest served-by
-     credit that every default error page carries.
+     response saying only that the reader was wrong. This one also reports that
+     the server is up, which host answered, what it is sending, and whether the
+     site has anything published at all — the diagnosis is free, since the
+     request was already made.
 
      Same-origin by construction, so it can read what a cross-origin probe
      never could: it checks the connection it was itself loaded over. It never
@@ -749,7 +763,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Servette — Self-test</title>
+  <title>404 — not found</title>
   <style>
     :root {
       --bg:      #0e0e0e;
@@ -947,8 +961,8 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
 
-    /* ── Self-test ── */
-    .selftest {
+    /* ── Diagnosis ── */
+    .checks {
       border: 1px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
@@ -958,7 +972,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
       animation: rise 0.5s ease 0.35s forwards;
     }
 
-    .selftest-head {
+    .checks-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -967,7 +981,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
       border-bottom: 1px solid var(--border);
     }
 
-    .selftest-title {
+    .checks-title {
       font-size: 0.7rem;
       letter-spacing: 0.1em;
       text-transform: uppercase;
@@ -1014,18 +1028,6 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     }
     .t-summary b { color: var(--text); font-weight: 500; }
 
-    /* ── What this page cannot reach ── */
-    .features {
-      font-size: 0.72rem;
-      color: var(--muted);
-      line-height: 1.7;
-      margin-bottom: 2rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.45s forwards;
-    }
-    .features b { color: var(--text); font-weight: 500; }
-    .features a { color: #60a5fa; text-decoration: none; }
-    .features a:hover { text-decoration: underline; }
 
     /* ── Footer ── */
     .note {
@@ -1067,7 +1069,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
 
   <!-- Shown only in the 404 role. The server is up and answered — the path is
        what is missing — so this leads with the path rather than with blame. -->
-  <div class="notfound" id="notfound" hidden>
+  <div class="notfound">
     <div class="notfound-head">
       <span class="notfound-code">404</span>
       <span class="notfound-msg">Nothing published here</span>
@@ -1092,30 +1094,14 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="selftest">
-    <div class="selftest-head">
-      <span class="selftest-title" id="selftest-title">Self-test — live from your browser</span>
+  <div class="checks">
+    <div class="checks-head">
+      <span class="checks-title">Diagnosis — live from your browser</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>
     <div class="t-summary" id="t-summary">running…</div>
   </div>
-
-  <!-- Hidden in the 404 role: an operator's error page is not the place to
-       advertise the server's feature list to their visitors. -->
-  <p class="features" id="features">
-    These checks only reach what a browser can see. The rest of Servette runs
-    where this page cannot look. On the request path it <b>redirects HTTP to
-    HTTPS</b>, <b>gzip-compresses</b> what it sends, <b>rate-limits</b> abusive
-    clients, can sit behind a <b>password</b>, and routes <b>each domain to its
-    own site</b> — these results describe only the one you reached. Off the
-    request path it runs as a <b>supervised service</b> that restarts on boot,
-    <b>drops privileges</b> once the ports are bound, <b>renews its certificate</b>
-    automatically, and accepts new site content only as <b>signed bundles</b> the
-    operator pulls on purpose. And nothing above
-    happens while it is answering you: by design, <b>no request ever reaches a
-    write</b>. <a href="https://servette.org">servette.org</a> describes the whole of it.
-  </p>
 
   <div class="note">
     This page ships inside Servette itself and runs on this site's own
@@ -1129,26 +1115,13 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
 <script>
   const $ = (id) => document.getElementById(id);
 
-  // ── Which role is this page playing? ──────────────────────────────
-  // The server answers 200 on these paths and 404 everywhere else, so the
-  // path alone settles the role — no request needed, and no flash of the
-  // wrong framing while one is in flight. Kept in step with _SELFTEST_PATHS
-  // in Server.
-  const SELFTEST_PATHS = ['/selftest', '/selftest/', '/selftest/index.html'];
-  const isErrorPage    = !SELFTEST_PATHS.includes(location.pathname);
-
-  if (isErrorPage) {
-    document.title = '404 — not found';
-    $('notfound').hidden = false;
-    // textContent, never innerHTML: the path is whatever the client asked
-    // for. decodeURI so an escaped path reads as the reader typed it, with
-    // the raw value kept when it is malformed enough to throw.
-    let shown = location.pathname + location.search;
-    try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
-    $('notfound-path').textContent = shown;
-    $('features').hidden           = true;
-    $('selftest-title').textContent = 'Diagnosis — live from your browser';
-  }
+  // ── The path the reader asked for ─────────────────────────────────
+  // textContent, never innerHTML: the path is whatever the client asked for.
+  // decodeURI so an escaped path reads as the reader typed it, with the raw
+  // value kept when it is malformed enough to throw.
+  let shown = location.pathname + location.search;
+  try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
+  $('notfound-path').textContent = shown;
 
   // ── Connection card ───────────────────────────────────────────────
   const isHttps = location.protocol === 'https:';
@@ -1159,9 +1132,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     $('badge').className    = 'badge badge-green';
     // Deliberately not "your server": this page serves on every Servette
     // site, and most readers are visitors, not the operator.
-    $('tagline-text').textContent = isErrorPage
-      ? 'THE SERVER IS RUNNING — THIS PATH IS NOT'
-      : 'THIS SERVER IS RUNNING';
+    $('tagline-text').textContent = 'THE SERVER IS RUNNING — THIS PATH IS NOT';
   } else {
     $('badge').textContent = '⚠ Not encrypted';
     $('badge').className    = 'badge badge-red';
@@ -1169,7 +1140,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     $('tagline-text').textContent = 'Connection is not secure';
   }
 
-  // ── Self-test ─────────────────────────────────────────────────────
+  // ── The checks ────────────────────────────────────────────────────
   // Each check makes a real request and reports the value it observed.
   // ok: true = PASS, false = FAIL, null = SKIP.
   //
@@ -1321,10 +1292,10 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     logEl.innerHTML = '';
     $('t-summary').textContent = 'running…';
     let pass = 0, fail = 0, skip = 0;
-    // In the 404 role the two diagnosis rows come first: what this response
-    // is, and whether the site is deployed at all. They frame the header
-    // checks that follow rather than being buried under them.
-    for (const c of (isErrorPage ? errorChecks.concat(checks) : checks)) {
+    // The two diagnosis rows come first: what this response is, and whether
+    // the site is deployed at all. They frame the header checks that follow
+    // rather than being buried under them.
+    for (const c of errorChecks.concat(checks)) {
       const { st, obs } = addRow(c.req);
       let r;
       try { r = await c.run(); }
@@ -1345,7 +1316,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
 </body>
 </html>
 """.encode()
-_SELFTEST_ETAG = '"' + hashlib.sha256(_SELFTEST_PAGE).hexdigest()[:16] + '"'
+_NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
 
 
 # Log escaping
@@ -1456,8 +1427,8 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
 
-    # Version discovery: what this box is running — the embedded self-test
-    # page reads this to show the served version. Deliberately
+    # Version discovery: what this box is running — the embedded error page
+    # reads this to show the served version. Deliberately
     # reports only what THIS box knows; "latest available" is the package
     # index's business, not Servette's. Host-level (one process, one version).
     #
@@ -1487,24 +1458,15 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
-        # The embedded self-test answers on two paths, and operator content
-        # wins both by simply existing:
+        # Every server needs an error page, and a bare "Not found." spends a
+        # whole response telling the reader only that they were wrong. This one
+        # also says what the server is, that it is up, and what it is actually
+        # sending — the diagnosis is free, the request was already made. The
+        # operator's own 404.html wins by simply existing.
         #
-        #   /selftest/  — the reserved path, unless an entry of that name
-        #                 (file or directory) sits in the site root. Answers
-        #                 200: the page was asked for and it is there.
-        #   any miss    — as the default error page, unless the operator has
-        #                 written a 404.html. Answers 404: the path really is
-        #                 not there. Every server needs an error page, and a
-        #                 bare "Not found." spends a whole response telling the
-        #                 reader only that they were wrong. This one also says
-        #                 what the server is, that it is up, and what it is
-        #                 actually sending — the diagnosis is free, the request
-        #                 was already made.
-        #
-        # That second answer also covers a site's own root while nothing is
-        # published there: no index.html means the root is itself a miss, so the
-        # domain reports on itself instead of answering with ten bytes of text.
+        # It also covers a site's own root while nothing is published there: no
+        # index.html means the root is itself a miss, so the domain reports on
+        # itself instead of answering with ten bytes of text.
         #
         # The response mirrors the file path's caching contract (ETag,
         # Cache-Control, 304) because the page's own checks probe the URL it
@@ -1513,39 +1475,35 @@ def _handle_request(method, url_path, headers, raw_ip):
         # browser, the connection it arrived over, behind the site's own auth.
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
-        selftest_asked = (url_path.split("?", 1)[0] in _SELFTEST_PATHS
-                          and not os.path.exists(os.path.join(site_root, "selftest")))
-        if selftest_asked or not os.path.isfile(custom_404):
-            code = 200 if selftest_asked else 404
-            # In the 404 role a positive lifetime is downgraded to
-            # revalidate-always. Under cache_policy = "max-age" an error page
-            # would otherwise sit in a shared cache for max_age seconds and keep
-            # answering 404 for a path *after* the operator publishes the very
-            # file that was missing. The asked-for page at /selftest/ keeps the
-            # site's policy: it is a real, unchanging resource.
+        if not os.path.isfile(custom_404):
+            # A positive lifetime is downgraded to revalidate-always. Under
+            # cache_policy = "max-age" an error page would otherwise sit in a
+            # shared cache for max_age seconds and keep answering 404 for a path
+            # *after* the operator publishes the very file that was missing.
             cache = _cache_control_header(site.username)
-            if code == 404 and "max-age" in cache:
+            if "max-age" in cache:
                 cache = ("private" if site.username else "public") + ", no-cache"
-            if headers.get("If-None-Match", "") == _SELFTEST_ETAG:
+            if headers.get("If-None-Match", "") == _NOT_FOUND_ETAG:
                 log.info("304 Not Modified %s to %s", log_path, ip)
-                return resp(304, [(b"etag", _SELFTEST_ETAG.encode()),
+                return resp(304, [(b"etag", _NOT_FOUND_ETAG.encode()),
                                   (b"cache-control", cache.encode())])
-            log.info("%d %s (embedded diagnostic page) to %s", code, log_path, ip)
-            return resp(code, [
+            log.info("404 %s (embedded error page) to %s", log_path, ip)
+            return resp(404, [
                 (b"content-type",   b"text/html; charset=utf-8"),
-                (b"content-length", str(len(_SELFTEST_PAGE)).encode()),
-                (b"etag",           _SELFTEST_ETAG.encode()),
+                (b"content-length", str(len(_NOT_FOUND_PAGE)).encode()),
+                (b"etag",           _NOT_FOUND_ETAG.encode()),
                 (b"cache-control",  cache.encode()),
-            ], _SELFTEST_PAGE)
+            ], _NOT_FOUND_PAGE)
 
-        # The operator's own 404.html, when they have written one.
-        if os.path.isfile(custom_404):
-            raw_404, _, _ = _get_cached_file(custom_404)
-            body_404 = raw_404 or b"Not found."
-            content_type_404 = b"text/html; charset=utf-8"
+        # The operator's own 404.html: the embedded page returned above unless
+        # this file exists, so it is the only way to reach here. Unreadable
+        # (bad permissions, a race with a deploy) falls back to the plain body
+        # rather than serving an empty one.
+        raw_404, _, _ = _get_cached_file(custom_404)
+        if raw_404 is None:
+            body_404, content_type_404 = b"Not found.", b"text/plain"
         else:
-            body_404 = b"Not found."
-            content_type_404 = b"text/plain"
+            body_404, content_type_404 = raw_404, b"text/html; charset=utf-8"
         log.warning("404 Not Found %s from %s", log_path, ip)
         return resp(404, [(b"content-type", content_type_404), (b"content-length", str(len(body_404)).encode())], body_404)
 
@@ -2137,11 +2095,50 @@ def _servette_user_exists():
     return result.returncode == 0
 
 
+def _servette_uid():
+    """The servette user's uid, or None when it does not exist."""
+    try:
+        import pwd as _pwd
+        return _pwd.getpwnam("servette").pw_uid
+    except (ImportError, KeyError):
+        return None
+
+
+def _servette_gid():
+    """The servette group's gid, or None when it does not exist."""
+    try:
+        import grp as _grp
+        return _grp.getgrnam("servette").gr_gid
+    except (ImportError, KeyError):
+        return None
+
+
+def _serve_dir_readable(path):
+    """Whether the service could plausibly read this serve_dir: world r+x, or
+    group r+x where the group actually is servette. The old check demanded
+    world bits and told the operator to add them with a+rX — advice that undid
+    the deliberate group-only grant _operator_chown_plan had just applied."""
+    st = os.stat(path)
+    if st.st_mode & 0o005 == 0o005:
+        return True
+    return st.st_mode & 0o050 == 0o050 and st.st_gid == _servette_gid()
+
+
 # Ownership: the service user
 def _chown_servette(path):
     """Chown path to servette:servette if the user exists and the path exists."""
-    if _servette_user_exists() and os.path.exists(path):
-        subprocess.run(["chown", "-R", "servette:servette", path], check=True)
+    if not (_servette_user_exists() and os.path.exists(path)):
+        return
+    # Only root and the service user itself may actually run this: root gives
+    # the file away, and the service user's own call is a permitted same-owner
+    # no-op (renewal re-chowns what it already owns). Any other caller is an
+    # unprivileged session or dev context where chown cannot succeed — found
+    # when a non-root save() crashed the whole program at Config() import,
+    # because check=True turned "cannot give files away" into a fatal error on
+    # any host where the servette user exists.
+    if os.geteuid() != 0 and os.geteuid() != _servette_uid():
+        return
+    subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
 # Ownership: the operator
@@ -2150,7 +2147,7 @@ def _operator_user():
     return os.environ.get("SUDO_USER") or getpass.getuser()
 
 
-def _operator_chown_plan(path):
+def _operator_chown_plan(path, strip_world=False):
     """The chown/chmod invocations _chown_operator runs, as argv lists —
     separated from the running so the decision is testable without root.
     Owner is the human behind sudo; group is `servette` with g+rX, which is
@@ -2161,48 +2158,71 @@ def _operator_chown_plan(path):
     `:servette` rather than the operator's own group, which need not exist
     on hosts without user-private groups. Before the service user exists
     (setup before enable, macOS session mode) ownership alone is set;
-    enable re-runs this once the user exists."""
+    enable re-runs this once the user exists.
+
+    strip_world removes world bits as well. For a tree the OPERATOR filled,
+    modes are theirs and only the group grant is added — but a tree Servette
+    itself wrote (a pulled bundle, extracted at 644/755) must also honour the
+    promise above, and leaving extraction's world bits in place would be this
+    program handing every local account what it deliberately scopes to one."""
     user = _operator_user()
     if _servette_user_exists():
         return [["chown", "-R", f"{user}:servette", path],
-                ["chmod", "-R", "g+rX", path]]
+                ["chmod", "-R", "g+rX,o-rwx" if strip_world else "g+rX", path]]
     return [["chown", "-R", user, path]]
 
 
-def _chown_operator(path):
+def _chown_operator(path, strip_world=False):
     """Apply _operator_chown_plan. Best-effort: a host without chown
     semantics (macOS session mode) serves fine without it."""
     if os.path.exists(path):
-        for argv in _operator_chown_plan(path):
+        for argv in _operator_chown_plan(path, strip_world):
             subprocess.run(argv, check=False, capture_output=True)
 
 
 # The systemd unit
-def _systemd_unit(python_path, package_dir):
+def _systemd_unit(python_path, module_path):
     """The systemd unit for the service. Writes are confined to where Servette
     actually writes — the data directory (config, certs, ACME account) and the ACME
     webroot (HTTP-01 challenge files during renewal); ProtectSystem=strict makes the
     rest of the filesystem read-only, and the unit runs as a least-privilege user
     holding only CAP_NET_BIND_SERVICE. The served directory ends up read-write only
     because it lives under the data directory; the server never writes it.
-    The package directory is pinned read-only on top: normally the code lives
-    outside the data directory and strict mode already covers it, but a checkout
-    deployment (SERVETTE_HOME=.) puts the code inside the writable tree, and the
-    pin holds there too — a compromised serving process cannot patch the program
-    systemd will restart it into. PYTHONPATH names the package's parent ONLY
-    when the package sits outside the interpreter's own site-packages (a
-    checkout) — a pip-installed package resolves without it, and an
-    unconditional PYTHONPATH would put a path entry ahead of the stdlib for
-    no benefit, widening what a write anywhere on that entry could shadow.
+    The module is pinned read-only on top: normally the code lives outside
+    the data directory and strict mode already covers it, but two deployments
+    put the code inside the writable tree — a checkout (SERVETTE_HOME=.) and
+    the runtime copy made when the service user cannot read where Servette is
+    installed — and the pin holds for both, so a compromised serving process
+    cannot patch the program systemd will restart it into. PYTHONPATH names the
+    module's directory ONLY when it sits outside the interpreter's own
+    site-packages (a checkout, or that same runtime copy) — a pip-installed
+    module the service can reach resolves without it, and an unconditional
+    PYTHONPATH would put a path entry ahead of the stdlib for no benefit,
+    widening what a write anywhere on that entry could shadow.
+
+    The remaining restrictions cost the service nothing it uses: no devices
+    beyond the private stubs, no clock/hostname changes, no kernel log reads,
+    no other processes' /proc entries, no realtime scheduling, no namespaces,
+    one syscall architecture. PYTHONDONTWRITEBYTECODE stops the interpreter
+    attempting __pycache__ writes into the read-only pin. Deliberately absent,
+    pending validation on real hardware: MemoryDenyWriteExecute and
+    SystemCallFilter (cffi loads a compiled extension), ProtectHome (breaks an
+    install that IS reachable under /home), and UMask=0077 (a renewed
+    certificate would become unreadable to the unelevated status command).
 
     The leading version stamp is load-bearing, not decoration: a pip upgrade
     changes no directive, so without the stamp an upgraded host's units would
     never read as stale and the running service would keep the old code. With
     it, any upgrade drifts every unit's text and the startup refresh restarts
     the service onto the version the shell is running."""
-    parent = os.path.dirname(package_dir)
+    parent = os.path.dirname(module_path)
     pythonpath = ("" if os.path.basename(parent) in ("site-packages", "dist-packages")
                   else f"Environment=PYTHONPATH={parent}\n")
+    # For the runtime copy the pin covers the whole of it: the copied
+    # dependencies and the PYTHONPATH root are exactly as much "the program
+    # systemd will restart the service into" as the module beside them, and a
+    # pin on the module alone would leave them outside it.
+    readonly = parent if parent == RUNTIME_DIR else module_path
     return f"""# generated by servette {__version__}
 [Unit]
 Description=Servette — The Simple Secure Server
@@ -2211,12 +2231,13 @@ After=network.target
 [Service]
 User=servette
 Environment=SERVETTE_HOME={BASE_DIR}
+Environment=PYTHONDONTWRITEBYTECODE=1
 {pythonpath}AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths={BASE_DIR} {ACME_WEBROOT}
-ReadOnlyPaths={package_dir}
+ReadOnlyPaths={readonly}
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -2224,6 +2245,14 @@ ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictSUIDSGID=yes
 LockPersonality=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
+RestrictRealtime=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
 ExecStart={python_path} -m servette --serve
 Restart=always
 RestartSec=3
@@ -2435,14 +2464,310 @@ def _ensure_swap():
             pass
 
 
+# The service runtime
+# Where the program is copied when the service user cannot reach where it is
+# installed. Under the data directory, so it is covered by the same backup and
+# the same removal as everything else Servette owns.
+RUNTIME_DIR = os.path.join(BASE_DIR, "runtime")
+
+# The program's own distribution name, for telling it apart from its
+# dependencies. A literal, not derived from __name__: under `python -m
+# servette` — which is exactly how the unit's ExecStart runs — a single-file
+# module executes as __main__, and deriving the name from that would make the
+# service look up the metadata of a distribution called __main__.
+_SELF = "servette"
+
+# What the program is written against, for the one case where installed metadata
+# cannot say: a checkout, which has no dist-info of its own to read. It must
+# match pyproject.toml's dependencies exactly, and the suite checks that it does
+# — a dependency added there and not here would give a service whose runtime
+# copy is missing a module.
+_DECLARED_DEPENDENCIES = ("cryptography",)
+
+
+def _reachable_by_service(path):
+    """Whether the unprivileged servette user could read path.
+
+    It owns nothing and belongs to no group but its own, so the question is
+    only about the world bits: execute on every directory along the way, read
+    on the file itself. Conservative by construction — a false 'no' costs a
+    copy into the data directory, while a false 'yes' costs a service that
+    cannot start, which is the failure this exists to prevent."""
+    path = os.path.abspath(path)
+    try:
+        if not os.stat(path).st_mode & 0o004:      # world-readable leaf
+            return False
+        while True:
+            parent = os.path.dirname(path)
+            if parent == path:                     # reached the root
+                return True
+            if not os.stat(parent).st_mode & 0o001:   # world-traversable
+                return False
+            path = parent
+    except OSError:
+        return False
+
+
+def _installed_runtime_reachable():
+    """Whether the service could run the program exactly where it is installed.
+    Both halves must hold: the interpreter systemd would exec, and the module
+    file it would import."""
+    return (_reachable_by_service(sys.executable)
+            and _reachable_by_service(os.path.abspath(__file__)))
+
+
+_python_minor_cache = {}
+
+
+def _python_minor(path):
+    """The 'major.minor' an interpreter reports, or None if it cannot be run.
+
+    Cached per path: an interpreter's version cannot change within one process
+    run, and the staleness chain asks several times per shell launch — without
+    the cache, a host on the runtime copy re-spawned every candidate
+    interpreter each time."""
+    if path not in _python_minor_cache:
+        try:
+            out = subprocess.run(
+                [path, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+                capture_output=True, text=True, timeout=10)
+            _python_minor_cache[path] = (out.stdout.strip()
+                                         if out.returncode == 0 else None)
+        except (OSError, subprocess.SubprocessError):
+            _python_minor_cache[path] = None
+    return _python_minor_cache[path]
+
+
+def _system_python():
+    """A reachable interpreter of the same minor version as this one, or None.
+
+    Same minor version is not a preference: cryptography ships a compiled
+    extension built against one ABI, and the runtime copy carries that build.
+    An interpreter that cannot load it would give a service that starts and
+    then fails on the first certificate operation, so no match is a refusal
+    rather than a best effort."""
+    want = "%d.%d" % sys.version_info[:2]
+    seen = set()
+    for cand in (getattr(sys, "_base_executable", None),
+                 f"/usr/bin/python{want}",
+                 f"/usr/local/bin/python{want}",
+                 "/usr/bin/python3"):
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        if os.path.isfile(cand) and _reachable_by_service(cand) \
+                and _python_minor(cand) == want:
+            return cand
+    return None
+
+
+def _required_distributions():
+    """Every distribution the program needs at run time, transitively.
+
+    Read from installed metadata rather than a list kept here, because a
+    dependency's own dependencies are not this program's to remember:
+    cryptography declares cffi, cffi declares pycparser, and cffi's compiled
+    backend is a bare .so beside the packages. A list would have named
+    cryptography and stopped.
+
+    Two exclusions. Requirements guarded by an extra are for building or
+    testing a dependency, not running it. Requirements that are not installed
+    were excluded by their own environment markers when pip resolved them —
+    pip has already evaluated those, so absence is the answer.
+
+    A checkout has no dist-info of its own, so there the walk starts from what
+    the program is written against instead; every dependency of THAT still comes
+    from metadata, which is where the transitive ones live."""
+    try:
+        importlib.metadata.distribution(_SELF)
+        want = [_SELF]
+    except importlib.metadata.PackageNotFoundError:
+        want = list(_DECLARED_DEPENDENCIES)
+    seen, out = set(), []
+    while want:
+        name = want.pop(0)
+        key = re.sub(r"[-_.]+", "-", name).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            reqs = importlib.metadata.distribution(name).requires or []
+        except importlib.metadata.PackageNotFoundError:
+            continue        # not installed: a marker ruled it out, or a checkout
+        if name != _SELF:
+            out.append(name)
+        for req in reqs:
+            if "extra ==" in req:
+                continue
+            dep = re.split(r"[<>=!~;\[\s(]", req, 1)[0].strip()
+            if dep:
+                want.append(dep)
+    return out
+
+
+def _distribution_paths(name):
+    """Where a distribution's importable top-level names live on disk.
+
+    top_level.txt when the wheel carries one — that is what names cffi's
+    _cffi_backend.so, which no package directory would reveal — and the
+    normalized distribution name when it does not, which is the modern wheel's
+    case. find_spec resolves each without importing it, so locating a
+    dependency never runs its module-level code."""
+    try:
+        dist = importlib.metadata.distribution(name)
+    except importlib.metadata.PackageNotFoundError:
+        return []
+    tops = (dist.read_text("top_level.txt") or "").split() \
+        or [re.sub(r"[-.]+", "_", name)]
+    paths = []
+    for top in tops:
+        try:
+            spec = importlib.util.find_spec(top)
+        except (ImportError, ValueError):
+            continue
+        if spec is None:
+            continue
+        locations = getattr(spec, "submodule_search_locations", None)
+        if locations:
+            paths.append(locations[0])          # a package directory
+        elif spec.origin and os.path.isfile(spec.origin):
+            paths.append(spec.origin)           # a single module, .py or .so
+    return paths
+
+
+def _runtime_sources():
+    """Every path the runtime copy must contain: the program — one module
+    file — then each top-level name of each distribution it requires."""
+    paths = [os.path.abspath(__file__)]
+    for name in _required_distributions():
+        paths.extend(_distribution_paths(name))
+    return paths
+
+
+def _provision_runtime():
+    """Copy the program and everything it imports into the data directory.
+
+    Root-owned, world-readable, writable by nobody but root — the service reads
+    it and the unit pins it ReadOnlyPaths on top, so a compromised serving
+    process cannot patch the program systemd will restart it into.
+
+    Built beside the live copy and swapped in, rather than written over it: a
+    half-copied runtime is a program that does not exist. The swap is two
+    renames, so a lazy import landing exactly between them would fail — the
+    service is restarted onto this runtime immediately afterwards, which is the
+    same moment it would have picked up the new code anyway."""
+    new, old = RUNTIME_DIR + ".new", RUNTIME_DIR + ".old"
+    for path in (new, old):
+        shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(new)
+    for src in _runtime_sources():
+        dest = os.path.join(new, os.path.basename(src))
+        if os.path.isdir(src):
+            shutil.copytree(src, dest)
+        else:
+            shutil.copy2(src, dest)
+
+    for root, _dirs, files in os.walk(new):
+        os.chmod(root, 0o755)
+        for f in files:
+            os.chmod(os.path.join(root, f), 0o644)
+    os.chmod(new, 0o755)
+
+    if os.path.exists(RUNTIME_DIR):
+        os.replace(RUNTIME_DIR, old)
+    os.replace(new, RUNTIME_DIR)
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def _verify_runtime(python_path, module_path):
+    """Run the program the way the unit will, as the user the unit will use.
+    None when it works, else what went wrong, in the child's own words.
+
+    This is the check that makes the rest of this section safe to trust. Every
+    part of it is inference — which paths the service user can read, which
+    distributions are required, which interpreter matches the compiled
+    extension — and inference about another user's view of the filesystem is
+    exactly the kind of thing that is wrong quietly. So before a unit is
+    written, the conclusion is executed: import the program and the certificate
+    machinery, from the paths the unit names, as `servette`. A host where that
+    fails is a host that would have restart-looped after the next reboot.
+
+    Falls back to running as this user when nothing can drop privileges, which
+    still proves the imports resolve; the path permissions are then covered
+    only by _reachable_by_service."""
+    parent = os.path.dirname(module_path)
+    # SERVETTE_HOME matches what the unit will carry: importing servette loads
+    # the config, and without this the probe reads the DEFAULT data directory —
+    # judging the service against a config it will never see.
+    env = {"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
+           "SERVETTE_HOME": BASE_DIR}
+    if os.path.basename(parent) not in ("site-packages", "dist-packages"):
+        env["PYTHONPATH"] = parent
+    probe = [python_path, "-c", "import servette, cryptography.x509"]
+    quoted = " ".join(shlex.quote(a) for a in probe)
+    # As the service user by whichever means the host has, unprivileged last so a
+    # host with neither still gets the import checked. Each dropper is named by
+    # absolute path: they live in /usr/sbin, which the probe's own minimal PATH
+    # does not carry, and a PATH miss would read as the runtime being broken.
+    # No dropper is tried at all without root — runuser and su cannot drop
+    # privilege the process does not hold, and their refusals ("may not be used
+    # by non-root users") would be reported as the runtime's problem.
+    candidates = []
+    if os.geteuid() == 0:
+        for tool, argv in (("runuser", ["-u", "servette", "--"] + probe),
+                           ("su", ["-s", "/bin/sh", "servette", "-c", quoted])):
+            found = shutil.which(tool) or shutil.which(tool, path="/usr/sbin:/sbin:/bin:/usr/bin")
+            if found:
+                candidates.append([found] + argv)
+    candidates.append(probe)
+
+    last = "could not run the program as the servette user"
+    for argv in candidates:
+        try:
+            r = subprocess.run(argv, env=env, cwd="/", capture_output=True,
+                               text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            last = str(e)
+            continue          # this way of dropping privilege is unavailable
+        if r.returncode == 0:
+            return None
+        err = (r.stderr or r.stdout).strip().splitlines()
+        if not err:
+            last = f"exited {r.returncode} without saying why"
+            continue
+        # A tool that cannot become the service user is this method failing, not
+        # the runtime failing — fall through and try the next one.
+        if any(t in err[-1] for t in ("user servette", "unknown user", "may not run",
+                                      "Authentication", "must be run from a terminal")):
+            last = err[-1]
+            continue
+        return err[-1]
+    return last
+
+
 # The unit interpreter
 def _unit_python_path():
-    """The interpreter the unit's ExecStart names: the one running this shell.
-    Under a pip/venv install that is the environment's own python, and the
-    service must use the same one to see the same installed packages. Shared
-    by the writer and the drift check — two computations of this path could
-    disagree and manufacture phantom drift."""
-    return sys.executable
+    """The interpreter the unit's ExecStart names: normally the one running
+    this shell. Under a pip/venv install that is the environment's own python,
+    and the service must use the same one to see the same installed packages.
+    Shared by the writer and the drift check — two computations of this path
+    could disagree and manufacture phantom drift.
+
+    Where the service user cannot reach that interpreter, the shell's own
+    cannot be named at all and a same-version system one stands in, against the
+    runtime copy. None means there is none to stand in, which refuses the
+    write."""
+    if _installed_runtime_reachable():
+        return sys.executable
+    return _system_python()
+
+
+def _unit_module_path():
+    """The module file the unit imports the program from, and pins read-only:
+    where it is installed when the service can read that, otherwise the copy in
+    the data directory."""
+    here = os.path.abspath(__file__)
+    return here if _installed_runtime_reachable() else os.path.join(RUNTIME_DIR, "servette.py")
 
 
 # A systemd directive value splits on whitespace, so a path carrying any would
@@ -2451,14 +2776,15 @@ def _unit_python_path():
 # such a path rather than encode it wrongly.
 # The whitespace refusal
 def _unsafe_unit_path():
-    """The first unit-embedded path (data dir, package dir) carrying
-    whitespace, or None. systemd directive values split on whitespace, so
-    such a path would silently become two wrong grants — and a newline would
+    """The first unit-embedded path (data dir, module file, interpreter)
+    carrying whitespace, or None. systemd directive values split on whitespace,
+    so such a path would silently become two wrong grants — and a newline would
     inject an arbitrary directive into the sandbox definition. Servette
-    refuses to write units for one rather than encode it wrongly."""
-    package_dir = os.path.dirname(os.path.abspath(__file__))
-    for p in (BASE_DIR, package_dir):
-        if re.search(r"\s", p):
+    refuses to write units for one rather than encode it wrongly. The
+    interpreter is in scope because ExecStart names it, and it is the one of
+    the three that can sit under a home directory the operator named."""
+    for p in (BASE_DIR, _unit_module_path(), _unit_python_path()):
+        if p and re.search(r"\s", p):
             return p
     return None
 
@@ -2470,7 +2796,7 @@ def _desired_units():
     netwatch_service, netwatch_timer = _netwatch_units()
     return {
         SERVICE_PATH:               _systemd_unit(_unit_python_path(),
-                                                    os.path.dirname(os.path.abspath(__file__))),
+                                                    _unit_module_path()),
         NETWATCH_PATH + ".service": netwatch_service,
         NETWATCH_PATH + ".timer":   netwatch_timer,
     }
@@ -2481,7 +2807,8 @@ def _stale_units():
     ones missing entirely, so a release that adds a unit flags as stale on
     hosts enabled before it existed. Empty when the service isn't installed
     at all: nothing to refresh on a session-only host."""
-    if not _service_file_exists() or _unsafe_unit_path():
+    if not _service_file_exists() or _unsafe_unit_path() \
+            or _unit_python_path() is None:
         return []   # no units to manage — or units this environment must not write
     stale = []
     for path, text in _desired_units().items():
@@ -2519,8 +2846,12 @@ def _service_env_drift():
     elif m.group(1) != BASE_DIR:
         drift.append(f"data directory: service uses {m.group(1)}, this shell uses {BASE_DIR}")
     m = re.search(r"^ExecStart=(\S+)", text, re.M)
-    if m and m.group(1) != _unit_python_path():
-        drift.append(f"interpreter: service uses {m.group(1)}, this shell runs {_unit_python_path()}")
+    wanted = _unit_python_path()
+    # None is not drift: this environment cannot name an interpreter the service
+    # could reach, so it has nothing to compare — the refusal belongs to the
+    # writer, which says so in words.
+    if m and wanted and m.group(1) != wanted:
+        drift.append(f"interpreter: service uses {m.group(1)}, this shell runs {wanted}")
     return drift
 
 
@@ -2549,6 +2880,33 @@ def _write_unit_files():
         )
         print("Created system user 'servette'.")
 
+    # The runtime is settled before the unit texts, which name what it decides —
+    # and proved before those texts reach disk, so a service that cannot import
+    # its own program is refused here rather than discovered at the next reboot.
+    if _installed_runtime_reachable():
+        # Nothing to copy — and a copy left by an earlier install the service
+        # could not reach would now be a second, stale program on the host.
+        shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
+    else:
+        if _unit_python_path() is None:
+            want = "%d.%d" % sys.version_info[:2]
+            print("  Error: Servette is installed where the service user cannot read")
+            print(f"  it, and no Python {want} was found outside it to run a copy with.")
+            print(f"  Install Servette for a Python this system also has outside your")
+            print("  home directory, or into a virtual environment under /opt.")
+            raise ValueError("no reachable interpreter for the service")
+        print(f"  Copying Servette to {RUNTIME_DIR} — the service user cannot read")
+        print("  where it is installed.")
+        _provision_runtime()
+
+    problem = _verify_runtime(_unit_python_path(), _unit_module_path())
+    if problem:
+        print("  Error: the service user cannot run Servette from")
+        print(f"  {_unit_module_path()}:")
+        print(f"    {problem}")
+        print("  Refusing to install a service that would fail to start. ")
+        raise ValueError(f"runtime unusable by the service user: {problem}")
+
     # one computation of the unit texts, shared with the staleness check
     for path, text in _desired_units().items():
         with open(path, "w") as f:
@@ -2574,16 +2932,15 @@ def _write_unit_files():
     os.makedirs(ACME_WEBROOT, exist_ok=True)
     _chown_servette(ACME_WEBROOT)
 
-    # warn if any site's serve_dir isn't world-readable
+    # warn if any site's serve_dir isn't readable by the service — through its
+    # group, or world bits the operator chose themselves
     for site in config.sites:
         if not site.serve_dir:
             continue
         serve_path = _resolve(site.serve_dir)
-        if os.path.isdir(serve_path):
-            mode = os.stat(serve_path).st_mode
-            if not (mode & 0o005 == 0o005):  # world read+execute on directory
-                print(f"  Warning: '{serve_path}' may not be readable by the servette user.")
-                print(f"  Fix with: chmod -R a+rX {serve_path}")
+        if os.path.isdir(serve_path) and not _serve_dir_readable(serve_path):
+            print(f"  Warning: '{serve_path}' may not be readable by the servette user.")
+            print(f"  Fix with: chown -R :servette {serve_path} && chmod -R g+rX {serve_path}")
 
     return updating
 
@@ -2616,7 +2973,7 @@ def cmd_enable():
     except ValueError:
         pass  # the writer already printed the path refusal
     except PermissionError:
-        print("Error: enable requires sudo. Run: sudo servette")
+        print("Error: enable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
         print("Error: enable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
@@ -2641,11 +2998,14 @@ def cmd_disable():
                 os.remove(NETWATCH_PATH + suffix)
             except OSError:
                 pass
+        # The runtime copy exists for the service; with no service it is a
+        # second program sitting on the host with nothing running it.
+        shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
         subprocess.run(["systemctl", "daemon-reload"], check=True)
         print("Servette service disabled.")
         log.info("Systemd service disabled")
     except PermissionError:
-        print("Error: disable requires sudo. Run: sudo python3 servette.py")
+        print("Error: disable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
         print("Error: disable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
@@ -3337,12 +3697,12 @@ def _config_add_site():
         print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
     # Nothing is written and nothing is offered: a site with no index.html
-    # answers its own domain with the embedded diagnostic page, which says the
+    # answers its own domain with the embedded error page, which says the
     # server is up and that nothing is published yet. Setup still never leaves
     # a site with nothing to serve (#37) — it just no longer needs to put a
     # file in the operator's folder to keep that promise.
     if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
-        print("  No index.html yet — the site will answer with Servette's diagnostic page until you publish one.")
+        print("  No index.html yet — the site will answer with Servette's error page until you publish one.")
 
     site = Site({"serve_dir": folder})
     config.sites.append(site)
@@ -3770,7 +4130,7 @@ def cmd_start():
                 log.info("Service started")
                 cmd_status()
             except PermissionError:
-                print("Error: start requires sudo. Run: sudo python3 servette.py")
+                print("Error: start needs root, and sudo is unavailable — re-run as root.")
             except FileNotFoundError:
                 print("Error: start requires a Linux server with systemd.")
             except subprocess.CalledProcessError as e:
@@ -3796,7 +4156,7 @@ def cmd_stop():
             log.info("Service stopped")
             stopped = True
         except PermissionError:
-            print("Error: stop requires sudo. Run: sudo python3 servette.py")
+            print("Error: stop needs root, and sudo is unavailable — re-run as root.")
         except FileNotFoundError:
             print("Error: stop requires a Linux server with systemd.")
         except subprocess.CalledProcessError as e:
@@ -3955,6 +4315,17 @@ def _check_for_content_update(site):
             shutil.rmtree(staging, ignore_errors=True)
             return "rejected"
 
+        # The tree just swapped in was extracted by this process — root, since
+        # pull elevates — so re-establish what enable establishes: the operator
+        # owns their content, the service reads through its group. strip_world
+        # because the extraction's own 644/755 modes are Servette's writing,
+        # not the operator's, and must honour the never-world-bits promise.
+        # Without this, every pull left the site root-owned — the operator
+        # locked out of their own folder — and world-readable.
+        live = _resolve(site.serve_dir).rstrip(os.sep)
+        _chown_operator(live, strip_world=True)
+        _chown_operator(live + ".bak", strip_world=True)
+
     log.info("Published new content for %s from %s", site.domain or site.serve_dir, site.publish_url)
     return "published"
 
@@ -3999,6 +4370,9 @@ def cmd_restore_site(site):
         if os.path.isdir(live_dir):
             shutil.rmtree(live_dir)
         os.rename(bak_dir, live_dir)
+        # The backup was made by a pull, which extracted it as root — same
+        # ownership repair as the pull itself, for the same reason.
+        _chown_operator(live_dir, strip_world=True)
     print("  Site content restored from backup.")
 
 
@@ -4237,8 +4611,8 @@ def cmd_setup():
     # Step 1 — the folder. Setup must never finish with nothing to serve (#37),
     # and no longer needs to write a file to keep that promise: it creates the
     # folder if missing, and a folder with no index.html answers its domain
-    # with the embedded diagnostic page. The page names the reserved path it
-    # also lives at, which is how an operator learns /selftest/ exists.
+    # with the embedded error page, which reports what the connection is
+    # actually sending.
     print()
     print("  Step 1 — Site folder")
     serve_path = _resolve(site.serve_dir)
@@ -4257,7 +4631,7 @@ def cmd_setup():
             print(f"  Serving {serve_path}.")
         else:
             print(f"  {serve_path} has no index.html yet — until you publish one, the")
-            print("  site answers with Servette's diagnostic page: it reports that the")
+            print("  site answers with Servette's error page: it reports that the")
             print("  server is up and what the connection is actually sending.")
 
     print()
@@ -4396,7 +4770,7 @@ def cmd_set(args):
     try:
         config.save()
     except PermissionError:
-        print("  Error: writing the config requires sudo. Run: sudo servette set ...")
+        print("  Error: writing the config needs root, and sudo is unavailable — re-run as root.")
         return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 
@@ -4427,7 +4801,13 @@ def _startup_refresh():
                     _reload_server()
                 print(f"  Service refreshed to v{__version__}.")
             except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
-                print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
+                # Option A of the refresh decision (#99): notice and tell. The
+                # shell runs unprivileged, and a password prompt nobody asked
+                # for at launch is the one place self-elevation would stop
+                # feeling like Servette asking — so the refresh names the one
+                # command that finishes the upgrade, and 'enable' does its own
+                # asking when run.
+                print("  Service unit is stale for this version — run 'enable' to refresh it.")
             except ValueError:
                 # The writer refuses a path systemd cannot carry safely, and has
                 # already printed why. A refusal must not take the launch down
@@ -4436,12 +4816,104 @@ def _startup_refresh():
                 print("  Leaving the existing service untouched.")
 
 
+# Elevating to root
+# The commands that never do their work as an ordinary user: they write the
+# config the service reads, the unit files, or a site folder the service user
+# owns. Read-only ones (status, sites, log) are absent deliberately — they must
+# keep working without a password prompt.
+_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "pull",
+                  "restore-site")
+
+# What sudo made of the last elevated command. The one-shot `servette <command>`
+# form exits with it, so tooling driving Servette over SSH sees a refused
+# password as a failure rather than a silent success; the interactive shell
+# ignores it and keeps its prompt.
+_elevated_status = 0
+
+
+def _needs_root(cmd):
+    """Whether this command, run right now, has work only root can do.
+
+    An unreadable servette.toml makes that true of everything, including the
+    read-only commands: without the file this process is holding defaults, and
+    reporting those as the operator's settings would be a lie. One password
+    prompt beats a confident wrong answer.
+
+    start and stop are the conditional pair. They drive systemd when a unit is
+    installed — root — but otherwise act on a session server living in this
+    process, which an elevated child could neither keep alive after it exits
+    nor reach in its parent. On that path they stay here and a privileged port
+    reports its own bind failure, which is the truthful answer."""
+    if config.unreadable:
+        return True
+    # Session mode owns nothing root does: the data directory is the operator's
+    # own (~/.servette on macOS) and there is no systemd to drive, so no command
+    # has work only root can do. A privileged port bind reports its own failure,
+    # exactly like the Linux session-server path. The unreadable check stays
+    # above this one deliberately — a config left root-owned by the retired
+    # `sudo servette` era still needs one elevation to read.
+    if _IS_MACOS:
+        return False
+    if cmd in _ROOT_COMMANDS:
+        return True
+    if cmd == "start":
+        return _service_file_exists()
+    if cmd == "stop":
+        return _service_is_active() and not _server_running()
+    return False
+
+
+def _elevate(cmd, args):
+    """Re-run one command under sudo, from a non-root invocation. Always
+    returns True: the command has been handled, whatever sudo made of it.
+
+    sys.executable is an absolute path, so sudo resolves the interpreter
+    without consulting PATH — which is the whole point. Nothing has to be
+    installed into a directory on sudo's secure_path for this to work, so an
+    install needs no symlink and the operator never types sudo themselves.
+
+    SERVETTE_HOME is passed through explicitly because sudo resets the
+    environment: losing it would silently point the elevated run at a
+    different data directory than the one the operator is working in, which is
+    a far worse failure than not elevating at all.
+
+    A child process rather than an exec, so the interactive shell survives the
+    privileged command and returns to its prompt instead of vanishing.
+
+    The notices go to stderr: the child owns stdout, and `status --json` has to
+    stay parseable through an elevation."""
+    global _elevated_status
+    if not shutil.which("sudo"):
+        print(f"  '{cmd}' needs root, and sudo is not installed — re-run as root.",
+              file=sys.stderr)
+        _elevated_status = 1
+        return True
+    print(f"  '{cmd}' needs root; asking sudo.", file=sys.stderr)
+    argv = ["sudo"]
+    if "SERVETTE_HOME" in os.environ:
+        argv.append("--preserve-env=SERVETTE_HOME")
+    argv += [sys.executable, "-m", "servette", cmd, *args]
+    try:
+        _elevated_status = subprocess.run(argv).returncode
+    except KeyboardInterrupt:
+        print(file=sys.stderr)   # the operator declined the password prompt
+        _elevated_status = 130
+    # The child may have changed the config this process is holding — a shell
+    # that kept showing the pre-elevation values would be reporting settings
+    # that no longer exist.
+    config.reload_if_changed()
+    return True
+
+
 # The dispatcher
 def run_command(cmd, args):
     """Dispatch one command by name; False for a name it doesn't know. Shared
     verbatim by the interactive loop and the one-shot `servette <command>`
     argv form — one dispatcher, so the two surfaces can never drift. quit and
     help stay in the interactive loop: they are about the loop itself."""
+    if os.geteuid() != 0 and _needs_root(cmd):
+        return _elevate(cmd, args)
+
     if cmd == "setup":
         cmd_setup()
     elif cmd == "config":
@@ -4533,7 +5005,43 @@ config = Config()
 
 # The entry point
 def main():
+    try:
+        # The inner finally flushes INSIDE the guarded region. stdout on a pipe
+        # is block-buffered, and output smaller than the buffer reaches the
+        # pipe only at interpreter shutdown — after this function has returned,
+        # where the EPIPE becomes an "Exception ignored" message and a wrong
+        # exit status instead of the handled case below. Flushing here makes
+        # the broken pipe surface where it can be caught, on every Python
+        # version and output size.
+        try:
+            _main()
+        finally:
+            sys.stdout.flush()
+    except BrokenPipeError:
+        # A consumer closed stdout mid-print — `servette status | head` is the
+        # canonical case. That is the consumer's normal behavior, not a fault
+        # here, so no traceback. stdout is re-pointed at devnull before exit so
+        # the interpreter's shutdown flush cannot raise the same error again,
+        # and the exit status is 141 (128+SIGPIPE): what the shell reports for
+        # any tool that dies on a closed pipe, so pipelines see the convention
+        # they already handle.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)
+
+
+def _main():
     if sys.argv[1:2] == ["--serve"]:
+        # Fail closed. Defaults standing in for an unreadable config is the
+        # SHELL's affordance — it elevates and reads again as root. A service
+        # has no second try, and the defaults carry no password: serving them
+        # would open a protected site to the world because a file's ownership
+        # broke. Exiting nonzero puts the truth in the journal instead.
+        if config.unreadable:
+            log.error("servette.toml exists but cannot be read — refusing to "
+                      "serve defaults in its place. Fix its ownership: "
+                      "chown servette:servette %s", config.CONFIG_FILE)
+            sys.exit(1)
         start_server()
         try:
             _watch_server()
@@ -4547,6 +5055,11 @@ def main():
         if not run_command(cmd, args):
             print(f"Unknown command: {cmd}. Run 'servette' for the interactive shell and its command list.")
             sys.exit(2)
+        # The work may have happened in an elevated child. Exit with what sudo
+        # made of it, so a refused password reads as a failure to whatever is
+        # driving this over SSH instead of a silent success.
+        if _elevated_status:
+            sys.exit(_elevated_status)
     else:
         shell()
 

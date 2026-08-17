@@ -2,7 +2,7 @@
 
 *Every incoming request: config, rate limiting, the file cache, site selection, the request handler, and the threaded HTTP servers.*
 
-*Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
+*Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown, never the module; the committed copy exists to be read, and `--check` holds it equal to the sources.*
 
 ## Config
 
@@ -120,28 +120,49 @@ class Config:
     def __init__(self):
         self._mtime = None
         try:
-            self._load()
+            # Only construction tolerates an unreadable file: it must reach the
+            # dispatcher so a privileged command can elevate and read again as
+            # root. The reload path (below) must not, or it would swap a
+            # protected site's live config for no-auth defaults.
+            self._load(tolerate_unreadable=True)
         except _ConfigInvalid as e:
             print(f"Error: {e}.")
             print(f"Fix or delete {self.CONFIG_FILE} and try again.")
             sys.exit(1)
 
-    def _load(self):
+    def _load(self, tolerate_unreadable=False):
         # Everything that can be refused is parsed and validated before any
         # attribute of self changes: _load also runs against the LIVE config on
         # the reload path, and raising after a partial mutation would leave the
         # server on a config that never existed on disk.
         data = {}
         existed = os.path.exists(self.CONFIG_FILE)
+        self.unreadable = False
         if existed:
             try:
                 with open(self.CONFIG_FILE, "rb") as f:
                     data = tomllib.load(f)
             except tomllib.TOMLDecodeError as e:
                 raise _ConfigInvalid(f"servette.toml is not valid TOML ({e})")
+            except OSError:
+                # The file is there and we may not read it — the normal state on
+                # a configured host, where servette.toml is the service user's
+                # and mode 600, seen by an operator who has not elevated yet.
+                # On construction this is not fatal: defaults stand in so the
+                # program can reach its dispatcher, which elevates and asks
+                # again as root, and the flag stops those defaults being
+                # reported as the operator's settings. But on the live reload
+                # path adopting defaults would silently drop this site's auth
+                # and every other setting because a file's ownership broke — so
+                # there it is refused exactly like an invalid file, keeping the
+                # last good config. self is unmutated at this point, so raising
+                # here honours the reload invariant.
+                if not tolerate_unreadable:
+                    raise _ConfigInvalid("servette.toml exists but cannot be read")
+                self.unreadable = True
 
         site_tables = data.get("site", [])
-        migrating   = existed and not site_tables
+        migrating   = existed and not site_tables and not self.unreadable
         if site_tables:
             sites = [Site(t) for t in site_tables]
         else:
@@ -172,12 +193,12 @@ class Config:
                         import cryptography  # noqa — availability probe only
                         legacy.domain = _domain_from_cert(cert_path) or ""
                     except ImportError:
-                        # Running under the system Python, before _bootstrap()
-                        # re-execs into the venv: _domain_from_cert would return
-                        # None and the migration would persist an empty domain,
-                        # silently demoting the site to the domainless catch-all
-                        # (no HSTS, no renewal). Defer the migration entirely;
-                        # the re-exec'd process runs it with cryptography there.
+                        # cryptography is missing — a broken or partial install.
+                        # _domain_from_cert would return None and the migration
+                        # would persist an empty domain, silently demoting the
+                        # site to the domainless catch-all (no HSTS, no
+                        # renewal). Defer the migration entirely; a later run
+                        # with the dependency present performs it.
                         migrating = False
             sites = [legacy]
 
@@ -751,21 +772,20 @@ def _security_headers(site):
 
 ## The request core
 
-Two reserved paths precede the handler: version discovery at `/.well-known/servette`, and the embedded self-test page, shipped beside the module as package data and read once at import.
+Two things precede the handler: version discovery at `/.well-known/servette`, and the default 404 body, inlined into the module by the build so there is no file to lose.
 
 ```python
 # Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
-# The reserved diagnostic page (DECISIONS.md: "The self-test is server-
-# delivered, client-executed"): authored as src/selftest.html and inlined here
-# by build.py, so it is part of the module rather than a file beside it. That
-# is deliberate — a page shipped as package data can be deleted on the box,
-# and deleting it would silently take the default 404 body with it. There is
-# no read at import and no missing-file case to degrade through.
-_SELFTEST_PATHS = ("/selftest", "/selftest/", "/selftest/index.html")
-_SELFTEST_PAGE = """@@SELFTEST_HTML@@""".encode()
-_SELFTEST_ETAG = '"' + hashlib.sha256(_SELFTEST_PAGE).hexdigest()[:16] + '"'
+# The default 404 body (DECISIONS.md: "The error page is server-delivered,
+# client-executed"): authored as src/404.html and inlined by build.py, so it is
+# part of the module rather than a file beside it. That is deliberate — a page
+# shipped as package data can be deleted on the box, and deleting it would
+# silently take the default 404 body with it. There is no read at import and no
+# missing-file case to degrade through.
+_NOT_FOUND_PAGE = """@@NOT_FOUND_HTML@@""".encode()
+_NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
 
 
 ```
@@ -886,8 +906,8 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
 
-    # Version discovery: what this box is running — the embedded self-test
-    # page reads this to show the served version. Deliberately
+    # Version discovery: what this box is running — the embedded error page
+    # reads this to show the served version. Deliberately
     # reports only what THIS box knows; "latest available" is the package
     # index's business, not Servette's. Host-level (one process, one version).
     #
@@ -917,24 +937,15 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
-        # The embedded self-test answers on two paths, and operator content
-        # wins both by simply existing:
+        # Every server needs an error page, and a bare "Not found." spends a
+        # whole response telling the reader only that they were wrong. This one
+        # also says what the server is, that it is up, and what it is actually
+        # sending — the diagnosis is free, the request was already made. The
+        # operator's own 404.html wins by simply existing.
         #
-        #   /selftest/  — the reserved path, unless an entry of that name
-        #                 (file or directory) sits in the site root. Answers
-        #                 200: the page was asked for and it is there.
-        #   any miss    — as the default error page, unless the operator has
-        #                 written a 404.html. Answers 404: the path really is
-        #                 not there. Every server needs an error page, and a
-        #                 bare "Not found." spends a whole response telling the
-        #                 reader only that they were wrong. This one also says
-        #                 what the server is, that it is up, and what it is
-        #                 actually sending — the diagnosis is free, the request
-        #                 was already made.
-        #
-        # That second answer also covers a site's own root while nothing is
-        # published there: no index.html means the root is itself a miss, so the
-        # domain reports on itself instead of answering with ten bytes of text.
+        # It also covers a site's own root while nothing is published there: no
+        # index.html means the root is itself a miss, so the domain reports on
+        # itself instead of answering with ten bytes of text.
         #
         # The response mirrors the file path's caching contract (ETag,
         # Cache-Control, 304) because the page's own checks probe the URL it
@@ -943,39 +954,35 @@ def _handle_request(method, url_path, headers, raw_ip):
         # browser, the connection it arrived over, behind the site's own auth.
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
-        selftest_asked = (url_path.split("?", 1)[0] in _SELFTEST_PATHS
-                          and not os.path.exists(os.path.join(site_root, "selftest")))
-        if selftest_asked or not os.path.isfile(custom_404):
-            code = 200 if selftest_asked else 404
-            # In the 404 role a positive lifetime is downgraded to
-            # revalidate-always. Under cache_policy = "max-age" an error page
-            # would otherwise sit in a shared cache for max_age seconds and keep
-            # answering 404 for a path *after* the operator publishes the very
-            # file that was missing. The asked-for page at /selftest/ keeps the
-            # site's policy: it is a real, unchanging resource.
+        if not os.path.isfile(custom_404):
+            # A positive lifetime is downgraded to revalidate-always. Under
+            # cache_policy = "max-age" an error page would otherwise sit in a
+            # shared cache for max_age seconds and keep answering 404 for a path
+            # *after* the operator publishes the very file that was missing.
             cache = _cache_control_header(site.username)
-            if code == 404 and "max-age" in cache:
+            if "max-age" in cache:
                 cache = ("private" if site.username else "public") + ", no-cache"
-            if headers.get("If-None-Match", "") == _SELFTEST_ETAG:
+            if headers.get("If-None-Match", "") == _NOT_FOUND_ETAG:
                 log.info("304 Not Modified %s to %s", log_path, ip)
-                return resp(304, [(b"etag", _SELFTEST_ETAG.encode()),
+                return resp(304, [(b"etag", _NOT_FOUND_ETAG.encode()),
                                   (b"cache-control", cache.encode())])
-            log.info("%d %s (embedded diagnostic page) to %s", code, log_path, ip)
-            return resp(code, [
+            log.info("404 %s (embedded error page) to %s", log_path, ip)
+            return resp(404, [
                 (b"content-type",   b"text/html; charset=utf-8"),
-                (b"content-length", str(len(_SELFTEST_PAGE)).encode()),
-                (b"etag",           _SELFTEST_ETAG.encode()),
+                (b"content-length", str(len(_NOT_FOUND_PAGE)).encode()),
+                (b"etag",           _NOT_FOUND_ETAG.encode()),
                 (b"cache-control",  cache.encode()),
-            ], _SELFTEST_PAGE)
+            ], _NOT_FOUND_PAGE)
 
-        # The operator's own 404.html, when they have written one.
-        if os.path.isfile(custom_404):
-            raw_404, _, _ = _get_cached_file(custom_404)
-            body_404 = raw_404 or b"Not found."
-            content_type_404 = b"text/html; charset=utf-8"
+        # The operator's own 404.html: the embedded page returned above unless
+        # this file exists, so it is the only way to reach here. Unreadable
+        # (bad permissions, a race with a deploy) falls back to the plain body
+        # rather than serving an empty one.
+        raw_404, _, _ = _get_cached_file(custom_404)
+        if raw_404 is None:
+            body_404, content_type_404 = b"Not found.", b"text/plain"
         else:
-            body_404 = b"Not found."
-            content_type_404 = b"text/plain"
+            body_404, content_type_404 = raw_404, b"text/html; charset=utf-8"
         log.warning("404 Not Found %s from %s", log_path, ip)
         return resp(404, [(b"content-type", content_type_404), (b"content-length", str(len(body_404)).encode())], body_404)
 

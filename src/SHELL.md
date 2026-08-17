@@ -2,7 +2,7 @@
 
 *The interactive terminal interface.*
 
-*Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
+*Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown, never the module; the committed copy exists to be read, and `--check` holds it equal to the sources.*
 
 ## Menus and prompts
 
@@ -227,12 +227,12 @@ def _config_add_site():
         print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
     # Nothing is written and nothing is offered: a site with no index.html
-    # answers its own domain with the embedded diagnostic page, which says the
+    # answers its own domain with the embedded error page, which says the
     # server is up and that nothing is published yet. Setup still never leaves
     # a site with nothing to serve (#37) — it just no longer needs to put a
     # file in the operator's folder to keep that promise.
     if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
-        print("  No index.html yet — the site will answer with Servette's diagnostic page until you publish one.")
+        print("  No index.html yet — the site will answer with Servette's error page until you publish one.")
 
     site = Site({"serve_dir": folder})
     config.sites.append(site)
@@ -722,7 +722,7 @@ def cmd_start():
                 log.info("Service started")
                 cmd_status()
             except PermissionError:
-                print("Error: start requires sudo. Run: sudo python3 servette.py")
+                print("Error: start needs root, and sudo is unavailable — re-run as root.")
             except FileNotFoundError:
                 print("Error: start requires a Linux server with systemd.")
             except subprocess.CalledProcessError as e:
@@ -753,7 +753,7 @@ def cmd_stop():
             log.info("Service stopped")
             stopped = True
         except PermissionError:
-            print("Error: stop requires sudo. Run: sudo python3 servette.py")
+            print("Error: stop needs root, and sudo is unavailable — re-run as root.")
         except FileNotFoundError:
             print("Error: stop requires a Linux server with systemd.")
         except subprocess.CalledProcessError as e:
@@ -943,6 +943,17 @@ def _check_for_content_update(site):
             shutil.rmtree(staging, ignore_errors=True)
             return "rejected"
 
+        # The tree just swapped in was extracted by this process — root, since
+        # pull elevates — so re-establish what enable establishes: the operator
+        # owns their content, the service reads through its group. strip_world
+        # because the extraction's own 644/755 modes are Servette's writing,
+        # not the operator's, and must honour the never-world-bits promise.
+        # Without this, every pull left the site root-owned — the operator
+        # locked out of their own folder — and world-readable.
+        live = _resolve(site.serve_dir).rstrip(os.sep)
+        _chown_operator(live, strip_world=True)
+        _chown_operator(live + ".bak", strip_world=True)
+
     log.info("Published new content for %s from %s", site.domain or site.serve_dir, site.publish_url)
     return "published"
 
@@ -992,6 +1003,9 @@ def cmd_restore_site(site):
         if os.path.isdir(live_dir):
             shutil.rmtree(live_dir)
         os.rename(bak_dir, live_dir)
+        # The backup was made by a pull, which extracted it as root — same
+        # ownership repair as the pull itself, for the same reason.
+        _chown_operator(live_dir, strip_world=True)
     print("  Site content restored from backup.")
 
 
@@ -1269,8 +1283,8 @@ def cmd_setup():
     # Step 1 — the folder. Setup must never finish with nothing to serve (#37),
     # and no longer needs to write a file to keep that promise: it creates the
     # folder if missing, and a folder with no index.html answers its domain
-    # with the embedded diagnostic page. The page names the reserved path it
-    # also lives at, which is how an operator learns /selftest/ exists.
+    # with the embedded error page, which reports what the connection is
+    # actually sending.
     print()
     print("  Step 1 — Site folder")
     serve_path = _resolve(site.serve_dir)
@@ -1289,7 +1303,7 @@ def cmd_setup():
             print(f"  Serving {serve_path}.")
         else:
             print(f"  {serve_path} has no index.html yet — until you publish one, the")
-            print("  site answers with Servette's diagnostic page: it reports that the")
+            print("  site answers with Servette's error page: it reports that the")
             print("  server is up and what the connection is actually sending.")
 
     print()
@@ -1449,7 +1463,7 @@ def cmd_set(args):
     try:
         config.save()
     except PermissionError:
-        print("  Error: writing the config requires sudo. Run: sudo servette set ...")
+        print("  Error: writing the config needs root, and sudo is unavailable — re-run as root.")
         return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 
@@ -1487,13 +1501,113 @@ def _startup_refresh():
                     _reload_server()
                 print(f"  Service refreshed to v{__version__}.")
             except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
-                print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
+                # Option A of the refresh decision (#99): notice and tell. The
+                # shell runs unprivileged, and a password prompt nobody asked
+                # for at launch is the one place self-elevation would stop
+                # feeling like Servette asking — so the refresh names the one
+                # command that finishes the upgrade, and 'enable' does its own
+                # asking when run.
+                print("  Service unit is stale for this version — run 'enable' to refresh it.")
             except ValueError:
                 # The writer refuses a path systemd cannot carry safely, and has
                 # already printed why. A refusal must not take the launch down
                 # with it: _startup_refresh runs on every interactive start, so
                 # an un-writable unit has to leave a usable shell behind.
                 print("  Leaving the existing service untouched.")
+
+
+```
+
+Servette needs root for a handful of things — the systemd unit, the service user, the config the service reads, the site folders it serves. It asks for that itself rather than requiring `sudo` in front of every invocation: prefixing the command forces the console script onto `sudo`'s `secure_path`, which forces an install to put it there, which is two of the three steps an install used to need.
+
+```python
+# Elevating to root
+# The commands that never do their work as an ordinary user: they write the
+# config the service reads, the unit files, or a site folder the service user
+# owns. Read-only ones (status, sites, log) are absent deliberately — they must
+# keep working without a password prompt.
+_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "pull",
+                  "restore-site")
+
+# What sudo made of the last elevated command. The one-shot `servette <command>`
+# form exits with it, so tooling driving Servette over SSH sees a refused
+# password as a failure rather than a silent success; the interactive shell
+# ignores it and keeps its prompt.
+_elevated_status = 0
+
+
+def _needs_root(cmd):
+    """Whether this command, run right now, has work only root can do.
+
+    An unreadable servette.toml makes that true of everything, including the
+    read-only commands: without the file this process is holding defaults, and
+    reporting those as the operator's settings would be a lie. One password
+    prompt beats a confident wrong answer.
+
+    start and stop are the conditional pair. They drive systemd when a unit is
+    installed — root — but otherwise act on a session server living in this
+    process, which an elevated child could neither keep alive after it exits
+    nor reach in its parent. On that path they stay here and a privileged port
+    reports its own bind failure, which is the truthful answer."""
+    if config.unreadable:
+        return True
+    # Session mode owns nothing root does: the data directory is the operator's
+    # own (~/.servette on macOS) and there is no systemd to drive, so no command
+    # has work only root can do. A privileged port bind reports its own failure,
+    # exactly like the Linux session-server path. The unreadable check stays
+    # above this one deliberately — a config left root-owned by the retired
+    # `sudo servette` era still needs one elevation to read.
+    if _IS_MACOS:
+        return False
+    if cmd in _ROOT_COMMANDS:
+        return True
+    if cmd == "start":
+        return _service_file_exists()
+    if cmd == "stop":
+        return _service_is_active() and not _server_running()
+    return False
+
+
+def _elevate(cmd, args):
+    """Re-run one command under sudo, from a non-root invocation. Always
+    returns True: the command has been handled, whatever sudo made of it.
+
+    sys.executable is an absolute path, so sudo resolves the interpreter
+    without consulting PATH — which is the whole point. Nothing has to be
+    installed into a directory on sudo's secure_path for this to work, so an
+    install needs no symlink and the operator never types sudo themselves.
+
+    SERVETTE_HOME is passed through explicitly because sudo resets the
+    environment: losing it would silently point the elevated run at a
+    different data directory than the one the operator is working in, which is
+    a far worse failure than not elevating at all.
+
+    A child process rather than an exec, so the interactive shell survives the
+    privileged command and returns to its prompt instead of vanishing.
+
+    The notices go to stderr: the child owns stdout, and `status --json` has to
+    stay parseable through an elevation."""
+    global _elevated_status
+    if not shutil.which("sudo"):
+        print(f"  '{cmd}' needs root, and sudo is not installed — re-run as root.",
+              file=sys.stderr)
+        _elevated_status = 1
+        return True
+    print(f"  '{cmd}' needs root; asking sudo.", file=sys.stderr)
+    argv = ["sudo"]
+    if "SERVETTE_HOME" in os.environ:
+        argv.append("--preserve-env=SERVETTE_HOME")
+    argv += [sys.executable, "-m", "servette", cmd, *args]
+    try:
+        _elevated_status = subprocess.run(argv).returncode
+    except KeyboardInterrupt:
+        print(file=sys.stderr)   # the operator declined the password prompt
+        _elevated_status = 130
+    # The child may have changed the config this process is holding — a shell
+    # that kept showing the pre-elevation values would be reporting settings
+    # that no longer exist.
+    config.reload_if_changed()
+    return True
 
 
 ```
@@ -1507,6 +1621,9 @@ def run_command(cmd, args):
     verbatim by the interactive loop and the one-shot `servette <command>`
     argv form — one dispatcher, so the two surfaces can never drift. quit and
     help stay in the interactive loop: they are about the loop itself."""
+    if os.geteuid() != 0 and _needs_root(cmd):
+        return _elevate(cmd, args)
+
     if cmd == "setup":
         cmd_setup()
     elif cmd == "config":

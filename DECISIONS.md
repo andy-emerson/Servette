@@ -6,11 +6,154 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
-## The diagnostic page is inlined, not shipped as a file
+## A stale unit is noticed and told, not auto-refreshed (#99)
 
-**Ruled:** the page is authored as `src/selftest.html` — real HTML, editable
+**Ruled (Human):** after an upgrade, the unprivileged shell notices the stale
+systemd unit at launch and says so; `enable` — which elevates itself — is the
+documented second half of an upgrade. `pipx upgrade servette` + `enable` is the
+complete pair, and README documents exactly that.
+**Why:** the alternatives put a password prompt at shell launch that the
+operator did not ask for — the one place self-elevation would stop feeling
+like Servette asking and start feeling like Servette demanding.
+**Rejected:** the refresh elevating itself when stale (zero extra commands and
+the old auto-refresh claim stays true, at the cost of an unprompted password
+request on every launch until it succeeds); refreshing automatically only when
+the shell happens to be root (two behaviors to test for a habit the install no
+longer teaches).
+**Reopen if:** operators demonstrably miss the `enable` step and run stale
+services long after upgrading — the failure this trades away is silent
+staleness, and evidence of it changes the balance. *(#99, 2026-08-17)*
+
+## The cryptography floor is 48.0.1
+
+**Ruled (Human):** `dependencies = ["cryptography>=48.0.1"]`, no ceiling. The
+floor tracks Servette's actual exposure, not the dependency's total advisory
+count: 48.0.1 is the lowest release whose statically-linked OpenSSL carries no
+published advisory — bundled OpenSSL is in the process no matter which APIs are
+called, so it sets the hard floor. Every advisory fixed above it
+(CVE-2026-69247, PKCS#7 decryption; CVE-2026-69248/-69249, the X.509 chain
+verifier) sits in APIs Servette never calls: its use of the library is X.509
+load/generate, Ed25519 verification, RSA signing for ACME, hashes and
+serialization.
+**Corrects the record:** the previous floor (50.0) was set by the Agent inside
+a merged commit, never surfaced as a decision, and its comment claimed
+CVE-2026-69247 "affects every cryptography below 50.0.0" — false on the
+advisory data (the CVE does not affect 41.x at all). The Human caught it.
+**Rejected:** >=50.0, the only release with zero published advisories — free in
+practice (a pipx install resolves newest regardless), but it encodes "no known
+advisories anywhere in the library" where this ruling encodes "no known
+advisories in what Servette runs," and the Human chose the scoped claim.
+**Reopen when:** Servette starts calling the X.509 verifier or PKCS#7 APIs —
+the call-graph scoping this floor rests on is then stale and the floor must be
+re-derived. *(2026-08-17)*
+
+## servette.py is committed to be read; the sources stay canonical
+
+**Ruled (Human):** the generated `servette.py` is committed at the repository
+root — the browsable single file — while `src/` remains the only source of
+truth: the package build regenerates the module from the sources at every
+install (`src/_literate_backend.py`), so what ships never depends on the
+committed copy, and `build.py --check` holds the committed copy byte-for-byte
+equal to the sources' build in CI.
+**Narrows "`pip install servette` is the only installation path"
+([above](#pip-install-servette-is-the-only-installation-path)):** a committed
+module is inevitably also a copyable one, and the Human closes that with eyes
+open — it was demonstrated before ruling that the copied file runs on a stock
+host against the system cryptography (41.0.7 on the test image, below even
+this ruling's floor), with no version resolution, no isolation, no upgrade
+path. The documented install remains exactly one: pipx. The copy path is
+deliberately undocumented — not removed, not explained: operators who know
+what to do with a single Python file do not need instructions, and everyone
+else is told the one path that carries the dependency floor with it.
+**Rejected:** not committing the module (drift-proof and enforces one-path
+structurally, but leaves no program to read in the repository); committing it
+and shipping the committed copy directly (simplest machinery, but PyPI would
+then trust a file that can drift rather than the sources).
+*(2026-08-17; supersedes the not-committed half of the 2026-08-17 single-file
+build decision)*
+
+## The build emits one servette.py; the package build runs the literate transform
+
+**Ruled (Human):** the program is a single module again — `py-modules =
+["servette"]`, no package directory, no `__main__.py` — and the
+Markdown-to-module transform runs inside the package build itself:
+`pyproject.toml` names `src/_literate_backend.py` (PEP 517, `backend-path`),
+which generates `servette.py` from the sources and delegates to setuptools, so
+pip, pipx and `python -m build` all perform the literate build on entry. The
+wheel carries exactly `servette.py` beside its metadata.
+**Why:** file count was never the identity claim, but one *visible, readable
+file* is — and folding the build into the package manager removes a separate
+step that could be forgotten and a class of staleness between it and what
+ships. The `-m` entry point is the one subtlety: a single module runs as
+`__main__` under `python -m servette`, so nothing in the module may derive its
+own name from `__name__`.
+**Rejected:** keeping the package layout (nothing wrong with it; it just served
+no reader); dropping the literate sources for the plain module (deletes the
+authored form the project is written in).
+**Amended same day:** the module was first ruled not-committed; committing it
+back is the ruling above this one. *(2026-08-17)*
+
+## Servette asks for root; the operator never types sudo
+
+**Ruled:** privileged commands elevate themselves. `run_command` re-runs the
+command as `sudo <sys.executable> -m servette <cmd>` and returns to the prompt;
+read-only commands (`status`, `sites`, `log`) stay unprivileged and never
+prompt, unless the config is unreadable, when reporting stand-in defaults as the
+operator's settings would be a lie.
+**Why:** `sudo servette` forced the console script onto sudo's `secure_path`,
+which forced the install to put it there — a symlink and a system-wide location,
+two of the three lines the install needed. An absolute `sys.executable` needs
+neither: sudo resolves it without consulting `PATH`.
+**Consequences accepted:** `SERVETTE_HOME` is passed through explicitly, since
+sudo resets the environment and losing it would silently point the elevated run
+at another data directory. `start` and `stop` elevate only on the systemd path —
+a session server lives in the shell's own process, where an elevated child could
+neither outlive its own exit nor reach the parent's. The one-shot form exits with
+sudo's status so tooling sees a refused password as a failure.
+**Rejected:** requiring `sudo` in front of every invocation (the status quo, and
+the cause of the install's shape); a setuid helper (a second privileged surface
+to audit, for a program whose whole claim is that you can read it).
+*(2026-08-17)*
+
+## The service's runtime lives where the service user can read it
+
+**Ruled:** `enable` measures whether the `servette` user can reach the installed
+program. Where it cannot, `enable` copies the program and its dependency closure
+into `RUNTIME_DIR` under the data directory — root-owned, world-readable, pinned
+`ReadOnlyPaths` by the unit — and names that copy in `ExecStart`. `disable`
+removes it, and so does an install the service *can* reach.
+**Why:** a per-user install, which is what `pip install --user` and pipx
+produce, sits under a home directory Debian and Ubuntu create mode 0750. The
+service user cannot traverse it, so the unit restart-loops on
+`ModuleNotFoundError` after the next reboot — invisible at install time, and the
+exact failure Servette exists to prevent (#98).
+**What is copied is read from metadata, not from a list here:** a list said
+"cryptography" and produced a runtime that could not import it, because
+cryptography declares cffi, cffi declares pycparser, and cffi's compiled backend
+is a bare `.so` that only its `top_level.txt` names. A checkout has no dist-info
+to read, so there the walk seeds from what `pyproject.toml` declares, and the
+suite fails if those two lists disagree.
+**The inference is executed, not trusted:** before any unit reaches disk,
+`_verify_runtime` imports the program and the certificate machinery from the
+paths the unit names, as the service user. A failure refuses the write. Every
+other part of this ruling is inference about another user's view of a
+filesystem, which is the kind of thing that is wrong quietly.
+**Rejected:** granting the service user traverse into the operator's home (one
+`chmod o+x`, but it weakens a distro default for every local account, against a
+stated principle of never setting world bits); documenting a root-owned install
+location instead (no code at all, but it puts `sudo` back in the install line,
+and `pipx --global` is missing from the pipx Ubuntu 24.04 ships).
+**Cost stated plainly:** 315 lines, to keep the install one line. Dropping the
+per-user install path would delete all of them.
+**Reopen if:** the distributions Servette targets stop creating home directories
+unreadable to other accounts, which would make the copy dead weight.
+*(#98, 2026-08-17)*
+
+## The error page is inlined, not shipped as a file
+
+**Ruled:** the page is authored as `src/404.html` — real HTML, editable
 and openable in a browser — and `build.py` inlines it into the module at build
-time. The installed package is Python only: `__init__.py` and `__main__.py`.
+time. The install is Python only: one `servette.py` module.
 **Why:** as package data it was a file an operator could delete, and deleting
 it took the default 404 body with it silently — the server would go back to
 answering ten bytes of `Not found.` with nothing to say why. A page that is
@@ -19,12 +162,12 @@ part of the module cannot be removed without removing the program.
 every quote escaped, no highlighting, unopenable in a browser) — the
 precedent, the deleted placeholder page, showed why that reads badly; and
 leaving it as package data with documentation asking operators not to delete
-it. **Accounting:** the 630 lines of markup are reported separately by
+it. **Accounting:** the 576 lines of markup are reported separately by
 `build.py --counts`, not folded into the Python figures. The counts back a
 claim about reading the *program*; markup the program ships is not markup an
 auditor reads to understand it. Stating that split openly is the point —
-quietly absorbing 630 lines into "readable in an afternoon" would inflate the
-claim by 16%. *(2026-08-17)*
+quietly absorbing 576 lines into "readable in an afternoon" would inflate the
+claim. *(2026-08-17)*
 
 ## `pip install servette` is the only installation path
 
@@ -51,7 +194,10 @@ fallback is offered in its place. That is the point: the gap is visible
 pressure to publish rather than a path that quietly substitutes for it.
 **Reopen:** an operator population that genuinely cannot reach PyPI — in which
 case the answer is a decided, documented second channel, not the return of an
-undocumented one. *(2026-08-17)*
+undocumented one. **Narrowed:** the committed `servette.py` is copyable and
+deliberately undocumented — see
+[servette.py is committed to be read](#servettepy-is-committed-to-be-read-the-sources-stay-canonical).
+*(2026-08-17)*
 
 ## The website lives in its own repository
 
@@ -122,19 +268,43 @@ what the placeholder used to return — a monitor reading green over a site
 with nothing to serve is the signal meaning less, which the principle
 forbids. *(2026-08-16)*
 
-## The self-test is server-delivered, client-executed
+## The error page is server-delivered, client-executed
 
-**Ruled:** the connection self-test ships embedded in the module and is
-served at the reserved path `/selftest/` wherever the operator's content
-doesn't shadow it — and, in its second role, as the default error page
-([above](#the-default-error-page-diagnoses-the-placeholder-is-retired)).
-Execution stays in the visitor's browser — only an outside client sees
-the browser-trusted cert chain, the real network path, and the provider
-firewall. **Rejected:** server-side execution (a server cannot see itself
-from outside; `_production_issues()` is already the inside half); the
-prior bundle-injected copy (superseded from #42 — it required a
-deliberately duplicated page and a network fetch in the publish tool).
-*(#79, 2026-08-16)*
+**Ruled:** the page ships embedded in the module and is served as the default
+404 body wherever the operator has written no `404.html`. Execution stays in the
+visitor's browser — only an outside client sees the browser-trusted cert chain,
+the real network path, and the provider firewall.
+**Rejected:** server-side execution (a server cannot see itself from outside;
+`_production_issues()` is already the inside half); the prior bundle-injected
+copy (superseded from #42 — it required a deliberately duplicated page and a
+network fetch in the publish tool). **Superseded within this ruling:** a second
+role at a reserved `/selftest/` path answering 200, retired below.
+*(#79, 2026-08-16; narrowed 2026-08-17)*
+
+## The page has one role: there is no reserved path
+
+**Ruled:** the page is Servette's 404 body and nothing else. `/selftest/` is an
+ordinary path that 404s like any other, and no directory in a site root shadows
+a reserved name.
+**Why:** what the 200 role bought was one URL that answered 200 on an install
+with nothing published yet. Everything else it did, a missing path already did —
+the same page, the same checks, the same trusted padlock, at 404. That did not
+pay for a reserved path, a status-code exception in the handler, a role branch
+in the page, an override directory, and two names for one thing. Renaming the
+file from selftest.html to diagnostics.html had made the naming worse rather
+than better: "diagnostic" and "self-test" are synonyms, so the rename bought no
+clarity while leaving 143 references pointing at the other name. One role means
+one name, and it is the one every web server already uses.
+**What is lost, stated plainly:** an operator with nothing published has no URL
+on their own site that answers 200, and no monitor-friendly endpoint. That
+follows from the status-code principle above rather than working against it: a
+site with nothing published has nothing to serve.
+**Rejected:** keeping the 200 role and giving it a user-facing name (`/status/`,
+pairing with the shell's `status`) — coherent, but it keeps a reserved path and
+a second framing to buy a convenience a missing path already provides.
+**Reopen if:** operators are found routinely wanting a 200 health endpoint on a
+site with no content, in which case it returns as one named thing, not as a
+second role for this page. *(2026-08-17)*
 
 ## site/pub/ is the operator tools page — *moved*
 
@@ -219,7 +389,7 @@ deliberately excluded from `set` (argv leaks; certificate coupling).
 **Rejected:** a network admin API — reaffirming the standing refusal;
 nothing network-reachable changes the server. *(#77, 2026-08-15)*
 
-## Servette ships as a package; the single-file principle is retired
+## Servette ships as a package; the single-file principle is retired — *superseded*
 
 **Ruled:** the build emits the `servette/` package; the literate `.md`
 sources remain the canonical authored form; the identity principle is
@@ -227,7 +397,11 @@ sources remain the canonical authored form; the identity principle is
 count. How many modules the package contains is an implementation
 detail. **Rejected:** dropping the literate layer (deletes the reading
 experience #69 invests in); keeping single-file output as a constraint
-(no reader left to serve). *(#77, 2026-08-15)*
+(no reader left to serve). **Superseded** (2026-08-17): the build emits one
+`servette.py` again and the package build runs the transform — see
+[the ruling](#the-build-emits-one-servettepy-the-package-build-runs-the-literate-transform);
+the literate sources remain canonical, exactly as this ruling kept them.
+*(#77, 2026-08-15)*
 
 ## The name is Servette
 

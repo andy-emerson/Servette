@@ -61,7 +61,8 @@ module is inevitably also a copyable one, and the Human closes that with eyes
 open — it was demonstrated before ruling that the copied file runs on a stock
 host against the system cryptography (41.0.7 on the test image, below even
 this ruling's floor), with no version resolution, no isolation, no upgrade
-path. The documented install remains exactly one: pipx. The copy path is
+path — and self-elevation cannot re-invoke it, since sudo's child imports
+servette by module name from paths the copied file is not on. The documented install remains exactly one: pipx. The copy path is
 deliberately undocumented — not removed, not explained: operators who know
 what to do with a single Python file do not need instructions, and everyone
 else is told the one path that carries the dependency floor with it.

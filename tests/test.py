@@ -888,6 +888,7 @@ def run_dispatch_tests(s):
         builtins.input = saved_input
         for n, fn in saved.items():
             setattr(s, n, fn)
+        s.os.geteuid = saved_dispatch_euid
 
     check("'status' routed to cmd_status", "status" in calls)
     check("'start' routed to cmd_start",   "start" in calls)
@@ -898,7 +899,6 @@ def run_dispatch_tests(s):
     pull_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "pull"]
     check("'pull 99' (bad site index) does not call cmd_pull", len(pull_calls) == 1)
     check("'quit' stops server and exits", calls[-1] == "stop")
-    s.os.geteuid = saved_dispatch_euid
 
 
     section("One-shot CLI: run_command and set")

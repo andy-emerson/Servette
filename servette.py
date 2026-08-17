@@ -5006,7 +5006,17 @@ config = Config()
 # The entry point
 def main():
     try:
-        _main()
+        # The inner finally flushes INSIDE the guarded region. stdout on a pipe
+        # is block-buffered, and output smaller than the buffer reaches the
+        # pipe only at interpreter shutdown — after this function has returned,
+        # where the EPIPE becomes an "Exception ignored" message and a wrong
+        # exit status instead of the handled case below. Flushing here makes
+        # the broken pipe surface where it can be caught, on every Python
+        # version and output size.
+        try:
+            _main()
+        finally:
+            sys.stdout.flush()
     except BrokenPipeError:
         # A consumer closed stdout mid-print — `servette status | head` is the
         # canonical case. That is the consumer's normal behavior, not a fault

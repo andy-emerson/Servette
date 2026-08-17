@@ -3100,9 +3100,25 @@ def run_install_tests(s, tmpdir):
                                  for e in probe_envs))
     finally:
         s.subprocess.run = saved_probe_run
-    problem = s._verify_runtime(sys.executable, os.path.join(tmpdir, "nowhere", "servette.py"))
-    check("...and one the program is not in does not",
-          isinstance(problem, str) and "servette" in problem)
+    # The broken runtime is a PLANTED broken module, not a missing directory:
+    # PYTHONPATH outranks site-packages, so the plant wins on any interpreter —
+    # including CI's venv, where servette is pip-installed and a merely-missing
+    # path let the probe resolve the installed copy and verify clean. The plant
+    # lives in its own world-traversable directory, not under tmpdir: mkdtemp
+    # makes 0700 homes, and when the suite runs as root the privilege-dropped
+    # probe could not even see a plant buried there — it reported the module
+    # missing instead of broken.
+    bad_rt = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(bad_rt, "servette.py"), "w") as f:
+            f.write("raise ImportError('unusable-runtime-probe')\n")
+        os.chmod(bad_rt, 0o755)
+        os.chmod(os.path.join(bad_rt, "servette.py"), 0o644)
+        problem = s._verify_runtime(sys.executable, os.path.join(bad_rt, "servette.py"))
+        check("...and one whose module cannot import does not",
+              isinstance(problem, str) and "unusable-runtime-probe" in problem)
+    finally:
+        shutil.rmtree(bad_rt, ignore_errors=True)
 
     # The refusal is what makes verification worth running: a host that would
     # restart-loop after the next reboot must be turned away here, with no unit

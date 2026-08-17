@@ -138,7 +138,7 @@ Re-run `servette` any time for the interactive shell — or run any command belo
 | `restore-site [n]` | Roll back a site's content to before its last pull |
 | `help` · `quit` | Command list · exit |
 
-**Update your site** with `pull` — the publish tool signs a new bundle, Servette verifies it and swaps it in atomically, and `restore-site` rolls back the last one. **Update Servette** with `pipx upgrade servette`; the next `servette` notices a stale service unit and refreshes it onto the new version. **Roll back** by installing the version you want (`pipx install --force servette==x.y.z`). Your `servette.toml` is never touched by an update.
+**Update your site** with `pull` — the publish tool signs a new bundle, Servette verifies it and swaps it in atomically, and `restore-site` rolls back the last one. **Update Servette** with `pipx upgrade servette`; the next `servette` notices the service unit is stale and says so — run `enable` to refresh the service onto the new version. **Roll back** by installing the version you want (`pipx install --force servette==x.y.z`). Your `servette.toml` is never touched by an update.
 
 > If you set a password, `servette.toml` holds its hash — sharing the file gives a recipient material for an offline cracking attempt.
 

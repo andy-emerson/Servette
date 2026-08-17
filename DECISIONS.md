@@ -54,6 +54,27 @@ then trust a file that can drift rather than the sources).
 *(2026-08-17; supersedes the not-committed half of the 2026-08-17 single-file
 build decision)*
 
+## The build emits one servette.py; the package build runs the literate transform
+
+**Ruled (Human):** the program is a single module again — `py-modules =
+["servette"]`, no package directory, no `__main__.py` — and the
+Markdown-to-module transform runs inside the package build itself:
+`pyproject.toml` names `src/_literate_backend.py` (PEP 517, `backend-path`),
+which generates `servette.py` from the sources and delegates to setuptools, so
+pip, pipx and `python -m build` all perform the literate build on entry. The
+wheel carries exactly `servette.py` beside its metadata.
+**Why:** file count was never the identity claim, but one *visible, readable
+file* is — and folding the build into the package manager removes a separate
+step that could be forgotten and a class of staleness between it and what
+ships. The `-m` entry point is the one subtlety: a single module runs as
+`__main__` under `python -m servette`, so nothing in the module may derive its
+own name from `__name__`.
+**Rejected:** keeping the package layout (nothing wrong with it; it just served
+no reader); dropping the literate sources for the plain module (deletes the
+authored form the project is written in).
+**Amended same day:** the module was first ruled not-committed; committing it
+back is the ruling above this one. *(2026-08-17)*
+
 ## Servette asks for root; the operator never types sudo
 
 **Ruled:** privileged commands elevate themselves. `run_command` re-runs the
@@ -350,7 +371,7 @@ deliberately excluded from `set` (argv leaks; certificate coupling).
 **Rejected:** a network admin API — reaffirming the standing refusal;
 nothing network-reachable changes the server. *(#77, 2026-08-15)*
 
-## Servette ships as a package; the single-file principle is retired
+## Servette ships as a package; the single-file principle is retired — *superseded*
 
 **Ruled:** the build emits the `servette/` package; the literate `.md`
 sources remain the canonical authored form; the identity principle is
@@ -358,7 +379,11 @@ sources remain the canonical authored form; the identity principle is
 count. How many modules the package contains is an implementation
 detail. **Rejected:** dropping the literate layer (deletes the reading
 experience #69 invests in); keeping single-file output as a constraint
-(no reader left to serve). *(#77, 2026-08-15)*
+(no reader left to serve). **Superseded** (2026-08-17): the build emits one
+`servette.py` again and the package build runs the transform — see
+[the ruling](#the-build-emits-one-servettepy-the-package-build-runs-the-literate-transform);
+the literate sources remain canonical, exactly as this ruling kept them.
+*(#77, 2026-08-15)*
 
 ## The name is Servette
 

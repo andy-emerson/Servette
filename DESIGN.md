@@ -32,7 +32,7 @@ A request to add any of these is not a feature request; it is a request for a di
 
 ### Platform scope
 
-Linux with systemd is the production target: the service user, ambient-capability port binding, sandboxing, restart-on-death, the network watchdog, and the journal are all systemd facilities, and CI runs the suite on Ubuntu and Debian 12. **macOS runs in session mode**: serving, certificates (self-signed and Let's Encrypt), and the shell all work under `sudo servette`, while service installation stays Linux-only — the `_IS_MACOS` flag marks every seam, and the suite exercises both sides of each on any host. **Windows is not supported.** The launchd and Windows rulings are in [DECISIONS.md](DECISIONS.md#macos-is-session-mode-windows-is-a-non-goal).
+Linux with systemd is the production target: the service user, ambient-capability port binding, sandboxing, restart-on-death, the network watchdog, and the journal are all systemd facilities, and CI runs the suite on Ubuntu and Debian 12. **macOS runs in session mode**: serving, certificates (self-signed and Let's Encrypt), and the shell all work under plain `servette` — nothing elevates, because the data directory is the operator's own and there is no service to install — while service installation stays Linux-only — the `_IS_MACOS` flag marks every seam, and the suite exercises both sides of each on any host. **Windows is not supported.** The launchd and Windows rulings are in [DECISIONS.md](DECISIONS.md#macos-is-session-mode-windows-is-a-non-goal).
 
 ## The request-time invariant
 
@@ -216,8 +216,8 @@ Commands that act on one site take an optional trailing site index, defaulting t
 ## Operating
 
 ```bash
-sudo servette                     # interactive shell (console script; python -m servette is the same)
-sudo servette <command> [args]    # one-shot: run one command and exit (what tooling drives)
+servette                          # interactive shell (console script; python -m servette is the same)
+servette <command> [args]         # one-shot: run one command and exit (what tooling drives)
 python3 -m servette --serve       # non-interactive service mode (used by systemd)
 ```
 
@@ -261,7 +261,7 @@ python3 -m venv .venv && .venv/bin/pip install .   # once — the package brings
 .venv/bin/python3 tests/test.py
 ```
 
-Requires `openssl` on PATH (used only by test setup to generate a throwaway cert). The suite starts a real server on a test port, runs checks, and tears down. It backs up and restores any existing `servette.toml`.
+Requires `openssl` on PATH (used only by test setup to generate a throwaway cert). The suite regenerates `servette.py` from `src/` before importing it — the same transform the package build runs, so what is tested is what ships — then starts a real server on a test port, runs checks, and tears down. It backs up and restores any existing `servette.toml`.
 
 Intentionally not covered end-to-end: live systemd operations and real Let's Encrypt issuance — each needs external infrastructure. Their seams are covered at the unit level: shell dispatch runs under scripted input, the generated unit files are checked (and verified with `systemd-analyze` where available), and `restore-site`, the prompts, and the install helpers have direct tests.
 
@@ -273,9 +273,9 @@ Remote: `git@github.com:andy-emerson/servette.git`. Open work and decisions live
 
 ### Releasing (maintainer task)
 
-Servette ships as a package on PyPI ([#77](https://github.com/andy-emerson/Servette/issues/77)); rollback is `pip install servette==x.y.z`. A release is the one and only place `__version__` changes. Versions are date-based, UTC: `0.<yy>.<doy>` — two-digit year and day-of-year (e.g. `0.26.219`).
+Servette ships on PyPI as a single-module distribution ([#77](https://github.com/andy-emerson/Servette/issues/77), since narrowed — see DECISIONS); rollback is `pipx install --force servette==x.y.z`. A release is the one and only place `__version__` changes. Versions are date-based, UTC: `0.<yy>.<doy>` — two-digit year and day-of-year (e.g. `0.26.219`).
 
-1. Bump `__version__` in `src/INIT.md`, rebuild, and merge via its own pull request — the only change that ever touches the version. `pyproject.toml` reads the version from the module; nothing is bumped twice.
+1. Bump `__version__` in `src/INIT.md`, regenerate `servette.py`, and merge both via their own pull request — the only change that ever touches the version. `pyproject.toml` reads the version from the module; nothing is bumped twice.
 2. Tag the merged bump commit with the version and build the artifacts (`python3 -m build`) — or let the publish workflow do both.
 3. Publish to PyPI via Trusted Publishing (the GitHub Actions OIDC flow — no long-lived token to leak). The PyPI project name is registered at first publish, deliberately not before ([#77](https://github.com/andy-emerson/Servette/issues/77) ruling 5); the publish workflow is written when that first release is cut.
 

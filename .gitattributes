@@ -1,5 +1,7 @@
 # GitHub Linguist overrides: the language bar should describe Servette — the
-# Python program — not the web pages that live beside it.
+# Python program — and this repository now holds nothing else. The website moved
+# to its own repository, so the rules that kept site/ and its end-to-end harness
+# out of the bar named paths that no longer exist here.
 #
 # The bar reads Python because the program is Python: servette/__init__.py (the
 # module, generated from the literate sources in src/), src/build.py, and
@@ -7,12 +9,6 @@
 # Markdown deliberately — counting it as Python too would count the same code
 # twice, once as source and once as generated output.
 #
-# site/ is the project website (HTML/JS pages, no build step) and tests/viewer/
-# is that site's end-to-end harness — JavaScript testing a web page, not part
-# of the program. Both are marked documentation so they stay out of the bar.
-site/**         linguist-documentation
-tests/viewer/** linguist-documentation
-
 # src/diagnostics.html is the authored form of the diagnostic page, inlined into
 # the module by build.py. Excluded for the same reason src/*.md is not counted
 # as Python: its content is already counted once, inside the generated module.

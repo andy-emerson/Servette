@@ -68,10 +68,11 @@ declining to take it. **Moved with it:** the front page, the source viewer,
 the publish tool, and the viewer's end-to-end harness (kept outside
 `servette.org/`, since anything under a hostname directory is served
 content). **Stayed:** the diagnostic page, which ships inside the
-package because every install serves it. **Costs accepted:** the line counts
-the site publishes can no longer be gated from here — the claim and its
-source are in different repositories, so `build.py --counts` prints the
-numbers and nothing checks the page carries them; and the viewer harness now
+package because every install serves it. **Costs accepted:** the *exact* per-section
+counts the site publishes can no longer be gated from here — the claim and its
+source are in different repositories, so `build.py --counts` prints them and
+nothing checks the page carries them. `--check-counts` survives, aimed at the
+figures this repository still states about itself. And the viewer harness now
 needs `SERVETTE_SRC` pointing at a checkout of this repository, so neither
 repository tests that page alone. *(2026-08-17)*
 

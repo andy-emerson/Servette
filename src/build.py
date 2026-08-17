@@ -27,11 +27,13 @@ Usage:
     python build.py --check         # build in memory, diff against the
                                      # existing module, exit 1 on drift
     python build.py --counts        # lines per section, for the website
+    python build.py --check-counts  # exit 1 if README's line counts are stale
 """
 
 import argparse
 import difflib
 import os
+import re
 import sys
 
 # The sources, in the order they concatenate into the module. MAIN.md is last
@@ -148,12 +150,55 @@ def selftest_lines(src_dir):
         return len(f.read().splitlines())
 
 
-# The website that publishes these counts lives in andy-emerson/websites now,
-# so this repository cannot verify them: the claim and the source it is a claim
-# about are in different repositories. --counts prints the numbers so whoever
-# edits that page can copy them; nothing here checks that they did. That is a
-# real loss — the counts drifted 106 lines unnoticed once, which is why the
-# check existed — and it is recorded rather than papered over.
+# Where this repository states its own size, and how to find it. Each entry is
+# a (label, regex) whose one capture group is the figure as published. These are
+# approximate by design — "~3,900 lines" — so the check is that each rounds to
+# the real total, not that it equals it.
+#
+# The website publishes exact per-section counts and lives in another repository
+# now, so those cannot be gated from here; --counts prints them for whoever
+# edits that page. What CAN be gated is every claim this repository makes about
+# itself, which is what the drift was: a number asserted long after it stopped
+# being true.
+_README_CLAIMS = [
+    ("comparison table", r"\| Readable source \| ~([\d,]+) lines \|"),
+    ("who-is-it-for prose", r"one readable module \(~([\d,]+) lines of Python"),
+]
+
+
+def check_readme_counts(src_dir, repo_dir):
+    """Verify every line-count figure README states about Servette.
+
+    Rounded to the nearest hundred, matching how the README writes them. A
+    reworded sentence fails as loudly as a stale number: moving a claim should
+    make someone re-check it rather than drop it out of the gate's view."""
+    total = dict((n, t) for n, t, _ in section_counts(src_dir))["Total"]
+    expected = round(total / 100) * 100
+
+    path = os.path.join(repo_dir, "README.md")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            readme = f.read()
+    except OSError as e:
+        print(f"count check failed: cannot read {path}: {e}", file=sys.stderr)
+        return 1
+
+    problems = []
+    for label, pattern in _README_CLAIMS:
+        m = re.search(pattern, readme)
+        if m is None:
+            problems.append(f"  {label}: claim not found "
+                            f"(expected ~{expected:,} — was the sentence rewritten?)")
+        elif int(m.group(1).replace(",", "")) != expected:
+            problems.append(f"  {label}: README says ~{m.group(1)}, "
+                            f"src/ is {total:,} which rounds to ~{expected:,}")
+
+    if problems:
+        print("STALE COUNTS: README.md disagrees with src/.", file=sys.stderr)
+        print("\n".join(problems), file=sys.stderr)
+        return 1
+    print(f"OK: README's ~{expected:,} lines matches the build of src/ ({total:,}).")
+    return 0
 
 
 def main(argv=None):
@@ -167,6 +212,9 @@ def main(argv=None):
                              "exit 1 if they differ")
     parser.add_argument("--counts", action="store_true",
                         help="print lines per section, for the website's figures")
+    parser.add_argument("--check-counts", action="store_true",
+                        help="verify the line counts README states against src/; "
+                             "exit 1 if any is stale")
     args = parser.parse_args(argv)
 
     src_dir  = os.path.dirname(os.path.abspath(__file__))
@@ -175,6 +223,9 @@ def main(argv=None):
 
     # Reads src/ only — no assembled module needed, so it answers even when the
     # build itself is broken.
+    if args.check_counts:
+        return check_readme_counts(src_dir, repo_dir)
+
     if args.counts:
         for name, total, code in section_counts(src_dir):
             print(f"{name:8} {total:>6,} total  {code:>6,} code")

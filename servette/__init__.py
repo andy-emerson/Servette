@@ -707,20 +707,645 @@ def _security_headers(site):
 # Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
-# The reserved self-test page (DECISIONS.md: "The self-test is server-
-# delivered, client-executed"): shipped beside this module as package data,
-# read once at import, served at /selftest/ wherever the operator's content
-# doesn't shadow it. A missing file (an unusual install) degrades to the
-# normal 404 rather than an error.
+# The reserved diagnostic page (DECISIONS.md: "The self-test is server-
+# delivered, client-executed"): authored as src/selftest.html and inlined here
+# by build.py, so it is part of the module rather than a file beside it. That
+# is deliberate — a page shipped as package data can be deleted on the box,
+# and deleting it would silently take the default 404 body with it. There is
+# no read at import and no missing-file case to degrade through.
 _SELFTEST_PATHS = ("/selftest", "/selftest/", "/selftest/index.html")
-try:
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "selftest.html"), "rb") as _f:
-        _SELFTEST_PAGE = _f.read()
-    _SELFTEST_ETAG = '"' + hashlib.sha256(_SELFTEST_PAGE).hexdigest()[:16] + '"'
-except OSError:
-    _SELFTEST_PAGE = None
-    _SELFTEST_ETAG = None
+_SELFTEST_PAGE = """<!DOCTYPE html>
+<!-- servette/selftest.html — the diagnostic page, shipped inside the module
+     and served in two roles (see DECISIONS.md, "The self-test is
+     server-delivered, client-executed"):
+
+       /selftest/  at 200 — the connection self-test, asked for on purpose.
+       any miss    at 404 — the default error page, where the site publishes
+                            no 404.html of its own.
+
+     Every server needs an error page, and a bare "Not found." spends a whole
+     response saying only that the reader was wrong. In the 404 role this page
+     also reports that the server is up, which host answered, what it is
+     sending, and whether the site has anything published at all — the
+     diagnosis is free, since the request was already made.
+
+     One file serves both roles because the checks are the same; the bytes are
+     identical, so both responses share an ETag. The role is read from
+     location.pathname (SELFTEST_PATHS below), which the server keeps in step:
+     it answers 200 only on those paths. In the 404 role the page drops the
+     paragraph describing Servette's wider features — an operator's error page
+     is not this project's billboard — and keeps only the modest served-by
+     credit that every default error page carries.
+
+     Same-origin by construction, so it can read what a cross-origin probe
+     never could: it checks the connection it was itself loaded over. It never
+     enumerates the filesystem — no "did you mean" suggestions — because that
+     would turn an error page into a file-discovery oracle for strangers. The
+     version-discovery row needs the operator's session (the endpoint is
+     auth-gated) and shows for a logged-in reader only. Because this file ships
+     with the server, its checks can never drift from the features they
+     check. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Servette — Self-test</title>
+  <style>
+    :root {
+      --bg:      #0e0e0e;
+      --surface: #161616;
+      --border:  #2a2a2a;
+      --text:    #e8e8e8;
+      --muted:   #555;
+      --green:   #4ade80;
+      --red:     #f87171;
+      /* No web fonts: a page that demonstrates a self-hosted server has no
+         business fetching anything from a third party. */
+      --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+              'Liberation Mono', 'Courier New', monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      opacity: 0.4;
+      z-index: 0;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 480px;
+      width: 100%;
+    }
+
+    .header {
+      margin-bottom: 3rem;
+      opacity: 0;
+      animation: rise 0.6s ease forwards;
+    }
+
+    .servette-logo {
+      font-family: var(--mono);
+      font-weight: 500;
+      font-size: 3rem;
+      letter-spacing: 0;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .servette-logo .ette   { color: #5A8466; }
+    .servette-logo .cursor { color: inherit; animation: servette-blink 1.1s steps(1) infinite; }
+
+    @keyframes servette-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+    .tagline {
+      margin-top: 0.5rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      margin-right: 0.5rem;
+      animation: pulse 2s ease infinite;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+    }
+
+    .dot.red { background: var(--red); animation: none; }
+
+    /* ── Not-found banner (404 role only) ── */
+    .notfound {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--muted);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 1.25rem;
+      margin-bottom: 1.5rem;
+      opacity: 0;
+      animation: rise 0.5s ease 0.1s forwards;
+    }
+
+    .notfound-head {
+      display: flex;
+      align-items: baseline;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+    }
+
+    .notfound-code {
+      font-size: 1.5rem;
+      font-weight: 500;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .notfound-msg {
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    /* The requested path is attacker-controlled text. It is written with
+       textContent and wrapped here rather than truncated, so a long path
+       cannot push the layout sideways. */
+    .notfound-path {
+      margin-top: 0.85rem;
+      font-size: 0.8rem;
+      color: var(--text);
+      overflow-wrap: anywhere;
+      word-break: break-all;
+    }
+
+    .notfound-why {
+      margin-top: 0.85rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      line-height: 1.7;
+    }
+
+    .notfound-why code {
+      color: var(--text);
+      font-size: 0.72rem;
+    }
+
+    .notfound-home {
+      display: inline-block;
+      margin-top: 0.85rem;
+      font-size: 0.75rem;
+      color: #5A8466;
+      text-decoration: none;
+    }
+
+    .notfound-home:hover { text-decoration: underline; }
+
+    /* ── Connection card ── */
+    .verified {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 1.5rem;
+      opacity: 0;
+      animation: rise 0.5s ease 0.2s forwards;
+    }
+
+    .verified-header {
+      background: var(--surface);
+      padding: 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .verified-label {
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.25rem;
+    }
+
+    .verified-value { font-size: 0.9rem; color: var(--text); }
+
+    .badge {
+      font-size: 0.7rem;
+      font-weight: 500;
+      padding: 0.3rem 0.7rem;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
+    .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
+
+    /* ── Self-test ── */
+    .selftest {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--surface);
+      margin-bottom: 1.5rem;
+      opacity: 0;
+      animation: rise 0.5s ease 0.35s forwards;
+    }
+
+    .selftest-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .selftest-title {
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .run-again {
+      font-family: inherit;
+      font-size: 0.7rem;
+      color: var(--muted);
+      background: none;
+      border: none;
+      cursor: pointer;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+    .run-again:hover { color: var(--text); }
+
+    .t-log { padding: 0.6rem 1.25rem; }
+
+    .t-row {
+      display: flex;
+      gap: 0.85rem;
+      padding: 0.32rem 0;
+      font-size: 0.72rem;
+      line-height: 1.45;
+    }
+
+    .t-st       { flex: 0 0 2.6em; font-weight: 500; }
+    .t-pass     { color: var(--green); }
+    .t-fail     { color: var(--red); }
+    .t-skip     { color: var(--muted); }
+    .t-pending  { color: var(--muted); }
+
+    .t-body { flex: 1; min-width: 0; }
+    .t-req  { color: var(--text); }
+    .t-obs  { color: var(--muted); }
+
+    .t-summary {
+      padding: 0.75rem 1.25rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+    .t-summary b { color: var(--text); font-weight: 500; }
+
+    /* ── What this page cannot reach ── */
+    .features {
+      font-size: 0.72rem;
+      color: var(--muted);
+      line-height: 1.7;
+      margin-bottom: 2rem;
+      opacity: 0;
+      animation: rise 0.5s ease 0.45s forwards;
+    }
+    .features b { color: var(--text); font-weight: 500; }
+    .features a { color: #60a5fa; text-decoration: none; }
+    .features a:hover { text-decoration: underline; }
+
+    /* ── Footer ── */
+    .note {
+      font-size: 0.7rem;
+      color: var(--muted);
+      line-height: 1.7;
+      opacity: 0;
+      animation: rise 0.5s ease 0.55s forwards;
+    }
+    .note a { color: #60a5fa; text-decoration: none; }
+    .note a:hover { text-decoration: underline; }
+    .note a.brand { color: #5A8466; }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; opacity: 1 !important; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="header">
+    <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
+    <div class="tagline" id="tagline">
+      <span class="dot" id="dot"></span><span id="tagline-text">checking...</span>
+    </div>
+  </div>
+
+  <!-- Shown only in the 404 role. The server is up and answered — the path is
+       what is missing — so this leads with the path rather than with blame. -->
+  <div class="notfound" id="notfound" hidden>
+    <div class="notfound-head">
+      <span class="notfound-code">404</span>
+      <span class="notfound-msg">Nothing published here</span>
+    </div>
+    <div class="notfound-path" id="notfound-path">—</div>
+    <p class="notfound-why" id="notfound-why">
+      The server is running and answered this request, so the connection is
+      fine — only the path is missing. You are seeing this page because the
+      site publishes no <code>404.html</code> of its own; the checks below
+      report what the server is actually sending.
+    </p>
+    <a class="notfound-home" id="notfound-home" href="/">← the site's home page</a>
+  </div>
+
+  <div class="verified">
+    <div class="verified-header">
+      <div>
+        <div class="verified-label">Connection</div>
+        <div class="verified-value" id="url">—</div>
+      </div>
+      <div class="badge" id="badge">—</div>
+    </div>
+  </div>
+
+  <div class="selftest">
+    <div class="selftest-head">
+      <span class="selftest-title" id="selftest-title">Self-test — live from your browser</span>
+      <button class="run-again" id="run-again" type="button">↻ run again</button>
+    </div>
+    <div class="t-log" id="t-log"></div>
+    <div class="t-summary" id="t-summary">running…</div>
+  </div>
+
+  <!-- Hidden in the 404 role: an operator's error page is not the place to
+       advertise the server's feature list to their visitors. -->
+  <p class="features" id="features">
+    These checks only reach what a browser can see. The rest of Servette runs
+    where this page cannot look. On the request path it <b>redirects HTTP to
+    HTTPS</b>, <b>gzip-compresses</b> what it sends, <b>rate-limits</b> abusive
+    clients, can sit behind a <b>password</b>, and routes <b>each domain to its
+    own site</b> — these results describe only the one you reached. Off the
+    request path it runs as a <b>supervised service</b> that restarts on boot,
+    <b>drops privileges</b> once the ports are bound, <b>renews its certificate</b>
+    automatically, and accepts new site content only as <b>signed bundles</b> the
+    operator pulls on purpose. And nothing above
+    happens while it is answering you: by design, <b>no request ever reaches a
+    write</b>. <a href="https://servette.org">servette.org</a> describes the whole of it.
+  </p>
+
+  <div class="note">
+    This page ships inside Servette itself and runs on this site's own
+    domain — that is why it can read what it tests. Served by
+    <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
+    The Simple, Secure, Static-Site Server.
+  </div>
+
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  // ── Which role is this page playing? ──────────────────────────────
+  // The server answers 200 on these paths and 404 everywhere else, so the
+  // path alone settles the role — no request needed, and no flash of the
+  // wrong framing while one is in flight. Kept in step with _SELFTEST_PATHS
+  // in Server.
+  const SELFTEST_PATHS = ['/selftest', '/selftest/', '/selftest/index.html'];
+  const isErrorPage    = !SELFTEST_PATHS.includes(location.pathname);
+
+  if (isErrorPage) {
+    document.title = '404 — not found';
+    $('notfound').hidden = false;
+    // textContent, never innerHTML: the path is whatever the client asked
+    // for. decodeURI so an escaped path reads as the reader typed it, with
+    // the raw value kept when it is malformed enough to throw.
+    let shown = location.pathname + location.search;
+    try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
+    $('notfound-path').textContent = shown;
+    $('features').hidden           = true;
+    $('selftest-title').textContent = 'Diagnosis — live from your browser';
+  }
+
+  // ── Connection card ───────────────────────────────────────────────
+  const isHttps = location.protocol === 'https:';
+  $('url').textContent = location.protocol + '//' + location.host;
+
+  if (isHttps) {
+    $('badge').textContent = '✓ Verified encrypted';
+    $('badge').className    = 'badge badge-green';
+    // Deliberately not "your server": this page serves on every Servette
+    // site, and most readers are visitors, not the operator.
+    $('tagline-text').textContent = isErrorPage
+      ? 'THE SERVER IS RUNNING — THIS PATH IS NOT'
+      : 'THIS SERVER IS RUNNING';
+  } else {
+    $('badge').textContent = '⚠ Not encrypted';
+    $('badge').className    = 'badge badge-red';
+    $('dot').className      = 'dot red';
+    $('tagline-text').textContent = 'Connection is not secure';
+  }
+
+  // ── Self-test ─────────────────────────────────────────────────────
+  // Each check makes a real request and reports the value it observed.
+  // ok: true = PASS, false = FAIL, null = SKIP.
+  //
+  // A SKIP is never faked as a pass — and, just as importantly, never
+  // faked as a fail. Several of these headers are optional and can be
+  // switched off in config; an operator who turned one off made a
+  // choice, and reporting that choice as a defect would be a lie in the
+  // other direction.
+  const here = location.href.split('#')[0];
+
+  // Rows that probe `here` are labelled with the path actually requested,
+  // not a hard-coded "/". In the 404 role that path is whatever the reader
+  // typed, and a label naming a request the page never made is a small lie
+  // it can avoid. Truncated to keep the column from being pushed sideways by
+  // a long path.
+  const P = (() => {
+    let p = location.pathname || '/';
+    try { p = decodeURI(p); } catch (e) { /* keep the raw form */ }
+    return p.length > 24 ? p.slice(0, 23) + '…' : p;
+  })();
+
+  let _hdrs = null;
+  const H = async () => (_hdrs ||= (await fetch(here, { cache: 'no-store' })).headers);
+  const seen = (v) => v || '(absent)';
+
+  // Diagnosis rows, in the 404 role only. They answer the two questions a
+  // bare "Not found." leaves open: is this response shaped like an error
+  // page at all, and is the *site* deployed or is nothing published anywhere?
+  // A visitor who mistyped one path sees a working home page; an operator
+  // whose deploy never landed sees that the root misses too. Both are read
+  // from same-origin requests a visitor could make by hand — the page adds
+  // no disclosure, and deliberately never lists directory contents or
+  // guesses near-miss filenames, which would make an error page into a
+  // file-discovery oracle.
+  const errorChecks = [
+    { req: 'GET ' + P, run: async () => {
+        const r = await fetch(here, { cache: 'no-store' });
+        const ct = r.headers.get('Content-Type') || '(absent)';
+        return { ok: r.status === 404 && ct.includes('text/html'),
+                 obs: '→ ' + r.status + ', ' + ct }; } },
+
+    // Skipped when this page *is* the root: the row above already reported
+    // that exact request, and two identical GET / rows disagreeing on PASS
+    // and FAIL reads as a contradiction rather than a diagnosis.
+    ...(location.pathname === '/' ? [] : [
+    { req: 'GET /', run: async () => {
+        const s = (await fetch('/', { cache: 'no-store' })).status;
+        if (s === 200)
+          return { ok: true, obs: '→ 200 — the site has a home page' };
+        if (s === 401)
+          return { ok: null, obs: '→ 401 — home page needs a password' };
+        return { ok: false, obs: '→ ' + s + ' — nothing is published at the root' }; } },
+    ]),
+  ];
+
+  const checks = [
+    { req: 'GET ' + P, run: async () => {
+        const v = (await H()).get('X-Frame-Options');
+        return { ok: v === 'DENY', obs: 'X-Frame-Options: ' + seen(v) }; } },
+
+    { req: 'GET ' + P, run: async () => {
+        const v = (await H()).get('X-Content-Type-Options');
+        return { ok: v === 'nosniff', obs: 'X-Content-Type-Options: ' + seen(v) }; } },
+
+    { req: 'GET ' + P, run: async () => {
+        const v = (await H()).get('Referrer-Policy');
+        return { ok: !!v, obs: 'Referrer-Policy: ' + seen(v) }; } },
+
+    // Optional (config: csp). Absent means disabled, not broken.
+    { req: 'GET ' + P, run: async () => {
+        const v = (await H()).get('Content-Security-Policy');
+        return v
+          ? { ok: true, obs: 'Content-Security-Policy: present' }
+          : { ok: null, obs: 'CSP: disabled in config' }; } },
+
+    // Optional (config: permissions_policy). Absent means disabled.
+    { req: 'GET ' + P, run: async () => {
+        const v = (await H()).get('Permissions-Policy');
+        return v
+          ? { ok: true, obs: 'Permissions-Policy: present' }
+          : { ok: null, obs: 'Permissions-Policy: disabled in config' }; } },
+
+    { req: 'GET ' + P, run: async () => {
+        const h = await H();
+        return { ok: !!h.get('ETag') && !!h.get('Cache-Control'),
+                 obs: 'Cache-Control + ETag: ' + (h.get('ETag') || '(absent)') }; } },
+
+    { req: 'GET ' + P + '  (If-None-Match)', run: async () => {
+        const etag = (await H()).get('ETag');
+        if (!etag) return { ok: null, obs: 'no ETag to revalidate' };
+        const r = await fetch(here, { cache: 'no-store', headers: { 'If-None-Match': etag } });
+        return r.status === 304
+          ? { ok: true, obs: '→ 304 Not Modified' }
+          : { ok: null, obs: '→ ' + r.status + ' (browser cache varies)' }; } },
+
+    { req: 'POST ' + P, run: async () => {
+        const s = (await fetch(here, { method: 'POST' })).status;
+        return { ok: s === 405, obs: '→ ' + s + (s === 405 ? ' Method Not Allowed' : '') }; } },
+
+    { req: 'GET /<random>', run: async () => {
+        const s = (await fetch('/__servette_probe_' + Date.now())).status;
+        return { ok: s === 404, obs: '→ ' + s + (s === 404 ? ' Not Found' : '') }; } },
+
+    { req: 'GET /%2e%2e%2f…', run: async () => {
+        const s = (await fetch('/%2e%2e%2f%2e%2e%2fetc%2fpasswd')).status;
+        return { ok: s === 403, obs: '→ ' + s + (s === 403 ? ' Forbidden' : '') }; } },
+
+    // HSTS is only sent for a site with a real domain certificate, so on a
+    // self-signed or LAN server its absence is correct.
+    { req: 'GET ' + P, run: async () => {
+        const v = (await H()).get('Strict-Transport-Security');
+        return v
+          ? { ok: true, obs: 'Strict-Transport-Security: present' }
+          : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
+
+    // Version discovery — same-origin, password-gated: the one check only
+    // this page can make (planned in #42). Servette serves it solely on a
+    // password-gated site, so the exact version reaches a party that already
+    // holds the password (this browser, once you logged in) and never an
+    // anonymous scanner. Absent is a choice or an older Servette, not a
+    // defect.
+    { req: 'GET /.well-known/servette', run: async () => {
+        const r = await fetch('/.well-known/servette', { cache: 'no-store' });
+        if (r.status !== 200)
+          return { ok: null, obs: 'hidden without a password (or an older Servette)' };
+        const v = await r.json();
+        return { ok: true, obs: 'running v' + v.running }; } },
+  ];
+
+  const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };
+  const logEl = $('t-log');
+
+  function addRow(reqText) {
+    const st  = document.createElement('span'); st.className  = 't-st t-pending'; st.textContent = LABEL.pending;
+    const req = document.createElement('span'); req.className = 't-req';  req.textContent = reqText;
+    const obs = document.createElement('span'); obs.className = 't-obs';  obs.textContent = '';
+    const body = document.createElement('span'); body.className = 't-body';
+    body.append(req, document.createTextNode('  '), obs);
+    const row = document.createElement('div'); row.className = 't-row';
+    row.append(st, body);
+    logEl.appendChild(row);
+    return { st, obs };
+  }
+
+  function paint(st, state) { st.textContent = LABEL[state]; st.className = 't-st t-' + state; }
+
+  async function runTests() {
+    _hdrs = null;                 // force fresh requests on each run
+    logEl.innerHTML = '';
+    $('t-summary').textContent = 'running…';
+    let pass = 0, fail = 0, skip = 0;
+    // In the 404 role the two diagnosis rows come first: what this response
+    // is, and whether the site is deployed at all. They frame the header
+    // checks that follow rather than being buried under them.
+    for (const c of (isErrorPage ? errorChecks.concat(checks) : checks)) {
+      const { st, obs } = addRow(c.req);
+      let r;
+      try { r = await c.run(); }
+      catch (e) { r = { ok: null, obs: 'could not run' }; }
+      obs.textContent = r.obs;
+      if (r.ok === true)       { paint(st, 'pass'); pass++; }
+      else if (r.ok === false) { paint(st, 'fail'); fail++; }
+      else                     { paint(st, 'skip'); skip++; }
+    }
+    $('t-summary').innerHTML =
+      '<b>' + pass + '</b> passed · <b>' + fail + '</b> failed · <b>' + skip + '</b> skipped';
+  }
+
+  $('run-again').addEventListener('click', runTests);
+  runTests();
+</script>
+
+</body>
+</html>
+""".encode()
+_SELFTEST_ETAG = '"' + hashlib.sha256(_SELFTEST_PAGE).hexdigest()[:16] + '"'
 
 
 # Log escaping
@@ -890,7 +1515,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         custom_404 = os.path.join(site_root, "404.html")
         selftest_asked = (url_path.split("?", 1)[0] in _SELFTEST_PATHS
                           and not os.path.exists(os.path.join(site_root, "selftest")))
-        if _SELFTEST_PAGE is not None and (selftest_asked or not os.path.isfile(custom_404)):
+        if selftest_asked or not os.path.isfile(custom_404):
             code = 200 if selftest_asked else 404
             # In the 404 role a positive lifetime is downgraded to
             # revalidate-always. Under cache_policy = "max-age" an error page
@@ -913,8 +1538,7 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"cache-control",  cache.encode()),
             ], _SELFTEST_PAGE)
 
-        # The operator's own 404.html, or the bare line where the embedded page
-        # is missing (an unusual install).
+        # The operator's own 404.html, when they have written one.
         if os.path.isfile(custom_404):
             raw_404, _, _ = _get_cached_file(custom_404)
             body_404 = raw_404 or b"Not found."
@@ -3804,6 +4428,12 @@ def _startup_refresh():
                 print(f"  Service refreshed to v{__version__}.")
             except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
                 print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
+            except ValueError:
+                # The writer refuses a path systemd cannot carry safely, and has
+                # already printed why. A refusal must not take the launch down
+                # with it: _startup_refresh runs on every interactive start, so
+                # an un-writable unit has to leave a usable shell behind.
+                print("  Leaving the existing service untouched.")
 
 
 # The dispatcher

@@ -63,7 +63,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 ```
 
-Where everything lives. `BASE_DIR` is the data directory — config, certificates, the ACME account, and the default site folder — deliberately not the directory holding the code, which the package manager owns and replaces. `SERVETTE_HOME` overrides it: a development checkout run with `SERVETTE_HOME=.` serves its own `site/` (which is how servette.org deploys), and the test suite points it at the repository. The absolute paths are where provisioning writes the systemd units and where the ACME client serves its challenges from.
+Where everything lives. `BASE_DIR` is the data directory — config, certificates, the ACME account, and the default site folder — deliberately not the directory holding the code, which the package manager owns and replaces. `SERVETTE_HOME` overrides it: the test suite points it at the repository, and it is how a second instance runs beside a first. The absolute paths are where provisioning writes the systemd units and where the ACME client serves its challenges from.
 
 ```python
 # Paths

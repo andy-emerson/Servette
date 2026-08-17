@@ -1488,6 +1488,12 @@ def _startup_refresh():
                 print(f"  Service refreshed to v{__version__}.")
             except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
                 print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
+            except ValueError:
+                # The writer refuses a path systemd cannot carry safely, and has
+                # already printed why. A refusal must not take the launch down
+                # with it: _startup_refresh runs on every interactive start, so
+                # an un-writable unit has to leave a usable shell behind.
+                print("  Leaving the existing service untouched.")
 
 
 ```

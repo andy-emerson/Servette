@@ -2665,6 +2665,31 @@ def run_install_tests(s, tmpdir):
     check("A pip-installed package gets no PYTHONPATH (nothing to widen)",
           "PYTHONPATH" not in pip_unit)
 
+    # A unit the writer refuses must not take the shell launch down with it:
+    # _startup_refresh calls the writer on every interactive start, and the
+    # whitespace-path refusal raises rather than returning.
+    saved_r = {n: getattr(s, n) for n in
+               ("_unsafe_unit_path", "_service_file_exists", "_stale_units",
+                "_service_env_drift", "_servette_user_exists")}
+    try:
+        s._unsafe_unit_path    = lambda: "/bad path/servette"
+        s._service_file_exists = lambda: True
+        s._stale_units         = lambda: [s.SERVICE_PATH]
+        s._service_env_drift   = lambda: []
+        s._servette_user_exists= lambda: True
+        crashed = None
+        with contextlib.redirect_stdout(io.StringIO()) as rbuf:
+            try:
+                s._startup_refresh()
+            except Exception as e:
+                crashed = e
+        check("A refused unit write does not crash the shell launch", crashed is None)
+        check("...and says the existing service was left alone",
+              "Leaving the existing service untouched" in rbuf.getvalue())
+    finally:
+        for n, v in saved_r.items():
+            setattr(s, n, v)
+
     # Paths systemd cannot carry are refused, not encoded wrongly.
     saved_base = s.BASE_DIR
     saved_sfe  = s._service_file_exists
@@ -2911,9 +2936,7 @@ def run_install_tests(s, tmpdir):
     # URL derived from the subject could name a host that does not reach here.
     # An unanchored path makes _cert_days_remaining return None and the row
     # vanish, so its presence is what proves the anchoring.
-    import contextlib
     import datetime as _dt
-    import io
     from cryptography import x509
     from cryptography.x509.oid import NameOID
     from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser
@@ -3111,8 +3134,6 @@ def run_platform_tests(s):
     # The macOS session-mode seam: every branch keyed on _IS_MACOS, exercised
     # both ways by forcing the flag — these run identically on any host, so a
     # green Linux CI actually covers the macOS branches.
-    import io, contextlib
-
     section("Platform seam (_IS_MACOS)")
     check("_IS_MACOS reflects sys.platform", s._IS_MACOS == sys.platform.startswith("darwin"))
 

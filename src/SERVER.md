@@ -757,20 +757,15 @@ Two reserved paths precede the handler: version discovery at `/.well-known/serve
 # Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
-# The reserved self-test page (DECISIONS.md: "The self-test is server-
-# delivered, client-executed"): shipped beside this module as package data,
-# read once at import, served at /selftest/ wherever the operator's content
-# doesn't shadow it. A missing file (an unusual install) degrades to the
-# normal 404 rather than an error.
+# The reserved diagnostic page (DECISIONS.md: "The self-test is server-
+# delivered, client-executed"): authored as src/selftest.html and inlined here
+# by build.py, so it is part of the module rather than a file beside it. That
+# is deliberate — a page shipped as package data can be deleted on the box,
+# and deleting it would silently take the default 404 body with it. There is
+# no read at import and no missing-file case to degrade through.
 _SELFTEST_PATHS = ("/selftest", "/selftest/", "/selftest/index.html")
-try:
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "selftest.html"), "rb") as _f:
-        _SELFTEST_PAGE = _f.read()
-    _SELFTEST_ETAG = '"' + hashlib.sha256(_SELFTEST_PAGE).hexdigest()[:16] + '"'
-except OSError:
-    _SELFTEST_PAGE = None
-    _SELFTEST_ETAG = None
+_SELFTEST_PAGE = """@@SELFTEST_HTML@@""".encode()
+_SELFTEST_ETAG = '"' + hashlib.sha256(_SELFTEST_PAGE).hexdigest()[:16] + '"'
 
 
 ```
@@ -950,7 +945,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         custom_404 = os.path.join(site_root, "404.html")
         selftest_asked = (url_path.split("?", 1)[0] in _SELFTEST_PATHS
                           and not os.path.exists(os.path.join(site_root, "selftest")))
-        if _SELFTEST_PAGE is not None and (selftest_asked or not os.path.isfile(custom_404)):
+        if selftest_asked or not os.path.isfile(custom_404):
             code = 200 if selftest_asked else 404
             # In the 404 role a positive lifetime is downgraded to
             # revalidate-always. Under cache_policy = "max-age" an error page
@@ -973,8 +968,7 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"cache-control",  cache.encode()),
             ], _SELFTEST_PAGE)
 
-        # The operator's own 404.html, or the bare line where the embedded page
-        # is missing (an unusual install).
+        # The operator's own 404.html, when they have written one.
         if os.path.isfile(custom_404):
             raw_404, _, _ = _get_cached_file(custom_404)
             body_404 = raw_404 or b"Not found."

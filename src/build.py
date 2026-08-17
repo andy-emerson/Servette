@@ -11,10 +11,12 @@ SYSTEM.md, SHELL.md, MAIN.md. Each interleaves three things:
   * everything else — headings, section intros — which is navigation for the
     reader and produces nothing.
 
-This tool reverses that mapping, in file order, to produce the module. It
-adds nothing of its own: every output line comes from either a code fence or
-a blockquote. The blockquote/comment mapping is an exact inverse of the split
-that created these files, so the build reproduces the module byte-for-byte —
+This tool reverses that mapping, in file order, to produce the module. Every
+output line comes from a code fence, a blockquote, or the one substitution
+below: `selftest.html` is inlined where the sources name it, so the diagnostic
+page ships inside the module instead of beside it. The blockquote/comment
+mapping is an exact inverse of the split that created these files, and the
+substitution is verbatim, so the build reproduces the module byte-for-byte —
 which `--check` verifies. (`servette/__main__.py` is the one hand-written
 file in the package: two lines that call main(), authored directly.)
 
@@ -24,6 +26,8 @@ Usage:
     python build.py --stdout        # write to stdout
     python build.py --check         # build in memory, diff against the
                                      # existing module, exit 1 on drift
+    python build.py --counts        # lines per section, for the website
+    python build.py --check-counts  # exit 1 if README's line counts are stale
 """
 
 import argparse
@@ -36,6 +40,13 @@ import sys
 # because the entry point it holds — `config = Config()` and the `__main__`
 # dispatch — runs on import and calls definitions from every section above it.
 SECTION_FILES = ["INIT.md", "SERVER.md", "SYSTEM.md", "SHELL.md", "MAIN.md"]
+
+# The diagnostic page is authored as real HTML — editable, highlighted, openable
+# in a browser — and inlined into the module at build time, so the shipped
+# package is Python only. An operator cannot delete a page that is not a file,
+# and the 404 body cannot go missing with it.
+SELFTEST_SOURCE  = "selftest.html"
+_SELFTEST_MARKER = "@@SELFTEST_HTML@@"
 
 _FENCE_OPEN  = "```python"
 _FENCE_CLOSE = "```"
@@ -81,12 +92,30 @@ def md_to_code(md_text, filename):
 
 
 def build(src_dir):
-    """Concatenate the reconstructed source of all four section files."""
+    """Concatenate the reconstructed sections, then inline the diagnostic page.
+
+    The substitution happens here and not in md_to_code, so the per-section
+    line counts stay a measure of the program rather than of an embedded
+    asset."""
     parts = []
     for name in SECTION_FILES:
         with open(os.path.join(src_dir, name), "r", encoding="utf-8") as f:
             parts.append(md_to_code(f.read(), name))
-    return "".join(parts)
+    out = "".join(parts)
+
+    with open(os.path.join(src_dir, SELFTEST_SOURCE), "r", encoding="utf-8") as f:
+        html = f.read()
+    # The page lands inside a triple-quoted literal. A `"""` in the HTML would
+    # close it early and a backslash would be read as an escape, so both fail
+    # the build rather than producing a module that is subtly not the page.
+    if '"""' in html:
+        raise ValueError(f"{SELFTEST_SOURCE}: contains \"\"\", which would end the literal")
+    if "\\" in html:
+        raise ValueError(f"{SELFTEST_SOURCE}: contains a backslash, which the literal would escape")
+    if out.count(_SELFTEST_MARKER) != 1:
+        raise ValueError(f"expected exactly one {_SELFTEST_MARKER} in the sources, "
+                         f"found {out.count(_SELFTEST_MARKER)}")
+    return out.replace(_SELFTEST_MARKER, html)
 
 
 def section_counts(src_dir):
@@ -110,65 +139,65 @@ def section_counts(src_dir):
     return rows
 
 
-# Where the website states a count, and how to find it. Each entry is a
-# (label, regex) whose one capture group is the number as published. A stale
-# count fails the gate; a rewritten sentence fails it too, which is correct —
-# moving a claim should make someone re-check it rather than silently drop it
-# from the gate's view.
-def _site_claims(counts):
-    by = {name: (total, code) for name, total, code in counts}
-    total, code = by["Total"]
-    claims = [
-        ("prose total",  rf"Servette is ([\d,]+) lines of Python", total),
-        ("prose code",   rf"lines of Python, of which ([\d,]+) are code", code),
-        ("headline stat", r'class="stat__n">([\d,]+)</p>\s*<p class="stat__what">lines you can read', total),
-    ]
-    for name in ("Init", "Server", "System", "Shell", "Main", "Total"):
-        t, c = by[name]
-        row = (rf'<th scope="row">{name}</th>.*?'
-               rf'<td class="num">([\d,]+)</td><td class="num">[\d,]+</td>')
-        col = (rf'<th scope="row">{name}</th>.*?'
-               rf'<td class="num">[\d,]+</td><td class="num">([\d,]+)</td>')
-        claims.append((f"table {name} total", row, t))
-        claims.append((f"table {name} code",  col, c))
-    # The "Four regions" walkthrough repeats the three big section totals.
-    for name, stem in (("Server", r"lines\. The only region a network request can reach"),
-                       ("System", r"lines\. Everything that runs on its own schedule"),
-                       ("Shell",  r"lines, and the largest region of the module")):
-        claims.append((f"regions {name}", rf"<p>([\d,]+) {stem}", by[name][0]))
-    return claims
+def selftest_lines(src_dir):
+    """Lines in the authored diagnostic page.
+
+    Reported apart from the section counts, not folded into them. The counts
+    back a claim about reading the *program*; an embedded HTML page is shipped
+    by it, not read as part of it, and burying 630 lines of markup inside the
+    Python figure would overstate what an auditor has to work through."""
+    with open(os.path.join(src_dir, SELFTEST_SOURCE), "r", encoding="utf-8") as f:
+        return len(f.read().splitlines())
 
 
-def check_site_counts(src_dir, repo_dir):
-    """Verify every line count the website publishes against src/.
+# Where this repository states its own size, and how to find it. Each entry is
+# a (label, regex) whose one capture group is the figure as published. These are
+# approximate by design — "~3,900 lines" — so the check is that each rounds to
+# the real total, not that it equals it.
+#
+# The website publishes exact per-section counts and lives in another repository
+# now, so those cannot be gated from here; --counts prints them for whoever
+# edits that page. What CAN be gated is every claim this repository makes about
+# itself, which is what the drift was: a number asserted long after it stopped
+# being true.
+_README_CLAIMS = [
+    ("comparison table", r"\| Readable source \| ~([\d,]+) lines \|"),
+    ("who-is-it-for prose", r"one readable module \(~([\d,]+) lines of Python"),
+]
 
-    The counts drifted unnoticed once (the page claimed 3,896/3,003 while main
-    held 4,002/3,034) because nothing re-ran them. This is that check."""
-    page_path = os.path.join(repo_dir, "site", "index.html")
+
+def check_readme_counts(src_dir, repo_dir):
+    """Verify every line-count figure README states about Servette.
+
+    Rounded to the nearest hundred, matching how the README writes them. A
+    reworded sentence fails as loudly as a stale number: moving a claim should
+    make someone re-check it rather than drop it out of the gate's view."""
+    total = dict((n, t) for n, t, _ in section_counts(src_dir))["Total"]
+    expected = round(total / 100) * 100
+
+    path = os.path.join(repo_dir, "README.md")
     try:
-        with open(page_path, "r", encoding="utf-8") as f:
-            page = f.read()
+        with open(path, "r", encoding="utf-8") as f:
+            readme = f.read()
     except OSError as e:
-        print(f"count check failed: cannot read {page_path}: {e}", file=sys.stderr)
+        print(f"count check failed: cannot read {path}: {e}", file=sys.stderr)
         return 1
 
     problems = []
-    for label, pattern, expected in _site_claims(section_counts(src_dir)):
-        m = re.search(pattern, page, re.DOTALL)
+    for label, pattern in _README_CLAIMS:
+        m = re.search(pattern, readme)
         if m is None:
-            problems.append(f"  {label}: claim not found on the page "
-                            f"(expected {expected:,} — was the sentence rewritten?)")
-        elif m.group(1).replace(",", "") != str(expected):
-            problems.append(f"  {label}: page says {m.group(1)}, src/ says {expected:,}")
+            problems.append(f"  {label}: claim not found "
+                            f"(expected ~{expected:,} — was the sentence rewritten?)")
+        elif int(m.group(1).replace(",", "")) != expected:
+            problems.append(f"  {label}: README says ~{m.group(1)}, "
+                            f"src/ is {total:,} which rounds to ~{expected:,}")
 
     if problems:
-        print("STALE COUNTS: site/index.html disagrees with src/.", file=sys.stderr)
+        print("STALE COUNTS: README.md disagrees with src/.", file=sys.stderr)
         print("\n".join(problems), file=sys.stderr)
-        print("\nCurrent counts from src/:", file=sys.stderr)
-        for name, total, code in section_counts(src_dir):
-            print(f"  {name:8} {total:>6,} total  {code:>6,} code", file=sys.stderr)
         return 1
-    print("OK: site/index.html line counts match the build of src/.")
+    print(f"OK: README's ~{expected:,} lines matches the build of src/ ({total:,}).")
     return 0
 
 
@@ -182,25 +211,27 @@ def main(argv=None):
                         help="compare the build against the existing servette.py; "
                              "exit 1 if they differ")
     parser.add_argument("--counts", action="store_true",
-                        help="print lines per section")
+                        help="print lines per section, for the website's figures")
     parser.add_argument("--check-counts", action="store_true",
-                        help="verify the line counts site/index.html publishes "
-                             "against src/; exit 1 if any is stale")
+                        help="verify the line counts README states against src/; "
+                             "exit 1 if any is stale")
     args = parser.parse_args(argv)
 
     src_dir  = os.path.dirname(os.path.abspath(__file__))
     repo_dir = os.path.dirname(src_dir)
     default  = os.path.join(repo_dir, "servette", "__init__.py")
 
-    # Both count modes read src/ only — no assembled module needed, so they
-    # answer even when the build itself is broken.
+    # Reads src/ only — no assembled module needed, so it answers even when the
+    # build itself is broken.
+    if args.check_counts:
+        return check_readme_counts(src_dir, repo_dir)
+
     if args.counts:
         for name, total, code in section_counts(src_dir):
             print(f"{name:8} {total:>6,} total  {code:>6,} code")
+        print(f"{'':8} {'':>6}         {selftest_lines(src_dir):>6,} "
+              f"embedded page ({SELFTEST_SOURCE}, not Python)")
         return 0
-
-    if args.check_counts:
-        return check_site_counts(src_dir, repo_dir)
 
     built = build(src_dir)
 

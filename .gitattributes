@@ -13,6 +13,12 @@
 site/**         linguist-documentation
 tests/viewer/** linguist-documentation
 
+# src/selftest.html is the authored form of the diagnostic page, inlined into
+# the module by build.py. Excluded for the same reason src/*.md is not counted
+# as Python: its content is already counted once, inside the generated module.
+# Counting the source too would count the same bytes twice.
+src/selftest.html linguist-documentation
+
 # The module is generated, but it IS the program — reviewed, and shipped as the
 # release artifact — so it must stay counted even if a Linguist heuristic ever
 # starts reading its generated-file banner.

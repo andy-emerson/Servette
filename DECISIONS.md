@@ -6,6 +6,76 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The diagnostic page is inlined, not shipped as a file
+
+**Ruled:** the page is authored as `src/selftest.html` — real HTML, editable
+and openable in a browser — and `build.py` inlines it into the module at build
+time. The installed package is Python only: `__init__.py` and `__main__.py`.
+**Why:** as package data it was a file an operator could delete, and deleting
+it took the default 404 body with it silently — the server would go back to
+answering ten bytes of `Not found.` with nothing to say why. A page that is
+part of the module cannot be removed without removing the program.
+**Rejected:** a Python string literal as the authored form (23 KB of HTML with
+every quote escaped, no highlighting, unopenable in a browser) — the
+precedent, the deleted placeholder page, showed why that reads badly; and
+leaving it as package data with documentation asking operators not to delete
+it. **Accounting:** the 630 lines of markup are reported separately by
+`build.py --counts`, not folded into the Python figures. The counts back a
+claim about reading the *program*; markup the program ships is not markup an
+auditor reads to understand it. Stating that split openly is the point —
+quietly absorbing 630 lines into "readable in an afternoon" would inflate the
+claim by 16%. *(2026-08-17)*
+
+## `pip install servette` is the only installation path
+
+**Ruled:** there is one way to install Servette, and every other way is
+removed rather than merely discouraged. The documented install is
+`pip install servette`; nothing in the repository or its documents describes,
+supports, or enables another. **Removed:** the
+`git+https://` install and update commands from README; the `pipx`
+alternative; and the website, which by living here let a checkout serve
+servette.org and so kept clone-and-run alive as the shortest path
+([above](#the-website-lives-in-its-own-repository)). **Not enforced in the
+server:** an attempt to gate `enable` on the package sitting in
+`site-packages` was made and reverted. Running as a supervised service that
+survives reboots is one of the five principles — a core function of the
+program — and a core function does not answer to a packaging question. The
+scope of this ruling is what the project *offers and documents*, not a
+capability withheld from a running server. Distribution is closed by having
+one documented channel, not by crippling systemd. **Why so absolute:** a
+second install path is a second thing to document, test, and support, and the
+cheap one gets suggested — repeatedly — precisely because it exists. A
+capability that is only discouraged is a capability. **Consequence accepted:**
+until the first PyPI release the documented command does not work, and no
+fallback is offered in its place. That is the point: the gap is visible
+pressure to publish rather than a path that quietly substitutes for it.
+**Reopen:** an operator population that genuinely cannot reach PyPI — in which
+case the answer is a decided, documented second channel, not the return of an
+undocumented one. *(2026-08-17)*
+
+## The website lives in its own repository
+
+**Ruled:** Servette's website moves to
+[andy-emerson/websites](https://github.com/andy-emerson/websites) as
+`servette.org/`, one directory per hostname, and leaves this repository. The
+program repository holds the program. **Why:** while the site sat here as
+`site/`, a checkout could serve it under `SERVETTE_HOME=.`, so "clone the
+program and serve its own folder" was the shortest path to deploying
+servette.org — which put this git repository inside the site's deployment
+story and made installing-from-git a standing suggestion. Servette installs
+from PyPI. Separation removes the shortcut instead of relying on anyone
+declining to take it. **Moved with it:** the front page, the source viewer,
+the publish tool, and the viewer's end-to-end harness (kept outside
+`servette.org/`, since anything under a hostname directory is served
+content). **Stayed:** the diagnostic page, which ships inside the
+package because every install serves it. **Costs accepted:** the *exact* per-section
+counts the site publishes can no longer be gated from here — the claim and its
+source are in different repositories, so `build.py --counts` prints them and
+nothing checks the page carries them. `--check-counts` survives, aimed at the
+figures this repository still states about itself. And the viewer harness now
+needs `SERVETTE_SRC` pointing at a checkout of this repository, so neither
+repository tests that page alone. *(2026-08-17)*
+
 ## The status code tells the truth; the body does the work
 
 **Ruled (principle).** Servette answers with the status code the situation
@@ -66,14 +136,17 @@ prior bundle-injected copy (superseded from #42 — it required a
 deliberately duplicated page and a network fetch in the publish tool).
 *(#79, 2026-08-16)*
 
-## site/pub/ is the operator tools page
+## site/pub/ is the operator tools page — *moved*
 
 **Ruled:** one bookmarkable home for operator services — the publish
 tool, the self-test explanation and link, the documented CLI loop. Its
 ceiling is a security boundary: it hosts, ships, links, and explains,
 and never reaches into a live server (no network admin API) or probes
 another origin. `servette sign` (client-side signing verb in the pip
-package) is **open**, not ruled. *(#79, 2026-08-16)*
+package) is **open**, not ruled. The page itself now lives at
+`servette.org/pub/` in the websites repository; the ceiling above is a
+property of the page and travelled with it. *(#79, 2026-08-16; moved
+2026-08-17)*
 
 ## DECISIONS.md is the canonical decision record
 
@@ -88,10 +161,11 @@ offline — the working agreement requires decisions in the repository).
 
 ## One home per fact: the site READMEs are deleted
 
-**Ruled:** `site/README.md` and `site/pub/README.md` are gone. The
-layout principle lives in DESIGN.md's website section; the publish
-tool's load-bearing constraints live in `site/pub/index.html`'s own
-header comment, where an editor of the page reads them. **Rejected:**
+**Ruled:** the website's folder READMEs are gone. The layout principle
+lives with the site itself, and the publish tool's load-bearing
+constraints live in that page's own header comment, where an editor of
+the page reads them. Both files, and the pages they described, are now in
+the websites repository. **Rejected:**
 parallel folder READMEs (the merge-scale review caught them drifting
 against DESIGN — two homes, one fact). *(#78, 2026-08-16)*
 

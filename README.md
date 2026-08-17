@@ -1,7 +1,7 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="site/assets/servette-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="site/assets/servette-light.svg">
-  <img alt="Servette" src="site/assets/servette-light.svg" width="300">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/servette-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/servette-light.svg">
+  <img alt="Servette" src="assets/servette-light.svg" width="300">
 </picture>
 
 ### The Simple, Secure Static-Site Server
@@ -52,7 +52,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 | HTTPS by default | Your site is encrypted, browsers show the padlock, and plain-HTTP requests are redirected up to HTTPS |
 | Basic Auth | Optional username and password to restrict access |
 | Rate limiting | Stops bots from hammering the server; makes password guessing impractical |
-| Instant content updates | Edit any file and the change is served immediately — files are read fresh from disk, no restart required |
+| Instant content updates | New content is served the moment it lands — files are read fresh from disk on every request, so a `pull` needs no restart and drops no connections |
 | Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |
 | Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
@@ -75,20 +75,37 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
 2. **Open ports 80 and 443** in the provider's firewall panel (on Lightsail: the instance's **Networking** tab). This is separate from the OS firewall and is the step people miss — 80 carries the HTTP→HTTPS redirect and Let's Encrypt validation, 443 serves the site.
 3. **Attach a static IP** so the address survives restarts.
 4. **Point your domain at it** — an `A` record to the static IP, before requesting a certificate.
-5. **SSH in and install Servette:**
+5. **SSH in and install Servette** — one line:
    ```
-   ssh -i your-key.pem user@YOUR.IP
-   sudo python3 -m venv /opt/servette
-   sudo /opt/servette/bin/pip install "servette @ git+https://github.com/andy-emerson/Servette"
-   sudo ln -s /opt/servette/bin/servette /usr/local/bin/servette
+   sudo python3 -m venv /opt/servette && sudo /opt/servette/bin/pip install servette && sudo ln -s /opt/servette/bin/servette /usr/local/bin/servette
    ```
-   (Once Servette has its first PyPI release this becomes `pip install servette`; the venv keeps the install isolated either way, and `pipx install --global servette` does the same job where pipx ≥ 1.5 is available.)
+   Three things happen: a private environment for Servette and its one
+   dependency, the install into it, and `servette` placed on the system path so
+   `sudo servette` finds it. The environment is needed because Debian, Ubuntu,
+   and Raspberry Pi OS refuse `pip install` into the system Python; the symlink
+   is needed because `sudo` ignores your own `PATH`.
+
+   <details><summary><b>If that doesn't work</b></summary>
+
+   | What you see | What it means |
+   |---|---|
+   | `No module named venv` / `ensurepip is not available` | `sudo apt install python3-venv` (Debian, Ubuntu, Raspberry Pi OS), then re-run. |
+   | `No matching distribution found for servette` | Your Python is older than 3.11 — check with `python3 --version`. |
+   | `error: externally-managed-environment` | The `venv` step was skipped, so pip is being pointed at the system Python. Run the line as written. |
+   | `servette: command not found` | The symlink didn't land. `ls -l /usr/local/bin/servette` — if it's missing, re-run the third command alone. |
+   | `sudo servette` not found but plain `servette` works | The command is on your `PATH` but not on `sudo`'s. Servette needs root to write its systemd unit, so it has to be in `/usr/local/bin` — re-run the third command. |
+   | `File exists` on the symlink | An older install is already there. Remove it (`sudo rm /usr/local/bin/servette`) and re-run that command. |
+   | Building `cryptography` from source, or a Rust compiler error | No prebuilt wheel matched your platform — usually a 32-bit or very old OS. Upgrade to a current 64-bit release, where wheels are published. |
+   | `Permission denied` writing `/opt/servette` | The `sudo` was dropped from one of the commands. |
+
+   Nothing here needs undoing before a retry: the line is safe to run again.
+   </details>
 
 ### Deploy on your own machine (e.g. a Raspberry Pi)
 
 1. **Install a Linux OS and enable SSH** (the Raspberry Pi Imager can set this up before first boot).
 2. **Forward ports 80 and 443** on your router to the machine, and point a domain's `A` record at your public IP (a dynamic-DNS service keeps the record current if your home IP changes). Skip this to run on your LAN only, with a self-signed certificate.
-3. **SSH in and install Servette** — the same three lines as the VPS shape above.
+3. **SSH in and install Servette** — the same one-line install as the VPS shape above, troubleshooting table included.
 
 ### Run setup
 
@@ -98,11 +115,9 @@ Servette keeps everything it serves and everything it saves in its data director
 sudo servette   # then, at the prompt: setup
 ```
 
-`sudo` is needed because setup writes a systemd unit and creates a restricted `servette` user — the server runs as that user, not root. The wizard sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), sets an optional password, then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically. Copy your site in whenever you like:
+`sudo` is needed because setup writes a systemd unit and creates a restricted `servette` user — the server runs as that user, not root. The wizard sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), sets an optional password, then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically.
 
-```
-scp -r mysite/* user@YOUR.IP:/var/lib/servette/site/
-```
+To put your site on it, build a signed bundle in the browser at [servette.org/pub/](https://servette.org/pub/) — it never uploads anything; the signing happens on your machine — host the `.tar.gz` and `.sig` pair anywhere reachable over HTTPS, set the URL and key once with `config` → `publish`, and run `pull`. Servette verifies the signature against that site's key before it swaps anything in, and `restore-site` undoes the last pull.
 
 ### Operate it
 
@@ -122,7 +137,7 @@ Re-run `sudo servette` any time for the interactive shell — or run any command
 | `restore-site [n]` | Roll back a site's content to before its last pull |
 | `help` · `quit` | Command list · exit |
 
-**Update your site** by copying new files over (`scp -r mysite/* user@your.server.ip:/var/lib/servette/site/`) — changes appear immediately, no restart. **Update Servette** the way you update any pip-installed tool (`sudo /opt/servette/bin/pip install -U "servette @ git+https://github.com/andy-emerson/Servette"` — just `-U servette` once the PyPI release exists); the next `sudo servette` notices a stale service unit and refreshes it. **Roll back** by installing the version you want (`pip install servette==x.y.z`). Your `servette.toml` is never touched by an update.
+**Update your site** with `pull` — the publish tool signs a new bundle, Servette verifies it and swaps it in atomically, and `restore-site` rolls back the last one. **Update Servette** the way you update any pip-installed tool (`sudo /opt/servette/bin/pip install -U servette`); the next `sudo servette` notices a stale service unit and refreshes it. **Roll back** by installing the version you want (`sudo /opt/servette/bin/pip install servette==x.y.z`). Your `servette.toml` is never touched by an update.
 
 > If you set a password, `servette.toml` holds its hash — sharing the file gives a recipient material for an offline cracking attempt.
 
@@ -153,7 +168,6 @@ Each site can have a **publish channel**: build a signed bundle of your site in 
 | `servette/` | The installable package: `__init__.py` is the entire product — server, system, and shell in one module, generated from `src/` and not edited by hand — beside a stub `__main__.py` and `selftest.html`, the embedded diagnostic page every install serves in two roles — at `/selftest/` when asked for, and as the default `404` error page |
 | `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into the module |
 | `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 and 3.14) and Debian 12 |
-| `site/` | The Servette website's source, and the folder a checkout serves by default; `site/src/` is a browsable view of the literate sources, `site/pub/` is the client-side publish tool, and `site/assets/` holds the logos this README displays |
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
 | `AGENTS.md` · `CLAUDE.md` | The human–agent working agreement, and the pointer to it |

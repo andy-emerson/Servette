@@ -79,10 +79,10 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
    ```
    ssh -i your-key.pem user@YOUR.IP
    sudo python3 -m venv /opt/servette
-   sudo /opt/servette/bin/pip install "servette @ git+https://github.com/andy-emerson/Servette"
+   sudo /opt/servette/bin/pip install servette
    sudo ln -s /opt/servette/bin/servette /usr/local/bin/servette
    ```
-   (Once Servette has its first PyPI release this becomes `pip install servette`; the venv keeps the install isolated either way, and `pipx install --global servette` does the same job where pipx ≥ 1.5 is available.)
+   The venv keeps Servette and its one dependency out of the system Python.
 
 ### Deploy on your own machine (e.g. a Raspberry Pi)
 
@@ -122,7 +122,7 @@ Re-run `sudo servette` any time for the interactive shell — or run any command
 | `restore-site [n]` | Roll back a site's content to before its last pull |
 | `help` · `quit` | Command list · exit |
 
-**Update your site** by copying new files over (`scp -r mysite/* user@your.server.ip:/var/lib/servette/site/`) — changes appear immediately, no restart. **Update Servette** the way you update any pip-installed tool (`sudo /opt/servette/bin/pip install -U "servette @ git+https://github.com/andy-emerson/Servette"` — just `-U servette` once the PyPI release exists); the next `sudo servette` notices a stale service unit and refreshes it. **Roll back** by installing the version you want (`pip install servette==x.y.z`). Your `servette.toml` is never touched by an update.
+**Update your site** by copying new files over (`scp -r mysite/* user@your.server.ip:/var/lib/servette/site/`) — changes appear immediately, no restart. **Update Servette** the way you update any pip-installed tool (`sudo /opt/servette/bin/pip install -U servette`); the next `sudo servette` notices a stale service unit and refreshes it. **Roll back** by installing the version you want (`sudo /opt/servette/bin/pip install servette==x.y.z`). Your `servette.toml` is never touched by an update.
 
 > If you set a password, `servette.toml` holds its hash — sharing the file gives a recipient material for an offline cracking attempt.
 

@@ -2659,11 +2659,32 @@ def run_install_tests(s, tmpdir):
           package_dir in ro_line)
     check("The service starts the package with the enabling shell's interpreter",
           f"ExecStart={sys.executable} -m servette --serve" in service)
-    check("PYTHONPATH resolves -m servette for checkout deployments",
-          f"Environment=PYTHONPATH={os.path.dirname(package_dir)}" in service)
+    # One installation path: the unit resolves the package from the
+    # interpreter's own site-packages and names no other directory. A unit
+    # carrying PYTHONPATH could start a service from a tree pip does not own —
+    # a second way to install Servette — and would shadow the stdlib from it.
+    check("No unit carries PYTHONPATH, whatever the package location",
+          "PYTHONPATH" not in service)
     pip_unit = s._systemd_unit(sys.executable, "/v/lib/python3.11/site-packages/servette")
-    check("A pip-installed package gets no PYTHONPATH (nothing to widen)",
+    check("A pip-installed package gets no PYTHONPATH either",
           "PYTHONPATH" not in pip_unit)
+
+    # And the refusal that makes the above unreachable by accident: this
+    # checkout is not pip-installed, so writing units must fail closed rather
+    # than produce a unit pointing at a directory pip does not manage.
+    saved_uup = s._unsafe_unit_path
+    try:
+        s._unsafe_unit_path = lambda: None      # past the whitespace guard
+        refused = False
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            try:
+                s._write_unit_files()
+            except ValueError:
+                refused = True
+        check("A non-pip-installed package is refused a service unit", refused)
+        check("...and says pip install servette", "pip install servette" in buf.getvalue())
+    finally:
+        s._unsafe_unit_path = saved_uup
 
     # Paths systemd cannot carry are refused, not encoded wrongly.
     saved_base = s.BASE_DIR
@@ -2911,9 +2932,7 @@ def run_install_tests(s, tmpdir):
     # URL derived from the subject could name a host that does not reach here.
     # An unanchored path makes _cert_days_remaining return None and the row
     # vanish, so its presence is what proves the anchoring.
-    import contextlib
     import datetime as _dt
-    import io
     from cryptography import x509
     from cryptography.x509.oid import NameOID
     from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser
@@ -3111,8 +3130,6 @@ def run_platform_tests(s):
     # The macOS session-mode seam: every branch keyed on _IS_MACOS, exercised
     # both ways by forcing the flag — these run identically on any host, so a
     # green Linux CI actually covers the macOS branches.
-    import io, contextlib
-
     section("Platform seam (_IS_MACOS)")
     check("_IS_MACOS reflects sys.platform", s._IS_MACOS == sys.platform.startswith("darwin"))
 

@@ -6,6 +6,30 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## `pip install servette` is the only installation path
+
+**Ruled:** there is one way to install Servette, and every other way is
+removed rather than merely discouraged. The documented install is
+`pip install servette`; nothing in the repository or its documents describes,
+supports, or enables another. **Enforced, not just written down:**
+`_write_unit_files` refuses to write a systemd unit unless the package sits in
+the interpreter's `site-packages`/`dist-packages`, and the unit carries no
+`PYTHONPATH`, so a directory pip does not own cannot become a running service.
+**Removed:** the `git+https://` install and update commands from README; the
+`pipx` alternative; the conditional `PYTHONPATH` that made a checkout
+deployment work; and the website, which by living here let a checkout serve
+servette.org and so kept clone-and-run alive as the shortest path
+([above](#the-website-lives-in-its-own-repository)). **Why so absolute:** a
+second install path is a second thing to document, test, and support, and the
+cheap one gets suggested — repeatedly — precisely because it exists. A
+capability that is only discouraged is a capability. **Consequence accepted:**
+until the first PyPI release the documented command does not work, and no
+fallback is offered in its place. That is the point: the gap is visible
+pressure to publish rather than a path that quietly substitutes for it.
+**Reopen:** an operator population that genuinely cannot reach PyPI — in which
+case the answer is a decided, documented second channel, not the return of an
+undocumented one. *(2026-08-17)*
+
 ## The website lives in its own repository
 
 **Ruled:** Servette's website moves to

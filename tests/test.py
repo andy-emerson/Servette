@@ -858,6 +858,15 @@ def run_dispatch_tests(s):
 
     section("Shell — command dispatch")
 
+    # Routing is under test here, not elevation policy (which has its own
+    # section). Dispatch is exercised as root, because as an unprivileged user
+    # run_command correctly elevates pull/restore-site instead of dispatching —
+    # and on CI runners, whose sudo is passwordless, that spawned REAL elevated
+    # children while the stubs sat unused. Caught by CI's non-root run; the
+    # suite had only ever been run as root locally.
+    saved_dispatch_euid = s.os.geteuid
+    s.os.geteuid = lambda: 0
+
     # Spy on the handlers so we verify routing without their side effects, and
     # feed scripted input. 'quit' calls stop_server, so stub it to keep the
     # live test server up for the integration tests that follow.
@@ -889,6 +898,8 @@ def run_dispatch_tests(s):
     pull_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "pull"]
     check("'pull 99' (bad site index) does not call cmd_pull", len(pull_calls) == 1)
     check("'quit' stops server and exits", calls[-1] == "stop")
+    s.os.geteuid = saved_dispatch_euid
+
 
     section("One-shot CLI: run_command and set")
 
@@ -1307,24 +1318,23 @@ def run_dispatch_tests(s):
 
     # The one-shot form is documented as the way scripts drive Servette, and a
     # script's first move is a pipe: `servette status | head` must end at the
-    # consumer's convenience, not in a BrokenPipeError traceback. Exercised for
-    # real — a subprocess writing into a pipe head has already closed — because
-    # the handler dup2s over the true stdout fd, which no StringIO can stand in
-    # for. 141 is 128+SIGPIPE: what the shell reports for any tool that dies on
-    # a closed pipe.
-    if shutil.which("bash"):
-        r = subprocess.run(
-            ["bash", "-c",
-             'set -o pipefail; '
-             f'SERVETTE_HOME="{SERVETTE_DIR}" "{sys.executable}" '
-             f'"{os.path.join(SERVETTE_DIR, "servette.py")}" status '
-             '2>/tmp/servette-pipe-probe.err | head -c 5 >/dev/null; '
-             'echo "${PIPESTATUS[0]}"'],
-            capture_output=True, text=True, timeout=60)
-        err = open("/tmp/servette-pipe-probe.err").read()
-        check("A closed stdout ends the one-shot quietly, exit 141",
-              r.stdout.strip() == "141" and "Traceback" not in err)
-        os.remove("/tmp/servette-pipe-probe.err")
+    # consumer's convenience, not in a BrokenPipeError traceback. A subprocess
+    # is required — the handler dup2s over the true stdout fd, which no
+    # StringIO can stand in for. The pipe's read end is closed BEFORE the child
+    # runs, so its first write raises EPIPE deterministically; the first
+    # version piped through `head -c 5`, and status output small enough to fit
+    # the 64K pipe buffer meant head could exit after the child had already
+    # finished writing — no SIGPIPE, a flaky pass. 141 is 128+SIGPIPE: what
+    # the shell reports for any tool that dies on a closed pipe.
+    pipe_r, pipe_w = os.pipe()
+    os.close(pipe_r)
+    env_pipe = dict(os.environ, SERVETTE_HOME=SERVETTE_DIR)
+    r = subprocess.run(
+        [sys.executable, os.path.join(SERVETTE_DIR, "servette.py"), "status"],
+        stdout=pipe_w, stderr=subprocess.PIPE, env=env_pipe, timeout=60)
+    os.close(pipe_w)
+    check("A closed stdout ends the one-shot quietly, exit 141",
+          r.returncode == 141 and b"Traceback" not in r.stderr)
 
     # _needs_root reads the live singleton, so drive that flag directly rather
     # than swapping the whole config out from under the rest of the suite.
@@ -2884,6 +2894,24 @@ def run_install_tests(s, tmpdir):
         check("_chown_servette silently skips nonexistent path", True)
     except Exception as e:
         check(f"_chown_servette silently skips nonexistent path (raised {e})", False)
+
+    # An unprivileged process cannot give files away: on a host where the
+    # servette user EXISTS, a non-root _chown_servette must skip, not raise —
+    # check=True on the chown turned that into a crash at Config() import
+    # (save() runs it), found by running the suite as a non-root user.
+    saved_chk_euid, saved_chk_sue = s.os.geteuid, s._servette_user_exists
+    chk_file = os.path.join(tmpdir, "chown-skip-probe")
+    open(chk_file, "w").write("x")
+    try:
+        s._servette_user_exists = lambda: True
+        s.os.geteuid = lambda: 12345          # neither root nor the service user
+        try:
+            s._chown_servette(chk_file)
+            check("Unprivileged _chown_servette skips instead of raising", True)
+        except Exception as e:
+            check(f"Unprivileged _chown_servette skips instead of raising (raised {e})", False)
+    finally:
+        s.os.geteuid, s._servette_user_exists = saved_chk_euid, saved_chk_sue
 
     # _chown_servette: no-ops when servette user does not exist
     if not s._servette_user_exists():

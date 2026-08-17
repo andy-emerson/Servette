@@ -269,6 +269,15 @@ def _servette_user_exists():
     return result.returncode == 0
 
 
+def _servette_uid():
+    """The servette user's uid, or None when it does not exist."""
+    try:
+        import pwd as _pwd
+        return _pwd.getpwnam("servette").pw_uid
+    except (ImportError, KeyError):
+        return None
+
+
 def _servette_gid():
     """The servette group's gid, or None when it does not exist."""
     try:
@@ -297,8 +306,18 @@ Files the service process must read — config, certificates, the ACME account �
 # Ownership: the service user
 def _chown_servette(path):
     """Chown path to servette:servette if the user exists and the path exists."""
-    if _servette_user_exists() and os.path.exists(path):
-        subprocess.run(["chown", "-R", "servette:servette", path], check=True)
+    if not (_servette_user_exists() and os.path.exists(path)):
+        return
+    # Only root and the service user itself may actually run this: root gives
+    # the file away, and the service user's own call is a permitted same-owner
+    # no-op (renewal re-chowns what it already owns). Any other caller is an
+    # unprivileged session or dev context where chown cannot succeed — found
+    # when a non-root save() crashed the whole program at Config() import,
+    # because check=True turned "cannot give files away" into a fatal error on
+    # any host where the servette user exists.
+    if os.geteuid() != 0 and os.geteuid() != _servette_uid():
+        return
+    subprocess.run(["chown", "-R", "servette:servette", path], check=True)
 
 
 ```
@@ -929,12 +948,16 @@ def _verify_runtime(python_path, module_path):
     # host with neither still gets the import checked. Each dropper is named by
     # absolute path: they live in /usr/sbin, which the probe's own minimal PATH
     # does not carry, and a PATH miss would read as the runtime being broken.
+    # No dropper is tried at all without root — runuser and su cannot drop
+    # privilege the process does not hold, and their refusals ("may not be used
+    # by non-root users") would be reported as the runtime's problem.
     candidates = []
-    for tool, argv in (("runuser", ["-u", "servette", "--"] + probe),
-                       ("su", ["-s", "/bin/sh", "servette", "-c", quoted])):
-        found = shutil.which(tool) or shutil.which(tool, path="/usr/sbin:/sbin:/bin:/usr/bin")
-        if found:
-            candidates.append([found] + argv)
+    if os.geteuid() == 0:
+        for tool, argv in (("runuser", ["-u", "servette", "--"] + probe),
+                           ("su", ["-s", "/bin/sh", "servette", "-c", quoted])):
+            found = shutil.which(tool) or shutil.which(tool, path="/usr/sbin:/sbin:/bin:/usr/bin")
+            if found:
+                candidates.append([found] + argv)
     candidates.append(probe)
 
     last = "could not run the program as the servette user"

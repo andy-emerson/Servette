@@ -1243,6 +1243,29 @@ def run_dispatch_tests(s):
         check("An unreadable config is not a fatal one", probe.unreadable)
         check("An unreadable config stands in defaults, not the file's values",
               probe.port == 443)
+
+        # Construction tolerates the unreadable file; the live RELOAD must not.
+        # Adopting defaults there would swap a protected site's real config —
+        # auth and all — for no-auth defaults because a file's ownership broke.
+        # Demonstrated live during review: a running 401 became 404 (request
+        # processed with no challenge) the instant the config went unreadable.
+        good = s.Config()   # a readable one, from the real (readable) test config
+        good.sites[0].username = "op"
+        good.sites[0].password_hash = "deadbeef"
+        good._mtime = 0                              # force "changed on disk"
+        good.CONFIG_FILE = unreadable_cfg            # now points at the unreadable file
+        s.open = _denied
+        raised = adopted = None
+        try:
+            good.reload_if_changed()                 # must keep the last good config
+            adopted = good.unreadable
+        except SystemExit:
+            raised = "exit"
+        finally:
+            s.__dict__.pop("open", None)
+        check("A reload of an unreadable config neither exits nor adopts defaults",
+              raised is None and good.sites[0].username == "op")
+        check("...and keeps the authenticated site's password", good.sites[0].password_hash == "deadbeef")
     finally:
         s.Config.CONFIG_FILE = saved_cfg_file
         s.__dict__.pop("open", None)

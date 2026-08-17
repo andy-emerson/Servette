@@ -169,13 +169,17 @@ class Config:
     def __init__(self):
         self._mtime = None
         try:
-            self._load()
+            # Only construction tolerates an unreadable file: it must reach the
+            # dispatcher so a privileged command can elevate and read again as
+            # root. The reload path (below) must not, or it would swap a
+            # protected site's live config for no-auth defaults.
+            self._load(tolerate_unreadable=True)
         except _ConfigInvalid as e:
             print(f"Error: {e}.")
             print(f"Fix or delete {self.CONFIG_FILE} and try again.")
             sys.exit(1)
 
-    def _load(self):
+    def _load(self, tolerate_unreadable=False):
         # Everything that can be refused is parsed and validated before any
         # attribute of self changes: _load also runs against the LIVE config on
         # the reload path, and raising after a partial mutation would leave the
@@ -193,10 +197,17 @@ class Config:
                 # The file is there and we may not read it — the normal state on
                 # a configured host, where servette.toml is the service user's
                 # and mode 600, seen by an operator who has not elevated yet.
-                # Not an invalid config and not fatal: defaults stand in so the
+                # On construction this is not fatal: defaults stand in so the
                 # program can reach its dispatcher, which elevates and asks
-                # again as root. The flag is what stops those defaults being
-                # reported as if they were the operator's settings.
+                # again as root, and the flag stops those defaults being
+                # reported as the operator's settings. But on the live reload
+                # path adopting defaults would silently drop this site's auth
+                # and every other setting because a file's ownership broke — so
+                # there it is refused exactly like an invalid file, keeping the
+                # last good config. self is unmutated at this point, so raising
+                # here honours the reload invariant.
+                if not tolerate_unreadable:
+                    raise _ConfigInvalid("servette.toml exists but cannot be read")
                 self.unreadable = True
 
         site_tables = data.get("site", [])

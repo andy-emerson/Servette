@@ -4778,7 +4778,13 @@ def _startup_refresh():
                     _reload_server()
                 print(f"  Service refreshed to v{__version__}.")
             except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
-                print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
+                # Option A of the refresh decision (#99): notice and tell. The
+                # shell runs unprivileged, and a password prompt nobody asked
+                # for at launch is the one place self-elevation would stop
+                # feeling like Servette asking — so the refresh names the one
+                # command that finishes the upgrade, and 'enable' does its own
+                # asking when run.
+                print("  Service unit is stale for this version — run 'enable' to refresh it.")
             except ValueError:
                 # The writer refuses a path systemd cannot carry safely, and has
                 # already printed why. A refusal must not take the launch down

@@ -1095,6 +1095,9 @@ def run_dispatch_tests(s):
             s._startup_refresh()
         check("A refresh that needs root fails soft with a hint",
               "run 'enable'" in buf.getvalue())
+        # Option A (#99): the hint must not tell the operator to type sudo —
+        # enable elevates itself, and sudo-in-the-message is the retired world.
+        check("...and the hint never says sudo", "sudo" not in buf.getvalue())
     finally:
         for n, v in saved.items():
             setattr(s, n, v)

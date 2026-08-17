@@ -8,7 +8,7 @@ Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
 ## The diagnostic page is inlined, not shipped as a file
 
-**Ruled:** the page is authored as `src/selftest.html` — real HTML, editable
+**Ruled:** the page is authored as `src/diagnostics.html` — real HTML, editable
 and openable in a browser — and `build.py` inlines it into the module at build
 time. The installed package is Python only: `__init__.py` and `__main__.py`.
 **Why:** as package data it was a file an operator could delete, and deleting

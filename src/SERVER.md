@@ -758,13 +758,13 @@ Two reserved paths precede the handler: version discovery at `/.well-known/serve
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
 # The reserved diagnostic page (DECISIONS.md: "The self-test is server-
-# delivered, client-executed"): authored as src/selftest.html and inlined here
+# delivered, client-executed"): authored as src/diagnostics.html and inlined
 # by build.py, so it is part of the module rather than a file beside it. That
 # is deliberate — a page shipped as package data can be deleted on the box,
 # and deleting it would silently take the default 404 body with it. There is
 # no read at import and no missing-file case to degrade through.
 _SELFTEST_PATHS = ("/selftest", "/selftest/", "/selftest/index.html")
-_SELFTEST_PAGE = """@@SELFTEST_HTML@@""".encode()
+_SELFTEST_PAGE = """@@DIAGNOSTICS_HTML@@""".encode()
 _SELFTEST_ETAG = '"' + hashlib.sha256(_SELFTEST_PAGE).hexdigest()[:16] + '"'
 
 

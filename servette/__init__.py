@@ -708,15 +708,15 @@ def _security_headers(site):
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
 # The reserved diagnostic page (DECISIONS.md: "The self-test is server-
-# delivered, client-executed"): authored as src/selftest.html and inlined here
+# delivered, client-executed"): authored as src/diagnostics.html and inlined
 # by build.py, so it is part of the module rather than a file beside it. That
 # is deliberate — a page shipped as package data can be deleted on the box,
 # and deleting it would silently take the default 404 body with it. There is
 # no read at import and no missing-file case to degrade through.
 _SELFTEST_PATHS = ("/selftest", "/selftest/", "/selftest/index.html")
 _SELFTEST_PAGE = """<!DOCTYPE html>
-<!-- servette/selftest.html — the diagnostic page, shipped inside the module
-     and served in two roles (see DECISIONS.md, "The self-test is
+<!-- src/diagnostics.html — the diagnostic page, inlined into the module by
+     build.py and served in two roles (see DECISIONS.md, "The self-test is
      server-delivered, client-executed"):
 
        /selftest/  at 200 — the connection self-test, asked for on purpose.

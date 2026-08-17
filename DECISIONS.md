@@ -6,6 +6,24 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A stale unit is noticed and told, not auto-refreshed (#99)
+
+**Ruled (Human):** after an upgrade, the unprivileged shell notices the stale
+systemd unit at launch and says so; `enable` — which elevates itself — is the
+documented second half of an upgrade. `pipx upgrade servette` + `enable` is the
+complete pair, and README documents exactly that.
+**Why:** the alternatives put a password prompt at shell launch that the
+operator did not ask for — the one place self-elevation would stop feeling
+like Servette asking and start feeling like Servette demanding.
+**Rejected:** the refresh elevating itself when stale (zero extra commands and
+the old auto-refresh claim stays true, at the cost of an unprompted password
+request on every launch until it succeeds); refreshing automatically only when
+the shell happens to be root (two behaviors to test for a habit the install no
+longer teaches).
+**Reopen if:** operators demonstrably miss the `enable` step and run stale
+services long after upgrading — the failure this trades away is silent
+staleness, and evidence of it changes the balance. *(#99, 2026-08-17)*
+
 ## The cryptography floor is 48.0.1
 
 **Ruled (Human):** `dependencies = ["cryptography>=48.0.1"]`, no ceiling. The

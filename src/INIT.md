@@ -20,7 +20,7 @@ Servette — The Simple Secure Static Site Server
 Servette serves a directory of static files over HTTPS with optional Basic Auth
 and essential security headers. Run it:
 
-    sudo servette
+    servette
 
 Architecture:
     Server              — config, rate limiting, file cache, the request handler, and the HTTP servers

@@ -35,6 +35,22 @@ Three ways in. systemd runs `--serve`: refuse outright a config that exists but 
 ```python
 # The entry point
 def main():
+    try:
+        _main()
+    except BrokenPipeError:
+        # A consumer closed stdout mid-print — `servette status | head` is the
+        # canonical case. That is the consumer's normal behavior, not a fault
+        # here, so no traceback. stdout is re-pointed at devnull before exit so
+        # the interpreter's shutdown flush cannot raise the same error again,
+        # and the exit status is 141 (128+SIGPIPE): what the shell reports for
+        # any tool that dies on a closed pipe, so pipelines see the convention
+        # they already handle.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(141)
+
+
+def _main():
     if sys.argv[1:2] == ["--serve"]:
         # Fail closed. Defaults standing in for an unreadable config is the
         # SHELL's affordance — it elevates and reads again as root. A service

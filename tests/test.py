@@ -1302,6 +1302,27 @@ def run_dispatch_tests(s):
         sys.argv[:] = saved_argv
         s.config.unreadable = saved_unreadable_serve
 
+    # The one-shot form is documented as the way scripts drive Servette, and a
+    # script's first move is a pipe: `servette status | head` must end at the
+    # consumer's convenience, not in a BrokenPipeError traceback. Exercised for
+    # real — a subprocess writing into a pipe head has already closed — because
+    # the handler dup2s over the true stdout fd, which no StringIO can stand in
+    # for. 141 is 128+SIGPIPE: what the shell reports for any tool that dies on
+    # a closed pipe.
+    if shutil.which("bash"):
+        r = subprocess.run(
+            ["bash", "-c",
+             'set -o pipefail; '
+             f'SERVETTE_HOME="{SERVETTE_DIR}" "{sys.executable}" '
+             f'"{os.path.join(SERVETTE_DIR, "servette.py")}" status '
+             '2>/tmp/servette-pipe-probe.err | head -c 5 >/dev/null; '
+             'echo "${PIPESTATUS[0]}"'],
+            capture_output=True, text=True, timeout=60)
+        err = open("/tmp/servette-pipe-probe.err").read()
+        check("A closed stdout ends the one-shot quietly, exit 141",
+              r.stdout.strip() == "141" and "Traceback" not in err)
+        os.remove("/tmp/servette-pipe-probe.err")
+
     # _needs_root reads the live singleton, so drive that flag directly rather
     # than swapping the whole config out from under the rest of the suite.
     saved_unreadable = s.config.unreadable

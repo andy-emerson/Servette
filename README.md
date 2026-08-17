@@ -102,7 +102,7 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
    Re-running the install is always safe.
    </details>
 
-### Deploy on your own machine (e.g. a Raspberry Pi)### Deploy on your own machine (e.g. a Raspberry Pi)
+### Deploy on your own machine (e.g. a Raspberry Pi)
 
 1. **Install a Linux OS and enable SSH** (the Raspberry Pi Imager can set this up before first boot).
 2. **Forward ports 80 and 443** on your router to the machine, and point a domain's `A` record at your public IP (a dynamic-DNS service keeps the record current if your home IP changes). Skip this to run on your LAN only, with a self-signed certificate.
@@ -167,7 +167,7 @@ Each site can have a **publish channel**: build a signed bundle of your site in 
 | Path | What it is |
 |---|---|
 | `servette.py` | The entire product — server, system, and shell in one module, generated from `src/` and committed to be read. The package build regenerates it from `src/` at every install, and CI holds the committed copy equal to the sources. The error page is inlined into it from `src/404.html`, so an install is Python only |
-| `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into the module |
+| `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`), the error page (`404.html`), and the build — `build.py`, plus the backend that runs it inside every package build |
 | `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 and 3.14) and Debian 12 |
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
@@ -175,4 +175,4 @@ Each site can have a **publish channel**: build a signed bundle of your site in 
 | `CONTRIBUTING.md` · `SECURITY.md` | How to contribute, and how to report a vulnerability |
 | `LICENSE` | MIT |
 
-The deploy guide above is the complete walkthrough; [servette.org](https://servette.org) carries the live self-test, a browsable view of the sources, and the publish tool.
+The deploy guide above is the complete walkthrough; [servette.org](https://servette.org) carries a browsable view of the sources and the publish tool.

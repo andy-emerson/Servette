@@ -6,6 +6,54 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The cryptography floor is 48.0.1
+
+**Ruled (Human):** `dependencies = ["cryptography>=48.0.1"]`, no ceiling. The
+floor tracks Servette's actual exposure, not the dependency's total advisory
+count: 48.0.1 is the lowest release whose statically-linked OpenSSL carries no
+published advisory — bundled OpenSSL is in the process no matter which APIs are
+called, so it sets the hard floor. Every advisory fixed above it
+(CVE-2026-69247, PKCS#7 decryption; CVE-2026-69248/-69249, the X.509 chain
+verifier) sits in APIs Servette never calls: its use of the library is X.509
+load/generate, Ed25519 verification, RSA signing for ACME, hashes and
+serialization.
+**Corrects the record:** the previous floor (50.0) was set by the Agent inside
+a merged commit, never surfaced as a decision, and its comment claimed
+CVE-2026-69247 "affects every cryptography below 50.0.0" — false on the
+advisory data (the CVE does not affect 41.x at all). The Human caught it.
+**Rejected:** >=50.0, the only release with zero published advisories — free in
+practice (a pipx install resolves newest regardless), but it encodes "no known
+advisories anywhere in the library" where this ruling encodes "no known
+advisories in what Servette runs," and the Human chose the scoped claim.
+**Reopen when:** Servette starts calling the X.509 verifier or PKCS#7 APIs —
+the call-graph scoping this floor rests on is then stale and the floor must be
+re-derived. *(2026-08-17)*
+
+## servette.py is committed to be read; the sources stay canonical
+
+**Ruled (Human):** the generated `servette.py` is committed at the repository
+root — the browsable single file — while `src/` remains the only source of
+truth: the package build regenerates the module from the sources at every
+install (`src/_literate_backend.py`), so what ships never depends on the
+committed copy, and `build.py --check` holds the committed copy byte-for-byte
+equal to the sources' build in CI.
+**Narrows "`pip install servette` is the only installation path"
+([above](#pip-install-servette-is-the-only-installation-path)):** a committed
+module is inevitably also a copyable one, and the Human closes that with eyes
+open — it was demonstrated before ruling that the copied file runs on a stock
+host against the system cryptography (41.0.7 on the test image, below even
+this ruling's floor), with no version resolution, no isolation, no upgrade
+path. The documented install remains exactly one: pipx. The copy path is
+deliberately undocumented — not removed, not explained: operators who know
+what to do with a single Python file do not need instructions, and everyone
+else is told the one path that carries the dependency floor with it.
+**Rejected:** not committing the module (drift-proof and enforces one-path
+structurally, but leaves no program to read in the repository); committing it
+and shipping the committed copy directly (simplest machinery, but PyPI would
+then trust a file that can drift rather than the sources).
+*(2026-08-17; supersedes the not-committed half of the 2026-08-17 single-file
+build decision)*
+
 ## Servette asks for root; the operator never types sudo
 
 **Ruled:** privileged commands elevate themselves. `run_command` re-runs the
@@ -107,7 +155,10 @@ fallback is offered in its place. That is the point: the gap is visible
 pressure to publish rather than a path that quietly substitutes for it.
 **Reopen:** an operator population that genuinely cannot reach PyPI — in which
 case the answer is a decided, documented second channel, not the return of an
-undocumented one. *(2026-08-17)*
+undocumented one. **Narrowed:** the committed `servette.py` is copyable and
+deliberately undocumented — see
+[servette.py is committed to be read](#servettepy-is-committed-to-be-read-the-sources-stay-canonical).
+*(2026-08-17)*
 
 ## The website lives in its own repository
 

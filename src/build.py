@@ -35,6 +35,7 @@ Usage:
 
 import argparse
 import difflib
+import subprocess
 import os
 import re
 import sys
@@ -216,16 +217,22 @@ _DOC_FILES = ["README.md", "DESIGN.md", "DECISIONS.md", "CONTRIBUTING.md",
 # it to silence a genuine miss is how a gate becomes decoration.
 _DOC_ALLOWLIST = {
     # Files that live on an operator's server, not in this repository.
+    # 404.html is listed even though src/404.html happens to be tracked: the
+    # documents' mentions mean the OPERATOR'S override file, and this entry
+    # keeps them passing if the source file is ever renamed again.
     "404.html":      "the operator's own error page, in their site folder",
     "index.html":    "the operator's home page",
     "servette.toml": "written at runtime into the data directory",
     "cert.pem":      "written at runtime into the data directory",
     "key.pem":       "written at runtime into the data directory",
-    "servette.service": "written at runtime into /etc/systemd/system",
     # Things named for comparison, which are other projects.
     "bottle.py":     "a peer project named in the comparison table",
     # Names belonging to the websites repository, which reads this one.
     "SERVETTE_SRC":  "an env var the websites repo's harness sets, not ours",
+    # Metadata inside installed wheels, read via importlib.metadata. Caught by
+    # the tracked-files check the moment it landed: this name had been passing
+    # only because untracked egg-info litter at the repo root contained one.
+    "top_level.txt": "a wheel's own metadata, not a repository file",
 }
 
 _IDENT_RE = re.compile(r"^_?[A-Za-z][A-Za-z0-9_]*(\(\))?$")
@@ -292,6 +299,28 @@ def _command_names(module, list_name):
             for entry in re.findall(r'\("([^"]+)"', m.group(1))}
 
 
+_TRACKED_CACHE = {}
+
+
+def _tracked_files(repo_dir):
+    """The repository's tracked paths, or None outside a usable git checkout.
+
+    Resolving against the working tree let a stale doc name pass because the
+    right-named LITTER existed — the suite runs with SERVETTE_HOME set to the
+    repository, so a servette.toml and certs materialize at the root on every
+    run. What a document claims exists should be judged against what the
+    repository ships, which is what git tracks."""
+    if repo_dir not in _TRACKED_CACHE:
+        try:
+            out = subprocess.run(["git", "-C", repo_dir, "ls-files"],
+                                 capture_output=True, text=True, timeout=15)
+            _TRACKED_CACHE[repo_dir] = (set(out.stdout.splitlines())
+                                        if out.returncode == 0 and out.stdout else None)
+        except (OSError, subprocess.SubprocessError):
+            _TRACKED_CACHE[repo_dir] = None
+    return _TRACKED_CACHE[repo_dir]
+
+
 def _resolves(token, doc_name, repo_dir):
     """Whether a path a document names is a file in this repository.
 
@@ -301,7 +330,20 @@ def _resolves(token, doc_name, repo_dir):
     — docs legitimately call the module `__init__.py` without spelling out
     servette/. The last reading is the loosest, which is the point: this check
     exists to catch a name for something that no longer exists anywhere, not to
-    police how precisely a sentence spells a path."""
+    police how precisely a sentence spells a path.
+
+    Judged against git's tracked files where there is a checkout to ask, the
+    filesystem otherwise (a tarball, a stripped CI workspace)."""
+    tracked = _tracked_files(repo_dir)
+    doc_dir_rel = os.path.dirname(doc_name)
+    if tracked is not None:
+        candidates = {os.path.normpath(os.path.join(doc_dir_rel, token)),
+                      os.path.normpath(token)}
+        if candidates & tracked:
+            return True
+        if "/" not in token:
+            return any(f.rsplit("/", 1)[-1] == token for f in tracked)
+        return False
     doc_dir = os.path.dirname(os.path.join(repo_dir, doc_name))
     for base in (doc_dir, repo_dir):
         if os.path.exists(os.path.join(base, token)):

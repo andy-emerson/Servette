@@ -1248,6 +1248,33 @@ def run_dispatch_tests(s):
         s.__dict__.pop("open", None)
         shutil.rmtree(unreadable_home, ignore_errors=True)
 
+    # The shell's defaults-stand-in affordance must never reach the SERVE path:
+    # the defaults carry no password, so serving them would open a protected
+    # site because a file's ownership broke. Demonstrated live during review —
+    # a 0600 root-owned config served "OPERATOR-ONLY CONTENT" at 200 with no
+    # credentials. --serve now refuses instead.
+    saved_start, saved_argv = s.start_server, sys.argv[:]
+    saved_unreadable_serve = s.config.unreadable
+    started = []
+    try:
+        s.start_server = lambda: started.append(True)
+        s.config.unreadable = True
+        sys.argv[:] = ["servette", "--serve"]
+        code = None
+        logging.disable(logging.CRITICAL)
+        try:
+            s.main()
+        except SystemExit as e:
+            code = e.code
+        finally:
+            logging.disable(logging.NOTSET)
+        check("--serve with an unreadable config exits nonzero", code == 1)
+        check("...without ever starting the server", not started)
+    finally:
+        s.start_server = saved_start
+        sys.argv[:] = saved_argv
+        s.config.unreadable = saved_unreadable_serve
+
     # _needs_root reads the live singleton, so drive that flag directly rather
     # than swapping the whole config out from under the rest of the suite.
     saved_unreadable = s.config.unreadable
@@ -1802,6 +1829,45 @@ def run_dispatch_tests(s):
     finally:
         shutil.rmtree(extract_root, ignore_errors=True)
 
+    section("Ownership plans")
+
+    # The plan is computed apart from the run so this is testable without root.
+    saved_sue = s._servette_user_exists
+    try:
+        s._servette_user_exists = lambda: True
+        plan = s._operator_chown_plan("/x", strip_world=True)
+        check("strip_world removes world bits in the same chmod",
+              ["chmod", "-R", "g+rX,o-rwx", "/x"] in plan)
+        plan = s._operator_chown_plan("/x")
+        check("...and an operator-filled tree keeps its own modes (g+rX only)",
+              ["chmod", "-R", "g+rX", "/x"] in plan
+              and not any("o-rwx" in " ".join(argv) for argv in plan))
+    finally:
+        s._servette_user_exists = saved_sue
+
+    # The serve_dir readability warning must accept the group-only grant the
+    # plan just made — the old check demanded world bits and told the operator
+    # to add them, undoing the grant two lines above it.
+    probe_dir = tempfile.mkdtemp()
+    saved_gid = s._servette_gid
+    try:
+        os.chmod(probe_dir, 0o755)
+        check("World-readable serve_dir passes", s._serve_dir_readable(probe_dir))
+        os.chmod(probe_dir, 0o750)
+        s._servette_gid = lambda: os.stat(probe_dir).st_gid
+        check("Group-only serve_dir passes when the group is servette",
+              s._serve_dir_readable(probe_dir))
+        s._servette_gid = lambda: -1
+        check("...and fails when it is some other group",
+              not s._serve_dir_readable(probe_dir))
+        os.chmod(probe_dir, 0o700)
+        s._servette_gid = lambda: os.stat(probe_dir).st_gid
+        check("Owner-only serve_dir fails regardless",
+              not s._serve_dir_readable(probe_dir))
+    finally:
+        s._servette_gid = saved_gid
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
     section("Atomic site-content swap and restore")
 
     saved_serve_dir = s.config.sites[0].serve_dir
@@ -1838,12 +1904,18 @@ def run_dispatch_tests(s):
               open(os.path.join(s.config.sites[0].serve_dir + ".bak", "marker.txt")).read() == "v2")
 
         saved_input = builtins.input
+        saved_chownop_r = s._chown_operator
+        restore_chowns = []
         try:
             builtins.input = lambda prompt="": "y"
+            s._chown_operator = lambda path, strip_world=False: restore_chowns.append((path, strip_world))
             with contextlib.redirect_stdout(io.StringIO()):
                 s.cmd_restore_site(s.config.sites[0])
         finally:
             builtins.input = saved_input
+            s._chown_operator = saved_chownop_r
+        check("Restore re-establishes operator ownership (the backup came from a pull)",
+              (s._resolve(s.config.sites[0].serve_dir).rstrip(os.sep), True) in restore_chowns)
         check("Restore: live content reverts to the backup (v2)",
               open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
         check("Restore: backup is consumed",
@@ -1909,10 +1981,25 @@ def run_dispatch_tests(s):
 
         urllib.request.urlopen = lambda url, timeout=None: (
             _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        result = s._check_for_content_update(s.config.sites[0])
+        # The tree a pull swaps in was extracted by this process — root, when
+        # the command elevated — so the pull must re-establish operator
+        # ownership itself, with world bits stripped: without it every pull
+        # left the site root-owned and world-readable.
+        saved_chownop = s._chown_operator
+        chown_calls = []
+        s._chown_operator = lambda path, strip_world=False: chown_calls.append((path, strip_world))
+        try:
+            result = s._check_for_content_update(s.config.sites[0])
+        finally:
+            s._chown_operator = saved_chownop
         check("Correctly signed bundle is published",
               open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
         check("Returns 'published'", result == "published")
+        live2 = s._resolve(s.config.sites[0].serve_dir).rstrip(os.sep)
+        check("Pull re-establishes operator ownership, world bits stripped",
+              (live2, True) in chown_calls)
+        check("...and on the backup it left behind",
+              (live2 + ".bak", True) in chown_calls)
 
         other_key = Ed25519PrivateKey.generate()
         bad_sig   = other_key.sign(bundle_bytes)
@@ -1920,9 +2007,16 @@ def run_dispatch_tests(s):
             _FakeResp(bad_sig) if url.endswith(".sig") else _FakeResp(bundle_bytes))
         with open(os.path.join(s.config.sites[0].serve_dir, "index.html"), "w") as f:
             f.write("unchanged")
+        chown_calls.clear()
+        s._chown_operator = lambda path, strip_world=False: chown_calls.append((path, strip_world))
         logging.disable(logging.CRITICAL)
-        result = s._check_for_content_update(s.config.sites[0])
+        try:
+            result = s._check_for_content_update(s.config.sites[0])
+        finally:
+            s._chown_operator = saved_chownop
         logging.disable(logging.NOTSET)
+        check("A rejected bundle re-establishes nothing (nothing changed)",
+              chown_calls == [])
         check("Bundle signed by the wrong key is rejected, content unchanged",
               open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "unchanged")
         check("Returns 'bad-signature'", result == "bad-signature")
@@ -2768,6 +2862,12 @@ def run_install_tests(s, tmpdir):
     ro_line = next((l for l in service.splitlines() if l.startswith("ReadOnlyPaths=")), "")
     check("The package is pinned read-only — holds even for a checkout inside the data dir (#47)",
           package_dir in ro_line)
+    for directive in ("PrivateDevices=yes", "ProtectClock=yes", "ProtectHostname=yes",
+                      "ProtectKernelLogs=yes", "ProtectProc=invisible",
+                      "RestrictRealtime=yes", "RestrictNamespaces=yes",
+                      "SystemCallArchitectures=native",
+                      "Environment=PYTHONDONTWRITEBYTECODE=1"):
+        check(f"Unit carries {directive.split('=')[0]}", directive in service)
     check("The service starts the package with the enabling shell's interpreter",
           f"ExecStart={sys.executable} -m servette --serve" in service)
     check("PYTHONPATH resolves -m servette for checkout deployments",
@@ -2868,8 +2968,8 @@ def run_install_tests(s, tmpdir):
             unit = s._systemd_unit(s._unit_python_path(), s._unit_package_dir())
             check("...on PYTHONPATH, since the copy is not site-packages",
                   f"Environment=PYTHONPATH={s.RUNTIME_DIR}" in unit)
-            check("...and pinned read-only inside the writable data directory",
-                  f"ReadOnlyPaths={os.path.join(s.RUNTIME_DIR, 'servette')}" in unit)
+            check("...and the WHOLE copy pinned read-only, dependencies included",
+                  f"ReadOnlyPaths={s.RUNTIME_DIR}\n" in unit)
             check("An interpreter path with whitespace is refused, not encoded",
                   s._unsafe_unit_path() is None)
             s._system_python = lambda: "/home/my user/.venv/bin/python"
@@ -2906,6 +3006,22 @@ def run_install_tests(s, tmpdir):
     check("A runtime that works verifies",
           s._verify_runtime(sys.executable,
                             os.path.dirname(os.path.abspath(s.__file__))) is None)
+
+    # The probe must judge the service against the config the unit will carry,
+    # which means the same SERVETTE_HOME — without it, a shell run with a
+    # non-default data directory verified against the default one's config.
+    saved_probe_run = s.subprocess.run
+    probe_envs = []
+    class _Ok:
+        returncode, stdout, stderr = 0, "", ""
+    try:
+        s.subprocess.run = lambda *a, **k: probe_envs.append(k.get("env")) or _Ok()
+        s._verify_runtime(sys.executable, os.path.dirname(os.path.abspath(s.__file__)))
+        check("The probe carries the unit's own SERVETTE_HOME",
+              probe_envs and all(e and e.get("SERVETTE_HOME") == s.BASE_DIR
+                                 for e in probe_envs))
+    finally:
+        s.subprocess.run = saved_probe_run
     problem = s._verify_runtime(sys.executable, os.path.join(tmpdir, "nowhere", "servette"))
     check("...and one the program is not in does not",
           isinstance(problem, str) and "servette" in problem)
@@ -3780,6 +3896,38 @@ def run_doc_check_tests(tmpdir):
           == {"log", "setup"})
     check("A renamed command list reads as empty rather than as agreement",
           build._command_names("nothing here", "_COMMANDS") == set())
+
+    # Litter must not satisfy the checker: the suite itself materializes files
+    # at the repo root (SERVETTE_HOME is the repo), and one stale doc name was
+    # found passing only because egg-info residue happened to contain it.
+    litter = os.path.join(SERVETTE_DIR, "litter-probe-only.md")
+    with open(litter, "w") as f:
+        f.write("x")
+    try:
+        check("An untracked file at the root does not resolve",
+              build.token_problem("litter-probe-only.md", "DESIGN.md",
+                                  SERVETTE_DIR, "") == "no such file in the repository")
+    finally:
+        os.remove(litter)
+
+    # The interpreter-version probe runs once per path, not per ask — the
+    # staleness chain asks several times per launch, and each ask used to
+    # spawn every candidate interpreter again.
+    probe_calls = []
+    fake = os.path.join(tmpdir, "never-a-python")
+    import servette as s_mod
+    saved_srun2 = s_mod.subprocess.run
+    def counting_run(argv, **k):
+        probe_calls.append(argv)
+        raise OSError("no such interpreter")
+    try:
+        s_mod.subprocess.run = counting_run
+        r1 = s_mod._python_minor(fake)
+        r2 = s_mod._python_minor(fake)
+        check("A failed interpreter probe is asked once and remembered",
+              r1 is None and r2 is None and len(probe_calls) == 1)
+    finally:
+        s_mod.subprocess.run = saved_srun2
 
     # And the gate itself, against the real repository.
     with contextlib.redirect_stdout(io.StringIO()) as out:

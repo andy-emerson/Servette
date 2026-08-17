@@ -30,12 +30,22 @@ config = Config()
 
 ```
 
-Three ways in. systemd runs `--serve`: serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. `servette <command>` runs one shell command and exits — the form external tooling drives (over SSH, which is the authentication), sharing the interactive shell's dispatcher so the two surfaces cannot drift; it exits 2 on an unknown command, passes on sudo's exit status when the command elevated, and deliberately skips the startup refresh so `status --json` output stays parseable. Bare `servette` is the interactive shell. (`python -m servette` is the same entry through `__main__.py`.)
+Three ways in. systemd runs `--serve`: refuse outright a config that exists but cannot be read (the shell's defaults-stand-in affordance would serve a password-protected site with no password), then serve until stopped, and exit nonzero if the server dies on its own, so systemd restarts the service. `servette <command>` runs one shell command and exits — the form external tooling drives (over SSH, which is the authentication), sharing the interactive shell's dispatcher so the two surfaces cannot drift; it exits 2 on an unknown command, passes on sudo's exit status when the command elevated, and deliberately skips the startup refresh so `status --json` output stays parseable. Bare `servette` is the interactive shell. (`python -m servette` is the same entry through `__main__.py`.)
 
 ```python
 # The entry point
 def main():
     if sys.argv[1:2] == ["--serve"]:
+        # Fail closed. Defaults standing in for an unreadable config is the
+        # SHELL's affordance — it elevates and reads again as root. A service
+        # has no second try, and the defaults carry no password: serving them
+        # would open a protected site to the world because a file's ownership
+        # broke. Exiting nonzero puts the truth in the journal instead.
+        if config.unreadable:
+            log.error("servette.toml exists but cannot be read — refusing to "
+                      "serve defaults in its place. Fix its ownership: "
+                      "chown servette:servette %s", config.CONFIG_FILE)
+            sys.exit(1)
         start_server()
         try:
             _watch_server()

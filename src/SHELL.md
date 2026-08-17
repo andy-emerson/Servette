@@ -943,6 +943,17 @@ def _check_for_content_update(site):
             shutil.rmtree(staging, ignore_errors=True)
             return "rejected"
 
+        # The tree just swapped in was extracted by this process — root, since
+        # pull elevates — so re-establish what enable establishes: the operator
+        # owns their content, the service reads through its group. strip_world
+        # because the extraction's own 644/755 modes are Servette's writing,
+        # not the operator's, and must honour the never-world-bits promise.
+        # Without this, every pull left the site root-owned — the operator
+        # locked out of their own folder — and world-readable.
+        live = _resolve(site.serve_dir).rstrip(os.sep)
+        _chown_operator(live, strip_world=True)
+        _chown_operator(live + ".bak", strip_world=True)
+
     log.info("Published new content for %s from %s", site.domain or site.serve_dir, site.publish_url)
     return "published"
 
@@ -992,6 +1003,9 @@ def cmd_restore_site(site):
         if os.path.isdir(live_dir):
             shutil.rmtree(live_dir)
         os.rename(bak_dir, live_dir)
+        # The backup was made by a pull, which extracted it as root — same
+        # ownership repair as the pull itself, for the same reason.
+        _chown_operator(live_dir, strip_world=True)
     print("  Site content restored from backup.")
 
 

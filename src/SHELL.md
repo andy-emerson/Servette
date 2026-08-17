@@ -1489,13 +1489,10 @@ def _startup_refresh():
             except (PermissionError, FileNotFoundError, subprocess.CalledProcessError):
                 print("  Service unit is stale for this version — run 'enable' with sudo to refresh.")
             except ValueError:
-                # The writer refuses some hosts outright and has already said
-                # why: a path systemd cannot carry, or a package pip does not
-                # own. Both are states an existing host can be *upgraded* into
-                # — a box enabled from a checkout before installation was
-                # narrowed to pip still has units, and they go stale on the
-                # next version — so this must leave the shell usable rather
-                # than take the launch down with it.
+                # The writer refuses a path systemd cannot carry safely, and has
+                # already printed why. A refusal must not take the launch down
+                # with it: _startup_refresh runs on every interactive start, so
+                # an un-writable unit has to leave a usable shell behind.
                 print("  Leaving the existing service untouched.")
 
 

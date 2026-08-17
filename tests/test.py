@@ -2659,58 +2659,36 @@ def run_install_tests(s, tmpdir):
           package_dir in ro_line)
     check("The service starts the package with the enabling shell's interpreter",
           f"ExecStart={sys.executable} -m servette --serve" in service)
-    # One installation path: the unit resolves the package from the
-    # interpreter's own site-packages and names no other directory. A unit
-    # carrying PYTHONPATH could start a service from a tree pip does not own —
-    # a second way to install Servette — and would shadow the stdlib from it.
-    check("No unit carries PYTHONPATH, whatever the package location",
-          "PYTHONPATH" not in service)
+    check("PYTHONPATH resolves -m servette for checkout deployments",
+          f"Environment=PYTHONPATH={os.path.dirname(package_dir)}" in service)
     pip_unit = s._systemd_unit(sys.executable, "/v/lib/python3.11/site-packages/servette")
-    check("A pip-installed package gets no PYTHONPATH either",
+    check("A pip-installed package gets no PYTHONPATH (nothing to widen)",
           "PYTHONPATH" not in pip_unit)
 
-    # And the refusal that makes the above unreachable by accident: this
-    # checkout is not pip-installed, so writing units must fail closed rather
-    # than produce a unit pointing at a directory pip does not manage.
-    saved_uup = s._unsafe_unit_path
+    # A unit the writer refuses must not take the shell launch down with it:
+    # _startup_refresh calls the writer on every interactive start, and the
+    # whitespace-path refusal raises rather than returning.
+    saved_r = {n: getattr(s, n) for n in
+               ("_unsafe_unit_path", "_service_file_exists", "_stale_units",
+                "_service_env_drift", "_servette_user_exists")}
     try:
-        s._unsafe_unit_path = lambda: None      # past the whitespace guard
-        refused = False
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
+        s._unsafe_unit_path    = lambda: "/bad path/servette"
+        s._service_file_exists = lambda: True
+        s._stale_units         = lambda: [s.SERVICE_PATH]
+        s._service_env_drift   = lambda: []
+        s._servette_user_exists= lambda: True
+        crashed = None
+        with contextlib.redirect_stdout(io.StringIO()) as rbuf:
             try:
-                s._write_unit_files()
-            except ValueError:
-                refused = True
-        check("A non-pip-installed package is refused a service unit", refused)
-        check("...and says pip install servette", "pip install servette" in buf.getvalue())
-
-        # The refusal must not take the shell down with it. Both ValueError
-        # refusals — a whitespace path, and a package pip does not own — are
-        # states an existing host can be UPGRADED into: a box enabled from a
-        # checkout before installation was narrowed still has units, and they
-        # go stale on the next version. _startup_refresh runs on every launch.
-        saved = {n: getattr(s, n) for n in
-                 ("_service_file_exists", "_stale_units", "_service_env_drift",
-                  "_servette_user_exists")}
-        try:
-            s._service_file_exists  = lambda: True
-            s._stale_units          = lambda: [s.SERVICE_PATH]
-            s._service_env_drift    = lambda: []
-            s._servette_user_exists = lambda: True
-            crashed = None
-            with contextlib.redirect_stdout(io.StringIO()) as rbuf:
-                try:
-                    s._startup_refresh()
-                except Exception as e:
-                    crashed = e
-            check("A refused unit write does not crash the shell launch", crashed is None)
-            check("...and says the existing service was left alone",
-                  "Leaving the existing service untouched" in rbuf.getvalue())
-        finally:
-            for n, v in saved.items():
-                setattr(s, n, v)
+                s._startup_refresh()
+            except Exception as e:
+                crashed = e
+        check("A refused unit write does not crash the shell launch", crashed is None)
+        check("...and says the existing service was left alone",
+              "Leaving the existing service untouched" in rbuf.getvalue())
     finally:
-        s._unsafe_unit_path = saved_uup
+        for n, v in saved_r.items():
+            setattr(s, n, v)
 
     # Paths systemd cannot carry are refused, not encoded wrongly.
     saved_base = s.BASE_DIR

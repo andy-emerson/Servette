@@ -11,15 +11,18 @@ Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 **Ruled:** there is one way to install Servette, and every other way is
 removed rather than merely discouraged. The documented install is
 `pip install servette`; nothing in the repository or its documents describes,
-supports, or enables another. **Enforced, not just written down:**
-`_write_unit_files` refuses to write a systemd unit unless the package sits in
-the interpreter's `site-packages`/`dist-packages`, and the unit carries no
-`PYTHONPATH`, so a directory pip does not own cannot become a running service.
-**Removed:** the `git+https://` install and update commands from README; the
-`pipx` alternative; the conditional `PYTHONPATH` that made a checkout
-deployment work; and the website, which by living here let a checkout serve
+supports, or enables another. **Removed:** the
+`git+https://` install and update commands from README; the `pipx`
+alternative; and the website, which by living here let a checkout serve
 servette.org and so kept clone-and-run alive as the shortest path
-([above](#the-website-lives-in-its-own-repository)). **Why so absolute:** a
+([above](#the-website-lives-in-its-own-repository)). **Not enforced in the
+server:** an attempt to gate `enable` on the package sitting in
+`site-packages` was made and reverted. Running as a supervised service that
+survives reboots is one of the five principles — a core function of the
+program — and a core function does not answer to a packaging question. The
+scope of this ruling is what the project *offers and documents*, not a
+capability withheld from a running server. Distribution is closed by having
+one documented channel, not by crippling systemd. **Why so absolute:** a
 second install path is a second thing to document, test, and support, and the
 cheap one gets suggested — repeatedly — precisely because it exists. A
 capability that is only discouraged is a capability. **Consequence accepted:**

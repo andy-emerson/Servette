@@ -722,7 +722,7 @@ def cmd_start():
                 log.info("Service started")
                 cmd_status()
             except PermissionError:
-                print("Error: start requires sudo. Run: sudo python3 servette.py")
+                print("Error: start needs root, and sudo is unavailable — re-run as root.")
             except FileNotFoundError:
                 print("Error: start requires a Linux server with systemd.")
             except subprocess.CalledProcessError as e:
@@ -753,7 +753,7 @@ def cmd_stop():
             log.info("Service stopped")
             stopped = True
         except PermissionError:
-            print("Error: stop requires sudo. Run: sudo python3 servette.py")
+            print("Error: stop needs root, and sudo is unavailable — re-run as root.")
         except FileNotFoundError:
             print("Error: stop requires a Linux server with systemd.")
         except subprocess.CalledProcessError as e:
@@ -1449,7 +1449,7 @@ def cmd_set(args):
     try:
         config.save()
     except PermissionError:
-        print("  Error: writing the config requires sudo. Run: sudo servette set ...")
+        print("  Error: writing the config needs root, and sudo is unavailable — re-run as root.")
         return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 
@@ -1498,6 +1498,92 @@ def _startup_refresh():
 
 ```
 
+Servette needs root for a handful of things — the systemd unit, the service user, the config the service reads, the site folders it serves. It asks for that itself rather than requiring `sudo` in front of every invocation: prefixing the command forces the console script onto `sudo`'s `secure_path`, which forces an install to put it there, which is two of the three steps an install used to need.
+
+```python
+# Elevating to root
+# The commands that never do their work as an ordinary user: they write the
+# config the service reads, the unit files, or a site folder the service user
+# owns. Read-only ones (status, sites, log) are absent deliberately — they must
+# keep working without a password prompt.
+_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "pull",
+                  "restore-site")
+
+# What sudo made of the last elevated command. The one-shot `servette <command>`
+# form exits with it, so tooling driving Servette over SSH sees a refused
+# password as a failure rather than a silent success; the interactive shell
+# ignores it and keeps its prompt.
+_elevated_status = 0
+
+
+def _needs_root(cmd):
+    """Whether this command, run right now, has work only root can do.
+
+    An unreadable servette.toml makes that true of everything, including the
+    read-only commands: without the file this process is holding defaults, and
+    reporting those as the operator's settings would be a lie. One password
+    prompt beats a confident wrong answer.
+
+    start and stop are the conditional pair. They drive systemd when a unit is
+    installed — root — but otherwise act on a session server living in this
+    process, which an elevated child could neither keep alive after it exits
+    nor reach in its parent. On that path they stay here and a privileged port
+    reports its own bind failure, which is the truthful answer."""
+    if config.unreadable:
+        return True
+    if cmd in _ROOT_COMMANDS:
+        return True
+    if cmd == "start":
+        return _service_file_exists()
+    if cmd == "stop":
+        return _service_is_active() and not _server_running()
+    return False
+
+
+def _elevate(cmd, args):
+    """Re-run one command under sudo, from a non-root invocation. Always
+    returns True: the command has been handled, whatever sudo made of it.
+
+    sys.executable is an absolute path, so sudo resolves the interpreter
+    without consulting PATH — which is the whole point. Nothing has to be
+    installed into a directory on sudo's secure_path for this to work, so an
+    install needs no symlink and the operator never types sudo themselves.
+
+    SERVETTE_HOME is passed through explicitly because sudo resets the
+    environment: losing it would silently point the elevated run at a
+    different data directory than the one the operator is working in, which is
+    a far worse failure than not elevating at all.
+
+    A child process rather than an exec, so the interactive shell survives the
+    privileged command and returns to its prompt instead of vanishing.
+
+    The notices go to stderr: the child owns stdout, and `status --json` has to
+    stay parseable through an elevation."""
+    global _elevated_status
+    if not shutil.which("sudo"):
+        print(f"  '{cmd}' needs root, and sudo is not installed — re-run as root.",
+              file=sys.stderr)
+        _elevated_status = 1
+        return True
+    print(f"  '{cmd}' needs root; asking sudo.", file=sys.stderr)
+    argv = ["sudo"]
+    if "SERVETTE_HOME" in os.environ:
+        argv.append("--preserve-env=SERVETTE_HOME")
+    argv += [sys.executable, "-m", "servette", cmd, *args]
+    try:
+        _elevated_status = subprocess.run(argv).returncode
+    except KeyboardInterrupt:
+        print(file=sys.stderr)   # the operator declined the password prompt
+        _elevated_status = 130
+    # The child may have changed the config this process is holding — a shell
+    # that kept showing the pre-elevation values would be reporting settings
+    # that no longer exist.
+    config.reload_if_changed()
+    return True
+
+
+```
+
 One dispatcher, shared verbatim by the interactive loop and the one-shot `servette <command>` argv form, so the two surfaces can never drift.
 
 ```python
@@ -1507,6 +1593,9 @@ def run_command(cmd, args):
     verbatim by the interactive loop and the one-shot `servette <command>`
     argv form — one dispatcher, so the two surfaces can never drift. quit and
     help stay in the interactive loop: they are about the loop itself."""
+    if os.geteuid() != 0 and _needs_root(cmd):
+        return _elevate(cmd, args)
+
     if cmd == "setup":
         cmd_setup()
     elif cmd == "config":

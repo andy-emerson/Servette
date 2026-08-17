@@ -967,12 +967,14 @@ def run_dispatch_tests(s):
             s.cmd_set(["99", "username=x"])
         check("set refuses a site index that doesn't exist", "No site 99" in buf.getvalue())
 
-        # Without root, the config write fails with a hint, not a traceback.
+        # Reaching cmd_set without root now means elevation did not happen —
+        # run_command elevates first, so this is the sudo-unavailable backstop.
+        # It must still fail with a usable sentence rather than a traceback.
         s.Config.save = lambda self: (_ for _ in ()).throw(PermissionError())
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["port=8445"])
-        check("set without root hints at sudo instead of dying",
-              "requires sudo" in buf.getvalue())
+        check("set without root fails with a hint, not a traceback",
+              "needs root" in buf.getvalue())
         s.Config.save = lambda self: save_count.append(1)
     finally:
         s.Config.save = saved_save
@@ -1173,6 +1175,151 @@ def run_dispatch_tests(s):
             site.serve_dir = sd
         shutil.rmtree(pu_marked, ignore_errors=True)
         shutil.rmtree(pu_owned, ignore_errors=True)
+
+    section("Root is requested, not required of the operator")
+
+    # Servette needs root for the systemd unit, the service user, the config the
+    # service reads, and the site folders it serves. It asks sudo for that itself
+    # rather than making the operator prefix every invocation — which is what
+    # forced the console script onto sudo's secure_path, and so forced an install
+    # to put it there.
+    check("Read-only commands never elevate",
+          not any(s._needs_root(c) for c in ("status", "sites", "log")))
+    check("Privileged commands do",
+          all(s._needs_root(c) for c in
+              ("setup", "config", "enable", "disable", "set", "pull", "restore-site")))
+
+    # start and stop are the conditional pair: root for the systemd path, but a
+    # session server lives in *this* process, where an elevated child could
+    # neither keep it alive after exiting nor reach the parent's to stop it.
+    saved_sfe, saved_isact, saved_srun = \
+        s._service_file_exists, s._service_is_active, s._server_running
+    try:
+        s._service_file_exists = lambda: True
+        s._service_is_active   = lambda: True
+        s._server_running      = lambda: False
+        check("start elevates when a unit is installed", s._needs_root("start"))
+        check("stop elevates when the service is what is running",
+              s._needs_root("stop"))
+
+        s._service_file_exists = lambda: False
+        s._service_is_active   = lambda: False
+        check("start stays put with no unit to drive", not s._needs_root("start"))
+
+        s._service_is_active = lambda: True
+        s._server_running    = lambda: True
+        check("stop stays put while a session server runs here",
+              not s._needs_root("stop"))
+    finally:
+        s._service_file_exists, s._service_is_active, s._server_running = \
+            saved_sfe, saved_isact, saved_srun
+
+    # A configured host keeps servette.toml at mode 600 for the service user, so
+    # an operator who has not elevated cannot read it. Two things must hold: the
+    # program still reaches its dispatcher (the crash this replaced happened at
+    # import, before any command could elevate), and it does not pass the
+    # stand-in defaults off as the operator's settings.
+    # Mode 000 would not reproduce it here — this suite may run as root, for whom
+    # permissions are advisory — so the denial is injected instead: a module-level
+    # `open` shadows the builtin for Servette's own code, and only while the
+    # config is being read.
+    unreadable_home = tempfile.mkdtemp()
+    unreadable_cfg  = os.path.join(unreadable_home, "servette.toml")
+    with open(unreadable_cfg, "w", encoding="utf-8") as f:
+        f.write('port = 8443\n')
+    saved_cfg_file = s.Config.CONFIG_FILE
+
+    def _denied(*a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    try:
+        s.Config.CONFIG_FILE = unreadable_cfg
+        s.open = _denied
+        try:
+            probe = s.Config()
+        finally:
+            del s.open                  # back to the builtin
+        check("An unreadable config is not a fatal one", probe.unreadable)
+        check("An unreadable config stands in defaults, not the file's values",
+              probe.port == 443)
+    finally:
+        s.Config.CONFIG_FILE = saved_cfg_file
+        s.__dict__.pop("open", None)
+        shutil.rmtree(unreadable_home, ignore_errors=True)
+
+    # _needs_root reads the live singleton, so drive that flag directly rather
+    # than swapping the whole config out from under the rest of the suite.
+    saved_unreadable = s.config.unreadable
+    try:
+        s.config.unreadable = True
+        check("Read-only commands elevate when the config is out of reach",
+              all(s._needs_root(c) for c in ("status", "sites", "log")))
+    finally:
+        s.config.unreadable = saved_unreadable
+
+    saved_run, saved_euid = s.subprocess.run, s.os.geteuid
+    captured = []
+    sudo_status = [0]
+
+    class _Done:                      # stands in for a CompletedProcess
+        def __init__(self, rc): self.returncode = rc
+
+    try:
+        def _fake_run(argv, *a, **k):
+            captured.append(argv)
+            return _Done(sudo_status[0])
+        s.subprocess.run = _fake_run
+
+        with contextlib.redirect_stderr(io.StringIO()) as buf:
+            s._elevate("enable", [])
+        argv = captured[0]
+        # An absolute interpreter is the whole mechanism: sudo resolves it
+        # without consulting PATH, so nothing has to live on secure_path.
+        check("Elevation names an absolute interpreter, not a PATH lookup",
+              argv[0] == "sudo" and os.path.isabs(argv[argv.index("-m") - 1]))
+        check("Elevation re-runs the same command as a module",
+              argv[argv.index("-m") + 1:] == ["servette", "enable"])
+        check("Elevation says what it is doing before prompting",
+              "needs root" in buf.getvalue())
+
+        # sudo resets the environment. Losing SERVETTE_HOME would point the
+        # elevated run at a different data directory than the operator is in —
+        # worse than not elevating at all.
+        captured.clear()
+        os.environ["SERVETTE_HOME"] = "/tmp/servette-elevate-probe"
+        with contextlib.redirect_stdout(io.StringIO()):
+            s._elevate("set", ["port=8443"])
+        check("Elevation carries SERVETTE_HOME across sudo",
+              "--preserve-env=SERVETTE_HOME" in captured[0])
+        check("Elevation passes the command's own arguments through",
+              captured[0][-3:] == ["servette", "set", "port=8443"])
+
+        # A refused password must not read as success to whatever is driving
+        # `servette <command>` over SSH: the work happened in the child, so its
+        # status is the only honest one to exit with.
+        sudo_status[0] = 1
+        with contextlib.redirect_stderr(io.StringIO()):
+            s._elevate("enable", [])
+        check("A failed elevation is remembered as a failure",
+              s._elevated_status == 1)
+        sudo_status[0] = 0
+        with contextlib.redirect_stderr(io.StringIO()):
+            s._elevate("enable", [])
+        check("A successful one is not", s._elevated_status == 0)
+
+        # Already root: the dispatcher must do the work, not re-invoke itself.
+        captured.clear()
+        s.os.geteuid = lambda: 0
+        s._service_is_active, s._server_running = (lambda: True), (lambda: False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.run_command("stop", [])
+        check("Running as root does the work instead of re-invoking sudo",
+              captured and not any(a and a[0] == "sudo" for a in captured)
+              and captured[0][:2] == ["systemctl", "stop"])
+    finally:
+        s.subprocess.run, s.os.geteuid = saved_run, saved_euid
+        s._service_is_active, s._server_running = saved_isact, saved_srun
+        os.environ.pop("SERVETTE_HOME", None)
 
     section("Site management (add/remove/select)")
 

@@ -837,7 +837,7 @@ def cmd_enable():
     except ValueError:
         pass  # the writer already printed the path refusal
     except PermissionError:
-        print("Error: enable requires sudo. Run: sudo servette")
+        print("Error: enable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
         print("Error: enable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
@@ -871,7 +871,7 @@ def cmd_disable():
         print("Servette service disabled.")
         log.info("Systemd service disabled")
     except PermissionError:
-        print("Error: disable requires sudo. Run: sudo python3 servette.py")
+        print("Error: disable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
         print("Error: disable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:

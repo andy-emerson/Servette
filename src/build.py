@@ -202,13 +202,13 @@ def check_readme_counts(src_dir, repo_dir):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Build servette.py from src/*.md")
+    parser = argparse.ArgumentParser(description="Build servette/__init__.py from src/*.md")
     parser.add_argument("--output", metavar="PATH",
-                        help="write here instead of ../servette.py")
+                        help="write here instead of ../servette/__init__.py")
     parser.add_argument("--stdout", action="store_true",
                         help="write the built source to stdout")
     parser.add_argument("--check", action="store_true",
-                        help="compare the build against the existing servette.py; "
+                        help="compare the build against the existing module; "
                              "exit 1 if they differ")
     parser.add_argument("--counts", action="store_true",
                         help="print lines per section, for the website's figures")
@@ -236,7 +236,7 @@ def main(argv=None):
     built = build(src_dir)
 
     # Fail loudly on a broken assembly rather than writing (or blessing) a
-    # servette.py that won't parse. compile() parses without executing, so this
+    # module that won't parse. compile() parses without executing, so this
     # has no side effects; it catches syntax errors, not runtime ones — the test
     # suite covers the rest.
     try:

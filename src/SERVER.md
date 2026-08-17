@@ -133,15 +133,25 @@ class Config:
         # server on a config that never existed on disk.
         data = {}
         existed = os.path.exists(self.CONFIG_FILE)
+        self.unreadable = False
         if existed:
             try:
                 with open(self.CONFIG_FILE, "rb") as f:
                     data = tomllib.load(f)
             except tomllib.TOMLDecodeError as e:
                 raise _ConfigInvalid(f"servette.toml is not valid TOML ({e})")
+            except OSError:
+                # The file is there and we may not read it — the normal state on
+                # a configured host, where servette.toml is the service user's
+                # and mode 600, seen by an operator who has not elevated yet.
+                # Not an invalid config and not fatal: defaults stand in so the
+                # program can reach its dispatcher, which elevates and asks
+                # again as root. The flag is what stops those defaults being
+                # reported as if they were the operator's settings.
+                self.unreadable = True
 
         site_tables = data.get("site", [])
-        migrating   = existed and not site_tables
+        migrating   = existed and not site_tables and not self.unreadable
         if site_tables:
             sites = [Site(t) for t in site_tables]
         else:

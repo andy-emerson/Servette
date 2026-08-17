@@ -8,6 +8,26 @@ description = "The Simple Secure Static Site Server — a production nanoserver 
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+authors = [{ name = "Andy Emerson" }]
+keywords = ["static-site", "https", "web-server", "letsencrypt", "acme", "systemd", "raspberry-pi"]
+# What PyPI shows a browser and what pip matches against. Development Status
+# stays Beta until the first release has run on a real deployment; saying
+# Production/Stable before that would be a claim ahead of its evidence.
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Web Environment",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Topic :: System :: Systems Administration",
+]
 dynamic = ["version"]
 # No upper bound, deliberately. The previous `<50.0` ceiling is what turned a
 # routine dependency lag into a vulnerability: CVE-2026-69247 affects every
@@ -25,6 +45,7 @@ servette = "servette:main"
 [project.urls]
 Homepage = "https://servette.org"
 Source = "https://github.com/andy-emerson/Servette"
+Issues = "https://github.com/andy-emerson/Servette/issues"
 
 [tool.setuptools]
 packages = ["servette"]

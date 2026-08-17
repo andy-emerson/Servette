@@ -1,30 +1,24 @@
-# Runtime config — contains password hashes and cert paths
-servette.toml
-
-# SSL certificate, key, and release signature files
-*.pem
-*.sig
-
-# Packaging build artifacts
-dist/
-build/
-*.egg-info/
-
-# Log files
-*.log
-
-# Python
-__pycache__/
-*.pyc
 
 # Local virtualenvs
-.venv/
-.servette-env/
-
+# Log files
+# Packaging build artifacts
+# Python
+# Runtime config — contains password hashes and cert paths
+# SSL certificate, key, and release signature files
 # Viewer e2e harness (tests/viewer/)
-node_modules/
-test-results/
-playwright-report/
-
 # macOS
+*.egg-info/
+*.log
+*.pem
+*.pyc
+*.sig
 .DS_Store
+.servette-env/
+.venv/
+__pycache__/
+build/
+dist/
+node_modules/
+playwright-report/
+servette.toml
+test-results/

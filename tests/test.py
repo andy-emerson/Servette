@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -2811,6 +2812,171 @@ def run_install_tests(s, tmpdir):
     pip_unit = s._systemd_unit(sys.executable, "/v/lib/python3.11/site-packages/servette")
     check("A pip-installed package gets no PYTHONPATH (nothing to widen)",
           "PYTHONPATH" not in pip_unit)
+
+    section("The runtime the service can reach")
+
+    # The service runs as an unprivileged user that owns nothing and is in no
+    # group but its own. A per-user install sits under a home directory Debian
+    # and Ubuntu create mode 0750, which that user cannot traverse — so the unit
+    # would name an interpreter and a package it cannot read, and the host would
+    # restart-loop on ModuleNotFoundError after the next reboot.
+    # Not under tmpdir: mkdtemp makes 0700 directories, which would make every
+    # path below one unreachable and the negative cases pass for the wrong
+    # reason. This tree is traversable from / down, so each mode change below is
+    # the only thing the answer can turn on.
+    reach = tempfile.mkdtemp()
+    home  = os.path.join(reach, "home")
+    leaf  = os.path.join(home, "pkg", "mod.py")
+    try:
+        os.makedirs(os.path.join(home, "pkg"))
+        with open(leaf, "w") as f:
+            f.write("x = 1\n")
+        subprocess.run(["chmod", "-R", "a+rX", reach], check=True)
+        check("A traversable path is reachable by the service user",
+              s._reachable_by_service(leaf))
+        os.chmod(home, 0o750)                        # what `useradd -m` gives
+        check("...and a 0750 home hides everything under it",
+              not s._reachable_by_service(leaf))
+        os.chmod(home, 0o755)
+        os.chmod(leaf, 0o640)
+        check("...as does a file the service user cannot read",
+              not s._reachable_by_service(leaf))
+        check("A path that does not exist is not reachable",
+              not s._reachable_by_service(os.path.join(reach, "nope", "mod.py")))
+    finally:
+        shutil.rmtree(reach, ignore_errors=True)
+
+    # What gets copied is read from installed metadata, not from a list here:
+    # cryptography declares cffi, cffi declares pycparser, and cffi's compiled
+    # backend is a bare .so beside the packages. A hand-kept list said
+    # "cryptography" and produced a runtime that could not import it.
+    required = s._required_distributions()
+    check("The dependency closure is resolved, not remembered",
+          any(d.lower() == "cryptography" for d in required))
+    check("...and the program itself is not one of its own dependencies",
+          not any(d.lower() == "servette" for d in required))
+    for dist in required:
+        if dist.lower() == "cffi":
+            check("A distribution's bare compiled module is found too, not just its package",
+                  any(p.endswith(".so") for p in s._distribution_paths(dist)))
+
+    # The seed for a checkout, which has no dist-info of its own to read, must
+    # be what the package actually declares — a dependency added to pyproject
+    # and not here would give a runtime missing a module.
+    declared = re.findall(r'"([A-Za-z0-9_.\-]+)\s*[><=!~]',
+                          re.search(r"dependencies\s*=\s*\[(.*?)\]",
+                                    open(os.path.join(SERVETTE_DIR, "pyproject.toml"),
+                                         encoding="utf-8").read(), re.S).group(1))
+    check("The checkout seed matches pyproject's dependencies",
+          [d.lower() for d in declared] == [d.lower() for d in s._DECLARED_DEPENDENCIES])
+
+    # Provisioning: the whole closure, root-owned, world-readable, and replaced
+    # wholesale so an older version cannot leave a module behind.
+    saved_rt, saved_base_rt = s.RUNTIME_DIR, s.BASE_DIR
+    try:
+        s.RUNTIME_DIR = os.path.join(tmpdir, "runtime")
+        os.makedirs(os.path.join(s.RUNTIME_DIR, "stale_leftover"), exist_ok=True)
+        s._provision_runtime()
+        landed = set(os.listdir(s.RUNTIME_DIR))
+        check("The runtime holds the program", "servette" in landed)
+        wanted = {os.path.basename(p) for p in s._runtime_sources()}
+        check("...and every path the closure named", wanted <= landed)
+        check("...and nothing an earlier version left", "stale_leftover" not in landed)
+        modes = []
+        for root, _d, files in os.walk(s.RUNTIME_DIR):
+            modes.append(os.stat(root).st_mode & 0o777)
+            modes += [os.stat(os.path.join(root, f)).st_mode & 0o777 for f in files]
+        check("The service can read all of it", all(m & 0o004 for m in modes))
+        check("...and write none of it", all(not m & 0o022 for m in modes))
+        check("No temporary tree is left beside it",
+              not os.path.exists(s.RUNTIME_DIR + ".new")
+              and not os.path.exists(s.RUNTIME_DIR + ".old"))
+
+        # Which paths the unit names follows from reachability, one predicate
+        # shared by the writer and the drift check.
+        saved_reach, saved_syspy = s._installed_runtime_reachable, s._system_python
+        try:
+            s._installed_runtime_reachable = lambda: False
+            s._system_python = lambda: "/usr/bin/python3"
+            check("Unreachable: the unit imports from the runtime copy",
+                  s._unit_package_dir() == os.path.join(s.RUNTIME_DIR, "servette"))
+            check("...with an interpreter outside the install",
+                  s._unit_python_path() == "/usr/bin/python3")
+            unit = s._systemd_unit(s._unit_python_path(), s._unit_package_dir())
+            check("...on PYTHONPATH, since the copy is not site-packages",
+                  f"Environment=PYTHONPATH={s.RUNTIME_DIR}" in unit)
+            check("...and pinned read-only inside the writable data directory",
+                  f"ReadOnlyPaths={os.path.join(s.RUNTIME_DIR, 'servette')}" in unit)
+            check("An interpreter path with whitespace is refused, not encoded",
+                  s._unsafe_unit_path() is None)
+            s._system_python = lambda: "/home/my user/.venv/bin/python"
+            check("...including when it is the interpreter that carries it",
+                  s._unsafe_unit_path() == "/home/my user/.venv/bin/python")
+            s._system_python = lambda: None
+            check("No matching interpreter means nothing is stale to rewrite",
+                  s._stale_units() == [])
+        finally:
+            s._installed_runtime_reachable = saved_reach
+            s._system_python = saved_syspy
+    finally:
+        s.RUNTIME_DIR, s.BASE_DIR = saved_rt, saved_base_rt
+        shutil.rmtree(os.path.join(tmpdir, "runtime"), ignore_errors=True)
+
+    # An interpreter of another minor version cannot load the cryptography build
+    # the runtime copy carries, so it is refused rather than named.
+    saved_minor = s._python_minor
+    try:
+        s._python_minor = lambda p: "2.7"
+        check("A version-mismatched interpreter is refused, not used",
+              s._system_python() is None)
+    finally:
+        s._python_minor = saved_minor
+    check("This interpreter reports its own version",
+          s._python_minor(sys.executable) == "%d.%d" % sys.version_info[:2])
+    check("An interpreter that cannot run reports nothing",
+          s._python_minor(os.path.join(tmpdir, "not-a-python")) is None)
+
+    # Every part of the reasoning above is inference about another user's view of
+    # the filesystem, so the conclusion is executed before a unit is written:
+    # import the program and the certificate machinery, from the paths the unit
+    # names, as the service user where the host can drop privileges.
+    check("A runtime that works verifies",
+          s._verify_runtime(sys.executable,
+                            os.path.dirname(os.path.abspath(s.__file__))) is None)
+    problem = s._verify_runtime(sys.executable, os.path.join(tmpdir, "nowhere", "servette"))
+    check("...and one the program is not in does not",
+          isinstance(problem, str) and "servette" in problem)
+
+    # The refusal is what makes verification worth running: a host that would
+    # restart-loop after the next reboot must be turned away here, with no unit
+    # written and no systemctl called.
+    saved_w = {n: getattr(s, n) for n in
+               ("_servette_user_exists", "_installed_runtime_reachable",
+                "_verify_runtime", "_service_file_exists", "_unsafe_unit_path")}
+    saved_sub = s.subprocess.run
+    ran = []
+    try:
+        s._servette_user_exists       = lambda: True
+        s._installed_runtime_reachable = lambda: True
+        s._verify_runtime             = lambda p, d: "ModuleNotFoundError: no servette"
+        s._service_file_exists        = lambda: False
+        s._unsafe_unit_path           = lambda: None
+        s.subprocess.run              = lambda argv, *a, **k: ran.append(argv)
+        refused = None
+        with contextlib.redirect_stdout(io.StringIO()) as wbuf:
+            try:
+                s._write_unit_files()
+            except ValueError as e:
+                refused = str(e)
+        check("A runtime the service cannot use refuses the write",
+              refused is not None and "unusable" in refused)
+        check("...before systemd is touched", ran == [])
+        check("...and says what the service could not do",
+              "ModuleNotFoundError" in wbuf.getvalue())
+    finally:
+        for n, v in saved_w.items():
+            setattr(s, n, v)
+        s.subprocess.run = saved_sub
 
     # A unit the writer refuses must not take the shell launch down with it:
     # _startup_refresh calls the writer on every interactive start, and the

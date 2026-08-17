@@ -42,6 +42,8 @@ import gzip
 import hashlib
 import hmac
 import http.server
+import importlib.metadata
+import importlib.util
 import io
 import ipaddress
 import json
@@ -50,6 +52,7 @@ import tarfile
 import tomllib
 import os
 import re
+import shlex
 import shutil
 import ssl
 import subprocess

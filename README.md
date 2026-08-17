@@ -52,7 +52,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 | HTTPS by default | Your site is encrypted, browsers show the padlock, and plain-HTTP requests are redirected up to HTTPS |
 | Basic Auth | Optional username and password to restrict access |
 | Rate limiting | Stops bots from hammering the server; makes password guessing impractical |
-| Instant content updates | Edit any file and the change is served immediately — files are read fresh from disk, no restart required |
+| Instant content updates | New content is served the moment it lands — files are read fresh from disk on every request, so a `pull` needs no restart and drops no connections |
 | Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |
 | Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
@@ -98,11 +98,9 @@ Servette keeps everything it serves and everything it saves in its data director
 sudo servette   # then, at the prompt: setup
 ```
 
-`sudo` is needed because setup writes a systemd unit and creates a restricted `servette` user — the server runs as that user, not root. The wizard sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), sets an optional password, then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically. Copy your site in whenever you like:
+`sudo` is needed because setup writes a systemd unit and creates a restricted `servette` user — the server runs as that user, not root. The wizard sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), sets an optional password, then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically.
 
-```
-scp -r mysite/* user@YOUR.IP:/var/lib/servette/site/
-```
+To put your site on it, build a signed bundle in the browser at [servette.org/pub/](https://servette.org/pub/) — it never uploads anything; the signing happens on your machine — host the `.tar.gz` and `.sig` pair anywhere reachable over HTTPS, set the URL and key once with `config` → `publish`, and run `pull`. Servette verifies the signature against that site's key before it swaps anything in, and `restore-site` undoes the last pull.
 
 ### Operate it
 
@@ -122,7 +120,7 @@ Re-run `sudo servette` any time for the interactive shell — or run any command
 | `restore-site [n]` | Roll back a site's content to before its last pull |
 | `help` · `quit` | Command list · exit |
 
-**Update your site** by copying new files over (`scp -r mysite/* user@your.server.ip:/var/lib/servette/site/`) — changes appear immediately, no restart. **Update Servette** the way you update any pip-installed tool (`sudo /opt/servette/bin/pip install -U servette`); the next `sudo servette` notices a stale service unit and refreshes it. **Roll back** by installing the version you want (`sudo /opt/servette/bin/pip install servette==x.y.z`). Your `servette.toml` is never touched by an update.
+**Update your site** with `pull` — the publish tool signs a new bundle, Servette verifies it and swaps it in atomically, and `restore-site` rolls back the last one. **Update Servette** the way you update any pip-installed tool (`sudo /opt/servette/bin/pip install -U servette`); the next `sudo servette` notices a stale service unit and refreshes it. **Roll back** by installing the version you want (`sudo /opt/servette/bin/pip install servette==x.y.z`). Your `servette.toml` is never touched by an update.
 
 > If you set a password, `servette.toml` holds its hash — sharing the file gives a recipient material for an offline cracking attempt.
 

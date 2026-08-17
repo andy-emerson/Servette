@@ -1353,7 +1353,16 @@ def run_dispatch_tests(s):
     class _Done:                      # stands in for a CompletedProcess
         def __init__(self, rc): self.returncode = rc
 
+    # These tests are about the argv handed to sudo, so sudo's PRESENCE is
+    # controlled, not inherited: Debian 12's CI container ships no sudo, and
+    # _elevate correctly took its sudo-is-not-installed branch there — leaving
+    # captured empty and this section crashing on captured[0] instead of
+    # testing anything. The absent-sudo branch gets its own test below.
+    saved_which = s.shutil.which
     try:
+        s.shutil.which = lambda name, *a, **k: (
+            "/usr/bin/sudo" if name == "sudo" else saved_which(name, *a, **k))
+
         def _fake_run(argv, *a, **k):
             captured.append(argv)
             return _Done(sudo_status[0])
@@ -1396,6 +1405,17 @@ def run_dispatch_tests(s):
             s._elevate("enable", [])
         check("A successful one is not", s._elevated_status == 0)
 
+        # A host with no sudo at all — Debian's CI container is one — must be
+        # told plainly, spawn nothing, and register the failure.
+        captured.clear()
+        s.shutil.which = lambda name, *a, **k: (
+            None if name == "sudo" else saved_which(name, *a, **k))
+        with contextlib.redirect_stderr(io.StringIO()) as nobuf:
+            s._elevate("enable", [])
+        check("Without sudo, elevation explains and spawns nothing",
+              "sudo is not installed" in nobuf.getvalue() and captured == [])
+        check("...and the one-shot would exit nonzero", s._elevated_status == 1)
+
         # Already root: the dispatcher must do the work, not re-invoke itself.
         captured.clear()
         s.os.geteuid = lambda: 0
@@ -1407,6 +1427,7 @@ def run_dispatch_tests(s):
               and captured[0][:2] == ["systemctl", "stop"])
     finally:
         s.subprocess.run, s.os.geteuid = saved_run, saved_euid
+        s.shutil.which = saved_which
         s._service_is_active, s._server_running = saved_isact, saved_srun
         os.environ.pop("SERVETTE_HOME", None)
 

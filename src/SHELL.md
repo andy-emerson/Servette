@@ -227,12 +227,12 @@ def _config_add_site():
         print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
     # Nothing is written and nothing is offered: a site with no index.html
-    # answers its own domain with the embedded diagnostic page, which says the
+    # answers its own domain with the embedded error page, which says the
     # server is up and that nothing is published yet. Setup still never leaves
     # a site with nothing to serve (#37) — it just no longer needs to put a
     # file in the operator's folder to keep that promise.
     if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
-        print("  No index.html yet — the site will answer with Servette's diagnostic page until you publish one.")
+        print("  No index.html yet — the site will answer with Servette's error page until you publish one.")
 
     site = Site({"serve_dir": folder})
     config.sites.append(site)
@@ -1269,8 +1269,8 @@ def cmd_setup():
     # Step 1 — the folder. Setup must never finish with nothing to serve (#37),
     # and no longer needs to write a file to keep that promise: it creates the
     # folder if missing, and a folder with no index.html answers its domain
-    # with the embedded diagnostic page. The page names the reserved path it
-    # also lives at, which is how an operator learns /selftest/ exists.
+    # with the embedded error page, which reports what the connection is
+    # actually sending.
     print()
     print("  Step 1 — Site folder")
     serve_path = _resolve(site.serve_dir)
@@ -1289,7 +1289,7 @@ def cmd_setup():
             print(f"  Serving {serve_path}.")
         else:
             print(f"  {serve_path} has no index.html yet — until you publish one, the")
-            print("  site answers with Servette's diagnostic page: it reports that the")
+            print("  site answers with Servette's error page: it reports that the")
             print("  server is up and what the connection is actually sending.")
 
     print()

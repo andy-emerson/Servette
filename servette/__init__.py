@@ -720,35 +720,23 @@ def _security_headers(site):
 # Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 
-# The reserved diagnostic page (DECISIONS.md: "The self-test is server-
-# delivered, client-executed"): authored as src/diagnostics.html and inlined
-# by build.py, so it is part of the module rather than a file beside it. That
-# is deliberate — a page shipped as package data can be deleted on the box,
-# and deleting it would silently take the default 404 body with it. There is
-# no read at import and no missing-file case to degrade through.
-_SELFTEST_PATHS = ("/selftest", "/selftest/", "/selftest/index.html")
-_SELFTEST_PAGE = """<!DOCTYPE html>
-<!-- src/diagnostics.html — the diagnostic page, inlined into the module by
-     build.py and served in two roles (see DECISIONS.md, "The self-test is
-     server-delivered, client-executed"):
-
-       /selftest/  at 200 — the connection self-test, asked for on purpose.
-       any miss    at 404 — the default error page, where the site publishes
-                            no 404.html of its own.
+# The default 404 body (DECISIONS.md: "The error page is server-delivered,
+# client-executed"): authored as src/404.html and inlined by build.py, so it is
+# part of the module rather than a file beside it. That is deliberate — a page
+# shipped as package data can be deleted on the box, and deleting it would
+# silently take the default 404 body with it. There is no read at import and no
+# missing-file case to degrade through.
+_NOT_FOUND_PAGE = """<!DOCTYPE html>
+<!-- src/404.html — Servette's default 404 body, inlined into the module by
+     build.py (see DECISIONS.md, "The error page is server-delivered,
+     client-executed"). Served for any miss where the site publishes no
+     404.html of its own.
 
      Every server needs an error page, and a bare "Not found." spends a whole
-     response saying only that the reader was wrong. In the 404 role this page
-     also reports that the server is up, which host answered, what it is
-     sending, and whether the site has anything published at all — the
-     diagnosis is free, since the request was already made.
-
-     One file serves both roles because the checks are the same; the bytes are
-     identical, so both responses share an ETag. The role is read from
-     location.pathname (SELFTEST_PATHS below), which the server keeps in step:
-     it answers 200 only on those paths. In the 404 role the page drops the
-     paragraph describing Servette's wider features — an operator's error page
-     is not this project's billboard — and keeps only the modest served-by
-     credit that every default error page carries.
+     response saying only that the reader was wrong. This one also reports that
+     the server is up, which host answered, what it is sending, and whether the
+     site has anything published at all — the diagnosis is free, since the
+     request was already made.
 
      Same-origin by construction, so it can read what a cross-origin probe
      never could: it checks the connection it was itself loaded over. It never
@@ -762,7 +750,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Servette — Self-test</title>
+  <title>404 — not found</title>
   <style>
     :root {
       --bg:      #0e0e0e;
@@ -960,8 +948,8 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
 
-    /* ── Self-test ── */
-    .selftest {
+    /* ── Diagnosis ── */
+    .checks {
       border: 1px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
@@ -971,7 +959,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
       animation: rise 0.5s ease 0.35s forwards;
     }
 
-    .selftest-head {
+    .checks-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -980,7 +968,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
       border-bottom: 1px solid var(--border);
     }
 
-    .selftest-title {
+    .checks-title {
       font-size: 0.7rem;
       letter-spacing: 0.1em;
       text-transform: uppercase;
@@ -1027,18 +1015,6 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     }
     .t-summary b { color: var(--text); font-weight: 500; }
 
-    /* ── What this page cannot reach ── */
-    .features {
-      font-size: 0.72rem;
-      color: var(--muted);
-      line-height: 1.7;
-      margin-bottom: 2rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.45s forwards;
-    }
-    .features b { color: var(--text); font-weight: 500; }
-    .features a { color: #60a5fa; text-decoration: none; }
-    .features a:hover { text-decoration: underline; }
 
     /* ── Footer ── */
     .note {
@@ -1080,7 +1056,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
 
   <!-- Shown only in the 404 role. The server is up and answered — the path is
        what is missing — so this leads with the path rather than with blame. -->
-  <div class="notfound" id="notfound" hidden>
+  <div class="notfound">
     <div class="notfound-head">
       <span class="notfound-code">404</span>
       <span class="notfound-msg">Nothing published here</span>
@@ -1105,30 +1081,14 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="selftest">
-    <div class="selftest-head">
-      <span class="selftest-title" id="selftest-title">Self-test — live from your browser</span>
+  <div class="checks">
+    <div class="checks-head">
+      <span class="checks-title">Diagnosis — live from your browser</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>
     <div class="t-summary" id="t-summary">running…</div>
   </div>
-
-  <!-- Hidden in the 404 role: an operator's error page is not the place to
-       advertise the server's feature list to their visitors. -->
-  <p class="features" id="features">
-    These checks only reach what a browser can see. The rest of Servette runs
-    where this page cannot look. On the request path it <b>redirects HTTP to
-    HTTPS</b>, <b>gzip-compresses</b> what it sends, <b>rate-limits</b> abusive
-    clients, can sit behind a <b>password</b>, and routes <b>each domain to its
-    own site</b> — these results describe only the one you reached. Off the
-    request path it runs as a <b>supervised service</b> that restarts on boot,
-    <b>drops privileges</b> once the ports are bound, <b>renews its certificate</b>
-    automatically, and accepts new site content only as <b>signed bundles</b> the
-    operator pulls on purpose. And nothing above
-    happens while it is answering you: by design, <b>no request ever reaches a
-    write</b>. <a href="https://servette.org">servette.org</a> describes the whole of it.
-  </p>
 
   <div class="note">
     This page ships inside Servette itself and runs on this site's own
@@ -1142,26 +1102,13 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
 <script>
   const $ = (id) => document.getElementById(id);
 
-  // ── Which role is this page playing? ──────────────────────────────
-  // The server answers 200 on these paths and 404 everywhere else, so the
-  // path alone settles the role — no request needed, and no flash of the
-  // wrong framing while one is in flight. Kept in step with _SELFTEST_PATHS
-  // in Server.
-  const SELFTEST_PATHS = ['/selftest', '/selftest/', '/selftest/index.html'];
-  const isErrorPage    = !SELFTEST_PATHS.includes(location.pathname);
-
-  if (isErrorPage) {
-    document.title = '404 — not found';
-    $('notfound').hidden = false;
-    // textContent, never innerHTML: the path is whatever the client asked
-    // for. decodeURI so an escaped path reads as the reader typed it, with
-    // the raw value kept when it is malformed enough to throw.
-    let shown = location.pathname + location.search;
-    try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
-    $('notfound-path').textContent = shown;
-    $('features').hidden           = true;
-    $('selftest-title').textContent = 'Diagnosis — live from your browser';
-  }
+  // ── The path the reader asked for ─────────────────────────────────
+  // textContent, never innerHTML: the path is whatever the client asked for.
+  // decodeURI so an escaped path reads as the reader typed it, with the raw
+  // value kept when it is malformed enough to throw.
+  let shown = location.pathname + location.search;
+  try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
+  $('notfound-path').textContent = shown;
 
   // ── Connection card ───────────────────────────────────────────────
   const isHttps = location.protocol === 'https:';
@@ -1172,9 +1119,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     $('badge').className    = 'badge badge-green';
     // Deliberately not "your server": this page serves on every Servette
     // site, and most readers are visitors, not the operator.
-    $('tagline-text').textContent = isErrorPage
-      ? 'THE SERVER IS RUNNING — THIS PATH IS NOT'
-      : 'THIS SERVER IS RUNNING';
+    $('tagline-text').textContent = 'THE SERVER IS RUNNING — THIS PATH IS NOT';
   } else {
     $('badge').textContent = '⚠ Not encrypted';
     $('badge').className    = 'badge badge-red';
@@ -1182,7 +1127,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     $('tagline-text').textContent = 'Connection is not secure';
   }
 
-  // ── Self-test ─────────────────────────────────────────────────────
+  // ── The checks ────────────────────────────────────────────────────
   // Each check makes a real request and reports the value it observed.
   // ok: true = PASS, false = FAIL, null = SKIP.
   //
@@ -1334,10 +1279,10 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
     logEl.innerHTML = '';
     $('t-summary').textContent = 'running…';
     let pass = 0, fail = 0, skip = 0;
-    // In the 404 role the two diagnosis rows come first: what this response
-    // is, and whether the site is deployed at all. They frame the header
-    // checks that follow rather than being buried under them.
-    for (const c of (isErrorPage ? errorChecks.concat(checks) : checks)) {
+    // The two diagnosis rows come first: what this response is, and whether
+    // the site is deployed at all. They frame the header checks that follow
+    // rather than being buried under them.
+    for (const c of errorChecks.concat(checks)) {
       const { st, obs } = addRow(c.req);
       let r;
       try { r = await c.run(); }
@@ -1358,7 +1303,7 @@ _SELFTEST_PAGE = """<!DOCTYPE html>
 </body>
 </html>
 """.encode()
-_SELFTEST_ETAG = '"' + hashlib.sha256(_SELFTEST_PAGE).hexdigest()[:16] + '"'
+_NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
 
 
 # Log escaping
@@ -1469,8 +1414,8 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
 
-    # Version discovery: what this box is running — the embedded self-test
-    # page reads this to show the served version. Deliberately
+    # Version discovery: what this box is running — the embedded error page
+    # reads this to show the served version. Deliberately
     # reports only what THIS box knows; "latest available" is the package
     # index's business, not Servette's. Host-level (one process, one version).
     #
@@ -1500,24 +1445,15 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
-        # The embedded self-test answers on two paths, and operator content
-        # wins both by simply existing:
+        # Every server needs an error page, and a bare "Not found." spends a
+        # whole response telling the reader only that they were wrong. This one
+        # also says what the server is, that it is up, and what it is actually
+        # sending — the diagnosis is free, the request was already made. The
+        # operator's own 404.html wins by simply existing.
         #
-        #   /selftest/  — the reserved path, unless an entry of that name
-        #                 (file or directory) sits in the site root. Answers
-        #                 200: the page was asked for and it is there.
-        #   any miss    — as the default error page, unless the operator has
-        #                 written a 404.html. Answers 404: the path really is
-        #                 not there. Every server needs an error page, and a
-        #                 bare "Not found." spends a whole response telling the
-        #                 reader only that they were wrong. This one also says
-        #                 what the server is, that it is up, and what it is
-        #                 actually sending — the diagnosis is free, the request
-        #                 was already made.
-        #
-        # That second answer also covers a site's own root while nothing is
-        # published there: no index.html means the root is itself a miss, so the
-        # domain reports on itself instead of answering with ten bytes of text.
+        # It also covers a site's own root while nothing is published there: no
+        # index.html means the root is itself a miss, so the domain reports on
+        # itself instead of answering with ten bytes of text.
         #
         # The response mirrors the file path's caching contract (ETag,
         # Cache-Control, 304) because the page's own checks probe the URL it
@@ -1526,39 +1462,35 @@ def _handle_request(method, url_path, headers, raw_ip):
         # browser, the connection it arrived over, behind the site's own auth.
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
-        selftest_asked = (url_path.split("?", 1)[0] in _SELFTEST_PATHS
-                          and not os.path.exists(os.path.join(site_root, "selftest")))
-        if selftest_asked or not os.path.isfile(custom_404):
-            code = 200 if selftest_asked else 404
-            # In the 404 role a positive lifetime is downgraded to
-            # revalidate-always. Under cache_policy = "max-age" an error page
-            # would otherwise sit in a shared cache for max_age seconds and keep
-            # answering 404 for a path *after* the operator publishes the very
-            # file that was missing. The asked-for page at /selftest/ keeps the
-            # site's policy: it is a real, unchanging resource.
+        if not os.path.isfile(custom_404):
+            # A positive lifetime is downgraded to revalidate-always. Under
+            # cache_policy = "max-age" an error page would otherwise sit in a
+            # shared cache for max_age seconds and keep answering 404 for a path
+            # *after* the operator publishes the very file that was missing.
             cache = _cache_control_header(site.username)
-            if code == 404 and "max-age" in cache:
+            if "max-age" in cache:
                 cache = ("private" if site.username else "public") + ", no-cache"
-            if headers.get("If-None-Match", "") == _SELFTEST_ETAG:
+            if headers.get("If-None-Match", "") == _NOT_FOUND_ETAG:
                 log.info("304 Not Modified %s to %s", log_path, ip)
-                return resp(304, [(b"etag", _SELFTEST_ETAG.encode()),
+                return resp(304, [(b"etag", _NOT_FOUND_ETAG.encode()),
                                   (b"cache-control", cache.encode())])
-            log.info("%d %s (embedded diagnostic page) to %s", code, log_path, ip)
-            return resp(code, [
+            log.info("404 %s (embedded error page) to %s", log_path, ip)
+            return resp(404, [
                 (b"content-type",   b"text/html; charset=utf-8"),
-                (b"content-length", str(len(_SELFTEST_PAGE)).encode()),
-                (b"etag",           _SELFTEST_ETAG.encode()),
+                (b"content-length", str(len(_NOT_FOUND_PAGE)).encode()),
+                (b"etag",           _NOT_FOUND_ETAG.encode()),
                 (b"cache-control",  cache.encode()),
-            ], _SELFTEST_PAGE)
+            ], _NOT_FOUND_PAGE)
 
-        # The operator's own 404.html, when they have written one.
-        if os.path.isfile(custom_404):
-            raw_404, _, _ = _get_cached_file(custom_404)
-            body_404 = raw_404 or b"Not found."
-            content_type_404 = b"text/html; charset=utf-8"
+        # The operator's own 404.html: the embedded page returned above unless
+        # this file exists, so it is the only way to reach here. Unreadable
+        # (bad permissions, a race with a deploy) falls back to the plain body
+        # rather than serving an empty one.
+        raw_404, _, _ = _get_cached_file(custom_404)
+        if raw_404 is None:
+            body_404, content_type_404 = b"Not found.", b"text/plain"
         else:
-            body_404 = b"Not found."
-            content_type_404 = b"text/plain"
+            body_404, content_type_404 = raw_404, b"text/html; charset=utf-8"
         log.warning("404 Not Found %s from %s", log_path, ip)
         return resp(404, [(b"content-type", content_type_404), (b"content-length", str(len(body_404)).encode())], body_404)
 
@@ -3662,12 +3594,12 @@ def _config_add_site():
         print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
         return
     # Nothing is written and nothing is offered: a site with no index.html
-    # answers its own domain with the embedded diagnostic page, which says the
+    # answers its own domain with the embedded error page, which says the
     # server is up and that nothing is published yet. Setup still never leaves
     # a site with nothing to serve (#37) — it just no longer needs to put a
     # file in the operator's folder to keep that promise.
     if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
-        print("  No index.html yet — the site will answer with Servette's diagnostic page until you publish one.")
+        print("  No index.html yet — the site will answer with Servette's error page until you publish one.")
 
     site = Site({"serve_dir": folder})
     config.sites.append(site)
@@ -4562,8 +4494,8 @@ def cmd_setup():
     # Step 1 — the folder. Setup must never finish with nothing to serve (#37),
     # and no longer needs to write a file to keep that promise: it creates the
     # folder if missing, and a folder with no index.html answers its domain
-    # with the embedded diagnostic page. The page names the reserved path it
-    # also lives at, which is how an operator learns /selftest/ exists.
+    # with the embedded error page, which reports what the connection is
+    # actually sending.
     print()
     print("  Step 1 — Site folder")
     serve_path = _resolve(site.serve_dir)
@@ -4582,7 +4514,7 @@ def cmd_setup():
             print(f"  Serving {serve_path}.")
         else:
             print(f"  {serve_path} has no index.html yet — until you publish one, the")
-            print("  site answers with Servette's diagnostic page: it reports that the")
+            print("  site answers with Servette's error page: it reports that the")
             print("  server is up and what the connection is actually sending.")
 
     print()

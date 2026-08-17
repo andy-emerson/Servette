@@ -13,7 +13,7 @@ SYSTEM.md, SHELL.md, MAIN.md. Each interleaves three things:
 
 This tool reverses that mapping, in file order, to produce the module. Every
 output line comes from a code fence, a blockquote, or the one substitution
-below: `diagnostics.html` is inlined where the sources name it, so the
+below: `404.html` is inlined where the sources name it, so the
 page ships inside the module instead of beside it. The blockquote/comment
 mapping is an exact inverse of the split that created these files, and the
 substitution is verbatim, so the build reproduces the module byte-for-byte —
@@ -41,12 +41,12 @@ import sys
 # dispatch — runs on import and calls definitions from every section above it.
 SECTION_FILES = ["INIT.md", "SERVER.md", "SYSTEM.md", "SHELL.md", "MAIN.md"]
 
-# The diagnostic page is authored as real HTML — editable, highlighted, openable
+# The default 404 body is authored as real HTML — editable, highlighted, openable
 # in a browser — and inlined into the module at build time, so the shipped
 # package is Python only. An operator cannot delete a page that is not a file,
-# and the 404 body cannot go missing with it.
-DIAGNOSTICS_SOURCE = "diagnostics.html"
-_DIAGNOSTICS_MARKER = "@@DIAGNOSTICS_HTML@@"
+# and the error body cannot go missing with it.
+NOT_FOUND_SOURCE = "404.html"
+_NOT_FOUND_MARKER = "@@NOT_FOUND_HTML@@"
 
 _FENCE_OPEN  = "```python"
 _FENCE_CLOSE = "```"
@@ -92,7 +92,7 @@ def md_to_code(md_text, filename):
 
 
 def build(src_dir):
-    """Concatenate the reconstructed sections, then inline the diagnostic page.
+    """Concatenate the reconstructed sections, then inline the 404 page.
 
     The substitution happens here and not in md_to_code, so the per-section
     line counts stay a measure of the program rather than of an embedded
@@ -103,19 +103,19 @@ def build(src_dir):
             parts.append(md_to_code(f.read(), name))
     out = "".join(parts)
 
-    with open(os.path.join(src_dir, DIAGNOSTICS_SOURCE), "r", encoding="utf-8") as f:
+    with open(os.path.join(src_dir, NOT_FOUND_SOURCE), "r", encoding="utf-8") as f:
         html = f.read()
     # The page lands inside a triple-quoted literal. A `"""` in the HTML would
     # close it early and a backslash would be read as an escape, so both fail
     # the build rather than producing a module that is subtly not the page.
     if '"""' in html:
-        raise ValueError(f"{DIAGNOSTICS_SOURCE}: contains \"\"\", which would end the literal")
+        raise ValueError(f"{NOT_FOUND_SOURCE}: contains \"\"\", which would end the literal")
     if "\\" in html:
-        raise ValueError(f"{DIAGNOSTICS_SOURCE}: contains a backslash, which the literal would escape")
-    if out.count(_DIAGNOSTICS_MARKER) != 1:
-        raise ValueError(f"expected exactly one {_DIAGNOSTICS_MARKER} in the sources, "
-                         f"found {out.count(_DIAGNOSTICS_MARKER)}")
-    return out.replace(_DIAGNOSTICS_MARKER, html)
+        raise ValueError(f"{NOT_FOUND_SOURCE}: contains a backslash, which the literal would escape")
+    if out.count(_NOT_FOUND_MARKER) != 1:
+        raise ValueError(f"expected exactly one {_NOT_FOUND_MARKER} in the sources, "
+                         f"found {out.count(_NOT_FOUND_MARKER)}")
+    return out.replace(_NOT_FOUND_MARKER, html)
 
 
 def section_counts(src_dir):
@@ -139,14 +139,14 @@ def section_counts(src_dir):
     return rows
 
 
-def diagnostics_lines(src_dir):
-    """Lines in the authored diagnostic page.
+def not_found_lines(src_dir):
+    """Lines in the authored 404 page.
 
     Reported apart from the section counts, not folded into them. The counts
     back a claim about reading the *program*; an embedded HTML page is shipped
     by it, not read as part of it, and burying 630 lines of markup inside the
     Python figure would overstate what an auditor has to work through."""
-    with open(os.path.join(src_dir, DIAGNOSTICS_SOURCE), "r", encoding="utf-8") as f:
+    with open(os.path.join(src_dir, NOT_FOUND_SOURCE), "r", encoding="utf-8") as f:
         return len(f.read().splitlines())
 
 
@@ -229,8 +229,8 @@ def main(argv=None):
     if args.counts:
         for name, total, code in section_counts(src_dir):
             print(f"{name:8} {total:>6,} total  {code:>6,} code")
-        print(f"{'':8} {'':>6}         {diagnostics_lines(src_dir):>6,} "
-              f"embedded page ({DIAGNOSTICS_SOURCE}, not Python)")
+        print(f"{'':8} {'':>6}         {not_found_lines(src_dir):>6,} "
+              f"embedded page ({NOT_FOUND_SOURCE}, not Python)")
         return 0
 
     built = build(src_dir)

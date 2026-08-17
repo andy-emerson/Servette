@@ -9,11 +9,11 @@
 # Markdown deliberately — counting it as Python too would count the same code
 # twice, once as source and once as generated output.
 #
-# src/diagnostics.html is the authored form of the diagnostic page, inlined into
-# the module by build.py. Excluded for the same reason src/*.md is not counted
-# as Python: its content is already counted once, inside the generated module.
+# src/404.html is the authored form of the default error page, inlined into the
+# module by build.py. Excluded for the same reason src/*.md is not counted as
+# Python: its content is already counted once, inside the generated module.
 # Counting the source too would count the same bytes twice.
-src/diagnostics.html linguist-documentation
+src/404.html linguist-documentation
 
 # The module is generated, but it IS the program — reviewed, and shipped as the
 # release artifact — so it must stay counted even if a Linguist heuristic ever

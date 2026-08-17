@@ -1100,7 +1100,7 @@ def run_dispatch_tests(s):
 
     # Setup must still never finish with nothing to serve (#37), but it no
     # longer keeps that promise by writing a file: a folder with no index.html
-    # answers its domain with the embedded diagnostic page. So Step 1 creates
+    # answers its domain with the embedded error page. So Step 1 creates
     # the missing folder, writes nothing into it, and says what will answer.
     # urlopen is stubbed to raise, so the public-IP lookup falls back as before
     # and nothing here can reach the network.
@@ -1125,8 +1125,8 @@ def run_dispatch_tests(s):
         check("Setup creates the missing serve_dir", os.path.isdir(setup_dir))
         check("Setup writes nothing into the empty folder",
               os.listdir(setup_dir) == [])
-        check("Setup says the diagnostic page will answer until they publish",
-              "diagnostic page" in out)
+        check("Setup says the error page will answer until they publish",
+              "error page" in out)
         check("Setup no longer offers to install a placeholder",
               "placeholder" not in out.lower())
 
@@ -2333,12 +2333,12 @@ def run_server_tests(s, serve_dir):
           req("GET", path="/nonexistent.html").status == 404)
 
     # With no 404.html of the operator's own, a miss is answered by the
-    # embedded diagnostic page rather than a bare line of text: every server
-    # needs an error page, and this one also reports that the server is up and
-    # what it is actually sending. The status stays 404 — the path really is
-    # not there — and the body is HTML so the page can run.
+    # embedded error page rather than a bare line of text: every server needs an
+    # error page, and this one also reports that the server is up and what it is
+    # actually sending. The status stays 404 — the path really is not there —
+    # and the body is HTML so the page can run.
     resp = req("GET", path="/nonexistent.html")
-    check("Default 404 body is the embedded diagnostic page",
+    check("Default 404 body is the embedded error page",
           resp.status == 404 and b"notfound-path" in resp.body)
     check("Default 404 is served as HTML",
           "text/html" in resp.headers.get("Content-Type", ""))
@@ -2356,24 +2356,22 @@ def run_server_tests(s, serve_dir):
     check("Default 404 revalidates to 304",
           bool(etag_404) and req("GET", path="/nonexistent.html",
                                  headers={"If-None-Match": etag_404}).status == 304)
-    # Same bytes as the asked-for page: one file in two roles, so one ETag.
-    check("Default 404 body is the same page /selftest/ serves",
-          resp.body == req("GET", path="/selftest/").body)
-    check("/selftest/ still answers 200 where it was asked for",
-          req("GET", path="/selftest/").status == 200)
+    # The page has one role now, so no path is exempt from being a miss: what
+    # was the reserved 200 path is an ordinary 404 like any other.
+    check("The former reserved path is an ordinary miss",
+          req("GET", path="/selftest/").status == 404)
+    check("...answered by the same page, byte for byte",
+          req("GET", path="/selftest/").body == resp.body)
 
     # An error page must never sit in a shared cache with a positive lifetime:
     # the operator publishes the file that was missing and cached clients would
-    # keep the 404. Under max-age the 404 role is downgraded to no-cache, while
-    # the asked-for page at /selftest/ keeps the site's policy.
+    # keep the 404.
     saved_policy, saved_age = s.config.cache_policy, s.config.cache_max_age
     s.config.cache_policy, s.config.cache_max_age = "max-age", 3600
     try:
         cc_404 = req("GET", path="/nonexistent.html").headers.get("Cache-Control", "")
         check("Default 404 is not cached with a positive max-age",
               "max-age" not in cc_404 and "no-cache" in cc_404)
-        check("/selftest/ keeps the site's max-age policy",
-              "max-age=3600" in req("GET", path="/selftest/").headers.get("Cache-Control", ""))
     finally:
         s.config.cache_policy, s.config.cache_max_age = saved_policy, saved_age
 
@@ -2392,7 +2390,7 @@ def run_server_tests(s, serve_dir):
     os.remove(custom_404_path)
     s._file_cache.clear()
 
-    check("Removing 404.html restores the diagnostic page as the default body",
+    check("Removing 404.html restores the embedded page as the default body",
           b"notfound-path" in req("GET", path="/nonexistent.html").body)
 
     section("403 — path traversal")
@@ -2518,59 +2516,24 @@ def run_server_tests(s, serve_dir):
     s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
-    section("Reserved self-test path")
+    section("The embedded error page under auth")
 
-    # The embedded page serves at /selftest/ unless the operator's content
-    # shadows it; it rides the site's own auth like everything else.
-    resp = req("GET", "/selftest/")
-    check("GET /selftest/ serves the embedded page",
-          resp.status == 200 and b"Self-test" in resp.body
-          and "text/html" in resp.headers.get("Content-Type", ""))
-    check("All three path forms serve it",
-          req("GET", "/selftest").status == 200
-          and req("GET", "/selftest/index.html").status == 200)
-    check("HEAD /selftest/ answers with an empty body",
-          req("HEAD", "/selftest/").status == 200 and req("HEAD", "/selftest/").body == b"")
-
-    # The embedded response honors the caching contract the page's own
-    # checks probe for (it fetches its served URL expecting ETag + 304).
-    resp = req("GET", "/selftest/")
-    etag = resp.headers.get("ETag", "")
-    check("Embedded page carries ETag and Cache-Control",
-          bool(etag) and bool(resp.headers.get("Cache-Control")))
-    check("If-None-Match revalidates to 304",
-          req("GET", "/selftest/", headers={"If-None-Match": etag}).status == 304)
-
-    shadow_dir = os.path.join(s._resolve(s.config.sites[0].serve_dir), "selftest")
-    os.makedirs(shadow_dir, exist_ok=True)
-    try:
-        with open(os.path.join(shadow_dir, "index.html"), "w") as f:
-            f.write("<!DOCTYPE html><p>operator selftest</p>")
-        check("Operator content shadows the reserved path",
-              b"operator selftest" in req("GET", "/selftest/").body)
-    finally:
-        shutil.rmtree(shadow_dir, ignore_errors=True)
-    check("Unshadowed again after removal", b"Self-test" in req("GET", "/selftest/").body)
-
-    # A plain file named selftest claims the path too — either shape wins.
-    shadow_file = os.path.join(s._resolve(s.config.sites[0].serve_dir), "selftest")
-    try:
-        with open(shadow_file, "w") as f:
-            f.write("plain-file selftest")
-        check("A plain file named selftest shadows the no-slash form",
-              b"plain-file selftest" in req("GET", "/selftest").body)
-        check("...and wins on the slash form too — the embedded page never serves beside it",
-              b"plain-file selftest" in req("GET", "/selftest/").body)
-    finally:
-        os.remove(shadow_file)
+    # It is a response like any other: it rides the site's own gate. An error
+    # page that answered past auth would leak the server's identity, its
+    # headers, and whether the site is published to anyone who guessed a wrong
+    # path on a private site.
+    check("HEAD on a miss answers with an empty body",
+          req("HEAD", "/nonexistent.html").status == 404
+          and req("HEAD", "/nonexistent.html").body == b"")
 
     s.config.sites[0].username = "testuser"
     s.config.sites[0].password_hash, s.config.sites[0].password_salt = s._hash_password("testpass")
     try:
-        check("On an auth site the page is behind the same gate",
-              req("GET", "/selftest/").status == 401)
-        check("...and serves with credentials",
-              req("GET", "/selftest/", auth=("testuser", "testpass")).status == 200)
+        check("On an auth site a miss is challenged, not diagnosed",
+              req("GET", "/nonexistent.html").status == 401)
+        got = req("GET", "/nonexistent.html", auth=("testuser", "testpass"))
+        check("...and serves the page with credentials",
+              got.status == 404 and b"notfound-path" in got.body)
     finally:
         s.config.sites[0].username      = ""
         s.config.sites[0].password_hash = ""

@@ -6,9 +6,65 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
-## The diagnostic page is inlined, not shipped as a file
+## Servette asks for root; the operator never types sudo
 
-**Ruled:** the page is authored as `src/diagnostics.html` — real HTML, editable
+**Ruled:** privileged commands elevate themselves. `run_command` re-runs the
+command as `sudo <sys.executable> -m servette <cmd>` and returns to the prompt;
+read-only commands (`status`, `sites`, `log`) stay unprivileged and never
+prompt, unless the config is unreadable, when reporting stand-in defaults as the
+operator's settings would be a lie.
+**Why:** `sudo servette` forced the console script onto sudo's `secure_path`,
+which forced the install to put it there — a symlink and a system-wide location,
+two of the three lines the install needed. An absolute `sys.executable` needs
+neither: sudo resolves it without consulting `PATH`.
+**Consequences accepted:** `SERVETTE_HOME` is passed through explicitly, since
+sudo resets the environment and losing it would silently point the elevated run
+at another data directory. `start` and `stop` elevate only on the systemd path —
+a session server lives in the shell's own process, where an elevated child could
+neither outlive its own exit nor reach the parent's. The one-shot form exits with
+sudo's status so tooling sees a refused password as a failure.
+**Rejected:** requiring `sudo` in front of every invocation (the status quo, and
+the cause of the install's shape); a setuid helper (a second privileged surface
+to audit, for a program whose whole claim is that you can read it).
+*(2026-08-17)*
+
+## The service's runtime lives where the service user can read it
+
+**Ruled:** `enable` measures whether the `servette` user can reach the installed
+program. Where it cannot, `enable` copies the program and its dependency closure
+into `RUNTIME_DIR` under the data directory — root-owned, world-readable, pinned
+`ReadOnlyPaths` by the unit — and names that copy in `ExecStart`. `disable`
+removes it, and so does an install the service *can* reach.
+**Why:** a per-user install, which is what `pip install --user` and pipx
+produce, sits under a home directory Debian and Ubuntu create mode 0750. The
+service user cannot traverse it, so the unit restart-loops on
+`ModuleNotFoundError` after the next reboot — invisible at install time, and the
+exact failure Servette exists to prevent (#98).
+**What is copied is read from metadata, not from a list here:** a list said
+"cryptography" and produced a runtime that could not import it, because
+cryptography declares cffi, cffi declares pycparser, and cffi's compiled backend
+is a bare `.so` that only its `top_level.txt` names. A checkout has no dist-info
+to read, so there the walk seeds from what `pyproject.toml` declares, and the
+suite fails if those two lists disagree.
+**The inference is executed, not trusted:** before any unit reaches disk,
+`_verify_runtime` imports the program and the certificate machinery from the
+paths the unit names, as the service user. A failure refuses the write. Every
+other part of this ruling is inference about another user's view of a
+filesystem, which is the kind of thing that is wrong quietly.
+**Rejected:** granting the service user traverse into the operator's home (one
+`chmod o+x`, but it weakens a distro default for every local account, against a
+stated principle of never setting world bits); documenting a root-owned install
+location instead (no code at all, but it puts `sudo` back in the install line,
+and `pipx --global` is missing from the pipx Ubuntu 24.04 ships).
+**Cost stated plainly:** 315 lines, to keep the install one line. Dropping the
+per-user install path would delete all of them.
+**Reopen if:** the distributions Servette targets stop creating home directories
+unreadable to other accounts, which would make the copy dead weight.
+*(#98, 2026-08-17)*
+
+## The error page is inlined, not shipped as a file
+
+**Ruled:** the page is authored as `src/404.html` — real HTML, editable
 and openable in a browser — and `build.py` inlines it into the module at build
 time. The installed package is Python only: `__init__.py` and `__main__.py`.
 **Why:** as package data it was a file an operator could delete, and deleting
@@ -19,12 +75,12 @@ part of the module cannot be removed without removing the program.
 every quote escaped, no highlighting, unopenable in a browser) — the
 precedent, the deleted placeholder page, showed why that reads badly; and
 leaving it as package data with documentation asking operators not to delete
-it. **Accounting:** the 630 lines of markup are reported separately by
+it. **Accounting:** the 576 lines of markup are reported separately by
 `build.py --counts`, not folded into the Python figures. The counts back a
 claim about reading the *program*; markup the program ships is not markup an
 auditor reads to understand it. Stating that split openly is the point —
-quietly absorbing 630 lines into "readable in an afternoon" would inflate the
-claim by 16%. *(2026-08-17)*
+quietly absorbing 576 lines into "readable in an afternoon" would inflate the
+claim. *(2026-08-17)*
 
 ## `pip install servette` is the only installation path
 
@@ -122,19 +178,43 @@ what the placeholder used to return — a monitor reading green over a site
 with nothing to serve is the signal meaning less, which the principle
 forbids. *(2026-08-16)*
 
-## The self-test is server-delivered, client-executed
+## The error page is server-delivered, client-executed
 
-**Ruled:** the connection self-test ships embedded in the module and is
-served at the reserved path `/selftest/` wherever the operator's content
-doesn't shadow it — and, in its second role, as the default error page
-([above](#the-default-error-page-diagnoses-the-placeholder-is-retired)).
-Execution stays in the visitor's browser — only an outside client sees
-the browser-trusted cert chain, the real network path, and the provider
-firewall. **Rejected:** server-side execution (a server cannot see itself
-from outside; `_production_issues()` is already the inside half); the
-prior bundle-injected copy (superseded from #42 — it required a
-deliberately duplicated page and a network fetch in the publish tool).
-*(#79, 2026-08-16)*
+**Ruled:** the page ships embedded in the module and is served as the default
+404 body wherever the operator has written no `404.html`. Execution stays in the
+visitor's browser — only an outside client sees the browser-trusted cert chain,
+the real network path, and the provider firewall.
+**Rejected:** server-side execution (a server cannot see itself from outside;
+`_production_issues()` is already the inside half); the prior bundle-injected
+copy (superseded from #42 — it required a deliberately duplicated page and a
+network fetch in the publish tool). **Superseded within this ruling:** a second
+role at a reserved `/selftest/` path answering 200, retired below.
+*(#79, 2026-08-16; narrowed 2026-08-17)*
+
+## The page has one role: there is no reserved path
+
+**Ruled:** the page is Servette's 404 body and nothing else. `/selftest/` is an
+ordinary path that 404s like any other, and no directory in a site root shadows
+a reserved name.
+**Why:** what the 200 role bought was one URL that answered 200 on an install
+with nothing published yet. Everything else it did, a missing path already did —
+the same page, the same checks, the same trusted padlock, at 404. That did not
+pay for a reserved path, a status-code exception in the handler, a role branch
+in the page, an override directory, and two names for one thing. Renaming the
+file from selftest.html to diagnostics.html had made the naming worse rather
+than better: "diagnostic" and "self-test" are synonyms, so the rename bought no
+clarity while leaving 143 references pointing at the other name. One role means
+one name, and it is the one every web server already uses.
+**What is lost, stated plainly:** an operator with nothing published has no URL
+on their own site that answers 200, and no monitor-friendly endpoint. That
+follows from the status-code principle above rather than working against it: a
+site with nothing published has nothing to serve.
+**Rejected:** keeping the 200 role and giving it a user-facing name (`/status/`,
+pairing with the shell's `status`) — coherent, but it keeps a reserved path and
+a second framing to buy a convenience a missing path already provides.
+**Reopen if:** operators are found routinely wanting a 200 health endpoint on a
+site with no content, in which case it returns as one named thing, not as a
+second role for this page. *(2026-08-17)*
 
 ## site/pub/ is the operator tools page — *moved*
 

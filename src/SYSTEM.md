@@ -2,7 +2,7 @@
 
 *The environment: server lifecycle, certificates and the ACME client, systemd and host provisioning.*
 
-*Authored here. `servette.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
+*Authored here. `servette/__init__.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
 
 ## Server lifecycle
 

@@ -9,7 +9,15 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dynamic = ["version"]
-dependencies = ["cryptography>=41.0,<50.0"]
+# No upper bound, deliberately. The previous `<50.0` ceiling is what turned a
+# routine dependency lag into a vulnerability: CVE-2026-69247 affects every
+# cryptography below 50.0.0, so the ceiling excluded the only fixed version and
+# pinned Servette to vulnerable releases. A ceiling on a security-critical
+# dependency has to be actively maintained or it becomes exactly that trap. CI
+# is the guard instead — the full suite runs on every push against whatever
+# cryptography resolves to, so a breaking release is caught here rather than by
+# an operator. The floor is 50.0 because nothing below it is unaffected.
+dependencies = ["cryptography>=50.0"]
 
 [project.scripts]
 servette = "servette:main"

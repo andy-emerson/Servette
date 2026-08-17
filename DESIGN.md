@@ -8,7 +8,7 @@ Servette is a **production nanoserver**: Python's standard-library `http.server`
 
 | Principle | What it commits us to |
 | - | - |
-| **Readable in an afternoon** | All of Servette is one literate module — `servette/__init__.py`, built from the five Markdown sources under `src/` — small enough to read and debug in an afternoon. No module sprawl, no hidden machinery. File count was never the point; what an auditor must understand is. |
+| **Readable in an afternoon** | All of Servette is one literate module — `servette.py`, generated from the five Markdown sources under `src/` — small enough to read and debug in an afternoon. No module sprawl, no hidden machinery. File count was never the point; what an auditor must understand is. |
 | **Secure by default** | Trusted TLS, HTTPS-only (HTTP 301s upward), security headers on every response, optional auth, rate limiting, a least-privilege service user. Security is the default state, never an opt-in. |
 | **Production-grade** | Makes the stdlib's `http.server` — a development server, by its own docs — fit to serve real sites on the public internet: automatic certificate renewal, auto-restart, survives reboots. Servette is the production layer, not a dev tool. |
 | **Zero-friction operation** | Install the package, run `servette`, follow the wizard. No configuration language, no manual certificate or dependency management. |
@@ -64,7 +64,7 @@ Prefer understatement: `_production_issues()` is the model — it lists what is 
 
 ## How it works
 
-Servette is one module (`servette/__init__.py`, ~3,900 lines, beside a five-line `__main__.py`) with three sections, each readable on its own, followed by a short `MAIN` block that instantiates the `Config` singleton and dispatches to `--serve`, a one-shot command, or the shell. Settings persist to `servette.toml` in the data directory. The module is generated from the Markdown sources under `src/` — you edit those, not it (see [Building](#building)).
+Servette is one module (`servette.py` — README states the line count, and a CI gate keeps it true) with three sections, each readable on its own, followed by a short `MAIN` block that instantiates the `Config` singleton and dispatches to `--serve`, a one-shot command, or the shell. Settings persist to `servette.toml` in the data directory. The module is generated from the Markdown sources under `src/` — you edit those, not it (see [Building](#building)).
 
 | Section | Lines | Responsibility |
 | - | - | - |
@@ -225,10 +225,10 @@ The package manager owns the environment: `pip install` brings `cryptography`, a
 
 ### Building
 
-`servette/__init__.py` is generated, not hand-edited. The source of truth is five literate Markdown files under `src/` — `INIT.md`, `SERVER.md`, `SYSTEM.md`, `SHELL.md`, `MAIN.md` — where the code lives in fenced `python` blocks and the module's own prose lives in Markdown (blockquotes and headings) around it. `src/build.py` concatenates them in that order (`MAIN` last, because the entry point it holds runs on import and calls definitions from every section above), reversing that mapping to assemble the module and adding nothing of its own — every output line comes from a code fence or a blockquote. (`servette/__main__.py`, two lines, is the package's one hand-written file.)
+`servette.py` is generated, never hand-edited, and never committed. The source of truth is five literate Markdown files under `src/` — `INIT.md`, `SERVER.md`, `SYSTEM.md`, `SHELL.md`, `MAIN.md` — where the code lives in fenced `python` blocks and the module's own prose lives in Markdown (blockquotes and headings) around it. `src/build.py` concatenates them in that order (`MAIN` last, because the entry point it holds runs on import and calls definitions from every section above), reversing that mapping to assemble the module and adding nothing of its own — every output line comes from a code fence or a blockquote. The package build runs the same transform itself: pip, pipx and `python -m build` enter through `src/_literate_backend.py` (the PEP 517 backend named in `pyproject.toml`), which generates `servette.py` and delegates to setuptools — installing from source IS the literate build, and the test suite generates the module the same way before importing it.
 
 ```bash
-python3 src/build.py            # regenerate servette/__init__.py from src/
+python3 src/build.py            # generate servette.py from src/ by hand
 python3 src/build.py --check    # exit non-zero if the module has drifted from src/
 python3 src/build.py --counts        # lines per section, total and code
 python3 src/build.py --check-counts  # exit non-zero if the website's counts are stale
@@ -242,7 +242,7 @@ The counts modes exist because the website publishes exact line numbers to back 
 
 Each source file is a sequence of cells. A fenced ` ```python ` block holds one def, class, or tight group, and opens with a one-line `# Name` comment — the block's reference name, which the source viewer displays (marker stripped) as the cell header and Navigator entry, and which ships into the module as its minimal section label. One to three sentences of plain prose sit immediately before each fence saying what the code below is; plain prose is the literate view's voice and emits nothing into the module. Markdown `##` headings are the landmarks; there are no banner comments in either view.
 
-Comments inside fences are minimal: docstrings, plus short labels for non-obvious steps. Rationale lives once, in the prose. The one construct that ships prose into the module is the blockquote (`> …`), which `build.py` maps to a `#` comment block — reserved for warnings and invariants that must survive into the generated `servette/__init__.py`, and therefore rare. Fences may open and close with blank lines; those are the generated module's inter-block spacing, and the viewer display-trims them while its doc model keeps the exact bytes.
+Comments inside fences are minimal: docstrings, plus short labels for non-obvious steps. Rationale lives once, in the prose. The one construct that ships prose into the module is the blockquote (`> …`), which `build.py` maps to a `#` comment block — reserved for warnings and invariants that must survive into the generated `servette.py`, and therefore rare. Fences may open and close with blank lines; those are the generated module's inter-block spacing, and the viewer display-trims them while its doc model keeps the exact bytes.
 
 ### The website
 

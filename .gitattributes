@@ -15,7 +15,7 @@
 # Counting the source too would count the same bytes twice.
 src/404.html linguist-documentation
 
-# The module is generated, but it IS the program — reviewed, and shipped as the
-# release artifact — so it must stay counted even if a Linguist heuristic ever
-# starts reading its generated-file banner.
-servette/__init__.py -linguist-generated
+# The generated module is not committed (the package build emits it), so there
+# is no rule for it: the bar counts the Python that IS tracked — build.py, the
+# backend, and the suite. src/*.md is Markdown, which Linguist classifies as
+# prose and keeps out of the bar on its own.

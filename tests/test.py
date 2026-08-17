@@ -29,9 +29,13 @@ import time
 import urllib.error
 import urllib.request
 
-# test.py lives in tests/; the repo root (containing the servette/ package) is its parent.
+# test.py lives in tests/; the repo root is its parent. servette.py is
+# generated, not committed, so the suite builds it first — the same transform
+# the package backend runs, so what is tested is what ships.
 SERVETTE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, SERVETTE_DIR)  # so `import servette` resolves to the package under test
+subprocess.run([sys.executable, os.path.join(SERVETTE_DIR, "src", "build.py"),
+                "--output", os.path.join(SERVETTE_DIR, "servette.py")], check=True)
+sys.path.insert(0, SERVETTE_DIR)  # so `import servette` resolves to the module under test
 os.environ["SERVETTE_HOME"] = SERVETTE_DIR  # data dir = the repo, as a dev checkout runs
 TEST_PORT    = 8443
 BASE_URL     = f"https://127.0.0.1:{TEST_PORT}"
@@ -2871,8 +2875,8 @@ def run_install_tests(s, tmpdir):
     section("Service file content")
 
     # Test the real generated unit, not a reconstructed copy.
-    package_dir = os.path.dirname(os.path.abspath(s.__file__))
-    service     = s._systemd_unit(sys.executable, package_dir)
+    module_path = os.path.abspath(s.__file__)
+    service     = s._systemd_unit(sys.executable, module_path)
     check("Service runs as the least-privilege user",  "User=servette" in service)
     check("Capabilities bounded to net-bind only",     "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" in service)
     check("NoNewPrivileges is set",                    "NoNewPrivileges=yes" in service)
@@ -2883,8 +2887,8 @@ def run_install_tests(s, tmpdir):
     check("The service resolves the same data dir the enabling shell did",
           f"Environment=SERVETTE_HOME={s.BASE_DIR}" in service)
     ro_line = next((l for l in service.splitlines() if l.startswith("ReadOnlyPaths=")), "")
-    check("The package is pinned read-only — holds even for a checkout inside the data dir (#47)",
-          package_dir in ro_line)
+    check("The module is pinned read-only — holds even for a checkout inside the data dir (#47)",
+          module_path in ro_line)
     for directive in ("PrivateDevices=yes", "ProtectClock=yes", "ProtectHostname=yes",
                       "ProtectKernelLogs=yes", "ProtectProc=invisible",
                       "RestrictRealtime=yes", "RestrictNamespaces=yes",
@@ -2894,8 +2898,8 @@ def run_install_tests(s, tmpdir):
     check("The service starts the package with the enabling shell's interpreter",
           f"ExecStart={sys.executable} -m servette --serve" in service)
     check("PYTHONPATH resolves -m servette for checkout deployments",
-          f"Environment=PYTHONPATH={os.path.dirname(package_dir)}" in service)
-    pip_unit = s._systemd_unit(sys.executable, "/v/lib/python3.11/site-packages/servette")
+          f"Environment=PYTHONPATH={os.path.dirname(module_path)}" in service)
+    pip_unit = s._systemd_unit(sys.executable, "/v/lib/python3.11/site-packages/servette.py")
     check("A pip-installed package gets no PYTHONPATH (nothing to widen)",
           "PYTHONPATH" not in pip_unit)
 
@@ -2964,7 +2968,7 @@ def run_install_tests(s, tmpdir):
         os.makedirs(os.path.join(s.RUNTIME_DIR, "stale_leftover"), exist_ok=True)
         s._provision_runtime()
         landed = set(os.listdir(s.RUNTIME_DIR))
-        check("The runtime holds the program", "servette" in landed)
+        check("The runtime holds the program", "servette.py" in landed)
         wanted = {os.path.basename(p) for p in s._runtime_sources()}
         check("...and every path the closure named", wanted <= landed)
         check("...and nothing an earlier version left", "stale_leftover" not in landed)
@@ -2985,10 +2989,10 @@ def run_install_tests(s, tmpdir):
             s._installed_runtime_reachable = lambda: False
             s._system_python = lambda: "/usr/bin/python3"
             check("Unreachable: the unit imports from the runtime copy",
-                  s._unit_package_dir() == os.path.join(s.RUNTIME_DIR, "servette"))
+                  s._unit_module_path() == os.path.join(s.RUNTIME_DIR, "servette.py"))
             check("...with an interpreter outside the install",
                   s._unit_python_path() == "/usr/bin/python3")
-            unit = s._systemd_unit(s._unit_python_path(), s._unit_package_dir())
+            unit = s._systemd_unit(s._unit_python_path(), s._unit_module_path())
             check("...on PYTHONPATH, since the copy is not site-packages",
                   f"Environment=PYTHONPATH={s.RUNTIME_DIR}" in unit)
             check("...and the WHOLE copy pinned read-only, dependencies included",
@@ -3027,8 +3031,7 @@ def run_install_tests(s, tmpdir):
     # import the program and the certificate machinery, from the paths the unit
     # names, as the service user where the host can drop privileges.
     check("A runtime that works verifies",
-          s._verify_runtime(sys.executable,
-                            os.path.dirname(os.path.abspath(s.__file__))) is None)
+          s._verify_runtime(sys.executable, os.path.abspath(s.__file__)) is None)
 
     # The probe must judge the service against the config the unit will carry,
     # which means the same SERVETTE_HOME — without it, a shell run with a
@@ -3039,13 +3042,13 @@ def run_install_tests(s, tmpdir):
         returncode, stdout, stderr = 0, "", ""
     try:
         s.subprocess.run = lambda *a, **k: probe_envs.append(k.get("env")) or _Ok()
-        s._verify_runtime(sys.executable, os.path.dirname(os.path.abspath(s.__file__)))
+        s._verify_runtime(sys.executable, os.path.abspath(s.__file__))
         check("The probe carries the unit's own SERVETTE_HOME",
               probe_envs and all(e and e.get("SERVETTE_HOME") == s.BASE_DIR
                                  for e in probe_envs))
     finally:
         s.subprocess.run = saved_probe_run
-    problem = s._verify_runtime(sys.executable, os.path.join(tmpdir, "nowhere", "servette"))
+    problem = s._verify_runtime(sys.executable, os.path.join(tmpdir, "nowhere", "servette.py"))
     check("...and one the program is not in does not",
           isinstance(problem, str) and "servette" in problem)
 
@@ -3125,7 +3128,7 @@ def run_install_tests(s, tmpdir):
     if shutil.which("systemd-analyze"):
         unit_path = os.path.join(tmpdir, "servette.service")
         with open(unit_path, "w") as f:
-            f.write(s._systemd_unit(sys.executable, package_dir))
+            f.write(s._systemd_unit(sys.executable, module_path))
         out  = subprocess.run(["systemd-analyze", "verify", unit_path], capture_output=True, text=True)
         text = (out.stdout + out.stderr).lower()
         check("systemd-analyze verify: no unknown directives",
@@ -3810,13 +3813,15 @@ def run_invariant_tests(s, serve_dir, tmpdir):
     section("Invariant: the wheel is Python only")
 
     # The error page is inlined at build time so an operator cannot delete it.
-    # That only holds while nothing else creeps into the package as data.
-    pkg = os.path.join(SERVETTE_DIR, "servette")
-    stray = sorted(f for _dp, _d, fs in os.walk(pkg) for f in fs
-                   if not f.endswith(".py") and not f.endswith(".pyc"))
-    check("The package directory holds only Python", not stray)
-    if stray:
-        print(f"      not Python: {stray}")
+    # That only holds while nothing rides along as data — and with the program
+    # as one module, "nothing beside it" is now structural: py-modules ships
+    # exactly the named file, so the first check is that pyproject still says
+    # py-modules and not packages.
+    with open(os.path.join(SERVETTE_DIR, "pyproject.toml"), encoding="utf-8") as f:
+        py_settings = [l.split("#", 1)[0] for l in f.read().splitlines()]
+    check("The program ships as a single module (py-modules, not packages)",
+          any("py-modules" in l and "servette" in l for l in py_settings)
+          and not any(l.strip().startswith("packages") for l in py_settings))
 
     with open(os.path.join(SERVETTE_DIR, "pyproject.toml"), encoding="utf-8") as f:
         # Declarations only. A comment saying there is no package data is not a
@@ -3830,6 +3835,11 @@ def run_invariant_tests(s, serve_dir, tmpdir):
     # `build` cannot be probed by importing it: this suite puts src/ on the path,
     # where build.py is Servette's own. Asking the interpreter to run the module
     # resolves it the way the release does.
+    #
+    # A stale ./build/lib from an older layout fails the wheel check below —
+    # setuptools sweeps leftovers into the wheel. That is a true positive (the
+    # wheel really would carry them); `rm -rf build` is the fix, and this very
+    # check is what caught the residue when the layout changed.
     probe = subprocess.run([sys.executable, "-m", "build", "--version"],
                            capture_output=True, text=True, cwd=SERVETTE_DIR)
     if probe.returncode == 0:
@@ -3841,11 +3851,12 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         if r.returncode == 0 and wheels:
             import zipfile
             with zipfile.ZipFile(os.path.join(out, wheels[0])) as z:
-                inside = [n for n in z.namelist() if n.startswith("servette/")]
-            check("The built wheel carries only Python under servette/",
-                  inside and all(n.endswith(".py") for n in inside))
-            if not all(n.endswith(".py") for n in inside):
-                print(f"      not Python: {[n for n in inside if not n.endswith('.py')]}")
+                names = z.namelist()
+            program = [n for n in names if not n.split("/")[0].endswith(".dist-info")]
+            check("The built wheel's program is exactly servette.py",
+                  program == ["servette.py"])
+            if program != ["servette.py"]:
+                print(f"      wheel carries: {program}")
         else:
             print("  ‣ skipped building a wheel: python -m build failed here "
                   f"(exit {r.returncode})")
@@ -3873,7 +3884,7 @@ def run_doc_check_tests(tmpdir):
     check("A file named from the document beside it resolves",
           build.token_problem("build.py", "src/SHELL.md", SERVETTE_DIR, hay) is None)
     check("A file named by basename alone resolves",
-          build.token_problem("__init__.py", "DESIGN.md", SERVETTE_DIR, hay) is None)
+          build.token_problem("test.py", "DESIGN.md", SERVETTE_DIR, hay) is None)
     check("A file that no longer exists is caught",
           build.token_problem("src/diagnostics.html", "DESIGN.md", SERVETTE_DIR, hay)
           == "no such file in the repository")

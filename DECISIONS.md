@@ -66,7 +66,7 @@ unreadable to other accounts, which would make the copy dead weight.
 
 **Ruled:** the page is authored as `src/404.html` — real HTML, editable
 and openable in a browser — and `build.py` inlines it into the module at build
-time. The installed package is Python only: `__init__.py` and `__main__.py`.
+time. The install is Python only: one `servette.py` module.
 **Why:** as package data it was a file an operator could delete, and deleting
 it took the default 404 body with it silently — the server would go back to
 answering ten bytes of `Not found.` with nothing to say why. A page that is

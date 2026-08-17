@@ -2,7 +2,7 @@
 
 *The interactive terminal interface.*
 
-*Authored here. `servette/__init__.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
+*Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown; the generated module is never committed.*
 
 ## Menus and prompts
 

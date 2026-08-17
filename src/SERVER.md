@@ -2,7 +2,7 @@
 
 *Every incoming request: config, rate limiting, the file cache, site selection, the request handler, and the threaded HTTP servers.*
 
-*Authored here. `servette/__init__.py` is built from the Markdown sources in `src/` by [`build.py`](build.py) — edit the Markdown, not the generated file.*
+*Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown; the generated module is never committed.*
 
 ## Config
 
@@ -193,12 +193,12 @@ class Config:
                         import cryptography  # noqa — availability probe only
                         legacy.domain = _domain_from_cert(cert_path) or ""
                     except ImportError:
-                        # Running under the system Python, before _bootstrap()
-                        # re-execs into the venv: _domain_from_cert would return
-                        # None and the migration would persist an empty domain,
-                        # silently demoting the site to the domainless catch-all
-                        # (no HSTS, no renewal). Defer the migration entirely;
-                        # the re-exec'd process runs it with cryptography there.
+                        # cryptography is missing — a broken or partial install.
+                        # _domain_from_cert would return None and the migration
+                        # would persist an empty domain, silently demoting the
+                        # site to the domainless catch-all (no HSTS, no
+                        # renewal). Defer the migration entirely; a later run
+                        # with the dependency present performs it.
                         migrating = False
             sites = [legacy]
 

@@ -166,7 +166,7 @@ Each site can have a **publish channel**: build a signed bundle of your site in 
 
 | Path | What it is |
 |---|---|
-| `servette/` | The installable package: `__init__.py` is the entire product — server, system, and shell in one module, generated from `src/` and not edited by hand — beside a stub `__main__.py`. The error page is inlined into the module at build time from `src/404.html`, so an install is Python only |
+| `servette.py` | The entire product — server, system, and shell in one module, generated from `src/` by the package build itself and never committed. The error page is inlined into it at build time from `src/404.html`, so an install is Python only |
 | `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into the module |
 | `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 and 3.14) and Debian 12 |
 | `README.md` | This file — the user-facing introduction and deploy guide |

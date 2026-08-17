@@ -3578,8 +3578,23 @@ def run_platform_tests(s):
 
     saved_flag = s._IS_MACOS
     try:
-        # _ensure_swap: inert on macOS even when RAM numbers would recommend swap
         s._IS_MACOS = True
+        # Session mode never elevates: the data directory is the operator's own
+        # and there is no systemd, so a sudo prompt would be for nothing — the
+        # bug this pins was every privileged-on-Linux command demanding a
+        # password on macOS and then writing root-owned files into ~/.servette.
+        check("macOS: no command elevates",
+              not any(s._needs_root(c) for c in
+                      ("setup", "config", "set", "pull", "restore-site", "start", "stop")))
+        saved_unreadable_mac = s.config.unreadable
+        try:
+            s.config.unreadable = True
+            check("...except to read a config the sudo era left root-owned",
+                  s._needs_root("status"))
+        finally:
+            s.config.unreadable = saved_unreadable_mac
+
+        # _ensure_swap: inert on macOS even when RAM numbers would recommend swap
         saved_meminfo = s._meminfo
         s._meminfo = lambda: (512 * 1024, 100 * 1024, 0)   # small-RAM host: would offer swap on Linux
         try:

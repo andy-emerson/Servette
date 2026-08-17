@@ -1545,6 +1545,14 @@ def _needs_root(cmd):
     reports its own bind failure, which is the truthful answer."""
     if config.unreadable:
         return True
+    # Session mode owns nothing root does: the data directory is the operator's
+    # own (~/.servette on macOS) and there is no systemd to drive, so no command
+    # has work only root can do. A privileged port bind reports its own failure,
+    # exactly like the Linux session-server path. The unreadable check stays
+    # above this one deliberately — a config left root-owned by the retired
+    # `sudo servette` era still needs one elevation to read.
+    if _IS_MACOS:
+        return False
     if cmd in _ROOT_COMMANDS:
         return True
     if cmd == "start":

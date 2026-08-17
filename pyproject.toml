@@ -50,7 +50,7 @@ Issues = "https://github.com/andy-emerson/Servette/issues"
 [tool.setuptools]
 packages = ["servette"]
 
-# No package-data: the diagnostic page is inlined into the module at build time
+# Nothing to carry as data: the error page is inlined into the module at build time
 # (src/build.py), so the wheel is Python only and there is no file beside the
 # code for an operator to delete.
 

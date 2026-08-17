@@ -3473,6 +3473,248 @@ def run_platform_tests(s):
         s._IS_MACOS = saved_flag
 
 
+# The write primitives. A module base is required for the ambiguous names, so
+# text.replace() is not mistaken for os.replace(); extractall and the pathlib
+# writers are unambiguous and counted wherever they appear.
+_WRITE_MODULES = {"os", "shutil", "tarfile", "path"}
+_WRITE_CALLS   = {"makedirs", "mkdir", "remove", "unlink", "rmdir", "replace",
+                  "rename", "rmtree", "copytree", "copy2", "copyfile", "chmod",
+                  "chown", "symlink", "truncate"}
+_WRITE_ANYWHERE = {"extractall", "write_text", "write_bytes"}
+
+
+def _writing_functions(module_src):
+    """Every function in the program that writes to the filesystem, as
+    {name: {primitives}}. Read from the syntax tree rather than by grep, so a
+    write cannot hide behind a line break or an unusual spelling."""
+    import ast
+    found = {}
+    for node in ast.walk(ast.parse(module_src)):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        writes = set()
+        for n in ast.walk(node):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            if isinstance(f, ast.Attribute) and f.attr in _WRITE_ANYWHERE:
+                writes.add(f.attr)
+            elif isinstance(f, ast.Attribute) and f.attr in _WRITE_CALLS:
+                base = f.value
+                root = base.id if isinstance(base, ast.Name) else (
+                    base.attr if isinstance(base, ast.Attribute) else None)
+                if root in _WRITE_MODULES:
+                    writes.add(f.attr)
+            elif isinstance(f, ast.Name) and f.id == "open":
+                mode = ""
+                if len(n.args) > 1 and isinstance(n.args[1], ast.Constant):
+                    mode = n.args[1].value or ""
+                for kw in n.keywords:
+                    if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                        mode = kw.value.value or ""
+                if any(c in mode for c in "wax+"):
+                    writes.add("open-for-write")
+        if writes:
+            found[node.name] = writes
+    return found
+
+
+def run_invariant_tests(s, serve_dir, tmpdir):
+    """The three claims the documents lean on hardest, each pinned so the
+    sentence and the check move together. Verified by hand once and tracked by
+    nothing since, which is how a true sentence becomes a stale one (#93)."""
+    sys.path.insert(0, os.path.join(SERVETTE_DIR, "src"))
+    import build
+
+    section("Invariant: writes are where the design says they are")
+
+    # The detector first, on source written to trip it: a pin that cannot fail
+    # pins nothing, and the ambiguous names are the risk in both directions.
+    probe_src = (
+        "def writes():\n    os.replace(a, b)\n\n"
+        "def also_writes():\n    open(p, 'w')\n\n"
+        "def unpacks():\n    tar.extractall(d)\n\n"
+        "def reads_only():\n    open(p, 'rb')\n\n"
+        "def just_a_string():\n    return s.replace('a', 'b')\n")
+    found = _writing_functions(probe_src)
+    check("The write detector sees os.replace, a write-mode open, and extractall",
+          set(found) == {"writes", "also_writes", "unpacks"})
+    check("...and does not mistake str.replace or a read for a write",
+          "just_a_string" not in found and "reads_only" not in found)
+
+    module_src = build.build(os.path.join(SERVETTE_DIR, "src"))
+    writers = _writing_functions(module_src)
+
+    # The whole write surface, frozen. A new writer anywhere in the program
+    # fails this until it is added here — which is the point: it forces someone
+    # to say which of the claims below it belongs to.
+    expected = {
+        # Site content: the publish pipeline, and nothing else.
+        "_check_for_content_update", "_swap_site_content", "cmd_restore_site",
+        # A site FOLDER, created empty — setup must never leave nothing to serve.
+        "cmd_setup",
+        # Servette's own state: config, certificates, the ACME account.
+        "save", "_generate_self_signed_cert", "_ensure_default_cert",
+        "_obtain_trusted_cert", "issue",
+        # The host, at install time and as root.
+        "_write_unit_files", "_provision_runtime", "cmd_disable", "_ensure_swap",
+        # Staging: unpacks a verified bundle into a temporary directory.
+        "_extract_bundle",
+        # Removes a site's own generated certificate when the site goes.
+        "_config_add_site",
+    }
+    surprise = set(writers) - expected
+    missing  = expected - set(writers)
+    check("The program's write surface is exactly what is pinned here",
+          not surprise and not missing)
+    if surprise:
+        print(f"      new writers, unclaimed by any invariant: {sorted(surprise)}")
+    if missing:
+        print(f"      pinned writers that no longer write: {sorted(missing)}")
+
+    # And of those, the ones that touch a site's content.
+    content_writers = {"_check_for_content_update", "_swap_site_content",
+                       "cmd_restore_site"}
+    check("Site content is written only by the publish channel",
+          content_writers <= set(writers)
+          and not (content_writers & {"cmd_setup"}))
+
+    section("Invariant: no request ever reaches a write")
+
+    # Not argued from the code — attempted. Every write primitive is made to
+    # raise, then a battery of requests runs. Anything that tried to write would
+    # fail its own response, so the statuses are the evidence.
+    denied = []
+
+    def _deny(name):
+        def fail(*a, **k):
+            denied.append(name)
+            raise AssertionError(f"a request reached {name}")
+        return fail
+
+    saved_os = {n: getattr(s.os, n) for n in
+                ("makedirs", "mkdir", "remove", "unlink", "rmdir", "replace",
+                 "rename", "chmod", "chown")}
+    saved_sh = {n: getattr(s.shutil, n) for n in ("rmtree", "copytree", "copy2")}
+    real_open = open
+
+    def guarded_open(f, mode="r", *a, **k):
+        if any(c in mode for c in "wax+"):
+            denied.append(f"open({mode})")
+            raise AssertionError(f"a request opened {f} for writing")
+        return real_open(f, mode, *a, **k)
+
+    with open(os.path.join(serve_dir, "index.html"), "w") as f:
+        f.write(TEST_HTML)
+    s._file_cache.clear()
+    before = sorted((p, os.stat(os.path.join(dp, p)).st_mtime)
+                    for dp, _d, fs in os.walk(serve_dir) for p in fs)
+    try:
+        for n, fn in saved_os.items():
+            setattr(s.os, n, _deny(f"os.{n}"))
+        for n, fn in saved_sh.items():
+            setattr(s.shutil, n, _deny(f"shutil.{n}"))
+        s.open = guarded_open
+
+        battery = [
+            ("GET",  "/",                     200),
+            ("GET",  "/index.html",            200),
+            ("HEAD", "/index.html",            200),
+            ("GET",  "/nothing-here",          404),   # the embedded error page
+            ("POST", "/index.html",            405),
+            ("GET",  "/../etc/passwd",         403),
+            ("GET",  "/.well-known/servette",  404),   # no password on this site
+        ]
+        statuses = []
+        for method, path, want in battery:
+            got = req(method, path=path)
+            statuses.append((method, path, got.status, want))
+        etag = req("GET", path="/index.html").headers.get("ETag", "")
+        cond = req("GET", path="/index.html", headers={"If-None-Match": etag}).status
+        gz   = req("GET", path="/index.html", headers={"Accept-Encoding": "gzip"}).status
+
+        check("Every kind of response completes with no write attempted",
+              all(g == w for _m, _p, g, w in statuses) and not denied)
+        for m, p, g, w in statuses:
+            if g != w:
+                print(f"      {m} {p} → {g}, expected {w}")
+        check("...including a revalidation and a compressed response",
+              cond == 304 and gz == 200 and not denied)
+
+        # The guards themselves, proven live — otherwise the section above
+        # passes just as well with them doing nothing at all. Probed with calls
+        # that write nothing even when permitted: driving a real writer through
+        # them left half-written temp files in the data directory.
+        caught = 0
+        for attempt in (lambda: s.os.remove(os.path.join(tmpdir, "nothing")),
+                        lambda: s.open(os.path.join(tmpdir, "nothing"), "w")):
+            try:
+                attempt()
+            except AssertionError:
+                caught += 1
+            except Exception:
+                pass
+        check("The guards are real: a write outside the request path is caught",
+              caught == 2)
+        denied.clear()
+    finally:
+        for n, fn in saved_os.items():
+            setattr(s.os, n, fn)
+        for n, fn in saved_sh.items():
+            setattr(s.shutil, n, fn)
+        s.__dict__.pop("open", None)
+
+    after = sorted((p, os.stat(os.path.join(dp, p)).st_mtime)
+                   for dp, _d, fs in os.walk(serve_dir) for p in fs)
+    check("...and the served directory is byte-for-byte untouched", before == after)
+
+    section("Invariant: the wheel is Python only")
+
+    # The error page is inlined at build time so an operator cannot delete it.
+    # That only holds while nothing else creeps into the package as data.
+    pkg = os.path.join(SERVETTE_DIR, "servette")
+    stray = sorted(f for _dp, _d, fs in os.walk(pkg) for f in fs
+                   if not f.endswith(".py") and not f.endswith(".pyc"))
+    check("The package directory holds only Python", not stray)
+    if stray:
+        print(f"      not Python: {stray}")
+
+    with open(os.path.join(SERVETTE_DIR, "pyproject.toml"), encoding="utf-8") as f:
+        # Declarations only. A comment saying there is no package data is not a
+        # declaration of package data — the first version of this check read the
+        # words rather than the settings, and failed on the comment explaining
+        # why the setting is absent.
+        settings = [l.split("#", 1)[0] for l in f.read().splitlines()]
+    check("pyproject declares no package data to carry",
+          not any("package-data" in l or "include-package-data" in l for l in settings))
+
+    # `build` cannot be probed by importing it: this suite puts src/ on the path,
+    # where build.py is Servette's own. Asking the interpreter to run the module
+    # resolves it the way the release does.
+    probe = subprocess.run([sys.executable, "-m", "build", "--version"],
+                           capture_output=True, text=True, cwd=SERVETTE_DIR)
+    if probe.returncode == 0:
+        out = os.path.join(tmpdir, "wheel")
+        r = subprocess.run([sys.executable, "-m", "build", "--wheel",
+                            "--no-isolation", "--outdir", out, SERVETTE_DIR],
+                           capture_output=True, text=True)
+        wheels = [w for w in os.listdir(out)] if os.path.isdir(out) else []
+        if r.returncode == 0 and wheels:
+            import zipfile
+            with zipfile.ZipFile(os.path.join(out, wheels[0])) as z:
+                inside = [n for n in z.namelist() if n.startswith("servette/")]
+            check("The built wheel carries only Python under servette/",
+                  inside and all(n.endswith(".py") for n in inside))
+            if not all(n.endswith(".py") for n in inside):
+                print(f"      not Python: {[n for n in inside if not n.endswith('.py')]}")
+        else:
+            print("  ‣ skipped building a wheel: python -m build failed here "
+                  f"(exit {r.returncode})")
+    else:
+        print("  ‣ skipped building a wheel: the `build` module is not installed. "
+              "The two checks above still hold the invariant.")
+
+
 def run_doc_check_tests(tmpdir):
     """The docs checker, checked. A gate nothing exercises is a gate that can
     quietly stop gating: an over-eager pattern gets it switched off, and a
@@ -3561,6 +3803,7 @@ def main():
         run_cert_tests(s, tmpdir)
         run_install_tests(s, tmpdir)
         run_platform_tests(s)
+        run_invariant_tests(s, serve_dir, tmpdir)
         run_doc_check_tests(tmpdir)
     finally:
         teardown(tmpdir, saved_config, config_path, s)

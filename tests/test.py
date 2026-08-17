@@ -3473,6 +3473,80 @@ def run_platform_tests(s):
         s._IS_MACOS = saved_flag
 
 
+def run_doc_check_tests(tmpdir):
+    """The docs checker, checked. A gate nothing exercises is a gate that can
+    quietly stop gating: an over-eager pattern gets it switched off, and a
+    too-narrow one passes everything. Both failure modes are tested here."""
+    section("The docs checker (build.py --check-docs)")
+
+    sys.path.insert(0, os.path.join(SERVETTE_DIR, "src"))
+    import build
+
+    hay = "def _needs_root(cmd):\n    pass\n--check-counts\n"
+
+    # It must judge only the shapes it can judge. Prose, header names and TOML
+    # keys live in backticks too, and guessing at them is what produces the
+    # false positives that get a check turned off for good.
+    check("A real file resolves",
+          build.token_problem("README.md", "DESIGN.md", SERVETTE_DIR, hay) is None)
+    check("A file named from the document beside it resolves",
+          build.token_problem("build.py", "src/SHELL.md", SERVETTE_DIR, hay) is None)
+    check("A file named by basename alone resolves",
+          build.token_problem("__init__.py", "DESIGN.md", SERVETTE_DIR, hay) is None)
+    check("A file that no longer exists is caught",
+          build.token_problem("src/diagnostics.html", "DESIGN.md", SERVETTE_DIR, hay)
+          == "no such file in the repository")
+    check("An identifier in the program resolves",
+          build.token_problem("_needs_root()", "DESIGN.md", SERVETTE_DIR, hay) is None)
+    check("An identifier that does not exist is caught",
+          build.token_problem("_gone_away", "DESIGN.md", SERVETTE_DIR, hay)
+          == "not in the program, the build, or the suite")
+    check("A flag a tool accepts resolves",
+          build.token_problem("--check-counts", "DESIGN.md", SERVETTE_DIR, hay) is None)
+    check("A flag no tool accepts is caught",
+          build.token_problem("--invented", "DESIGN.md", SERVETTE_DIR, hay)
+          == "no tool accepts that flag")
+    for prose in ("HSTS", "TLS", "Cache-Control", "pip install servette",
+                  "serve_dir", "/var/lib/servette", "~/.local/bin",
+                  "https://servette.org"):
+        if prose == "serve_dir":
+            continue        # a real config key AND a real identifier; judged
+        check(f"Not judged: `{prose}`",
+              build.token_problem(prose, "DESIGN.md", SERVETTE_DIR, hay) is None)
+
+    # Fenced code is the thing being documented, not a claim about it.
+    md = "before\n\n```python\n_only_in_a_fence = 1\n```\n\n> a comment\nafter\n"
+    check("Fenced code is not scanned",
+          "_only_in_a_fence" not in build._prose_only(md))
+    check("Prose around a fence is",
+          "before" in build._prose_only(md) and "after" in build._prose_only(md))
+    check("A blockquote is code for src/*.md and dropped there",
+          "a comment" not in build._prose_only(md, drop_blockquotes=True)
+          and "a comment" in build._prose_only(md))
+
+    # GitHub hyphenates per space, not per run of spaces, so a heading with an
+    # ampersand anchors with the gap it leaves.
+    check("An anchor slug matches GitHub's, ampersand and all",
+          build._slug("## Scope & non-goals") == "scope--non-goals")
+    check("...and a plain heading's",
+          build._slug("### Releasing (maintainer task)") == "releasing-maintainer-task")
+
+    # `log [n]` in the README and ("log [n]", …) in the shell are one claim.
+    check("Command names are read without their argument specs",
+          build._command_names('_COMMANDS = [\n    ("log [n]", "x"),\n'
+                               '    ("setup", "y"),\n]\n', "_COMMANDS")
+          == {"log", "setup"})
+    check("A renamed command list reads as empty rather than as agreement",
+          build._command_names("nothing here", "_COMMANDS") == set())
+
+    # And the gate itself, against the real repository.
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc = build.check_docs(os.path.join(SERVETTE_DIR, "src"), SERVETTE_DIR)
+    check("Every name the documents state resolves", rc == 0)
+    if rc != 0:
+        print(out.getvalue())
+
+
 def main():
     print("\n──────────────────────────────────────────────────────")
     print("  Servette Test Suite")
@@ -3487,6 +3561,7 @@ def main():
         run_cert_tests(s, tmpdir)
         run_install_tests(s, tmpdir)
         run_platform_tests(s)
+        run_doc_check_tests(tmpdir)
     finally:
         teardown(tmpdir, saved_config, config_path, s)
 

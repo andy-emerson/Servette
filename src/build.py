@@ -28,6 +28,9 @@ Usage:
                                      # existing module, exit 1 on drift
     python build.py --counts        # lines per section, for the website
     python build.py --check-counts  # exit 1 if README's line counts are stale
+    python build.py --check-docs    # exit 1 if the docs name something that
+                                     # does not exist: a path, an identifier, a
+                                     # flag, a command, or a link target
 """
 
 import argparse
@@ -201,6 +204,258 @@ def check_readme_counts(src_dir, repo_dir):
     return 0
 
 
+# Which documents this checks. AGENTS.md is absent deliberately: it is an
+# upstream file replaced whole, not edited here, so a name it uses is not this
+# repository's to fix.
+_DOC_FILES = ["README.md", "DESIGN.md", "DECISIONS.md", "CONTRIBUTING.md",
+              "SECURITY.md", "CLAUDE.md"]
+
+# Backticked names that are real but do not resolve here, each with the reason.
+# This list is where the check stays honest: an entry is a claim that something
+# is unresolvable ON PURPOSE, so adding one should feel like a decision. Growing
+# it to silence a genuine miss is how a gate becomes decoration.
+_DOC_ALLOWLIST = {
+    # Files that live on an operator's server, not in this repository.
+    "404.html":      "the operator's own error page, in their site folder",
+    "index.html":    "the operator's home page",
+    "servette.toml": "written at runtime into the data directory",
+    "cert.pem":      "written at runtime into the data directory",
+    "key.pem":       "written at runtime into the data directory",
+    "servette.service": "written at runtime into /etc/systemd/system",
+    # Things named for comparison, which are other projects.
+    "bottle.py":     "a peer project named in the comparison table",
+    # Names belonging to the websites repository, which reads this one.
+    "SERVETTE_SRC":  "an env var the websites repo's harness sets, not ours",
+}
+
+_IDENT_RE = re.compile(r"^_?[A-Za-z][A-Za-z0-9_]*(\(\))?$")
+_PATH_RE  = re.compile(r"^[A-Za-z0-9_./-]+\.(py|md|html|toml|yml|yaml|txt|cfg|pem)$")
+_FLAG_RE  = re.compile(r"^--[a-z][a-z0-9-]*$")
+
+
+def _prose_only(md_text, drop_blockquotes=False):
+    """The document minus its fenced code blocks. Code inside a fence is the
+    thing being documented, not a claim about it, so a stale name there is the
+    build's problem and not this check's. Blockquotes are dropped for src/*.md,
+    where they are the module's own comments — code by another spelling."""
+    out, in_fence = [], False
+    for line in md_text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if drop_blockquotes and line.startswith(">"):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def token_problem(token, doc_name, repo_dir, haystack):
+    """What is wrong with one backticked name, or None if nothing is.
+
+    Only three shapes are judged — a path with a source extension, a `--flag`,
+    and an identifier carrying an underscore or parentheses. Everything else in
+    backticks is prose, a header name, a TOML key, a shell word: unjudgeable
+    without understanding the sentence, and guessing produces the false
+    positives that get a check switched off. An acronym like `HSTS` is why
+    identifiers must carry an underscore or parens to be judged at all."""
+    if token in _DOC_ALLOWLIST:
+        return None
+    # Absolute and home-relative paths are runtime locations on a server, not
+    # files here.
+    if token.startswith(("/", "~", "http://", "https://")):
+        return None
+
+    if _PATH_RE.match(token):
+        if not _resolves(token, doc_name, repo_dir):
+            return "no such file in the repository"
+        return None
+
+    if _FLAG_RE.match(token):
+        return None if token in haystack else "no tool accepts that flag"
+
+    if _IDENT_RE.match(token) and ("_" in token or token.endswith("()")):
+        bare = token[:-2] if token.endswith("()") else token
+        if bare not in haystack:
+            return "not in the program, the build, or the suite"
+    return None
+
+
+def _command_names(module, list_name):
+    """The command names in one of the shell's command lists — the name only,
+    with any argument spec dropped, since `log [n]` is the command `log`."""
+    m = re.search(rf"^{list_name} = \[(.*?)^\]", module, re.M | re.S)
+    if not m:
+        return set()
+    return {entry.split()[0]
+            for entry in re.findall(r'\("([^"]+)"', m.group(1))}
+
+
+def _resolves(token, doc_name, repo_dir):
+    """Whether a path a document names is a file in this repository.
+
+    Three readings, in the order a human would try them: relative to the
+    document doing the naming (src/SHELL.md saying `build.py` means the one
+    beside it), relative to the repository root, and finally as a bare basename
+    — docs legitimately call the module `__init__.py` without spelling out
+    servette/. The last reading is the loosest, which is the point: this check
+    exists to catch a name for something that no longer exists anywhere, not to
+    police how precisely a sentence spells a path."""
+    doc_dir = os.path.dirname(os.path.join(repo_dir, doc_name))
+    for base in (doc_dir, repo_dir):
+        if os.path.exists(os.path.join(base, token)):
+            return True
+    if "/" not in token:
+        for root, dirs, files in os.walk(repo_dir):
+            dirs[:] = [d for d in dirs
+                       if d not in (".git", "node_modules", ".venv", "build")]
+            if token in files:
+                return True
+    return False
+
+
+def _slug(heading):
+    """A heading as GitHub anchors it: lowercased, punctuation dropped, then one
+    hyphen per space — not per RUN of spaces, which is why "Scope & non-goals"
+    anchors as scope--non-goals with the ampersand's gap preserved. Duplicate
+    headings (GitHub appends -1, -2) are not modelled; this resolves the
+    first."""
+    text = heading.strip().lstrip("#").strip()
+    text = re.sub(r"`|\*|_", "", text)
+    text = re.sub(r"[^\w\s-]", "", text).strip().lower()
+    return text.replace(" ", "-")
+
+
+def _anchors(md_text):
+    return {_slug(l) for l in md_text.splitlines() if l.startswith("#")}
+
+
+def check_docs(src_dir, repo_dir):
+    """Verify that every name the documents state can be resolved.
+
+    Five questions, each mechanical, because a check with false positives gets
+    switched off and then gates nothing:
+
+      1. a relative path in backticks exists in the repository;
+      2. an identifier in backticks appears in the program, the build, or the
+         suite;
+      3. a `--flag` in backticks is one the tools accept;
+      4. every command README documents exists in the shell's own command
+         lists, and every command those lists hold is documented;
+      5. every internal link resolves, anchor included.
+
+    What it cannot check is whether a true sentence is the right sentence:
+    prose that misdescribes working code reads the same to a regex. That limit
+    is the reason DESIGN's verification bar names review as well as gates."""
+    problems = []
+
+    module = build(src_dir)
+    haystack = module
+    for extra in (os.path.join(src_dir, "build.py"),
+                  os.path.join(repo_dir, "tests", "test.py")):
+        try:
+            with open(extra, "r", encoding="utf-8") as f:
+                haystack += f.read()
+        except OSError:
+            pass
+
+    docs = {}
+    for name in _DOC_FILES:
+        try:
+            with open(os.path.join(repo_dir, name), "r", encoding="utf-8") as f:
+                docs[name] = f.read()
+        except OSError:
+            continue
+    for name in SECTION_FILES:
+        with open(os.path.join(src_dir, name), "r", encoding="utf-8") as f:
+            docs["src/" + name] = f.read()
+
+    for name, raw in docs.items():
+        prose = _prose_only(raw, drop_blockquotes=name.startswith("src/"))
+
+        for token in re.findall(r"`([^`\n]+)`", prose):
+            bad = token_problem(token, name, repo_dir, haystack)
+            if bad:
+                problems.append(f"  {name}: `{token}` — {bad}")
+
+        for text, target in re.findall(r"\[([^\]]+)\]\(([^)]+)\)", prose):
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            path, _, anchor = target.partition("#")
+            if path:
+                if not _resolves(path, name, repo_dir):
+                    problems.append(f"  {name}: link [{text}]({target}) — no such file")
+                    continue
+                full = os.path.join(os.path.dirname(os.path.join(repo_dir, name)), path)
+                if anchor and path.endswith(".md") and os.path.exists(full):
+                    with open(full, "r", encoding="utf-8") as f:
+                        if _slug(anchor) not in _anchors(f.read()):
+                            problems.append(f"  {name}: link [{text}]({target}) — "
+                                            f"no heading anchors to #{anchor}")
+            elif anchor and _slug(anchor) not in _anchors(raw):
+                problems.append(f"  {name}: link [{text}]({target}) — "
+                                f"no heading in this file anchors to #{anchor}")
+
+    # README's command table is the most-read thing in the repository, and
+    # _COMMANDS is the only authority on what the shell answers to. Drift either
+    # way is a documented command that does nothing, or a real one nobody is
+    # told about. Both sides are read as command NAMES with their argument specs
+    # stripped, so `status [--json]` and ("status [--json]", …) are the same
+    # claim about the same command.
+    # A gate DESIGN claims but CI does not run is the verification bar
+    # over-claiming about itself. A check counts as run either as its own
+    # workflow step or from inside the suite, which is a workflow step already —
+    # so the haystack is both. Only this direction is checked: naming a gate
+    # nothing runs fails, while a check CI runs that DESIGN has not caught up to
+    # does not.
+    enforced = ""
+    for path in (os.path.join(repo_dir, ".github", "workflows", "test.yml"),
+                 os.path.join(repo_dir, "tests", "test.py")):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                enforced += f.read()
+        except OSError:
+            pass
+    bar = docs.get("DESIGN.md", "")
+    if "## Verification bar" in bar and enforced:
+        bar = bar[bar.index("## Verification bar"):]
+        rest = bar[1:]
+        bar = bar[:rest.index("\n## ") + 1] if "\n## " in rest else bar
+        for flag in sorted(set(re.findall(r"`build\.py (--check[a-z-]*)`", bar))):
+            if flag not in enforced and flag.lstrip("-").replace("-", "_") not in enforced:
+                problems.append(f"  DESIGN.md: the verification bar names "
+                                f"`build.py {flag}` as a gate, but nothing in CI "
+                                f"or the suite runs it")
+
+    real = _command_names(module, "_COMMANDS")
+    documented = set()
+    # Located by its header row, not by row shape: README has other two-column
+    # tables of backticked names (the repository layout), and telling them apart
+    # by appearance alone reported LICENSE as a missing shell command.
+    table = re.search(r"^\| Command \| What it does \|\n\|-+\|-+\|\n((?:\|.*\n)+)",
+                      docs.get("README.md", ""), re.M)
+    if table:
+        for row in re.findall(r"^\|(.+?)\|", table.group(1), re.M):
+            for token in re.findall(r"`([^`]+)`", row):
+                if "/" not in token:
+                    documented.add(token.split()[0])
+    else:
+        problems.append("  README.md: no `| Command | What it does |` table found — "
+                        "was it reshaped? Nothing is gating the command list.")
+    for cmd in sorted(documented - real):
+        problems.append(f"  README.md: documents a `{cmd}` command the shell does not have")
+    for cmd in sorted(real - documented):
+        problems.append(f"  README.md: the shell has a `{cmd}` command README's table omits")
+
+    if problems:
+        print("STALE DOCS: the documents name things that do not exist.", file=sys.stderr)
+        print("\n".join(problems), file=sys.stderr)
+        return 1
+    print(f"OK: {len(docs)} documents name only things that exist.")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Build servette/__init__.py from src/*.md")
     parser.add_argument("--output", metavar="PATH",
@@ -215,6 +470,9 @@ def main(argv=None):
     parser.add_argument("--check-counts", action="store_true",
                         help="verify the line counts README states against src/; "
                              "exit 1 if any is stale")
+    parser.add_argument("--check-docs", action="store_true",
+                        help="verify that paths, identifiers, flags, commands and "
+                             "links the docs name exist; exit 1 if any is stale")
     args = parser.parse_args(argv)
 
     src_dir  = os.path.dirname(os.path.abspath(__file__))
@@ -225,6 +483,9 @@ def main(argv=None):
     # build itself is broken.
     if args.check_counts:
         return check_readme_counts(src_dir, repo_dir)
+
+    if args.check_docs:
+        return check_docs(src_dir, repo_dir)
 
     if args.counts:
         for name, total, code in section_counts(src_dir):

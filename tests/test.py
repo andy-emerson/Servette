@@ -2683,6 +2683,32 @@ def run_install_tests(s, tmpdir):
                 refused = True
         check("A non-pip-installed package is refused a service unit", refused)
         check("...and says pip install servette", "pip install servette" in buf.getvalue())
+
+        # The refusal must not take the shell down with it. Both ValueError
+        # refusals — a whitespace path, and a package pip does not own — are
+        # states an existing host can be UPGRADED into: a box enabled from a
+        # checkout before installation was narrowed still has units, and they
+        # go stale on the next version. _startup_refresh runs on every launch.
+        saved = {n: getattr(s, n) for n in
+                 ("_service_file_exists", "_stale_units", "_service_env_drift",
+                  "_servette_user_exists")}
+        try:
+            s._service_file_exists  = lambda: True
+            s._stale_units          = lambda: [s.SERVICE_PATH]
+            s._service_env_drift    = lambda: []
+            s._servette_user_exists = lambda: True
+            crashed = None
+            with contextlib.redirect_stdout(io.StringIO()) as rbuf:
+                try:
+                    s._startup_refresh()
+                except Exception as e:
+                    crashed = e
+            check("A refused unit write does not crash the shell launch", crashed is None)
+            check("...and says the existing service was left alone",
+                  "Leaving the existing service untouched" in rbuf.getvalue())
+        finally:
+            for n, v in saved.items():
+                setattr(s, n, v)
     finally:
         s._unsafe_unit_path = saved_uup
 

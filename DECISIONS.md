@@ -6,6 +6,26 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The diagnostic page is inlined, not shipped as a file
+
+**Ruled:** the page is authored as `src/selftest.html` — real HTML, editable
+and openable in a browser — and `build.py` inlines it into the module at build
+time. The installed package is Python only: `__init__.py` and `__main__.py`.
+**Why:** as package data it was a file an operator could delete, and deleting
+it took the default 404 body with it silently — the server would go back to
+answering ten bytes of `Not found.` with nothing to say why. A page that is
+part of the module cannot be removed without removing the program.
+**Rejected:** a Python string literal as the authored form (23 KB of HTML with
+every quote escaped, no highlighting, unopenable in a browser) — the
+precedent, the deleted placeholder page, showed why that reads badly; and
+leaving it as package data with documentation asking operators not to delete
+it. **Accounting:** the 630 lines of markup are reported separately by
+`build.py --counts`, not folded into the Python figures. The counts back a
+claim about reading the *program*; markup the program ships is not markup an
+auditor reads to understand it. Stating that split openly is the point —
+quietly absorbing 630 lines into "readable in an afternoon" would inflate the
+claim by 16%. *(2026-08-17)*
+
 ## `pip install servette` is the only installation path
 
 **Ruled:** there is one way to install Servette, and every other way is
@@ -47,7 +67,7 @@ from PyPI. Separation removes the shortcut instead of relying on anyone
 declining to take it. **Moved with it:** the front page, the source viewer,
 the publish tool, and the viewer's end-to-end harness (kept outside
 `servette.org/`, since anything under a hostname directory is served
-content). **Stayed:** `servette/selftest.html`, which ships inside the
+content). **Stayed:** the diagnostic page, which ships inside the
 package because every install serves it. **Costs accepted:** the line counts
 the site publishes can no longer be gated from here — the claim and its
 source are in different repositories, so `build.py --counts` prints the

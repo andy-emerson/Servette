@@ -50,8 +50,9 @@ Issues = "https://github.com/andy-emerson/Servette/issues"
 [tool.setuptools]
 packages = ["servette"]
 
-[tool.setuptools.package-data]
-servette = ["selftest.html"]
+# No package-data: the diagnostic page is inlined into the module at build time
+# (src/build.py), so the wheel is Python only and there is no file beside the
+# code for an operator to delete.
 
 [tool.setuptools.dynamic]
 version = { attr = "servette.__version__" }

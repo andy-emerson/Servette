@@ -75,20 +75,37 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
 2. **Open ports 80 and 443** in the provider's firewall panel (on Lightsail: the instance's **Networking** tab). This is separate from the OS firewall and is the step people miss — 80 carries the HTTP→HTTPS redirect and Let's Encrypt validation, 443 serves the site.
 3. **Attach a static IP** so the address survives restarts.
 4. **Point your domain at it** — an `A` record to the static IP, before requesting a certificate.
-5. **SSH in and install Servette:**
+5. **SSH in and install Servette** — one line:
    ```
-   ssh -i your-key.pem user@YOUR.IP
-   sudo python3 -m venv /opt/servette
-   sudo /opt/servette/bin/pip install servette
-   sudo ln -s /opt/servette/bin/servette /usr/local/bin/servette
+   sudo python3 -m venv /opt/servette && sudo /opt/servette/bin/pip install servette && sudo ln -s /opt/servette/bin/servette /usr/local/bin/servette
    ```
-   The venv keeps Servette and its one dependency out of the system Python.
+   Three things happen: a private environment for Servette and its one
+   dependency, the install into it, and `servette` placed on the system path so
+   `sudo servette` finds it. The environment is needed because Debian, Ubuntu,
+   and Raspberry Pi OS refuse `pip install` into the system Python; the symlink
+   is needed because `sudo` ignores your own `PATH`.
+
+   <details><summary><b>If that doesn't work</b></summary>
+
+   | What you see | What it means |
+   |---|---|
+   | `No module named venv` / `ensurepip is not available` | `sudo apt install python3-venv` (Debian, Ubuntu, Raspberry Pi OS), then re-run. |
+   | `No matching distribution found for servette` | Your Python is older than 3.11 — check with `python3 --version`. |
+   | `error: externally-managed-environment` | The `venv` step was skipped, so pip is being pointed at the system Python. Run the line as written. |
+   | `servette: command not found` | The symlink didn't land. `ls -l /usr/local/bin/servette` — if it's missing, re-run the third command alone. |
+   | `sudo servette` not found but plain `servette` works | The command is on your `PATH` but not on `sudo`'s. Servette needs root to write its systemd unit, so it has to be in `/usr/local/bin` — re-run the third command. |
+   | `File exists` on the symlink | An older install is already there. Remove it (`sudo rm /usr/local/bin/servette`) and re-run that command. |
+   | Building `cryptography` from source, or a Rust compiler error | No prebuilt wheel matched your platform — usually a 32-bit or very old OS. Upgrade to a current 64-bit release, where wheels are published. |
+   | `Permission denied` writing `/opt/servette` | The `sudo` was dropped from one of the commands. |
+
+   Nothing here needs undoing before a retry: the line is safe to run again.
+   </details>
 
 ### Deploy on your own machine (e.g. a Raspberry Pi)
 
 1. **Install a Linux OS and enable SSH** (the Raspberry Pi Imager can set this up before first boot).
 2. **Forward ports 80 and 443** on your router to the machine, and point a domain's `A` record at your public IP (a dynamic-DNS service keeps the record current if your home IP changes). Skip this to run on your LAN only, with a self-signed certificate.
-3. **SSH in and install Servette** — the same three lines as the VPS shape above.
+3. **SSH in and install Servette** — the same one-line install as the VPS shape above, troubleshooting table included.
 
 ### Run setup
 

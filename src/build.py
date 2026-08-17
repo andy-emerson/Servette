@@ -11,10 +11,12 @@ SYSTEM.md, SHELL.md, MAIN.md. Each interleaves three things:
   * everything else — headings, section intros — which is navigation for the
     reader and produces nothing.
 
-This tool reverses that mapping, in file order, to produce the module. It
-adds nothing of its own: every output line comes from either a code fence or
-a blockquote. The blockquote/comment mapping is an exact inverse of the split
-that created these files, so the build reproduces the module byte-for-byte —
+This tool reverses that mapping, in file order, to produce the module. Every
+output line comes from a code fence, a blockquote, or the one substitution
+below: `selftest.html` is inlined where the sources name it, so the diagnostic
+page ships inside the module instead of beside it. The blockquote/comment
+mapping is an exact inverse of the split that created these files, and the
+substitution is verbatim, so the build reproduces the module byte-for-byte —
 which `--check` verifies. (`servette/__main__.py` is the one hand-written
 file in the package: two lines that call main(), authored directly.)
 
@@ -36,6 +38,13 @@ import sys
 # because the entry point it holds — `config = Config()` and the `__main__`
 # dispatch — runs on import and calls definitions from every section above it.
 SECTION_FILES = ["INIT.md", "SERVER.md", "SYSTEM.md", "SHELL.md", "MAIN.md"]
+
+# The diagnostic page is authored as real HTML — editable, highlighted, openable
+# in a browser — and inlined into the module at build time, so the shipped
+# package is Python only. An operator cannot delete a page that is not a file,
+# and the 404 body cannot go missing with it.
+SELFTEST_SOURCE  = "selftest.html"
+_SELFTEST_MARKER = "@@SELFTEST_HTML@@"
 
 _FENCE_OPEN  = "```python"
 _FENCE_CLOSE = "```"
@@ -81,12 +90,30 @@ def md_to_code(md_text, filename):
 
 
 def build(src_dir):
-    """Concatenate the reconstructed source of all four section files."""
+    """Concatenate the reconstructed sections, then inline the diagnostic page.
+
+    The substitution happens here and not in md_to_code, so the per-section
+    line counts stay a measure of the program rather than of an embedded
+    asset."""
     parts = []
     for name in SECTION_FILES:
         with open(os.path.join(src_dir, name), "r", encoding="utf-8") as f:
             parts.append(md_to_code(f.read(), name))
-    return "".join(parts)
+    out = "".join(parts)
+
+    with open(os.path.join(src_dir, SELFTEST_SOURCE), "r", encoding="utf-8") as f:
+        html = f.read()
+    # The page lands inside a triple-quoted literal. A `"""` in the HTML would
+    # close it early and a backslash would be read as an escape, so both fail
+    # the build rather than producing a module that is subtly not the page.
+    if '"""' in html:
+        raise ValueError(f"{SELFTEST_SOURCE}: contains \"\"\", which would end the literal")
+    if "\\" in html:
+        raise ValueError(f"{SELFTEST_SOURCE}: contains a backslash, which the literal would escape")
+    if out.count(_SELFTEST_MARKER) != 1:
+        raise ValueError(f"expected exactly one {_SELFTEST_MARKER} in the sources, "
+                         f"found {out.count(_SELFTEST_MARKER)}")
+    return out.replace(_SELFTEST_MARKER, html)
 
 
 def section_counts(src_dir):
@@ -108,6 +135,17 @@ def section_counts(src_dir):
         tot_code += code
     rows.append(("Total", tot, tot_code))
     return rows
+
+
+def selftest_lines(src_dir):
+    """Lines in the authored diagnostic page.
+
+    Reported apart from the section counts, not folded into them. The counts
+    back a claim about reading the *program*; an embedded HTML page is shipped
+    by it, not read as part of it, and burying 630 lines of markup inside the
+    Python figure would overstate what an auditor has to work through."""
+    with open(os.path.join(src_dir, SELFTEST_SOURCE), "r", encoding="utf-8") as f:
+        return len(f.read().splitlines())
 
 
 # The website that publishes these counts lives in andy-emerson/websites now,
@@ -140,6 +178,8 @@ def main(argv=None):
     if args.counts:
         for name, total, code in section_counts(src_dir):
             print(f"{name:8} {total:>6,} total  {code:>6,} code")
+        print(f"{'':8} {'':>6}         {selftest_lines(src_dir):>6,} "
+              f"embedded page ({SELFTEST_SOURCE}, not Python)")
         return 0
 
     built = build(src_dir)

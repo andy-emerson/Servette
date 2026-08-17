@@ -4035,17 +4035,28 @@ def run_doc_check_tests(tmpdir):
     check("A renamed command list reads as empty rather than as agreement",
           build._command_names("nothing here", "_COMMANDS") == set())
 
-    # Litter must not satisfy the checker: the suite itself materializes files
-    # at the repo root (SERVETTE_HOME is the repo), and one stale doc name was
-    # found passing only because egg-info residue happened to contain it.
+    # Litter must not satisfy the checker — in tracked mode. The tracked set is
+    # INJECTED, because whether the host has git must not decide what this test
+    # asserts: Debian's CI container ships no git, its checkout is a downloaded
+    # tarball with no .git, and there the checker legitimately runs in its
+    # filesystem-fallback mode — where this file resolving is the documented
+    # behavior, not the failure. Both modes are pinned.
     litter = os.path.join(SERVETTE_DIR, "litter-probe-only.md")
     with open(litter, "w") as f:
         f.write("x")
+    saved_tracked = dict(build._TRACKED_CACHE)
     try:
-        check("An untracked file at the root does not resolve",
+        build._TRACKED_CACHE[SERVETTE_DIR] = {"README.md"}    # tracked mode
+        check("Tracked mode: an untracked file at the root does not resolve",
               build.token_problem("litter-probe-only.md", "DESIGN.md",
                                   SERVETTE_DIR, "") == "no such file in the repository")
+        build._TRACKED_CACHE[SERVETTE_DIR] = None             # no git to ask
+        check("Fallback mode (no git): the filesystem answers instead",
+              build.token_problem("litter-probe-only.md", "DESIGN.md",
+                                  SERVETTE_DIR, "") is None)
     finally:
+        build._TRACKED_CACHE.clear()
+        build._TRACKED_CACHE.update(saved_tracked)
         os.remove(litter)
 
     # The interpreter-version probe runs once per path, not per ask — the

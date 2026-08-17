@@ -24,12 +24,12 @@ Usage:
     python build.py --stdout        # write to stdout
     python build.py --check         # build in memory, diff against the
                                      # existing module, exit 1 on drift
+    python build.py --counts        # lines per section, for the website
 """
 
 import argparse
 import difflib
 import os
-import re
 import sys
 
 # The sources, in the order they concatenate into the module. MAIN.md is last
@@ -110,66 +110,12 @@ def section_counts(src_dir):
     return rows
 
 
-# Where the website states a count, and how to find it. Each entry is a
-# (label, regex) whose one capture group is the number as published. A stale
-# count fails the gate; a rewritten sentence fails it too, which is correct —
-# moving a claim should make someone re-check it rather than silently drop it
-# from the gate's view.
-def _site_claims(counts):
-    by = {name: (total, code) for name, total, code in counts}
-    total, code = by["Total"]
-    claims = [
-        ("prose total",  rf"Servette is ([\d,]+) lines of Python", total),
-        ("prose code",   rf"lines of Python, of which ([\d,]+) are code", code),
-        ("headline stat", r'class="stat__n">([\d,]+)</p>\s*<p class="stat__what">lines you can read', total),
-    ]
-    for name in ("Init", "Server", "System", "Shell", "Main", "Total"):
-        t, c = by[name]
-        row = (rf'<th scope="row">{name}</th>.*?'
-               rf'<td class="num">([\d,]+)</td><td class="num">[\d,]+</td>')
-        col = (rf'<th scope="row">{name}</th>.*?'
-               rf'<td class="num">[\d,]+</td><td class="num">([\d,]+)</td>')
-        claims.append((f"table {name} total", row, t))
-        claims.append((f"table {name} code",  col, c))
-    # The "Four regions" walkthrough repeats the three big section totals.
-    for name, stem in (("Server", r"lines\. The only region a network request can reach"),
-                       ("System", r"lines\. Everything that runs on its own schedule"),
-                       ("Shell",  r"lines, and the largest region of the module")):
-        claims.append((f"regions {name}", rf"<p>([\d,]+) {stem}", by[name][0]))
-    return claims
-
-
-def check_site_counts(src_dir, repo_dir):
-    """Verify every line count the website publishes against src/.
-
-    The counts drifted unnoticed once (the page claimed 3,896/3,003 while main
-    held 4,002/3,034) because nothing re-ran them. This is that check."""
-    page_path = os.path.join(repo_dir, "site", "index.html")
-    try:
-        with open(page_path, "r", encoding="utf-8") as f:
-            page = f.read()
-    except OSError as e:
-        print(f"count check failed: cannot read {page_path}: {e}", file=sys.stderr)
-        return 1
-
-    problems = []
-    for label, pattern, expected in _site_claims(section_counts(src_dir)):
-        m = re.search(pattern, page, re.DOTALL)
-        if m is None:
-            problems.append(f"  {label}: claim not found on the page "
-                            f"(expected {expected:,} — was the sentence rewritten?)")
-        elif m.group(1).replace(",", "") != str(expected):
-            problems.append(f"  {label}: page says {m.group(1)}, src/ says {expected:,}")
-
-    if problems:
-        print("STALE COUNTS: site/index.html disagrees with src/.", file=sys.stderr)
-        print("\n".join(problems), file=sys.stderr)
-        print("\nCurrent counts from src/:", file=sys.stderr)
-        for name, total, code in section_counts(src_dir):
-            print(f"  {name:8} {total:>6,} total  {code:>6,} code", file=sys.stderr)
-        return 1
-    print("OK: site/index.html line counts match the build of src/.")
-    return 0
+# The website that publishes these counts lives in andy-emerson/websites now,
+# so this repository cannot verify them: the claim and the source it is a claim
+# about are in different repositories. --counts prints the numbers so whoever
+# edits that page can copy them; nothing here checks that they did. That is a
+# real loss — the counts drifted 106 lines unnoticed once, which is why the
+# check existed — and it is recorded rather than papered over.
 
 
 def main(argv=None):
@@ -182,25 +128,19 @@ def main(argv=None):
                         help="compare the build against the existing servette.py; "
                              "exit 1 if they differ")
     parser.add_argument("--counts", action="store_true",
-                        help="print lines per section")
-    parser.add_argument("--check-counts", action="store_true",
-                        help="verify the line counts site/index.html publishes "
-                             "against src/; exit 1 if any is stale")
+                        help="print lines per section, for the website's figures")
     args = parser.parse_args(argv)
 
     src_dir  = os.path.dirname(os.path.abspath(__file__))
     repo_dir = os.path.dirname(src_dir)
     default  = os.path.join(repo_dir, "servette", "__init__.py")
 
-    # Both count modes read src/ only — no assembled module needed, so they
-    # answer even when the build itself is broken.
+    # Reads src/ only — no assembled module needed, so it answers even when the
+    # build itself is broken.
     if args.counts:
         for name, total, code in section_counts(src_dir):
             print(f"{name:8} {total:>6,} total  {code:>6,} code")
         return 0
-
-    if args.check_counts:
-        return check_site_counts(src_dir, repo_dir)
 
     built = build(src_dir)
 

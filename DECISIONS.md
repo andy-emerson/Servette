@@ -6,6 +6,28 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The website lives in its own repository
+
+**Ruled:** Servette's website moves to
+[andy-emerson/websites](https://github.com/andy-emerson/websites) as
+`servette.org/`, one directory per hostname, and leaves this repository. The
+program repository holds the program. **Why:** while the site sat here as
+`site/`, a checkout could serve it under `SERVETTE_HOME=.`, so "clone the
+program and serve its own folder" was the shortest path to deploying
+servette.org — which put this git repository inside the site's deployment
+story and made installing-from-git a standing suggestion. Servette installs
+from PyPI. Separation removes the shortcut instead of relying on anyone
+declining to take it. **Moved with it:** the front page, the source viewer,
+the publish tool, and the viewer's end-to-end harness (kept outside
+`servette.org/`, since anything under a hostname directory is served
+content). **Stayed:** `servette/selftest.html`, which ships inside the
+package because every install serves it. **Costs accepted:** the line counts
+the site publishes can no longer be gated from here — the claim and its
+source are in different repositories, so `build.py --counts` prints the
+numbers and nothing checks the page carries them; and the viewer harness now
+needs `SERVETTE_SRC` pointing at a checkout of this repository, so neither
+repository tests that page alone. *(2026-08-17)*
+
 ## The status code tells the truth; the body does the work
 
 **Ruled (principle).** Servette answers with the status code the situation
@@ -66,14 +88,17 @@ prior bundle-injected copy (superseded from #42 — it required a
 deliberately duplicated page and a network fetch in the publish tool).
 *(#79, 2026-08-16)*
 
-## site/pub/ is the operator tools page
+## site/pub/ is the operator tools page — *moved*
 
 **Ruled:** one bookmarkable home for operator services — the publish
 tool, the self-test explanation and link, the documented CLI loop. Its
 ceiling is a security boundary: it hosts, ships, links, and explains,
 and never reaches into a live server (no network admin API) or probes
 another origin. `servette sign` (client-side signing verb in the pip
-package) is **open**, not ruled. *(#79, 2026-08-16)*
+package) is **open**, not ruled. The page itself now lives at
+`servette.org/pub/` in the websites repository; the ceiling above is a
+property of the page and travelled with it. *(#79, 2026-08-16; moved
+2026-08-17)*
 
 ## DECISIONS.md is the canonical decision record
 
@@ -88,10 +113,11 @@ offline — the working agreement requires decisions in the repository).
 
 ## One home per fact: the site READMEs are deleted
 
-**Ruled:** `site/README.md` and `site/pub/README.md` are gone. The
-layout principle lives in DESIGN.md's website section; the publish
-tool's load-bearing constraints live in `site/pub/index.html`'s own
-header comment, where an editor of the page reads them. **Rejected:**
+**Ruled:** the website's folder READMEs are gone. The layout principle
+lives with the site itself, and the publish tool's load-bearing
+constraints live in that page's own header comment, where an editor of
+the page reads them. Both files, and the pages they described, are now in
+the websites repository. **Rejected:**
 parallel folder READMEs (the merge-scale review caught them drifting
 against DESIGN — two homes, one fact). *(#78, 2026-08-16)*
 

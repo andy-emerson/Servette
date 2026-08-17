@@ -1,7 +1,7 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="site/assets/servette-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="site/assets/servette-light.svg">
-  <img alt="Servette" src="site/assets/servette-light.svg" width="300">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/servette-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/servette-light.svg">
+  <img alt="Servette" src="assets/servette-light.svg" width="300">
 </picture>
 
 ### The Simple, Secure Static-Site Server
@@ -153,7 +153,6 @@ Each site can have a **publish channel**: build a signed bundle of your site in 
 | `servette/` | The installable package: `__init__.py` is the entire product — server, system, and shell in one module, generated from `src/` and not edited by hand — beside a stub `__main__.py` and `selftest.html`, the embedded diagnostic page every install serves in two roles — at `/selftest/` when asked for, and as the default `404` error page |
 | `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`) plus `build.py`, which assembles them into the module |
 | `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 and 3.14) and Debian 12 |
-| `site/` | The Servette website's source, and the folder a checkout serves by default; `site/src/` is a browsable view of the literate sources, `site/pub/` is the client-side publish tool, and `site/assets/` holds the logos this README displays |
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
 | `AGENTS.md` · `CLAUDE.md` | The human–agent working agreement, and the pointer to it |

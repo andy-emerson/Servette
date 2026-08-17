@@ -2,12 +2,13 @@
 
 *Shebang docstring, version, imports, and module-level constants.*
 
-*Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown; the generated module is never committed.*
+*Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown, never the module; the committed copy exists to be read, and `--check` holds it equal to the sources.*
 
-> GENERATED FILE — do not edit, do not commit. servette.py is generated from
-> the Markdown sources in src/ — by the package build (src/_literate_backend.py)
+> GENERATED FILE — do not edit by hand. servette.py is generated from the
+> Markdown sources in src/ — by the package build (src/_literate_backend.py)
 > whenever pip or `python -m build` runs, or by hand with src/build.py. Edit
-> the sources and regenerate; edits here are overwritten by the next build.
+> the sources and regenerate; edits here are overwritten by the next build
+> and fail CI's `build.py --check`.
 
 The module opens by introducing itself: what it does, how it is run, and the three sections everything below belongs to. `__version__` is the single version of record — the package build reads it from here.
 

@@ -2,7 +2,7 @@
 
 *Every incoming request: config, rate limiting, the file cache, site selection, the request handler, and the threaded HTTP servers.*
 
-*Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown; the generated module is never committed.*
+*Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown, never the module; the committed copy exists to be read, and `--check` holds it equal to the sources.*
 
 ## Config
 

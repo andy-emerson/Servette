@@ -22,6 +22,3 @@ node_modules/
 playwright-report/
 servette.toml
 test-results/
-
-# The generated module — built by the package backend or src/build.py, never committed.
-/servette.py

@@ -4,7 +4,7 @@ Contributions are welcome — written by hand, written with an AI agent, or
 anywhere in between. The bar is the same either way: the code is judged,
 not who or what typed it. Three things to know before you push:
 
-- **The module is generated.** Never hand-edit (or commit) `servette.py`.
+- **The module is generated.** Never hand-edit `servette.py` — edit `src/` and regenerate; CI fails on drift.
   Edit the Markdown sources under `src/`, run `python3 src/build.py`, and
   commit both; `python3 src/build.py --check` (which CI also runs) fails
   the build on drift. See [Building](DESIGN.md#building).

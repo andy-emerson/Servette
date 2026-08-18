@@ -28,7 +28,7 @@ Architecture:
     Shell               — the interactive terminal interface
 """
 
-__version__ = "0.26.219"
+__version__ = "0.26.230"
 
 ```
 

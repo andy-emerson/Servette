@@ -998,17 +998,18 @@ def run_dispatch_tests(s):
             setattr(s.config, n, v)
         s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_site
 
-    # Every save restores the service user's read access — a root-owned 0600
-    # config from `sudo servette set` would otherwise kill the running service.
-    saved_chown = s._chown_servette
+    # Every save restores the config's ownership — a root-owned 0600 config from
+    # `sudo servette set` would otherwise kill the running service and send the
+    # operator's own read-only commands looking for a password.
+    saved_chown = s._chown_config
     chowned = []
     try:
-        s._chown_servette = lambda path: chowned.append(path)
+        s._chown_config = lambda path: chowned.append(path)
         s.config.save()
-        check("save() re-chowns the config for the service user",
+        check("save() restores the config's ownership",
               chowned == [s.config.CONFIG_FILE])
     finally:
-        s._chown_servette = saved_chown
+        s._chown_config = saved_chown
 
     # One-shot dispatch: --serve is positional, so a stray flag in a command's
     # arguments stays an argument instead of silently becoming the server.
@@ -2945,6 +2946,79 @@ def run_install_tests(s, tmpdir):
         except Exception as e:
             check(f"_chown_servette no-ops when user absent (raised {e})", False)
 
+    section("Config file permissions")
+
+    # servette.toml is the operator's file about the operator's box. Owned 0600
+    # by the service user, every read-only command elevated to read it and
+    # config.unreadable stayed true, firing the fail-closed reload guard during
+    # correct operation. The file is now servette:<operator group> 0640.
+    check("_operator_group returns a non-empty name",
+          isinstance(s._operator_group(), str) and s._operator_group() != "")
+    saved_og_env = os.environ.get("SUDO_USER")
+    try:
+        os.environ["SUDO_USER"] = "nosuchuser-servette-probe"
+        check("_operator_group falls back to the username when the group is unresolvable",
+              s._operator_group() == "nosuchuser-servette-probe")
+    finally:
+        if saved_og_env is None:
+            os.environ.pop("SUDO_USER", None)
+        else:
+            os.environ["SUDO_USER"] = saved_og_env
+
+    cfg_probe = os.path.join(tmpdir, "perm-probe.toml")
+    open(cfg_probe, "w").write("port = 443\n")
+    os.chmod(cfg_probe, 0o600)
+    saved_cfg_euid, saved_cfg_sue = s.os.geteuid, s._servette_user_exists
+    try:
+        # No servette user (session mode, macOS, tests): nothing to hand over,
+        # so the mode the writer chose stands.
+        s._servette_user_exists = lambda: False
+        s._chown_config(cfg_probe)
+        check("_chown_config leaves the mode alone with no service user",
+              os.stat(cfg_probe).st_mode & 0o777 == 0o600)
+
+        # A process that is neither root nor the service user cannot hand the
+        # file over at all, and must not try — the same crash _chown_servette
+        # learned to avoid, on the same import-time save() path.
+        s._servette_user_exists = lambda: True
+        s.os.geteuid = lambda: 12345
+        try:
+            s._chown_config(cfg_probe)
+            check("Unprivileged _chown_config skips instead of raising", True)
+        except Exception as e:
+            check(f"Unprivileged _chown_config skips instead of raising (raised {e})", False)
+        check("Unprivileged _chown_config changes nothing",
+              os.stat(cfg_probe).st_mode & 0o777 == 0o600)
+
+        # Root's path: the chown is best-effort (it fails here, with no such
+        # group), the chmod is not. That ordering is what makes the widening
+        # fail closed — a group that could not be handed over leaves the file
+        # readable by servette, which already owns it.
+        s.os.geteuid = lambda: 0
+        s._chown_config(cfg_probe)
+        check("_chown_config sets 0640, group-readable and never world-readable",
+              os.stat(cfg_probe).st_mode & 0o777 == 0o640)
+    finally:
+        s.os.geteuid, s._servette_user_exists = saved_cfg_euid, saved_cfg_sue
+
+    # save() writes through a mkstemp temp file, which arrives 0600, and
+    # os.replace installs that mode over the live config. Without the restore
+    # every `config` run would take the readable file away again.
+    save_probe    = os.path.join(tmpdir, "save-probe.toml")
+    saved_cf      = s.Config.CONFIG_FILE
+    saved_sv_euid = s.os.geteuid
+    saved_sv_sue  = s._servette_user_exists
+    try:
+        s.Config.CONFIG_FILE    = save_probe
+        s._servette_user_exists = lambda: True
+        s.os.geteuid            = lambda: 0
+        s.Config().save()
+        check("save() leaves the config 0640, not the temp file's 0600",
+              os.stat(save_probe).st_mode & 0o777 == 0o640)
+    finally:
+        s.Config.CONFIG_FILE = saved_cf
+        s.os.geteuid, s._servette_user_exists = saved_sv_euid, saved_sv_sue
+
     section("Service file content")
 
     # Test the real generated unit, not a reconstructed copy.
@@ -3323,6 +3397,23 @@ def run_install_tests(s, tmpdir):
           s._swap_offer(1200, True, 1200) is None)
     check("Our swapfile, undersized → offer, declining keeps current",
           s._swap_offer(1200, True, 600) == ("a 600 MB swapfile", "keep 600"))
+    # The live box took a 1400 MB offer and SwapTotal came back 1399 MB: mkswap
+    # spends the first page on a header and the MB arithmetic floors the rest.
+    # Compared exactly, that host is told to resize to the size it already has,
+    # forever, and resizing reproduces the same shortfall.
+    check("Our swapfile, short by mkswap's header → no offer",
+          s._swap_offer(1400, True, 1399) is None)
+    check("Our swapfile, short by exactly the slack → no offer",
+          s._swap_offer(1200, True, 1200 - s._SWAP_SLACK_MB) is None)
+    check("Our swapfile, short by more than the slack → still offered",
+          s._swap_offer(1200, True, 1200 - s._SWAP_SLACK_MB - 1)
+          == (f"a {1200 - s._SWAP_SLACK_MB - 1} MB swapfile",
+              f"keep {1200 - s._SWAP_SLACK_MB - 1}"))
+    # The slack forgives less than the recommendation's own rounding already
+    # does: _round_up_2sig moves a four-digit estimate in 100 MB steps, so the
+    # tolerance cannot swallow a size difference the recommendation could see.
+    check("Slack is smaller than the recommendation's rounding step",
+          s._SWAP_SLACK_MB < s._round_up_2sig(1101) - s._round_up_2sig(1001))
     check("Our swapfile, inactive → offer, declining skips",
           s._swap_offer(1200, True, 0) == ("an inactive swapfile", "skip"))
     check("No recommendation → no offer",
@@ -3802,6 +3893,10 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # Servette's own state: config, certificates, the ACME account.
         "save", "_generate_self_signed_cert", "_ensure_default_cert",
         "_obtain_trusted_cert", "issue",
+        # Writes no content — sets the config's mode, which is a write all the
+        # same, and the one kind of write the detector should never let past
+        # unclaimed on a file holding a password hash.
+        "_chown_config",
         # The host, at install time and as root.
         "_write_unit_files", "_provision_runtime", "cmd_disable", "_ensure_swap",
         # Staging: unpacks a verified bundle into a temporary directory.

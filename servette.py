@@ -392,12 +392,13 @@ permissions_policy = {s(self.permissions_policy)}
                 pass
             raise
         # The replace installs the temp file's root:root 0600 — unreadable by
-        # the servette service user, which would kill the running service's
-        # per-request config reload and crash-loop the next restart. Restore
-        # the ownership enable establishes; a no-op where the user doesn't
-        # exist (session mode, tests, macOS). Late import shape as with
-        # _domain_from_cert: _chown_servette is defined in System.
-        _chown_servette(self.CONFIG_FILE)
+        # both the service user (whose per-request reload would die, crash-
+        # looping the next restart) and the operator (whose read-only commands
+        # would elevate to read their own settings). Restore the ownership
+        # enable establishes; a no-op where the servette user doesn't exist
+        # (session mode, tests, macOS). Late import shape as with
+        # _domain_from_cert: _chown_config is defined in System.
+        _chown_config(self.CONFIG_FILE)
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
@@ -2125,6 +2126,50 @@ def _serve_dir_readable(path):
 
 
 # Ownership: the service user
+def _chown_config(path):
+    """Give the config to the service user, readable by the operator: owner
+    servette, group the operator's own, mode 0640.
+
+    servette.toml is the operator's file about the operator's box, and the
+    read-only commands (status, sites, log) read it to report a URL and a
+    certificate expiry. Owning it 0600 to the service user made those commands
+    elevate on every configured host — a password to look at your own server —
+    and left config.unreadable permanently true, so the fail-closed reload
+    guard fired during correct operation. A guard that trips in normal use is
+    one people learn to ignore.
+
+    The group is the operator's, so the widening is from one system user to
+    exactly one more: them. World bits stay off, as they do for site content —
+    the file carries a password HASH and salt, which is material for an offline
+    attack and never something to hand to every local account.
+
+    The chown is best-effort and the chmod unconditional, which is what makes
+    the widening fail closed. Only root can hand the group away; the service
+    user re-saving its own config cannot, and there the group stays servette,
+    so 0640 grants read to a user that already had it. save() runs at import on
+    every configured host — check=True here would be the crash _chown_servette
+    already learned to avoid."""
+    if not (_servette_user_exists() and os.path.exists(path)):
+        return
+    if os.geteuid() != 0 and os.geteuid() != _servette_uid():
+        return
+    subprocess.run(["chown", f"servette:{_operator_group()}", path],
+                   check=False, capture_output=True)
+    os.chmod(path, 0o640)
+
+
+def _operator_group():
+    """The operator's own group, for the config's group ownership. Their primary
+    group by name; the operator's username where that cannot be resolved, which
+    is correct on the user-private-group distributions Servette targets."""
+    user = _operator_user()
+    try:
+        import grp as _grp, pwd as _pwd
+        return _grp.getgrgid(_pwd.getpwnam(user).pw_gid).gr_name
+    except (ImportError, KeyError):
+        return user
+
+
 def _chown_servette(path):
     """Chown path to servette:servette if the user exists and the path exists."""
     if not (_servette_user_exists() and os.path.exists(path)):
@@ -2324,6 +2369,7 @@ def _meminfo():
 _SPIKE_ALLOWANCE_KB = 700 * 1024
 _SWAP_MIN_MB        = 512
 _SWAP_MAX_MB        = 2048
+_SWAP_SLACK_MB      = 8
 
 
 # Ceiling division
@@ -2370,7 +2416,11 @@ def _swap_offer(rec_mb, ours, active_mb):
     create (a partition, a distro-managed file) is left alone — resizing it would
     fight whatever manages it. Enter always takes the recommendation; the skip
     hint says what declining preserves, so no two options in the prompt are
-    redundant."""
+    redundant.
+
+    A swapfile within _SWAP_SLACK_MB of the recommendation counts as meeting it,
+    so a host that took the offer is not asked again for the megabyte mkswap
+    spends on its header."""
     if rec_mb is None:
         return None
     if active_mb > 0 and not ours:
@@ -2379,7 +2429,7 @@ def _swap_offer(rec_mb, ours, active_mb):
         return "no swapfile", "skip"
     if active_mb == 0:
         return "an inactive swapfile", "skip"
-    if active_mb >= rec_mb:
+    if active_mb >= rec_mb - _SWAP_SLACK_MB:
         return None
     return f"a {active_mb} MB swapfile", f"keep {active_mb}"
 
@@ -2426,8 +2476,8 @@ def _ensure_swap():
         except ValueError:
             print("  Not a number — skipping swap setup.")
             return
-    if ours and mb == active_mb:
-        return  # keeping the current size — nothing to do
+    if ours and abs(mb - active_mb) <= _SWAP_SLACK_MB:
+        return  # the size asked for is the size already active — nothing to do
     size = mb * 1024 * 1024
     try:
         st        = os.statvfs("/")
@@ -2918,7 +2968,7 @@ def _write_unit_files():
                    check=True, capture_output=True)
 
     # chown files the service process needs to read, across every site
-    _chown_servette(config.CONFIG_FILE)
+    _chown_config(config.CONFIG_FILE)
     for site in config.sites:
         if site.cert_file:
             _chown_servette(_resolve(site.cert_file))

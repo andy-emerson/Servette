@@ -1,0 +1,60 @@
+# Publish to PyPI when a GitHub Release is published.
+#
+# The credential is an OIDC token minted per run by GitHub and exchanged with
+# PyPI (Trusted Publishing) — there is no API token stored in this repository
+# to leak or rotate. PyPI must already hold a matching publisher for
+# andy-emerson/Servette, workflow publish.yml, environment pypi; register it
+# before the first release, because the exchange is what authenticates the
+# upload and it fails closed.
+#
+# The artifacts are built the same way everything else builds them: `python -m
+# build` enters src/_literate_backend.py, which generates servette.py from the
+# Markdown sources and delegates to setuptools. Nothing here assembles the
+# module itself, so a release cannot ship a module the sources did not produce.
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions: {}          # nothing by default; each job asks for what it needs
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # The environment gates the OIDC identity PyPI trusts, and is where a
+    # required reviewer can be added later without touching this file.
+    environment: pypi
+    permissions:
+      id-token: write    # mint the OIDC token — this IS the credential
+      contents: read     # check out the tagged commit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The same gates main is held to, re-run against the exact tagged tree:
+      # the release is the one artifact nobody can amend afterwards, and a
+      # version can never be re-uploaded to PyPI.
+      - name: Verify the committed module matches src/
+        run: python3 src/build.py --check
+
+      - name: Verify the documents name only things that exist
+        run: python3 src/build.py --check-docs
+
+      - name: Build the sdist and wheel through the literate backend
+        run: |
+          python -m pip install --quiet build
+          python -m build
+
+      # Catches a malformed description or metadata before the upload rather
+      # than after, while the version number is still spendable.
+      - name: Check the artifacts PyPI will receive
+        run: |
+          python -m pip install --quiet twine
+          python -m twine check dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

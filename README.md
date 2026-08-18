@@ -92,7 +92,8 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
 
    | What you see | What it means |
    |---|---|
-   | `pipx: command not found` | `sudo apt install pipx`, then re-run. |
+   | `pipx: command not found` | `sudo apt install pipx`, then re-run. On macOS, `brew install pipx`. |
+   | `E: Unable to locate package pipx` | The package index is stale or the repository holding pipx is off. `sudo apt update` first; on Ubuntu, pipx lives in `universe` (`sudo add-apt-repository universe`), and on Debian 12 it is in `main` once the index is current. |
    | `No matching distribution found for servette` | Your Python is older than 3.11 — check `python3 --version`. |
    | `error: externally-managed-environment` | Something used `pip` against the system Python. Use `pipx`, which makes its own environment. |
    | `servette: command not found` after installing | pipx put it in `~/.local/bin`, which isn't on your `PATH` yet. Run `pipx ensurepath`, then open a new shell. |

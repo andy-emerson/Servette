@@ -497,17 +497,39 @@ _rate_lock       = threading.Lock()
 
 # Normalizing addresses
 def _normalize_ip(ip):
-    """Normalize IPv6-mapped IPv4 addresses so both forms bucket together.
+    """Normalize IPv6-mapped IPv4 addresses so both forms read the same.
 
-    Uses ipaddress so every mapped spelling collapses to the same key — the dotted
-    ::ffff:1.2.3.4 and the hex ::ffff:c0a8:0101 are the same address and must share a
-    rate-limit bucket. Non-addresses (e.g. "unknown", junk XFF) pass through as-is."""
+    Uses ipaddress so every mapped spelling collapses to the same string — the
+    dotted ::ffff:1.2.3.4 and the hex ::ffff:c0a8:0101 are the same address.
+    Non-addresses (e.g. "unknown", junk XFF) pass through as-is. This is the
+    address as logged; the limiters key on _bucket_key below."""
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return ip
     if addr.version == 6 and addr.ipv4_mapped:
         return str(addr.ipv4_mapped)
+    return ip
+
+
+def _bucket_key(ip):
+    """The rate/connection bucket an address belongs to.
+
+    IPv4 buckets per address. Native IPv6 buckets by its /64: providers hand
+    a subscriber at least a /64 (RFC 6177), so one visitor holds 2^64
+    addresses — keyed individually, rotating the low bits gave every request
+    a fresh bucket, quietly switching off the request rate limit, the
+    auth-failure throttle, and the per-IP connection cap for any IPv6
+    client. /64 is the finest bucket that is still one subscriber's, so a
+    visitor can neither dodge the limits nor exhaust a neighbor's. Logs keep
+    the full address (_normalize_ip); only the limiters see this key."""
+    ip = _normalize_ip(ip)
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
     return ip
 
 
@@ -590,17 +612,27 @@ def _entry_bytes(entry):
 def _get_cached_file(path):
     """Return (raw, compressed_or_None, etag), reloading only if the file changed.
 
+    "Changed" is judged on (mtime_ns, size, inode) from one stat call — not
+    mtime alone, which the publish pipeline can hold constant across content
+    changes: tar restores each member's archived mtime at whole-second
+    granularity, so two pulls of a file edited and repacked within the same
+    second (or built by any pinned-timestamp tooling) carried identical
+    mtimes with different bytes, and the cache served the old bytes
+    indefinitely. The swap extracts fresh files, so the inode always moves;
+    size and nanosecond mtime guard direct in-place edits too.
+
     compressed is None for already-compressed types; a file too large to fit in
     the cache is served raw and not stored, so it can't purge everything else.
     """
     try:
-        mtime = os.path.getmtime(path)
+        st = os.stat(path)
     except OSError:
         return None, None, None
+    stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
 
     with _file_cache_lock:
         entry = _file_cache.get(path)
-        if entry and entry["mtime"] == mtime:
+        if entry and entry["stamp"] == stamp:
             return entry["raw"], entry["compressed"], entry["etag"]
 
     # Two threads can race here: both miss the cache check and both read the file. The fix is
@@ -623,7 +655,7 @@ def _get_cached_file(path):
 
     ext        = os.path.splitext(path)[1].lower()
     compressed = gzip.compress(raw, compresslevel=6) if ext in _COMPRESSIBLE_EXTS else None
-    new_entry  = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
+    new_entry  = {"stamp": stamp, "raw": raw, "compressed": compressed, "etag": etag}
 
     if _entry_bytes(new_entry) > cache_max:
         return raw, compressed, etag  # rare: raw fit but raw+gzip doesn't — serve, don't store
@@ -1416,7 +1448,8 @@ def _handle_request(method, url_path, headers, raw_ip):
     # headers still gets throttled rather than dodging the limiter under the
     # closed-system 404 below; the cost is that a rate-limited response never
     # carries HSTS even for a real site's domain.
-    if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
+    bucket = _bucket_key(ip)   # /64 for IPv6 — logs keep the full address
+    if _rate_limit_exceeded(_request_times, bucket, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
@@ -1449,7 +1482,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         # credentials burn CPU and RAM on every attempt no matter the limit. The
         # peek (record=False) decides whether to spend the hash at all; an actual
         # failure below is what records a strike toward the limit.
-        if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit, record=False):
+        if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, bucket, config.auth_rate_limit, record=False):
             log.warning("Auth rate limited %s", ip)
             return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
@@ -1471,7 +1504,7 @@ def _handle_request(method, url_path, headers, raw_ip):
                 pass
 
         if not authed:
-            if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit):
+            if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, bucket, config.auth_rate_limit):
                 log.warning("Auth rate limited %s", ip)
                 return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
             if credentials_submitted:
@@ -1856,7 +1889,10 @@ class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
 
     @staticmethod
     def _ip_key(client_address):
-        return _normalize_ip(client_address[0]) if client_address else "?"
+        # The connection cap shares the limiters' bucketing (/64 for IPv6) —
+        # per-address keying let one subscriber's 2^64 addresses each claim a
+        # fresh slot allowance, unmaking the cap for IPv6 sources.
+        return _bucket_key(client_address[0]) if client_address else "?"
 
     def _ip_acquire(self, ip):
         """Count a connection against ip. Returns False — without counting — when
@@ -2492,29 +2528,55 @@ def _swap_recommendation(mem_kb, avail_kb, cache_mb):
     return min(max(size_mb, _SWAP_MIN_MB), _SWAP_MAX_MB) * 1024 ** 2
 
 
-def _swap_offer(rec_mb, ours, active_mb):
+def _swap_sizes():
+    """(ours_mb, foreign_mb) of ACTIVE swap, from /proc/swaps: the size of
+    Servette's own swapfile when active (else None), and the total of every
+    other active swap device. SwapTotal from /proc/meminfo lumps them
+    together, and using it as "the swapfile's size" printed a wrong number
+    whenever a partition coexisted — and let a resize conclude 'nothing to
+    do' because partition + file happened to sum near the request. (None, 0)
+    where /proc/swaps can't be read (non-Linux)."""
+    ours, foreign = None, 0
+    try:
+        with open("/proc/swaps") as f:
+            next(f, None)  # the header line
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                if parts[0] == _SWAP_PATH:
+                    ours = int(parts[2]) // 1024
+                else:
+                    foreign += int(parts[2]) // 1024
+    except (OSError, ValueError):
+        pass
+    return ours, foreign
+
+
+def _swap_offer(rec_mb, ours, ours_mb, foreign_mb):
     """(description, skip_hint) for the swap prompt, or None when no offer is due.
+    `ours` is whether /swapfile exists on disk; `ours_mb` its active size (None
+    when inactive); `foreign_mb` every other active swap device's total.
 
     Only Servette's own /swapfile is ever offered a resize; swap Servette didn't
     create (a partition, a distro-managed file) is left alone — resizing it would
-    fight whatever manages it. Enter always takes the recommendation; the skip
-    hint says what declining preserves, so no two options in the prompt are
-    redundant.
+    fight whatever manages it, and its presence also suppresses the create offer,
+    since the host's swap is already someone else's decision. Enter always takes
+    the recommendation; the skip hint says what declining preserves, so no two
+    options in the prompt are redundant.
 
     A swapfile within _SWAP_SLACK_MB of the recommendation counts as meeting it,
     so a host that took the offer is not asked again for the megabyte mkswap
     spends on its header."""
     if rec_mb is None:
         return None
-    if active_mb > 0 and not ours:
-        return None
     if not ours:
-        return "no swapfile", "skip"
-    if active_mb == 0:
+        return None if foreign_mb else ("no swapfile", "skip")
+    if not ours_mb:
         return "an inactive swapfile", "skip"
-    if active_mb >= rec_mb - _SWAP_SLACK_MB:
+    if ours_mb >= rec_mb - _SWAP_SLACK_MB:
         return None
-    return f"a {active_mb} MB swapfile", f"keep {active_mb}"
+    return f"a {ours_mb} MB swapfile", f"keep {ours_mb}"
 
 
 # The flash-wear note
@@ -2529,17 +2591,29 @@ def _root_on_sd_card():
         return False
 
 
+# Making the swapfile
+def _make_swapfile(size):
+    """Allocate, format, and activate /swapfile at `size` bytes; raises on any
+    failure. Mode 0600 is set before content exists — never world-readable."""
+    with open(_SWAP_PATH, "wb") as f:
+        os.chmod(_SWAP_PATH, 0o600)
+        os.posix_fallocate(f.fileno(), 0, size)
+    subprocess.run(["mkswap", _SWAP_PATH], check=True, capture_output=True)
+    subprocess.run(["swapon", _SWAP_PATH], check=True, capture_output=True)
+
+
 # The swap offer
 def _ensure_swap():
     """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
     if _IS_MACOS:
         return  # macOS manages its own swap; mkswap/swapon/fallocate do not exist there
-    mem_kb, avail_kb, swap_kb = _meminfo()
+    mem_kb, avail_kb, _ = _meminfo()
     rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
     rec_mb    = rec // (1024 * 1024) if rec else None
     ours      = os.path.exists(_SWAP_PATH)
-    active_mb = (swap_kb or 0) // 1024  # total active swap; ≈ ours when ours is the only one
-    offer     = _swap_offer(rec_mb, ours, active_mb)
+    ours_mb, foreign_mb = _swap_sizes()
+    active_mb = ours_mb or 0            # OUR file's active size, not the host total
+    offer     = _swap_offer(rec_mb, ours, ours_mb, foreign_mb)
     if offer is None:
         return
     swap_desc, skip_hint = offer
@@ -2576,11 +2650,7 @@ def _ensure_swap():
             print("  Could not deactivate the current swapfile (heavily in use?) — try again later.")
             return
     try:
-        with open(_SWAP_PATH, "wb") as f:
-            os.chmod(_SWAP_PATH, 0o600)  # before content exists — never world-readable
-            os.posix_fallocate(f.fileno(), 0, size)
-        subprocess.run(["mkswap", _SWAP_PATH], check=True, capture_output=True)
-        subprocess.run(["swapon", _SWAP_PATH], check=True, capture_output=True)
+        _make_swapfile(size)
         with open("/etc/fstab") as f:
             fstab = f.read()
         if _SWAP_PATH not in fstab.split():
@@ -2590,9 +2660,33 @@ def _ensure_swap():
         log.info("Swapfile active: %d MB at %s", mb, _SWAP_PATH)
     except (OSError, subprocess.CalledProcessError) as e:
         print(f"  Could not set up swapfile: {e}")
+        # A failed RESIZE has already truncated the old file, so try to give
+        # the host back the swap it walked in with — a memory-tight host that
+        # accepted a grow offer must not end up worse than it started. Swap
+        # content is scratch (it was swapoff'd above), so rebuilding at the
+        # old size restores the prior state in full.
+        if ours and active_mb > 0:
+            try:
+                _make_swapfile(active_mb * 1024 * 1024)
+                print(f"  Restored the previous {active_mb} MB swapfile.")
+                return
+            except (OSError, subprocess.CalledProcessError):
+                pass
+        # Nothing to restore (or the restore failed): remove the dead file AND
+        # its fstab line — a line pointing at a missing or unformatted file is
+        # a failed swap unit at every boot from here on.
         try:
             subprocess.run(["swapoff", _SWAP_PATH], capture_output=True)
             os.remove(_SWAP_PATH)
+        except OSError:
+            pass
+        try:
+            with open("/etc/fstab") as f:
+                lines = f.readlines()
+            kept = [l for l in lines if _SWAP_PATH not in l.split()]
+            if kept != lines:
+                with open("/etc/fstab", "w") as f:
+                    f.writelines(kept)
         except OSError:
             pass
 
@@ -4172,7 +4266,13 @@ def _config_cache():
         age_str = _input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
         if age_str:
             try:
-                config.cache_max_age = int(age_str)
+                # Non-negative, same rule 'set' enforces: a negative max-age
+                # is not a shorter cache, it is a malformed Cache-Control
+                # header sent on every response.
+                age = int(age_str)
+                if age < 0:
+                    raise ValueError
+                config.cache_max_age = age
             except ValueError:
                 print("  → invalid number, keeping current max-age")
     config.save()
@@ -4191,6 +4291,16 @@ def _config_trusted_proxy():
     if new_value == current:
         print("  → unchanged")
         return
+    if new_value:
+        # The same rule 'set' enforces. A typo saved here was worse than a
+        # refusal: the peer-address comparison then never matches, XFF is
+        # never trusted, and every proxied visitor shares the proxy's single
+        # rate-limit bucket — the whole site throttles as one client.
+        try:
+            ipaddress.ip_address(new_value)
+        except ValueError:
+            print("  → must be an IP address, unchanged")
+            return
     config.trusted_proxy = new_value
     config.save()
     print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
@@ -4434,9 +4544,16 @@ def _extract_bundle(data, dest_dir):
     os.makedirs(dest_dir)
     dest_real = os.path.realpath(dest_dir)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-        members = tf.getmembers()
-        total = 0
-        for m in members:
+        # Members are walked with next() rather than getmembers(): walking a
+        # gzip stream decompresses it, so getmembers() paid the FULL
+        # decompression cost before the size cap ever ran — the cap bounded
+        # what was written, not the CPU a bomb burns. next() lets the walk
+        # abort at the ceiling. (Only a signed bundle gets here at all, so
+        # this bounds a compromised or buggy publisher, not the anonymous
+        # internet.)
+        members = []
+        total   = 0
+        while (m := tf.next()) is not None:
             if not (m.isfile() or m.isdir()):
                 raise ValueError(f"unsupported entry type in bundle: {m.name}")
             target = os.path.realpath(os.path.join(dest_dir, m.name))
@@ -4445,6 +4562,7 @@ def _extract_bundle(data, dest_dir):
             total += m.size
             if total > _MAX_BUNDLE_BYTES:
                 raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
+            members.append(m)
         # The PEP 706 feature probe: data_filter exists exactly when
         # extractall() accepts filter=. Debian 12's 3.11.2 predates the
         # backport — there the checks above are the (sufficient) guard.
@@ -4462,13 +4580,24 @@ def _swap_site_content(new_dir, serve_dir):
     new_dir must be on the same filesystem as serve_dir (both under BASE_DIR)
     so the renames are atomic; the only unavoidable risk window is the two
     renames themselves, each a single fast syscall back to back — proportionate
-    to Servette's scale, not a high-QPS system where that window would matter."""
+    to Servette's scale, not a high-QPS system where that window would matter.
+
+    The first rename is undone if the second fails: without the rollback a
+    failed swap left NO live directory at all — every request a 404 — while
+    the caller reported the pull merely 'rejected', and only a manual
+    restore-site would have noticed the site was down."""
     live_dir = _resolve(serve_dir).rstrip(os.sep)
     bak_dir  = live_dir + ".bak"
     shutil.rmtree(bak_dir, ignore_errors=True)
-    if os.path.isdir(live_dir):
+    had_live = os.path.isdir(live_dir)
+    if had_live:
         os.rename(live_dir, bak_dir)
-    os.rename(new_dir, live_dir)
+    try:
+        os.rename(new_dir, live_dir)
+    except OSError:
+        if had_live:
+            os.rename(bak_dir, live_dir)
+        raise
 
 
 _publish_lock = threading.Lock()  # serializes site-content mutation across every
@@ -4637,14 +4766,16 @@ def _production_issues():
             issues.append(f"no password protection{tag} — run 'config' to set credentials")
         if bool(site.publish_url) != bool(site.publish_key):
             issues.append(f"publish channel partially configured{tag} — run 'config publish' to finish setup")
-    mem_kb, avail_kb, swap_kb = _meminfo()
-    rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
-    active_mb = (swap_kb or 0) // 1024
-    offer     = _swap_offer(rec // (1024 * 1024) if rec else None,
-                            os.path.exists(_SWAP_PATH), active_mb)
+    mem_kb, avail_kb, _ = _meminfo()
+    rec     = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
+    ours_mb, foreign_mb = _swap_sizes()
+    offer   = _swap_offer(rec // (1024 * 1024) if rec else None,
+                          os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
     if offer is not None:
-        if active_mb:
-            issues.append(f"swapfile {active_mb} MB but {rec // (1024 * 1024)} MB "
+        if ours_mb:
+            # ours_mb, not SwapTotal: with a swap partition alongside, the
+            # total printed a size the swapfile does not have.
+            issues.append(f"swapfile {ours_mb} MB but {rec // (1024 * 1024)} MB "
                           "recommended — run 'enable' to resize")
         else:
             issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'enable' to add a swapfile")

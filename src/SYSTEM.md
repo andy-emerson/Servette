@@ -659,29 +659,55 @@ def _swap_recommendation(mem_kb, avail_kb, cache_mb):
     return min(max(size_mb, _SWAP_MIN_MB), _SWAP_MAX_MB) * 1024 ** 2
 
 
-def _swap_offer(rec_mb, ours, active_mb):
+def _swap_sizes():
+    """(ours_mb, foreign_mb) of ACTIVE swap, from /proc/swaps: the size of
+    Servette's own swapfile when active (else None), and the total of every
+    other active swap device. SwapTotal from /proc/meminfo lumps them
+    together, and using it as "the swapfile's size" printed a wrong number
+    whenever a partition coexisted — and let a resize conclude 'nothing to
+    do' because partition + file happened to sum near the request. (None, 0)
+    where /proc/swaps can't be read (non-Linux)."""
+    ours, foreign = None, 0
+    try:
+        with open("/proc/swaps") as f:
+            next(f, None)  # the header line
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                if parts[0] == _SWAP_PATH:
+                    ours = int(parts[2]) // 1024
+                else:
+                    foreign += int(parts[2]) // 1024
+    except (OSError, ValueError):
+        pass
+    return ours, foreign
+
+
+def _swap_offer(rec_mb, ours, ours_mb, foreign_mb):
     """(description, skip_hint) for the swap prompt, or None when no offer is due.
+    `ours` is whether /swapfile exists on disk; `ours_mb` its active size (None
+    when inactive); `foreign_mb` every other active swap device's total.
 
     Only Servette's own /swapfile is ever offered a resize; swap Servette didn't
     create (a partition, a distro-managed file) is left alone — resizing it would
-    fight whatever manages it. Enter always takes the recommendation; the skip
-    hint says what declining preserves, so no two options in the prompt are
-    redundant.
+    fight whatever manages it, and its presence also suppresses the create offer,
+    since the host's swap is already someone else's decision. Enter always takes
+    the recommendation; the skip hint says what declining preserves, so no two
+    options in the prompt are redundant.
 
     A swapfile within _SWAP_SLACK_MB of the recommendation counts as meeting it,
     so a host that took the offer is not asked again for the megabyte mkswap
     spends on its header."""
     if rec_mb is None:
         return None
-    if active_mb > 0 and not ours:
-        return None
     if not ours:
-        return "no swapfile", "skip"
-    if active_mb == 0:
+        return None if foreign_mb else ("no swapfile", "skip")
+    if not ours_mb:
         return "an inactive swapfile", "skip"
-    if active_mb >= rec_mb - _SWAP_SLACK_MB:
+    if ours_mb >= rec_mb - _SWAP_SLACK_MB:
         return None
-    return f"a {active_mb} MB swapfile", f"keep {active_mb}"
+    return f"a {ours_mb} MB swapfile", f"keep {ours_mb}"
 
 
 ```
@@ -706,17 +732,29 @@ def _root_on_sd_card():
 The interactive offer itself: present the measurement, take a size or a decline, then create (or grow) the swapfile — sized only after checking the disk can afford it, activated only after `mkswap` succeeds, and rolled back if any step fails.
 
 ```python
+# Making the swapfile
+def _make_swapfile(size):
+    """Allocate, format, and activate /swapfile at `size` bytes; raises on any
+    failure. Mode 0600 is set before content exists — never world-readable."""
+    with open(_SWAP_PATH, "wb") as f:
+        os.chmod(_SWAP_PATH, 0o600)
+        os.posix_fallocate(f.fileno(), 0, size)
+    subprocess.run(["mkswap", _SWAP_PATH], check=True, capture_output=True)
+    subprocess.run(["swapon", _SWAP_PATH], check=True, capture_output=True)
+
+
 # The swap offer
 def _ensure_swap():
     """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
     if _IS_MACOS:
         return  # macOS manages its own swap; mkswap/swapon/fallocate do not exist there
-    mem_kb, avail_kb, swap_kb = _meminfo()
+    mem_kb, avail_kb, _ = _meminfo()
     rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
     rec_mb    = rec // (1024 * 1024) if rec else None
     ours      = os.path.exists(_SWAP_PATH)
-    active_mb = (swap_kb or 0) // 1024  # total active swap; ≈ ours when ours is the only one
-    offer     = _swap_offer(rec_mb, ours, active_mb)
+    ours_mb, foreign_mb = _swap_sizes()
+    active_mb = ours_mb or 0            # OUR file's active size, not the host total
+    offer     = _swap_offer(rec_mb, ours, ours_mb, foreign_mb)
     if offer is None:
         return
     swap_desc, skip_hint = offer
@@ -753,11 +791,7 @@ def _ensure_swap():
             print("  Could not deactivate the current swapfile (heavily in use?) — try again later.")
             return
     try:
-        with open(_SWAP_PATH, "wb") as f:
-            os.chmod(_SWAP_PATH, 0o600)  # before content exists — never world-readable
-            os.posix_fallocate(f.fileno(), 0, size)
-        subprocess.run(["mkswap", _SWAP_PATH], check=True, capture_output=True)
-        subprocess.run(["swapon", _SWAP_PATH], check=True, capture_output=True)
+        _make_swapfile(size)
         with open("/etc/fstab") as f:
             fstab = f.read()
         if _SWAP_PATH not in fstab.split():
@@ -767,9 +801,33 @@ def _ensure_swap():
         log.info("Swapfile active: %d MB at %s", mb, _SWAP_PATH)
     except (OSError, subprocess.CalledProcessError) as e:
         print(f"  Could not set up swapfile: {e}")
+        # A failed RESIZE has already truncated the old file, so try to give
+        # the host back the swap it walked in with — a memory-tight host that
+        # accepted a grow offer must not end up worse than it started. Swap
+        # content is scratch (it was swapoff'd above), so rebuilding at the
+        # old size restores the prior state in full.
+        if ours and active_mb > 0:
+            try:
+                _make_swapfile(active_mb * 1024 * 1024)
+                print(f"  Restored the previous {active_mb} MB swapfile.")
+                return
+            except (OSError, subprocess.CalledProcessError):
+                pass
+        # Nothing to restore (or the restore failed): remove the dead file AND
+        # its fstab line — a line pointing at a missing or unformatted file is
+        # a failed swap unit at every boot from here on.
         try:
             subprocess.run(["swapoff", _SWAP_PATH], capture_output=True)
             os.remove(_SWAP_PATH)
+        except OSError:
+            pass
+        try:
+            with open("/etc/fstab") as f:
+                lines = f.readlines()
+            kept = [l for l in lines if _SWAP_PATH not in l.split()]
+            if kept != lines:
+                with open("/etc/fstab", "w") as f:
+                    f.writelines(kept)
         except OSError:
             pass
 

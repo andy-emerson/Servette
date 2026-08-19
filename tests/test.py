@@ -574,6 +574,23 @@ serve_dir = "b"
     check("Plain IPv6 unchanged",          s._normalize_ip("2001:db8::1") == "2001:db8::1")
     check("Non-address passes through",    s._normalize_ip("unknown") == "unknown")
 
+    section("Rate-limit bucketing (_bucket_key)")
+
+    # A subscriber holds at least a /64 (RFC 6177): keyed per address, rotating
+    # the low 64 bits handed every request a fresh bucket, switching off the
+    # rate limit, the auth throttle, and the connection cap for IPv6 clients.
+    check("IPv4 buckets per address",      s._bucket_key("10.0.0.1") == "10.0.0.1")
+    check("Mapped IPv4 buckets as IPv4",   s._bucket_key("::ffff:c0a8:0101") == "192.168.1.1")
+    check("An IPv6 /64 shares one bucket",
+          s._bucket_key("2001:db8:1:2::1") == s._bucket_key("2001:db8:1:2:ffff:ffff:ffff:ffff"))
+    check("Different /64s get different buckets",
+          s._bucket_key("2001:db8:1:2::1") != s._bucket_key("2001:db8:1:3::1"))
+    check("Non-address passes through",    s._bucket_key("unknown") == "unknown")
+    # The connection cap and the request path share the same bucketing.
+    check("The per-IP connection cap keys on the bucket",
+          s._CappedThreadingHTTPServer._ip_key(("2001:db8:1:2::9", 1234))
+          == s._bucket_key("2001:db8:1:2::1"))
+
     section("_is_within_base_dir (serve_dir containment)")
 
     # Added by the commit that rejected a serve_dir outside BASE_DIR, which
@@ -2062,8 +2079,57 @@ def run_dispatch_tests(s):
             check("Oversized bundle rejected", raised)
         finally:
             s._MAX_BUNDLE_BYTES = saved_max
+
+        # The size cap must run DURING the member walk, not after it: walking
+        # a gzip stream decompresses it, and getmembers() paid the full
+        # decompression cost of a bomb before the cap ever looked. next()
+        # lets the walk abort at the ceiling.
+        import inspect as _inspect_eb
+        eb_src = _inspect_eb.getsource(s._extract_bundle)
+        check("The member walk can abort at the cap (next(), not getmembers())",
+              "tf.getmembers()" not in eb_src and "tf.next()" in eb_src)
     finally:
         shutil.rmtree(extract_root, ignore_errors=True)
+
+    section("Config sub-shell validates what 'set' validates")
+
+    # The two write surfaces must enforce the same rules. A typo'd
+    # trusted_proxy saved by the sub-shell was worse than a refusal: the peer
+    # comparison never matches, XFF is never trusted, and every proxied
+    # visitor lands in the proxy's single rate-limit bucket.
+    saved_proxy_v = s.config.trusted_proxy
+    saved_input_v = builtins.input
+    saved_save_v  = s.Config.save
+    try:
+        s.Config.save = lambda self: None
+        s.config.trusted_proxy = ""
+        builtins.input = lambda prompt="": "not-an-ip"
+        with contextlib.redirect_stdout(io.StringIO()) as vbuf:
+            s._config_trusted_proxy()
+        check("Sub-shell refuses a non-IP trusted_proxy",
+              s.config.trusted_proxy == "" and "must be an IP" in vbuf.getvalue())
+        builtins.input = lambda prompt="": "203.0.113.7"
+        with contextlib.redirect_stdout(io.StringIO()):
+            s._config_trusted_proxy()
+        check("...and accepts a real one", s.config.trusted_proxy == "203.0.113.7")
+
+        # A negative max-age is not a shorter cache, it is a malformed
+        # Cache-Control header on every response.
+        saved_age_v    = s.config.cache_max_age
+        saved_policy_v = s.config.cache_policy
+        answers = iter(["max-age", "-5"])
+        builtins.input = lambda prompt="": next(answers, "")  # "" = leave the
+        #                       trailing cache_size_mb prompt unchanged
+        with contextlib.redirect_stdout(io.StringIO()):
+            s._config_cache()
+        check("Sub-shell refuses a negative cache_max_age",
+              s.config.cache_max_age == saved_age_v)
+        s.config.cache_max_age = saved_age_v
+        s.config.cache_policy  = saved_policy_v
+    finally:
+        s.config.trusted_proxy = saved_proxy_v
+        builtins.input = saved_input_v
+        s.Config.save = saved_save_v
 
     section("Ownership plans")
 
@@ -2161,6 +2227,19 @@ def run_dispatch_tests(s):
             s.cmd_restore_site(s.config.sites[0])
         check("Restoring again with nothing to restore reports cleanly, does not raise",
               "Nothing to restore" in buf.getvalue())
+
+        # A failed second rename must put the live directory back: without the
+        # rollback the site was left with NO directory at all — every request
+        # a 404 — while the pull reported merely 'rejected'.
+        ghost = os.path.join(swap_root, "never-created")
+        raised_swap = False
+        try:
+            s._swap_site_content(ghost, s.config.sites[0].serve_dir)
+        except OSError:
+            raised_swap = True
+        check("A failed swap raises instead of passing as silence", raised_swap)
+        check("...and the live content is rolled back, not gone",
+              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
     finally:
         s.config.sites[0].serve_dir = saved_serve_dir
         shutil.rmtree(swap_root, ignore_errors=True)
@@ -2512,6 +2591,30 @@ def run_server_tests(s, serve_dir):
     check("Oversized compressible file served raw (not gzipped)", comp_css is None and raw_css is not None)
     check("Oversized compressible file keeps its etag", bool(etag_css))
     os.remove(big_css)
+
+    section("Cache invalidation — the publish shape")
+
+    # A pull swaps in tar-extracted files whose mtimes come from the archive at
+    # whole-second granularity: two bundles of a file edited and repacked
+    # within the same second (or built by pinned-timestamp tooling) carry the
+    # SAME mtime with different bytes. Keyed on mtime alone, the cache served
+    # the old bytes indefinitely. The key is now (mtime_ns, size, inode) — a
+    # swap always lands a fresh inode, so it can never impersonate the entry.
+    twin = os.path.join(serve_dir, "twin.html")
+    with open(twin, "w") as f:
+        f.write("OLD-CONTENT!")
+    os.utime(twin, (1000000, 1000000))
+    raw_old, _, _ = s._get_cached_file(twin)
+    check("First read is cached", raw_old == b"OLD-CONTENT!" and twin in s._file_cache)
+    staged_twin = twin + ".staged"
+    with open(staged_twin, "w") as f:
+        f.write("NEW-CONTENT!")                        # same length, same mtime
+    os.utime(staged_twin, (1000000, 1000000))
+    os.replace(staged_twin, twin)                      # the swap: a new inode
+    raw_new, _, etag_new = s._get_cached_file(twin)
+    check("Same-mtime same-size replacement is still detected",
+          raw_new == b"NEW-CONTENT!")
+    os.remove(twin)
     os.remove(small_path); os.remove(big_path)
     s._file_cache.clear()
     s._file_cache_bytes = 0
@@ -3653,23 +3756,29 @@ def run_install_tests(s, tmpdir):
     section("Swap offer")
 
     check("No swap → offer, declining skips",
-          s._swap_offer(1200, False, 0) == ("no swapfile", "skip"))
+          s._swap_offer(1200, False, None, 0) == ("no swapfile", "skip"))
     check("Foreign swap (partition, distro-managed) → no offer",
-          s._swap_offer(1200, False, 600) is None)
+          s._swap_offer(1200, False, None, 600) is None)
     check("Our swapfile, big enough → no offer",
-          s._swap_offer(1200, True, 1200) is None)
+          s._swap_offer(1200, True, 1200, 0) is None)
     check("Our swapfile, undersized → offer, declining keeps current",
-          s._swap_offer(1200, True, 600) == ("a 600 MB swapfile", "keep 600"))
+          s._swap_offer(1200, True, 600, 0) == ("a 600 MB swapfile", "keep 600"))
+    # The sizes are per-device from /proc/swaps, not SwapTotal: with a foreign
+    # partition alongside, SwapTotal printed a size the swapfile does not have
+    # and let partition + file sum past the recommendation, hiding a real
+    # undersize.
+    check("Our undersized swapfile is offered even when a partition tops up the total",
+          s._swap_offer(1200, True, 600, 1024) == ("a 600 MB swapfile", "keep 600"))
     # The live box took a 1400 MB offer and SwapTotal came back 1399 MB: mkswap
     # spends the first page on a header and the MB arithmetic floors the rest.
     # Compared exactly, that host is told to resize to the size it already has,
     # forever, and resizing reproduces the same shortfall.
     check("Our swapfile, short by mkswap's header → no offer",
-          s._swap_offer(1400, True, 1399) is None)
+          s._swap_offer(1400, True, 1399, 0) is None)
     check("Our swapfile, short by exactly the slack → no offer",
-          s._swap_offer(1200, True, 1200 - s._SWAP_SLACK_MB) is None)
+          s._swap_offer(1200, True, 1200 - s._SWAP_SLACK_MB, 0) is None)
     check("Our swapfile, short by more than the slack → still offered",
-          s._swap_offer(1200, True, 1200 - s._SWAP_SLACK_MB - 1)
+          s._swap_offer(1200, True, 1200 - s._SWAP_SLACK_MB - 1, 0)
           == (f"a {1200 - s._SWAP_SLACK_MB - 1} MB swapfile",
               f"keep {1200 - s._SWAP_SLACK_MB - 1}"))
     # The slack forgives less than the recommendation's own rounding already
@@ -3678,9 +3787,14 @@ def run_install_tests(s, tmpdir):
     check("Slack is smaller than the recommendation's rounding step",
           s._SWAP_SLACK_MB < s._round_up_2sig(1101) - s._round_up_2sig(1001))
     check("Our swapfile, inactive → offer, declining skips",
-          s._swap_offer(1200, True, 0) == ("an inactive swapfile", "skip"))
+          s._swap_offer(1200, True, None, 0) == ("an inactive swapfile", "skip"))
     check("No recommendation → no offer",
-          s._swap_offer(None, False, 0) is None)
+          s._swap_offer(None, False, None, 0) is None)
+
+    ours_probe, foreign_probe = s._swap_sizes()
+    check("_swap_sizes reads /proc/swaps without crashing",
+          (ours_probe is None or isinstance(ours_probe, int))
+          and isinstance(foreign_probe, int))
 
     mem_kb, avail_kb, swap_kb = s._meminfo()
     check("_meminfo returns a consistent triple",
@@ -3693,15 +3807,30 @@ def run_install_tests(s, tmpdir):
     section("Host health warning")
 
     saved_meminfo = s._meminfo
+    saved_sizes   = s._swap_sizes
     try:
-        s._meminfo = lambda: (414 * 1024, 176 * 1024, 0)
+        s._meminfo    = lambda: (414 * 1024, 176 * 1024, 0)
+        s._swap_sizes = lambda: (None, 0)
         check("No-swap host under demand pressure is flagged",
               any("no swap" in issue for issue in s._production_issues()))
-        s._meminfo = lambda: (414 * 1024, 176 * 1024, GB_KB)
-        check("Host with swap is not flagged",
-              not any("no swap" in issue for issue in s._production_issues()))
+        s._swap_sizes = lambda: (None, 1024)
+        check("Host with a foreign swap partition is not flagged",
+              not any("swap" in issue for issue in s._production_issues()))
+        # The nag names OUR file's size from /proc/swaps — with a partition
+        # alongside, SwapTotal printed a number the swapfile does not have.
+        saved_exists_hh = s.os.path.exists
+        s.os.path.exists = (lambda real: lambda p:
+                            True if p == s._SWAP_PATH else real(p))(saved_exists_hh)
+        try:
+            s._swap_sizes = lambda: (600, 1024)
+            flagged = [i for i in s._production_issues() if "swapfile" in i]
+            check("An undersized swapfile is named by its own size, not SwapTotal",
+                  flagged and "swapfile 600 MB" in flagged[0])
+        finally:
+            s.os.path.exists = saved_exists_hh
     finally:
-        s._meminfo = saved_meminfo
+        s._meminfo    = saved_meminfo
+        s._swap_sizes = saved_sizes
 
     section("Publish channel config")
 
@@ -4162,7 +4291,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         "_chown_config",
         # The host, at install time and as root.
         "_write_unit_files", "_build_runtime", "_commit_runtime", "cmd_disable",
-        "_ensure_swap",
+        "_ensure_swap", "_make_swapfile",
         # Staging: unpacks a verified bundle into a temporary directory.
         "_extract_bundle",
         # Removes a site's own generated certificate when the site goes.

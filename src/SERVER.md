@@ -465,22 +465,44 @@ _rate_lock       = threading.Lock()
 
 ```
 
-Both spellings of a mapped IPv4 address must share one bucket.
+Both spellings of a mapped IPv4 address must share one bucket — and an IPv6 client's whole /64 must too, or the buckets aren't limits at all. Two functions, because the two jobs diverge: the log wants the address, the limiter wants the subscriber.
 
 ```python
 # Normalizing addresses
 def _normalize_ip(ip):
-    """Normalize IPv6-mapped IPv4 addresses so both forms bucket together.
+    """Normalize IPv6-mapped IPv4 addresses so both forms read the same.
 
-    Uses ipaddress so every mapped spelling collapses to the same key — the dotted
-    ::ffff:1.2.3.4 and the hex ::ffff:c0a8:0101 are the same address and must share a
-    rate-limit bucket. Non-addresses (e.g. "unknown", junk XFF) pass through as-is."""
+    Uses ipaddress so every mapped spelling collapses to the same string — the
+    dotted ::ffff:1.2.3.4 and the hex ::ffff:c0a8:0101 are the same address.
+    Non-addresses (e.g. "unknown", junk XFF) pass through as-is. This is the
+    address as logged; the limiters key on _bucket_key below."""
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return ip
     if addr.version == 6 and addr.ipv4_mapped:
         return str(addr.ipv4_mapped)
+    return ip
+
+
+def _bucket_key(ip):
+    """The rate/connection bucket an address belongs to.
+
+    IPv4 buckets per address. Native IPv6 buckets by its /64: providers hand
+    a subscriber at least a /64 (RFC 6177), so one visitor holds 2^64
+    addresses — keyed individually, rotating the low bits gave every request
+    a fresh bucket, quietly switching off the request rate limit, the
+    auth-failure throttle, and the per-IP connection cap for any IPv6
+    client. /64 is the finest bucket that is still one subscriber's, so a
+    visitor can neither dodge the limits nor exhaust a neighbor's. Logs keep
+    the full address (_normalize_ip); only the limiters see this key."""
+    ip = _normalize_ip(ip)
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
     return ip
 
 
@@ -594,17 +616,27 @@ The read-through path: mtime-validated hits, one gzip per file change, and two p
 def _get_cached_file(path):
     """Return (raw, compressed_or_None, etag), reloading only if the file changed.
 
+    "Changed" is judged on (mtime_ns, size, inode) from one stat call — not
+    mtime alone, which the publish pipeline can hold constant across content
+    changes: tar restores each member's archived mtime at whole-second
+    granularity, so two pulls of a file edited and repacked within the same
+    second (or built by any pinned-timestamp tooling) carried identical
+    mtimes with different bytes, and the cache served the old bytes
+    indefinitely. The swap extracts fresh files, so the inode always moves;
+    size and nanosecond mtime guard direct in-place edits too.
+
     compressed is None for already-compressed types; a file too large to fit in
     the cache is served raw and not stored, so it can't purge everything else.
     """
     try:
-        mtime = os.path.getmtime(path)
+        st = os.stat(path)
     except OSError:
         return None, None, None
+    stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
 
     with _file_cache_lock:
         entry = _file_cache.get(path)
-        if entry and entry["mtime"] == mtime:
+        if entry and entry["stamp"] == stamp:
             return entry["raw"], entry["compressed"], entry["etag"]
 
     # Two threads can race here: both miss the cache check and both read the file. The fix is
@@ -627,7 +659,7 @@ def _get_cached_file(path):
 
     ext        = os.path.splitext(path)[1].lower()
     compressed = gzip.compress(raw, compresslevel=6) if ext in _COMPRESSIBLE_EXTS else None
-    new_entry  = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
+    new_entry  = {"stamp": stamp, "raw": raw, "compressed": compressed, "etag": etag}
 
     if _entry_bytes(new_entry) > cache_max:
         return raw, compressed, etag  # rare: raw fit but raw+gzip doesn't — serve, don't store
@@ -895,7 +927,8 @@ def _handle_request(method, url_path, headers, raw_ip):
     # headers still gets throttled rather than dodging the limiter under the
     # closed-system 404 below; the cost is that a rate-limited response never
     # carries HSTS even for a real site's domain.
-    if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
+    bucket = _bucket_key(ip)   # /64 for IPv6 — logs keep the full address
+    if _rate_limit_exceeded(_request_times, bucket, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
@@ -928,7 +961,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         # credentials burn CPU and RAM on every attempt no matter the limit. The
         # peek (record=False) decides whether to spend the hash at all; an actual
         # failure below is what records a strike toward the limit.
-        if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit, record=False):
+        if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, bucket, config.auth_rate_limit, record=False):
             log.warning("Auth rate limited %s", ip)
             return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
@@ -950,7 +983,7 @@ def _handle_request(method, url_path, headers, raw_ip):
                 pass
 
         if not authed:
-            if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit):
+            if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, bucket, config.auth_rate_limit):
                 log.warning("Auth rate limited %s", ip)
                 return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
             if credentials_submitted:
@@ -1383,7 +1416,10 @@ class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
 
     @staticmethod
     def _ip_key(client_address):
-        return _normalize_ip(client_address[0]) if client_address else "?"
+        # The connection cap shares the limiters' bucketing (/64 for IPv6) —
+        # per-address keying let one subscriber's 2^64 addresses each claim a
+        # fresh slot allowance, unmaking the cap for IPv6 sources.
+        return _bucket_key(client_address[0]) if client_address else "?"
 
     def _ip_acquire(self, ip):
         """Count a connection against ip. Returns False — without counting — when

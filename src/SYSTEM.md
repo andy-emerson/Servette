@@ -578,15 +578,22 @@ _SWAP_PATH = "/swapfile"
 
 
 def _meminfo():
-    """Return (mem_total_kb, mem_available_kb, swap_total_kb) from /proc/meminfo,
-    or (None, None, None) where it can't be read (non-Linux)."""
+    """Return (mem_total_kb, mem_available_kb, committed_kb) from /proc/meminfo,
+    or (None, None, None) where it can't be read (non-Linux).
+
+    Committed_AS is the kernel's own answer to the question the swap sizing
+    asks: how much memory this host would need if every allocation it has
+    handed out were actually used. MemAvailable comes along for the prompt,
+    which reports free memory to the operator, not for the arithmetic.
+    SwapTotal is deliberately absent — it lumps every swap device together,
+    and the sizes that matter come per-device from _swap_sizes."""
     try:
         fields = {}
         with open("/proc/meminfo") as f:
             for line in f:
                 key, _, rest = line.partition(":")
                 fields[key.strip()] = int(rest.split()[0])  # values are in kB
-        return fields["MemTotal"], fields["MemAvailable"], fields["SwapTotal"]
+        return fields["MemTotal"], fields["MemAvailable"], fields["Committed_AS"]
     except (OSError, KeyError, ValueError, IndexError):
         return None, None, None
 
@@ -607,7 +614,9 @@ _SWAP_SLACK_MB      = 8
 
 ```
 
-`_SWAP_SLACK_MB` is how far under the recommendation still counts as meeting it. A host that accepted a 1400 MB offer reports `SwapTotal` of 1399 MB, because `mkswap` spends the first page on a header and the arithmetic floors what is left; compared exactly, that host is told forever to resize to a size it already has, and resizing produces the same shortfall again. The recommendation is rounded to two significant digits, so it carries less precision than the slack it now forgives.
+`_SWAP_SLACK_MB` is how far under the recommendation still counts as meeting it. A host that accepted a 1400 MB offer measures 1399 MB active, because `mkswap` spends the first page on a header and the arithmetic floors what is left; compared exactly, that host is told forever to resize to a size it already has, and resizing produces the same shortfall again. The recommendation is rounded to two significant digits, so it carries less precision than the slack it now forgives.
+
+The spike allowance is the estimate's weakest number and says so: one measurement of one runaway process on one host, kept because there is nothing better to replace it with. Published guidance has moved away from RAM-multiple rules without converging on anything else — Red Hat's own documentation now calls its old 2×RAM table impractical and defers to workload, and Ubuntu's spans the square root of RAM to twice RAM, a range wide enough to be an admission. Measuring this host is the better bet; the constant is where that measuring stops.
 
 Integer division that rounds up instead of down, spelled out once — the swap sizing and the JWK encoding both need it, and Python has no built-in operator for it.
 
@@ -636,22 +645,65 @@ def _round_up_2sig(n):
 
 ```
 
+Servette's own file cache is the one part of demand Servette knows the ceiling of — and the one part that must not be counted twice.
+
+```python
+# The cache's share of demand
+def _cache_headroom_mb(cache_mb):
+    """How much of the configured file cache is NOT already in Committed_AS.
+
+    The cache holds file bytes on the Python heap, so a warm cache is
+    anonymous memory the kernel has already committed — measured: 200 MB of
+    cached files raised Committed_AS by 201 MB. Adding the configured ceiling
+    on top of that counts the same megabytes twice, and the doubling below
+    turns a 128 MB default into 256 MB of swap this host does not need.
+
+    So the ceiling is charged only where no live process is holding it yet: a
+    host being set up or enabled with nothing serving. Where a server IS
+    running, whatever its cache has taken is in the signal already and its
+    unfilled remainder is charged to nobody — deliberately, because that
+    keeps the two callers ordered. The offer (service down, ceiling charged)
+    can only ever be larger than the later status check (service up, ceiling
+    in the signal), so a host that accepts the offer is never afterwards told
+    to resize. The old formula had this backwards: the cache entered the
+    measurement between setup and status, so the check drifted upward past
+    the size the operator had just chosen, and nagged forever."""
+    return 0 if (_server_running() or _service_is_active()) else cache_mb
+
+
+```
+
 How much swap this host should have, from measured supply and demand — and whether an offer is even due, which depends on whose swap is already active.
 
 ```python
 # The recommendation
-def _swap_recommendation(mem_kb, avail_kb, cache_mb):
+def _swap_recommendation(mem_kb, committed_kb, cache_headroom_mb):
     """Recommended total swap in bytes for this host, or None when demand fits in RAM.
 
-    Supply is measured (MemTotal). Demand is what's resident now (MemTotal −
-    MemAvailable), plus Servette's configured cache, plus the spike allowance.
-    When demand exceeds supply, the deficit is doubled for margin, rounded up to
-    two significant digits, floored at 512 MB and capped at 2 GB — the threshold
-    emerges from the measurement rather than a hardcoded RAM ceiling. Whether to
-    act on the recommendation is _swap_offer's decision."""
-    if mem_kb is None or avail_kb is None:
+    Supply is measured (MemTotal). Demand is Committed_AS — the kernel's own
+    worst case, what this host needs if every allocation it has handed out is
+    actually used — plus the cache ceiling not yet inside it
+    (_cache_headroom_mb), plus the spike allowance. When demand exceeds
+    supply, the deficit is doubled for margin, rounded up to two significant
+    digits, floored at 512 MB and capped at 2 GB, so the threshold emerges
+    from the measurement rather than a hardcoded RAM ceiling. Whether to act
+    on the recommendation is _swap_offer's decision.
+
+    Committed_AS rather than resident usage (MemTotal − MemAvailable), for
+    two reasons found by measuring both: it is what swap actually backs
+    (commitments are anonymous; page cache is written back to its own file
+    and never swapped), and it holds still — sampled every two seconds for
+    thirty, resident usage wandered 9 MB while Committed_AS did not move at
+    all. Nine megabytes is nothing until the doubling and the two-significant
+    -digit rounding turn it into a 100 MB step, which is how a host that had
+    just taken the recommended size came to be told to resize. The honest
+    cost of the swap: Committed_AS counts address space that may never be
+    touched, so a process that reserves generously and writes little makes
+    this estimate high. Recommending too much swap wastes disk; recommending
+    too little loses the host."""
+    if mem_kb is None or committed_kb is None:
         return None
-    demand_kb  = (mem_kb - avail_kb) + cache_mb * 1024 + _SPIKE_ALLOWANCE_KB
+    demand_kb  = committed_kb + cache_headroom_mb * 1024 + _SPIKE_ALLOWANCE_KB
     deficit_kb = demand_kb - mem_kb
     if deficit_kb <= 0:
         return None
@@ -748,8 +800,9 @@ def _ensure_swap():
     """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
     if _IS_MACOS:
         return  # macOS manages its own swap; mkswap/swapon/fallocate do not exist there
-    mem_kb, avail_kb, _ = _meminfo()
-    rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
+    mem_kb, avail_kb, committed_kb = _meminfo()
+    rec       = _swap_recommendation(mem_kb, committed_kb,
+                                     _cache_headroom_mb(config.cache_size_mb))
     rec_mb    = rec // (1024 * 1024) if rec else None
     ours      = os.path.exists(_SWAP_PATH)
     ours_mb, foreign_mb = _swap_sizes()

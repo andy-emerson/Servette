@@ -79,7 +79,10 @@ def _main():
         except KeyboardInterrupt:
             stop_server()
         else:
-            log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
+            if _reload_requested:
+                log.info("Exiting to reload — systemd restarts the service")
+            else:
+                log.error("HTTPS server stopped unexpectedly — exiting so systemd restarts the service")
             sys.exit(1)
     elif len(sys.argv) > 1:
         cmd, args = sys.argv[1].lower(), sys.argv[2:]

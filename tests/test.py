@@ -3303,12 +3303,19 @@ def run_install_tests(s, tmpdir):
           [d.lower() for d in declared] == [d.lower() for d in s._DECLARED_DEPENDENCIES])
 
     # Provisioning: the whole closure, root-owned, world-readable, and replaced
-    # wholesale so an older version cannot leave a module behind.
+    # wholesale so an older version cannot leave a module behind. Build and
+    # commit are separate steps so verification can run between them — the old
+    # single call swapped first and verified after, so a refused runtime was
+    # already installed (and the good copy destroyed) when the refusal printed.
     saved_rt, saved_base_rt = s.RUNTIME_DIR, s.BASE_DIR
     try:
         s.RUNTIME_DIR = os.path.join(tmpdir, "runtime")
         os.makedirs(os.path.join(s.RUNTIME_DIR, "stale_leftover"), exist_ok=True)
-        s._provision_runtime()
+        staged = s._build_runtime()
+        check("Building alone leaves the live runtime untouched",
+              os.path.exists(os.path.join(s.RUNTIME_DIR, "stale_leftover"))
+              and os.path.exists(os.path.join(staged, "servette.py")))
+        s._commit_runtime(staged)
         landed = set(os.listdir(s.RUNTIME_DIR))
         check("The runtime holds the program", "servette.py" in landed)
         wanted = {os.path.basename(p) for p in s._runtime_sources()}
@@ -3416,9 +3423,11 @@ def run_install_tests(s, tmpdir):
     saved_w = {n: getattr(s, n) for n in
                ("_servette_user_exists", "_installed_runtime_reachable",
                 "_verify_runtime", "_service_file_exists", "_unsafe_unit_path")}
-    saved_sub = s.subprocess.run
+    saved_sub    = s.subprocess.run
+    saved_euid_w = s.os.geteuid
     ran = []
     try:
+        s.os.geteuid                  = lambda: 0   # past the writer's root gate
         s._servette_user_exists       = lambda: True
         s._installed_runtime_reachable = lambda: True
         s._verify_runtime             = lambda p, d: "ModuleNotFoundError: no servette"
@@ -3436,10 +3445,69 @@ def run_install_tests(s, tmpdir):
         check("...before systemd is touched", ran == [])
         check("...and says what the service could not do",
               "ModuleNotFoundError" in wbuf.getvalue())
+
+        # An unprivileged caller is turned away BEFORE the runtime swap, not
+        # at the unit write: the old order let an unprivileged startup
+        # refresh (in a checkout the operator owns) replace the runtime copy,
+        # then fail at the unit file — a version-skewed, operator-owned
+        # runtime behind a unit still describing the old one.
+        s.os.geteuid = lambda: 1000
+        ran.clear()
+        early = None
+        try:
+            s._write_unit_files()
+        except PermissionError:
+            early = "refused"
+        check("An unprivileged writer is refused before anything is touched",
+              early == "refused" and ran == [])
     finally:
         for n, v in saved_w.items():
             setattr(s, n, v)
         s.subprocess.run = saved_sub
+        s.os.geteuid     = saved_euid_w
+
+    # The staged-copy gate: a runtime that fails verification is discarded
+    # with the live runtime untouched — structurally, the writer verifies the
+    # staged tree before committing it.
+    import inspect as _inspect2
+    writer_src = _inspect2.getsource(s._write_unit_files)
+    check("The writer verifies the staged runtime before committing it",
+          0 < writer_src.find("_build_runtime")
+            < writer_src.find("_verify_runtime")
+            < writer_src.find("_commit_runtime"))
+
+    # A pinned interpreter an OS upgrade removed is reported as the outage it
+    # is, not as generic environment drift.
+    saved_svc_path = s.SERVICE_PATH
+    gone_unit = os.path.join(tmpdir, "gone-interp.service")
+    with open(gone_unit, "w") as f:
+        f.write(f"Environment=SERVETTE_HOME={s.BASE_DIR}\n"
+                "ExecStart=/nonexistent/python3.9 -m servette --serve\n")
+    try:
+        s.SERVICE_PATH = gone_unit
+        drift = s._service_env_drift()
+        check("A vanished service interpreter is named as unable to start",
+              any("no longer exists" in d and "cannot start" in d for d in drift))
+    finally:
+        s.SERVICE_PATH = saved_svc_path
+
+    # A deliberate reload-stop is logged as a restart, not as an unexpected
+    # death: without the flag every certificate rotation wrote an error line
+    # to the journal, teaching the operator the error line is routine.
+    saved_argv_rl = sys.argv[:]
+    saved_stop_rl = s.stop_server
+    try:
+        sys.argv = ["servette", "--serve"]
+        stops = []
+        s.stop_server = lambda: stops.append(1)
+        s._reload_requested = False
+        s._reload_server()
+        check("An in-service reload stops the server and marks the exit deliberate",
+              stops == [1] and s._reload_requested is True)
+    finally:
+        sys.argv = saved_argv_rl
+        s.stop_server = saved_stop_rl
+        s._reload_requested = False
 
     # A unit the writer refuses must not take the shell launch down with it:
     # _startup_refresh calls the writer on every interactive start, and the
@@ -4093,7 +4161,8 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # unclaimed on a file holding a password hash.
         "_chown_config",
         # The host, at install time and as root.
-        "_write_unit_files", "_provision_runtime", "cmd_disable", "_ensure_swap",
+        "_write_unit_files", "_build_runtime", "_commit_runtime", "cmd_disable",
+        "_ensure_swap",
         # Staging: unpacks a verified bundle into a temporary directory.
         "_extract_bundle",
         # Removes a site's own generated certificate when the site goes.

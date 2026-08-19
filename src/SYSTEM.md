@@ -218,14 +218,21 @@ What `--serve` blocks on: the watch that turns a dead server thread into a dead 
 
 ```python
 # The service watch
-def _watch_server(poll=5, grace=30):
+def _watch_server(poll=2, grace=5):
     """Block until the HTTPS server has been dead for `grace` seconds.
 
     --serve exits non-zero when this returns, so systemd's Restart=always brings
     the service back. Without the watch, a dead server thread leaves a living
-    process: systemd reports active while nothing is listening. The grace period
-    spans the stop/start window of an in-process certificate reload, so a reload
-    doesn't read as a death."""
+    process: systemd reports active while nothing is listening.
+
+    Under --serve nothing ever restarts the server in-process — a certificate
+    reload deliberately stops it and lets systemd relaunch — so every dead
+    thread this sees ends in an exit, and the grace only sets how long the
+    site stays down before the restart begins. It was 30 seconds, justified
+    by an in-process reload window that cannot occur in this mode: every
+    certificate rotation cost ~35 seconds of downtime where stop, exit, and
+    RestartSec add up to well under ten. The small grace that remains
+    absorbs stop_server's own teardown ordering, nothing more."""
     deadline = None
     while True:
         t = _https_thread
@@ -956,21 +963,17 @@ def _runtime_sources():
     return paths
 
 
-def _provision_runtime():
-    """Copy the program and everything it imports into the data directory.
+def _build_runtime():
+    """Copy the program and everything it imports into a staging tree beside
+    the live runtime, and return its path. Building and committing are split
+    so verification can run between them: the staged copy is proved usable by
+    the service user before anything the service depends on is touched.
 
     Root-owned, world-readable, writable by nobody but root — the service reads
     it and the unit pins it ReadOnlyPaths on top, so a compromised serving
-    process cannot patch the program systemd will restart it into.
-
-    Built beside the live copy and swapped in, rather than written over it: a
-    half-copied runtime is a program that does not exist. The swap is two
-    renames, so a lazy import landing exactly between them would fail — the
-    service is restarted onto this runtime immediately afterwards, which is the
-    same moment it would have picked up the new code anyway."""
-    new, old = RUNTIME_DIR + ".new", RUNTIME_DIR + ".old"
-    for path in (new, old):
-        shutil.rmtree(path, ignore_errors=True)
+    process cannot patch the program systemd will restart it into."""
+    new = RUNTIME_DIR + ".new"
+    shutil.rmtree(new, ignore_errors=True)
     os.makedirs(new)
     for src in _runtime_sources():
         dest = os.path.join(new, os.path.basename(src))
@@ -984,7 +987,22 @@ def _provision_runtime():
         for f in files:
             os.chmod(os.path.join(root, f), 0o644)
     os.chmod(new, 0o755)
+    return new
 
+
+def _commit_runtime(new):
+    """Swap a verified staging tree into place as the live runtime.
+
+    Called only after _verify_runtime has passed against the staged copy —
+    the old code swapped first and verified after, so a refused runtime was
+    already installed when the refusal printed, the known-good copy already
+    destroyed, and the next restart (reboot, certificate rotation) landed the
+    service on the very thing verification rejected. The swap is two renames,
+    so a lazy import landing exactly between them would fail — the service is
+    restarted onto this runtime immediately afterwards, which is the same
+    moment it would have picked up the new code anyway."""
+    old = RUNTIME_DIR + ".old"
+    shutil.rmtree(old, ignore_errors=True)
     if os.path.exists(RUNTIME_DIR):
         os.replace(RUNTIME_DIR, old)
     os.replace(new, RUNTIME_DIR)
@@ -1183,6 +1201,15 @@ def _service_env_drift():
     # writer, which says so in words.
     if m and wanted and m.group(1) != wanted:
         drift.append(f"interpreter: service uses {m.group(1)}, this shell runs {wanted}")
+    # A pinned interpreter an OS upgrade removed is worse than drift — the
+    # service is not merely stale, it cannot START: systemd retries 203/EXEC
+    # every few seconds without ever parking in 'failed' where monitoring
+    # would notice, and the journal is the only symptom. Say what is actually
+    # wrong, not just that the environments differ.
+    if m and not os.path.exists(m.group(1)):
+        drift.append(f"service interpreter {m.group(1)} no longer exists "
+                     "(removed by an OS upgrade?) — the service cannot start "
+                     "until 'enable' re-provisions it")
     return drift
 
 
@@ -1207,6 +1234,17 @@ def _write_unit_files():
         print("  and install path.")
         raise ValueError("unit path contains whitespace")
 
+    # Root, checked before anything is touched. Everything below mutates the
+    # host — the runtime swap included — and an unprivileged caller (the
+    # startup refresh in a checkout the operator owns) used to get exactly as
+    # far as its permissions allowed: on such a host that meant swapping the
+    # runtime copy, then failing at the unit write — a version-skewed,
+    # operator-owned runtime behind a unit that still described the old one.
+    # macOS is exempt: there is no systemd to write for, and the
+    # FileNotFoundError from the tools below is the message that says so.
+    if not _IS_MACOS and os.geteuid() != 0:
+        raise PermissionError("writing unit files requires root")
+
     updating = _service_file_exists()
 
     if not _servette_user_exists():
@@ -1217,8 +1255,9 @@ def _write_unit_files():
         print("Created system user 'servette'.")
 
     # The runtime is settled before the unit texts, which name what it decides —
-    # and proved before those texts reach disk, so a service that cannot import
-    # its own program is refused here rather than discovered at the next reboot.
+    # and proved before it replaces anything, so a copy the service could not
+    # import is discarded with the known-good runtime still in place, rather
+    # than installed for the next reboot to discover.
     if _installed_runtime_reachable():
         # Nothing to copy — and a copy left by an earlier install the service
         # could not reach would now be a second, stale program on the host.
@@ -1233,7 +1272,16 @@ def _write_unit_files():
             raise ValueError("no reachable interpreter for the service")
         print(f"  Copying Servette to {RUNTIME_DIR} — the service user cannot read")
         print("  where it is installed.")
-        _provision_runtime()
+        staged  = _build_runtime()
+        problem = _verify_runtime(_unit_python_path(),
+                                  os.path.join(staged, "servette.py"))
+        if problem:
+            shutil.rmtree(staged, ignore_errors=True)
+            print("  Error: the service user cannot run the copied Servette:")
+            print(f"    {problem}")
+            print("  Refusing to install it. The existing runtime and service are unchanged.")
+            raise ValueError(f"runtime unusable by the service user: {problem}")
+        _commit_runtime(staged)
 
     problem = _verify_runtime(_unit_python_path(), _unit_module_path())
     if problem:
@@ -1496,13 +1544,21 @@ Reloading picks the mechanism the environment allows: inside the sandboxed servi
 
 ```python
 # Reloading
+_reload_requested = False  # lets --serve's exit log a restart as a restart
+
+
 def _reload_server():
     """Reload the server to pick up a new certificate."""
+    global _reload_requested
     if "--serve" in sys.argv:
         # Inside the service, the sandboxed unit user can't systemctl restart
         # (NoNewPrivileges, least privilege). Stop serving instead: _watch_server
         # sees the dead thread, --serve exits non-zero, and Restart=always
-        # relaunches the service with the new certificate loaded.
+        # relaunches the service with the new certificate loaded. The flag
+        # keeps the journal honest: without it every deliberate reload logged
+        # "stopped unexpectedly", teaching the operator that the error line
+        # is routine.
+        _reload_requested = True
         log.info("Stopping to load the new certificate — systemd restarts the service")
         stop_server()
     elif _service_is_active():

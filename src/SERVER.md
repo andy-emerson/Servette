@@ -751,12 +751,16 @@ def _resolve_request_path(url_path, serve_dir):
     not found.
 
     The containment guards are written out inline — realpath, then a literal
-    startswith check — rather than through _within, on purpose: this is the one
-    place attacker-controlled text becomes a filesystem path, and the guard
-    should be verifiable at the boundary itself, by a reader without chasing a
-    helper and by a taint analyzer whose barrier recognition is per-function
-    (CodeQL flagged every downstream use of this path as uncontrolled because
-    the check it needed to see lived one call away)."""
+    startswith check on every continuing path — rather than through _within, on
+    purpose: this is the one place attacker-controlled text becomes a
+    filesystem path, and the guard must be verifiable at the boundary itself,
+    by a reader without chasing a helper and by a taint analyzer that checks
+    the guard dominates every path to every use. That domination requirement is
+    why the site root is resolved to its index BEFORE the guard rather than
+    exempted by an equality test beside it: `x == serve_dir or
+    x.startswith(...)` short-circuits past the startswith on the root path,
+    and a guard some path can skip is, to an analyzer and strictly speaking,
+    not a guard."""
     serve_dir = os.path.realpath(_resolve(serve_dir))
     clean     = unquote(url_path.split("?")[0]).lstrip("/")   # lstrip: never an absolute path
     # Refuse hidden files and directories. A dotfile is never meant to be public,
@@ -768,7 +772,11 @@ def _resolve_request_path(url_path, serve_dir):
     if _hidden_segment(clean.split("/")):
         return None, 403
     abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
-    if abs_path != serve_dir and not abs_path.startswith(serve_dir + os.sep):
+    if abs_path == serve_dir:
+        # The site root itself ("/", or an alias resolving to it) — its
+        # document is the index, resolved here so the guard below covers it.
+        abs_path = os.path.realpath(os.path.join(serve_dir, "index.html"))
+    if not abs_path.startswith(serve_dir + os.sep):
         return None, 403
     if os.path.isdir(abs_path):
         abs_path = os.path.realpath(os.path.join(abs_path, "index.html"))

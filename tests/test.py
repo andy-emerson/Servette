@@ -1285,10 +1285,87 @@ def run_dispatch_tests(s):
         check("A reload of an unreadable config neither exits nor adopts defaults",
               raised is None and good.sites[0].username == "op")
         check("...and keeps the authenticated site's password", good.sites[0].password_hash == "deadbeef")
+
+        # The unreadable state is usually a save caught mid-replace: os.replace
+        # has installed the temp file, _chown_config has not yet restored its
+        # ownership. The old code stamped the new mtime on the failed reload,
+        # and the later chown/chmod change only ctime — so when the file became
+        # readable again a beat later, the change detector saw nothing to do
+        # and the server sat on the old config until the NEXT save. Reproduced
+        # live during review: disk said port 8080, memory served 443, forever.
+        good.reload_if_changed()             # the shadow is gone: the next request
+        check("The reload RECOVERS once the file is readable again (mtime unmoved)",
+              good.port == 8443)
+
+        # A failed reload must also leave the unreadable FLAG as it found it.
+        # The old code cleared it at the top of _load before the read it was
+        # about to fail — after which a long-lived unprivileged shell stopped
+        # elevating its read-only commands and reported the built-in defaults
+        # as the operator's settings: the exact lie the flag exists to prevent.
+        flagged = s.Config()
+        flagged.unreadable = True                    # a shell holding defaults
+        flagged._mtime     = 0                       # file "changed on disk"
+        flagged.CONFIG_FILE = unreadable_cfg
+        s.open = _denied
+        try:
+            flagged.reload_if_changed()              # still unreadable: must fail
+        finally:
+            s.__dict__.pop("open", None)
+        check("A failed reload preserves unreadable=True (keeps elevating)",
+              flagged.unreadable is True)
     finally:
         s.Config.CONFIG_FILE = saved_cfg_file
         s.__dict__.pop("open", None)
         shutil.rmtree(unreadable_home, ignore_errors=True)
+
+    # Invalid TOML is the opposite case: a bad EDIT stays bad until someone
+    # edits again, so there the failed reload stamps the mtime — one parse and
+    # one warning per bad edit, not one per request.
+    bad_home = tempfile.mkdtemp()
+    bad_cfg  = os.path.join(bad_home, "servette.toml")
+    with open(bad_cfg, "w", encoding="utf-8") as f:
+        f.write("port = 8443\n")
+    try:
+        s.Config.CONFIG_FILE = bad_cfg
+        parses = s.Config()
+        with open(bad_cfg, "w", encoding="utf-8") as f:
+            f.write("port = = broken\n")
+        os.utime(bad_cfg, (1, 1))                    # a distinct, stable mtime
+        parses.reload_if_changed()
+        check("An invalid edit keeps the last good config", parses.port == 8443)
+        check("...and stamps its mtime so the bad file is parsed once",
+              parses._mtime == os.path.getmtime(bad_cfg))
+    finally:
+        s.Config.CONFIG_FILE = saved_cfg_file
+        shutil.rmtree(bad_home, ignore_errors=True)
+
+    # The migration save is guarded: an unprivileged operator (or the sandboxed
+    # service) can read a legacy flat config but cannot write the root-owned
+    # data directory. The old code let save()'s PermissionError escape
+    # Config.__init__ — which runs at import — so `servette status` died with a
+    # traceback and a service restart-looped, over a file this process was
+    # never going to write. Reproduced live during review with real users.
+    legacy_home = tempfile.mkdtemp()
+    legacy_cfg  = os.path.join(legacy_home, "servette.toml")
+    with open(legacy_cfg, "w", encoding="utf-8") as f:
+        f.write('serve_dir = "site"\nusername = "op"\n')   # flat: pre-[[site]]
+    saved_save = s.Config.save
+    try:
+        s.Config.CONFIG_FILE = legacy_cfg
+        s.Config.save = lambda self: (_ for _ in ()).throw(
+            PermissionError(13, "Permission denied"))
+        try:
+            migrated = s.Config()
+            check("A legacy config in an unwritable dir still constructs", True)
+        except PermissionError:
+            migrated = None
+            check("A legacy config in an unwritable dir still constructs (raised)", False)
+        check("...with the migration applied in memory",
+              migrated is not None and migrated.sites[0].username == "op")
+    finally:
+        s.Config.save = saved_save
+        s.Config.CONFIG_FILE = saved_cfg_file
+        shutil.rmtree(legacy_home, ignore_errors=True)
 
     # The shell's defaults-stand-in affordance must never reach the SERVE path:
     # the defaults carry no password, so serving them would open a protected
@@ -2998,8 +3075,50 @@ def run_install_tests(s, tmpdir):
         s._chown_config(cfg_probe)
         check("_chown_config sets 0640, group-readable and never world-readable",
               os.stat(cfg_probe).st_mode & 0o777 == 0o640)
+
+        # Failure must degrade toward the SERVICE. A SUDO_USER deleted since
+        # the sudo (or an NSS outage) makes the operator-group chown fail
+        # wholesale — and the file it would leave behind is save()'s
+        # root:root os.replace result, which the service cannot read: reload
+        # dead, next restart refusing to serve. The fallback hands the file
+        # to servette:servette instead — the operator loses the no-password
+        # read until the next enable; the site loses nothing.
+        saved_run = s.subprocess.run
+        chowns = []
+        class _Rc:
+            def __init__(self, rc): self.returncode = rc
+        def fake_run(argv, **k):
+            if argv[0] == "chown":
+                chowns.append(argv)
+                return _Rc(1 if len(chowns) == 1 else 0)  # operator group fails
+            return saved_run(argv, **k)
+        try:
+            s.subprocess.run = fake_run
+            s._chown_config(cfg_probe)
+        finally:
+            s.subprocess.run = saved_run
+        check("A failed operator-group chown falls back to servette:servette",
+              len(chowns) == 2 and chowns[1][:2] == ["chown", "servette:servette"])
+        check("...and the mode is still 0640",
+              os.stat(cfg_probe).st_mode & 0o777 == 0o640)
     finally:
         s.os.geteuid, s._servette_user_exists = saved_cfg_euid, saved_cfg_sue
+
+    # A root shell never elevates, so before this no path re-read the file for
+    # it: a long-lived root session acted on hours-old state and its next save
+    # silently reverted anything written since. The dispatcher now refreshes.
+    saved_euid_rc  = s.os.geteuid
+    saved_reload   = s.Config.reload_if_changed
+    reloads = []
+    try:
+        s.os.geteuid = lambda: 0
+        s.Config.reload_if_changed = lambda self: reloads.append(1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.run_command("sites", [])
+        check("A root shell re-reads the config before dispatching", len(reloads) == 1)
+    finally:
+        s.os.geteuid = saved_euid_rc
+        s.Config.reload_if_changed = saved_reload
 
     # save() writes through a mkstemp temp file, which arrives 0600, and
     # os.replace installs that mode over the live config. Without the restore

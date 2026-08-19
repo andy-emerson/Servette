@@ -321,18 +321,34 @@ def _chown_config(path):
     the file carries a password HASH and salt, which is material for an offline
     attack and never something to hand to every local account.
 
-    The chown is best-effort and the chmod unconditional, which is what makes
-    the widening fail closed. Only root can hand the group away; the service
-    user re-saving its own config cannot, and there the group stays servette,
-    so 0640 grants read to a user that already had it. save() runs at import on
-    every configured host — check=True here would be the crash _chown_servette
-    already learned to avoid."""
+    Failure must degrade toward the service, not away from it. The chown can
+    fail — a SUDO_USER deleted since the sudo, an NSS outage naming a group
+    that doesn't resolve — and the file it would leave behind is whatever
+    save()'s os.replace installed: root:root, which the service cannot read,
+    which kills the per-request reload and makes the next restart refuse to
+    serve. So a failed operator chown falls back to servette:servette — the
+    operator loses their no-password read until the next enable, the service
+    loses nothing, and the site stays up. The chmod runs unconditionally
+    (0640 under servette:servette grants read to a user that already had it).
+
+    The service user is a legitimate caller — a deferred config migration on
+    a host where it can write — but not one that can grant the operator
+    anything: a non-root owner may only chgrp to groups it belongs to, and
+    servette belongs only to servette. Its saves therefore leave
+    servette:servette 0640, and the operator's group read returns with the
+    next root-elevated save or enable, both of which run this function as
+    root. save() runs at import on every configured host — check=True
+    anywhere here would be the crash _chown_servette already learned to
+    avoid."""
     if not (_servette_user_exists() and os.path.exists(path)):
         return
     if os.geteuid() != 0 and os.geteuid() != _servette_uid():
         return
-    subprocess.run(["chown", f"servette:{_operator_group()}", path],
-                   check=False, capture_output=True)
+    r = subprocess.run(["chown", f"servette:{_operator_group()}", path],
+                       check=False, capture_output=True)
+    if r.returncode != 0:
+        subprocess.run(["chown", "servette:servette", path],
+                       check=False, capture_output=True)
     os.chmod(path, 0o640)
 
 

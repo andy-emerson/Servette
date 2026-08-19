@@ -1624,6 +1624,14 @@ def run_command(cmd, args):
     if os.geteuid() != 0 and _needs_root(cmd):
         return _elevate(cmd, args)
 
+    # A root shell never elevates, so nothing else re-reads the file for it —
+    # and a long-lived root session would otherwise act on hours-old state,
+    # silently reverting anything written since (by tooling over SSH, or a
+    # service-side migration) with its next save. Unprivileged shells get the
+    # same freshness through _elevate's child, which loads from disk.
+    if os.geteuid() == 0:
+        config.reload_if_changed()
+
     if cmd == "setup":
         cmd_setup()
     elif cmd == "config":

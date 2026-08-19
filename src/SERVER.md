@@ -106,6 +106,16 @@ class _ConfigInvalid(Exception):
     stays in force — see reload_if_changed."""
 
 
+class _ConfigUnreadable(_ConfigInvalid):
+    """servette.toml exists but this process may not read it. A subclass
+    because every _ConfigInvalid handler treats it the same way — except the
+    reload, where the distinction is load-bearing: an invalid file stays
+    invalid until someone edits it, but an unreadable one is usually a save
+    caught mid-flight (os.replace has installed the temp file, _chown_config
+    has not yet run) and becomes readable again moments later, so the reload
+    must keep trying rather than write the state off until the next edit."""
+
+
 ```
 
 The `Config` class is the whole settings lifecycle: load (with validation before any live field mutates, and the flat-config migration), the per-request reload that survives a bad edit, and the atomic save that writes `servette.toml` — the TOML template with its operator-facing comments is the string literal inside `save()`.
@@ -118,7 +128,8 @@ class Config:
     CONFIG_FILE = os.path.join(BASE_DIR, "servette.toml")
 
     def __init__(self):
-        self._mtime = None
+        self._mtime        = None
+        self._warned_mtime = None  # throttles the unreadable-reload warning
         try:
             # Only construction tolerates an unreadable file: it must reach the
             # dispatcher so a privileged command can elevate and read again as
@@ -136,33 +147,42 @@ class Config:
         # the reload path, and raising after a partial mutation would leave the
         # server on a config that never existed on disk.
         data = {}
-        existed = os.path.exists(self.CONFIG_FILE)
-        self.unreadable = False
+        existed    = os.path.exists(self.CONFIG_FILE)
+        unreadable = False   # local until validation passes: _load runs against
+        read_mtime = None    # the LIVE config on the reload path, and a raise
+        #                      below must leave every attribute — this flag
+        #                      included — exactly as it found it
         if existed:
             try:
                 with open(self.CONFIG_FILE, "rb") as f:
+                    # The mtime of the bytes actually read, from the open
+                    # handle. Stat'ing the path again later would race a
+                    # concurrent save: its os.replace landing between this
+                    # read and that stat would stamp the NEW file's mtime
+                    # over the OLD file's content, and the change detector
+                    # would then see nothing to reload, ever.
+                    read_mtime = os.fstat(f.fileno()).st_mtime
                     data = tomllib.load(f)
             except tomllib.TOMLDecodeError as e:
                 raise _ConfigInvalid(f"servette.toml is not valid TOML ({e})")
             except OSError:
-                # The file is there and we may not read it — the normal state on
-                # a configured host, where servette.toml is the service user's
-                # and mode 600, seen by an operator who has not elevated yet.
-                # On construction this is not fatal: defaults stand in so the
-                # program can reach its dispatcher, which elevates and asks
-                # again as root, and the flag stops those defaults being
-                # reported as the operator's settings. But on the live reload
-                # path adopting defaults would silently drop this site's auth
-                # and every other setting because a file's ownership broke — so
-                # there it is refused exactly like an invalid file, keeping the
-                # last good config. self is unmutated at this point, so raising
-                # here honours the reload invariant.
+                # The file is there and we may not read it. On construction
+                # this is not fatal: defaults stand in so the program can
+                # reach its dispatcher, which elevates and asks again as
+                # root, and the flag stops those defaults being reported as
+                # the operator's settings. But on the live reload path
+                # adopting defaults would silently drop this site's auth and
+                # every other setting because a file's ownership broke — so
+                # there it is refused like an invalid file, keeping the last
+                # good config — under the subclass, because unlike a bad
+                # edit this state is usually a save caught mid-replace and
+                # the reload must keep trying.
                 if not tolerate_unreadable:
-                    raise _ConfigInvalid("servette.toml exists but cannot be read")
-                self.unreadable = True
+                    raise _ConfigUnreadable("servette.toml exists but cannot be read")
+                unreadable = True
 
         site_tables = data.get("site", [])
-        migrating   = existed and not site_tables and not self.unreadable
+        migrating   = existed and not site_tables and not unreadable
         if site_tables:
             sites = [Site(t) for t in site_tables]
         else:
@@ -225,10 +245,17 @@ class Config:
         self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
         self.permissions_policy = data.get("permissions_policy", "camera=(), microphone=(), usb=(), midi=(), serial=()")
 
-        try:
-            self._mtime = os.path.getmtime(self.CONFIG_FILE)
-        except OSError:
-            pass
+        self.unreadable = unreadable
+        if read_mtime is not None:
+            self._mtime = read_mtime
+        else:
+            # No handle to fstat — the file was absent or unreadable-tolerated.
+            # The path stat is fine here: there is no content for a racing
+            # save to divorce the stamp from.
+            try:
+                self._mtime = os.path.getmtime(self.CONFIG_FILE)
+            except OSError:
+                pass
 
         for site in self.sites:
             try:
@@ -237,7 +264,19 @@ class Config:
                 site._cert_mtime = None
 
         if migrating:
-            self.save()
+            # Guarded: save() needs write permission on the data directory,
+            # which an unprivileged operator or the sandboxed service does not
+            # have. The in-memory state above is fully migrated either way —
+            # only the file on disk waits, and the next root-elevated command
+            # (every settings write elevates) performs the same migration and
+            # persists it. Letting the OSError escape would instead crash any
+            # unprivileged run — including the service, at import, in a
+            # systemd restart loop — over a file it was never going to write.
+            try:
+                self.save()
+            except OSError as e:
+                log.warning("Config migration not yet saved (%s) — a root "
+                            "command will persist it", e)
 
     def reload_if_changed(self):
         try:
@@ -249,12 +288,27 @@ class Config:
         try:
             self._load()
             log.info("Config reloaded from disk")
+        except _ConfigUnreadable as e:
+            # Unreadable is (almost always) transient: a save's os.replace has
+            # landed and its _chown_config has not yet run, so the very next
+            # request will likely read the file fine. Do NOT stamp the mtime —
+            # stamping was the bug that made this state permanent: the later
+            # chown/chmod that restore readability touch only ctime, so a
+            # stamped reload never fired again and the server sat on the old
+            # config until the next save. The warning is throttled by mtime
+            # instead, so a file that stays unreadable costs one failed open
+            # per request and one log line per change, not a log flood.
+            if mtime != self._warned_mtime:
+                self._warned_mtime = mtime
+                log.warning("Config NOT reloaded (%s) — retrying on the next request", e)
         except _ConfigInvalid as e:
-            # Keep serving on the last good configuration: this runs on request
-            # threads, where an escape would kill the request mid-flight and a
-            # process exit would take the whole server down over a typo. Stamp
-            # the mtime so the bad file isn't re-parsed — and the warning isn't
-            # repeated — on every request until the file changes again.
+            # A bad edit, by contrast, stays bad until someone edits again.
+            # Keep serving on the last good configuration: this runs on
+            # request threads, where an escape would kill the request
+            # mid-flight and a process exit would take the whole server down
+            # over a typo. Stamp the mtime so the bad file isn't re-parsed —
+            # and the warning isn't repeated — on every request until the
+            # file changes again.
             self._mtime = mtime
             log.warning("Config NOT reloaded (%s) — still serving the previous configuration", e)
 

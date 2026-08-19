@@ -69,8 +69,9 @@ def _main():
         # broke. Exiting nonzero puts the truth in the journal instead.
         if config.unreadable:
             log.error("servette.toml exists but cannot be read — refusing to "
-                      "serve defaults in its place. Fix its ownership: "
-                      "chown servette:servette %s", config.CONFIG_FILE)
+                      "serve defaults in its place. Run 'enable' to restore "
+                      "its ownership (servette, operator-group-readable, 0640): %s",
+                      config.CONFIG_FILE)
             sys.exit(1)
         start_server()
         try:

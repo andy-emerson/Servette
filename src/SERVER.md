@@ -106,6 +106,16 @@ class _ConfigInvalid(Exception):
     stays in force — see reload_if_changed."""
 
 
+class _ConfigUnreadable(_ConfigInvalid):
+    """servette.toml exists but this process may not read it. A subclass
+    because every _ConfigInvalid handler treats it the same way — except the
+    reload, where the distinction is load-bearing: an invalid file stays
+    invalid until someone edits it, but an unreadable one is usually a save
+    caught mid-flight (os.replace has installed the temp file, _chown_config
+    has not yet run) and becomes readable again moments later, so the reload
+    must keep trying rather than write the state off until the next edit."""
+
+
 ```
 
 The `Config` class is the whole settings lifecycle: load (with validation before any live field mutates, and the flat-config migration), the per-request reload that survives a bad edit, and the atomic save that writes `servette.toml` — the TOML template with its operator-facing comments is the string literal inside `save()`.
@@ -118,7 +128,8 @@ class Config:
     CONFIG_FILE = os.path.join(BASE_DIR, "servette.toml")
 
     def __init__(self):
-        self._mtime = None
+        self._mtime        = None
+        self._warned_mtime = None  # throttles the unreadable-reload warning
         try:
             # Only construction tolerates an unreadable file: it must reach the
             # dispatcher so a privileged command can elevate and read again as
@@ -136,33 +147,42 @@ class Config:
         # the reload path, and raising after a partial mutation would leave the
         # server on a config that never existed on disk.
         data = {}
-        existed = os.path.exists(self.CONFIG_FILE)
-        self.unreadable = False
+        existed    = os.path.exists(self.CONFIG_FILE)
+        unreadable = False   # local until validation passes: _load runs against
+        read_mtime = None    # the LIVE config on the reload path, and a raise
+        #                      below must leave every attribute — this flag
+        #                      included — exactly as it found it
         if existed:
             try:
                 with open(self.CONFIG_FILE, "rb") as f:
+                    # The mtime of the bytes actually read, from the open
+                    # handle. Stat'ing the path again later would race a
+                    # concurrent save: its os.replace landing between this
+                    # read and that stat would stamp the NEW file's mtime
+                    # over the OLD file's content, and the change detector
+                    # would then see nothing to reload, ever.
+                    read_mtime = os.fstat(f.fileno()).st_mtime
                     data = tomllib.load(f)
             except tomllib.TOMLDecodeError as e:
                 raise _ConfigInvalid(f"servette.toml is not valid TOML ({e})")
             except OSError:
-                # The file is there and we may not read it — the normal state on
-                # a configured host, where servette.toml is the service user's
-                # and mode 600, seen by an operator who has not elevated yet.
-                # On construction this is not fatal: defaults stand in so the
-                # program can reach its dispatcher, which elevates and asks
-                # again as root, and the flag stops those defaults being
-                # reported as the operator's settings. But on the live reload
-                # path adopting defaults would silently drop this site's auth
-                # and every other setting because a file's ownership broke — so
-                # there it is refused exactly like an invalid file, keeping the
-                # last good config. self is unmutated at this point, so raising
-                # here honours the reload invariant.
+                # The file is there and we may not read it. On construction
+                # this is not fatal: defaults stand in so the program can
+                # reach its dispatcher, which elevates and asks again as
+                # root, and the flag stops those defaults being reported as
+                # the operator's settings. But on the live reload path
+                # adopting defaults would silently drop this site's auth and
+                # every other setting because a file's ownership broke — so
+                # there it is refused like an invalid file, keeping the last
+                # good config — under the subclass, because unlike a bad
+                # edit this state is usually a save caught mid-replace and
+                # the reload must keep trying.
                 if not tolerate_unreadable:
-                    raise _ConfigInvalid("servette.toml exists but cannot be read")
-                self.unreadable = True
+                    raise _ConfigUnreadable("servette.toml exists but cannot be read")
+                unreadable = True
 
         site_tables = data.get("site", [])
-        migrating   = existed and not site_tables and not self.unreadable
+        migrating   = existed and not site_tables and not unreadable
         if site_tables:
             sites = [Site(t) for t in site_tables]
         else:
@@ -225,10 +245,17 @@ class Config:
         self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
         self.permissions_policy = data.get("permissions_policy", "camera=(), microphone=(), usb=(), midi=(), serial=()")
 
-        try:
-            self._mtime = os.path.getmtime(self.CONFIG_FILE)
-        except OSError:
-            pass
+        self.unreadable = unreadable
+        if read_mtime is not None:
+            self._mtime = read_mtime
+        else:
+            # No handle to fstat — the file was absent or unreadable-tolerated.
+            # The path stat is fine here: there is no content for a racing
+            # save to divorce the stamp from.
+            try:
+                self._mtime = os.path.getmtime(self.CONFIG_FILE)
+            except OSError:
+                pass
 
         for site in self.sites:
             try:
@@ -237,7 +264,19 @@ class Config:
                 site._cert_mtime = None
 
         if migrating:
-            self.save()
+            # Guarded: save() needs write permission on the data directory,
+            # which an unprivileged operator or the sandboxed service does not
+            # have. The in-memory state above is fully migrated either way —
+            # only the file on disk waits, and the next root-elevated command
+            # (every settings write elevates) performs the same migration and
+            # persists it. Letting the OSError escape would instead crash any
+            # unprivileged run — including the service, at import, in a
+            # systemd restart loop — over a file it was never going to write.
+            try:
+                self.save()
+            except OSError as e:
+                log.warning("Config migration not yet saved (%s) — a root "
+                            "command will persist it", e)
 
     def reload_if_changed(self):
         try:
@@ -249,12 +288,27 @@ class Config:
         try:
             self._load()
             log.info("Config reloaded from disk")
+        except _ConfigUnreadable as e:
+            # Unreadable is (almost always) transient: a save's os.replace has
+            # landed and its _chown_config has not yet run, so the very next
+            # request will likely read the file fine. Do NOT stamp the mtime —
+            # stamping was the bug that made this state permanent: the later
+            # chown/chmod that restore readability touch only ctime, so a
+            # stamped reload never fired again and the server sat on the old
+            # config until the next save. The warning is throttled by mtime
+            # instead, so a file that stays unreadable costs one failed open
+            # per request and one log line per change, not a log flood.
+            if mtime != self._warned_mtime:
+                self._warned_mtime = mtime
+                log.warning("Config NOT reloaded (%s) — retrying on the next request", e)
         except _ConfigInvalid as e:
-            # Keep serving on the last good configuration: this runs on request
-            # threads, where an escape would kill the request mid-flight and a
-            # process exit would take the whole server down over a typo. Stamp
-            # the mtime so the bad file isn't re-parsed — and the warning isn't
-            # repeated — on every request until the file changes again.
+            # A bad edit, by contrast, stays bad until someone edits again.
+            # Keep serving on the last good configuration: this runs on
+            # request threads, where an escape would kill the request
+            # mid-flight and a process exit would take the whole server down
+            # over a typo. Stamp the mtime so the bad file isn't re-parsed —
+            # and the warning isn't repeated — on every request until the
+            # file changes again.
             self._mtime = mtime
             log.warning("Config NOT reloaded (%s) — still serving the previous configuration", e)
 
@@ -341,12 +395,13 @@ permissions_policy = {s(self.permissions_policy)}
                 pass
             raise
         # The replace installs the temp file's root:root 0600 — unreadable by
-        # the servette service user, which would kill the running service's
-        # per-request config reload and crash-loop the next restart. Restore
-        # the ownership enable establishes; a no-op where the user doesn't
-        # exist (session mode, tests, macOS). Late import shape as with
-        # _domain_from_cert: _chown_servette is defined in System.
-        _chown_servette(self.CONFIG_FILE)
+        # both the service user (whose per-request reload would die, crash-
+        # looping the next restart) and the operator (whose read-only commands
+        # would elevate to read their own settings). Restore the ownership
+        # enable establishes; a no-op where the servette user doesn't exist
+        # (session mode, tests, macOS). Late import shape as with
+        # _domain_from_cert: _chown_config is defined in System.
+        _chown_config(self.CONFIG_FILE)
         try:
             self._mtime = os.path.getmtime(self.CONFIG_FILE)
         except OSError:
@@ -410,22 +465,44 @@ _rate_lock       = threading.Lock()
 
 ```
 
-Both spellings of a mapped IPv4 address must share one bucket.
+Both spellings of a mapped IPv4 address must share one bucket — and an IPv6 client's whole /64 must too, or the buckets aren't limits at all. Two functions, because the two jobs diverge: the log wants the address, the limiter wants the subscriber.
 
 ```python
 # Normalizing addresses
 def _normalize_ip(ip):
-    """Normalize IPv6-mapped IPv4 addresses so both forms bucket together.
+    """Normalize IPv6-mapped IPv4 addresses so both forms read the same.
 
-    Uses ipaddress so every mapped spelling collapses to the same key — the dotted
-    ::ffff:1.2.3.4 and the hex ::ffff:c0a8:0101 are the same address and must share a
-    rate-limit bucket. Non-addresses (e.g. "unknown", junk XFF) pass through as-is."""
+    Uses ipaddress so every mapped spelling collapses to the same string — the
+    dotted ::ffff:1.2.3.4 and the hex ::ffff:c0a8:0101 are the same address.
+    Non-addresses (e.g. "unknown", junk XFF) pass through as-is. This is the
+    address as logged; the limiters key on _bucket_key below."""
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return ip
     if addr.version == 6 and addr.ipv4_mapped:
         return str(addr.ipv4_mapped)
+    return ip
+
+
+def _bucket_key(ip):
+    """The rate/connection bucket an address belongs to.
+
+    IPv4 buckets per address. Native IPv6 buckets by its /64: providers hand
+    a subscriber at least a /64 (RFC 6177), so one visitor holds 2^64
+    addresses — keyed individually, rotating the low bits gave every request
+    a fresh bucket, quietly switching off the request rate limit, the
+    auth-failure throttle, and the per-IP connection cap for any IPv6
+    client. /64 is the finest bucket that is still one subscriber's, so a
+    visitor can neither dodge the limits nor exhaust a neighbor's. Logs keep
+    the full address (_normalize_ip); only the limiters see this key."""
+    ip = _normalize_ip(ip)
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
     return ip
 
 
@@ -539,17 +616,27 @@ The read-through path: mtime-validated hits, one gzip per file change, and two p
 def _get_cached_file(path):
     """Return (raw, compressed_or_None, etag), reloading only if the file changed.
 
+    "Changed" is judged on (mtime_ns, size, inode) from one stat call — not
+    mtime alone, which the publish pipeline can hold constant across content
+    changes: tar restores each member's archived mtime at whole-second
+    granularity, so two pulls of a file edited and repacked within the same
+    second (or built by any pinned-timestamp tooling) carried identical
+    mtimes with different bytes, and the cache served the old bytes
+    indefinitely. The swap extracts fresh files, so the inode always moves;
+    size and nanosecond mtime guard direct in-place edits too.
+
     compressed is None for already-compressed types; a file too large to fit in
     the cache is served raw and not stored, so it can't purge everything else.
     """
     try:
-        mtime = os.path.getmtime(path)
+        st = os.stat(path)
     except OSError:
         return None, None, None
+    stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
 
     with _file_cache_lock:
         entry = _file_cache.get(path)
-        if entry and entry["mtime"] == mtime:
+        if entry and entry["stamp"] == stamp:
             return entry["raw"], entry["compressed"], entry["etag"]
 
     # Two threads can race here: both miss the cache check and both read the file. The fix is
@@ -572,7 +659,7 @@ def _get_cached_file(path):
 
     ext        = os.path.splitext(path)[1].lower()
     compressed = gzip.compress(raw, compresslevel=6) if ext in _COMPRESSIBLE_EXTS else None
-    new_entry  = {"mtime": mtime, "raw": raw, "compressed": compressed, "etag": etag}
+    new_entry  = {"stamp": stamp, "raw": raw, "compressed": compressed, "etag": etag}
 
     if _entry_bytes(new_entry) > cache_max:
         return raw, compressed, etag  # rare: raw fit but raw+gzip doesn't — serve, don't store
@@ -629,13 +716,15 @@ def _mime_type(path):
 
 ```
 
-The two predicates path resolution is built on: containment within the site's own tree, and the dotfile refusal.
+Two predicates: containment for config-time checks, and the dotfile refusal. The request path deliberately does not use `_within` — its containment guard is written out inline below, where a scanner and a reader can both verify it at the security boundary itself.
 
 ```python
 # Containment
 def _within(base, target):
     """True if `target` is `base` or sits inside it. commonpath on already-resolved
-    absolute paths means a traversal or symlink escape lands outside `base` and fails."""
+    absolute paths means a traversal or symlink escape lands outside `base` and
+    fails. Used by the config-time serve_dir checks; the REQUEST path's
+    containment is inlined in _resolve_request_path instead — see there."""
     try:
         return os.path.commonpath([base, target]) == base
     except ValueError:   # different drives / mixed absolute-relative — treat as outside
@@ -659,7 +748,19 @@ URL to file, confined to the matched site's `serve_dir`. The hidden-name rule ru
 def _resolve_request_path(url_path, serve_dir):
     """Resolve a URL path to an absolute file path within the matched site's
     serve_dir. Returns (None, 403) on traversal or a hidden path, (None, 404) if
-    not found."""
+    not found.
+
+    The containment guards are written out inline — realpath, then a literal
+    startswith check on every continuing path — rather than through _within, on
+    purpose: this is the one place attacker-controlled text becomes a
+    filesystem path, and the guard must be verifiable at the boundary itself,
+    by a reader without chasing a helper and by a taint analyzer that checks
+    the guard dominates every path to every use. That domination requirement is
+    why the site root is resolved to its index BEFORE the guard rather than
+    exempted by an equality test beside it: `x == serve_dir or
+    x.startswith(...)` short-circuits past the startswith on the root path,
+    and a guard some path can skip is, to an analyzer and strictly speaking,
+    not a guard."""
     serve_dir = os.path.realpath(_resolve(serve_dir))
     clean     = unquote(url_path.split("?")[0]).lstrip("/")   # lstrip: never an absolute path
     # Refuse hidden files and directories. A dotfile is never meant to be public,
@@ -667,20 +768,24 @@ def _resolve_request_path(url_path, serve_dir):
     # .git checkout, a .env, an editor backup — so serving them leaks source and
     # secrets. This first pass reads the *requested* segments, closing the direct
     # case (GET /.git/config); the ".." of a traversal is caught here too, with
-    # _within below as the backstop.
+    # the containment check below as the backstop.
     if _hidden_segment(clean.split("/")):
         return None, 403
     abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
-    if not _within(serve_dir, abs_path):
+    if abs_path == serve_dir:
+        # The site root itself ("/", or an alias resolving to it) — its
+        # document is the index, resolved here so the guard below covers it.
+        abs_path = os.path.realpath(os.path.join(serve_dir, "index.html"))
+    if not abs_path.startswith(serve_dir + os.sep):
         return None, 403
     if os.path.isdir(abs_path):
         abs_path = os.path.realpath(os.path.join(abs_path, "index.html"))
-        if not _within(serve_dir, abs_path):
+        if not abs_path.startswith(serve_dir + os.sep):
             return None, 403
     # Re-check the *resolved* target's segments. The pass above reads the name
     # the client asked for; a symlink inside serve_dir whose own name is not a
     # dotfile can still resolve to a hidden target (serve_dir/x -> serve_dir/.git
-    # /config), and realpath keeps it within serve_dir, so _within passes.
+    # /config), and realpath keeps it within serve_dir, so containment passes.
     # Applying the same rule to the resolved path refuses a hidden target by
     # whatever name it was reached. abs_path is at or under serve_dir here, so
     # the slice yields the relative segments (empty at the root — no dotfile).
@@ -840,7 +945,8 @@ def _handle_request(method, url_path, headers, raw_ip):
     # headers still gets throttled rather than dodging the limiter under the
     # closed-system 404 below; the cost is that a rate-limited response never
     # carries HSTS even for a real site's domain.
-    if _rate_limit_exceeded(_request_times, ip, config.rate_limit):
+    bucket = _bucket_key(ip)   # /64 for IPv6 — logs keep the full address
+    if _rate_limit_exceeded(_request_times, bucket, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
@@ -873,7 +979,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         # credentials burn CPU and RAM on every attempt no matter the limit. The
         # peek (record=False) decides whether to spend the hash at all; an actual
         # failure below is what records a strike toward the limit.
-        if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit, record=False):
+        if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, bucket, config.auth_rate_limit, record=False):
             log.warning("Auth rate limited %s", ip)
             return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
@@ -895,7 +1001,7 @@ def _handle_request(method, url_path, headers, raw_ip):
                 pass
 
         if not authed:
-            if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, ip, config.auth_rate_limit):
+            if credentials_submitted and _rate_limit_exceeded(_auth_fail_times, bucket, config.auth_rate_limit):
                 log.warning("Auth rate limited %s", ip)
                 return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
             if credentials_submitted:
@@ -1328,7 +1434,10 @@ class _CappedThreadingHTTPServer(http.server.ThreadingHTTPServer):
 
     @staticmethod
     def _ip_key(client_address):
-        return _normalize_ip(client_address[0]) if client_address else "?"
+        # The connection cap shares the limiters' bucketing (/64 for IPv6) —
+        # per-address keying let one subscriber's 2^64 addresses each claim a
+        # fresh slot allowance, unmaking the cap for IPv6 sources.
+        return _bucket_key(client_address[0]) if client_address else "?"
 
     def _ip_acquire(self, ip):
         """Count a connection against ip. Returns False — without counting — when

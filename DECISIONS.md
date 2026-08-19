@@ -6,6 +6,28 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## servette.toml is the operator's to read: servette:their group, 0640
+
+**Ruled (Human):** the config is owned by the service user with the operator's
+own group and mode `0640`. The read-only commands (`status`, `sites`, `log`)
+then never ask for a password, and `config.unreadable` — the fail-closed guard
+that refuses to report defaults as settings — stops firing during correct
+operation.
+**Why:** at `0600` the guard tripped on every configured host, so the operator
+paid a password to look at their own box and a real warning became routine
+noise. A guard that fires in normal use is one people learn to ignore. The
+widening is from one system user to exactly one more, the operator, and world
+bits stay off: the file carries a scrypt hash and its salt, which are material
+for an offline attack.
+**Rejected:** leaving `0600` and accepting the prompt (honest, but it teaches
+the operator to type a password for read-only work and blunts the guard);
+world-readable `0644`, which would hand the hash to every local account; and
+having the read-only commands parse the file as root and drop the result, which
+buys the same readability with a privileged code path instead of a file mode.
+**Reopen if:** the config ever holds a secret rather than a verifier — a
+plaintext token, an API key, a private key — at which point the operator's
+convenience no longer outweighs keeping it to one user. *(2026-08-18)*
+
 ## A stale unit is noticed and told, not auto-refreshed (#99)
 
 **Ruled (Human):** after an upgrade, the unprivileged shell notices the stale

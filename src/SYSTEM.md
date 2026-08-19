@@ -218,14 +218,21 @@ What `--serve` blocks on: the watch that turns a dead server thread into a dead 
 
 ```python
 # The service watch
-def _watch_server(poll=5, grace=30):
+def _watch_server(poll=2, grace=5):
     """Block until the HTTPS server has been dead for `grace` seconds.
 
     --serve exits non-zero when this returns, so systemd's Restart=always brings
     the service back. Without the watch, a dead server thread leaves a living
-    process: systemd reports active while nothing is listening. The grace period
-    spans the stop/start window of an in-process certificate reload, so a reload
-    doesn't read as a death."""
+    process: systemd reports active while nothing is listening.
+
+    Under --serve nothing ever restarts the server in-process — a certificate
+    reload deliberately stops it and lets systemd relaunch — so every dead
+    thread this sees ends in an exit, and the grace only sets how long the
+    site stays down before the restart begins. It was 30 seconds, justified
+    by an in-process reload window that cannot occur in this mode: every
+    certificate rotation cost ~35 seconds of downtime where stop, exit, and
+    RestartSec add up to well under ten. The small grace that remains
+    absorbs stop_server's own teardown ordering, nothing more."""
     deadline = None
     while True:
         t = _https_thread
@@ -300,10 +307,70 @@ def _serve_dir_readable(path):
 
 ```
 
-Files the service process must read — config, certificates, the ACME account — are owned by the `servette` user.
+Files the service process must read — config, certificates, the ACME account — are owned by the `servette` user. The config is the one that also grants a group: it is the operator's file about the operator's box, so their own group reads it and their read-only commands never ask for a password.
 
 ```python
 # Ownership: the service user
+def _chown_config(path):
+    """Give the config to the service user, readable by the operator: owner
+    servette, group the operator's own, mode 0640.
+
+    servette.toml is the operator's file about the operator's box, and the
+    read-only commands (status, sites, log) read it to report a URL and a
+    certificate expiry. Owning it 0600 to the service user made those commands
+    elevate on every configured host — a password to look at your own server —
+    and left config.unreadable permanently true, so the fail-closed reload
+    guard fired during correct operation. A guard that trips in normal use is
+    one people learn to ignore.
+
+    The group is the operator's, so the widening is from one system user to
+    exactly one more: them. World bits stay off, as they do for site content —
+    the file carries a password HASH and salt, which is material for an offline
+    attack and never something to hand to every local account.
+
+    Failure must degrade toward the service, not away from it. The chown can
+    fail — a SUDO_USER deleted since the sudo, an NSS outage naming a group
+    that doesn't resolve — and the file it would leave behind is whatever
+    save()'s os.replace installed: root:root, which the service cannot read,
+    which kills the per-request reload and makes the next restart refuse to
+    serve. So a failed operator chown falls back to servette:servette — the
+    operator loses their no-password read until the next enable, the service
+    loses nothing, and the site stays up. The chmod runs unconditionally
+    (0640 under servette:servette grants read to a user that already had it).
+
+    The service user is a legitimate caller — a deferred config migration on
+    a host where it can write — but not one that can grant the operator
+    anything: a non-root owner may only chgrp to groups it belongs to, and
+    servette belongs only to servette. Its saves therefore leave
+    servette:servette 0640, and the operator's group read returns with the
+    next root-elevated save or enable, both of which run this function as
+    root. save() runs at import on every configured host — check=True
+    anywhere here would be the crash _chown_servette already learned to
+    avoid."""
+    if not (_servette_user_exists() and os.path.exists(path)):
+        return
+    if os.geteuid() != 0 and os.geteuid() != _servette_uid():
+        return
+    r = subprocess.run(["chown", f"servette:{_operator_group()}", path],
+                       check=False, capture_output=True)
+    if r.returncode != 0:
+        subprocess.run(["chown", "servette:servette", path],
+                       check=False, capture_output=True)
+    os.chmod(path, 0o640)
+
+
+def _operator_group():
+    """The operator's own group, for the config's group ownership. Their primary
+    group by name; the operator's username where that cannot be resolved, which
+    is correct on the user-private-group distributions Servette targets."""
+    user = _operator_user()
+    try:
+        import grp as _grp, pwd as _pwd
+        return _grp.getgrgid(_pwd.getpwnam(user).pw_gid).gr_name
+    except (ImportError, KeyError):
+        return user
+
+
 def _chown_servette(path):
     """Chown path to servette:servette if the user exists and the path exists."""
     if not (_servette_user_exists() and os.path.exists(path)):
@@ -314,10 +381,16 @@ def _chown_servette(path):
     # unprivileged session or dev context where chown cannot succeed — found
     # when a non-root save() crashed the whole program at Config() import,
     # because check=True turned "cannot give files away" into a fatal error on
-    # any host where the servette user exists.
+    # any host where the servette user exists. Best-effort even for the
+    # permitted callers: the service's renewal runs this over the ACME webroot
+    # and the certs tree, and one stray root-owned file in either (an
+    # interrupted root issuance's leftover token) would otherwise turn every
+    # future renewal into a CalledProcessError before Let's Encrypt was even
+    # contacted, hourly, until the certificate expired.
     if os.geteuid() != 0 and os.geteuid() != _servette_uid():
         return
-    subprocess.run(["chown", "-R", "servette:servette", path], check=True)
+    subprocess.run(["chown", "-R", "servette:servette", path],
+                   check=False, capture_output=True)
 
 
 ```
@@ -529,9 +602,12 @@ def _meminfo():
 _SPIKE_ALLOWANCE_KB = 700 * 1024
 _SWAP_MIN_MB        = 512
 _SWAP_MAX_MB        = 2048
+_SWAP_SLACK_MB      = 8
 
 
 ```
+
+`_SWAP_SLACK_MB` is how far under the recommendation still counts as meeting it. A host that accepted a 1400 MB offer reports `SwapTotal` of 1399 MB, because `mkswap` spends the first page on a header and the arithmetic floors what is left; compared exactly, that host is told forever to resize to a size it already has, and resizing produces the same shortfall again. The recommendation is rounded to two significant digits, so it carries less precision than the slack it now forgives.
 
 Integer division that rounds up instead of down, spelled out once — the swap sizing and the JWK encoding both need it, and Python has no built-in operator for it.
 
@@ -583,25 +659,55 @@ def _swap_recommendation(mem_kb, avail_kb, cache_mb):
     return min(max(size_mb, _SWAP_MIN_MB), _SWAP_MAX_MB) * 1024 ** 2
 
 
-def _swap_offer(rec_mb, ours, active_mb):
+def _swap_sizes():
+    """(ours_mb, foreign_mb) of ACTIVE swap, from /proc/swaps: the size of
+    Servette's own swapfile when active (else None), and the total of every
+    other active swap device. SwapTotal from /proc/meminfo lumps them
+    together, and using it as "the swapfile's size" printed a wrong number
+    whenever a partition coexisted — and let a resize conclude 'nothing to
+    do' because partition + file happened to sum near the request. (None, 0)
+    where /proc/swaps can't be read (non-Linux)."""
+    ours, foreign = None, 0
+    try:
+        with open("/proc/swaps") as f:
+            next(f, None)  # the header line
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                if parts[0] == _SWAP_PATH:
+                    ours = int(parts[2]) // 1024
+                else:
+                    foreign += int(parts[2]) // 1024
+    except (OSError, ValueError):
+        pass
+    return ours, foreign
+
+
+def _swap_offer(rec_mb, ours, ours_mb, foreign_mb):
     """(description, skip_hint) for the swap prompt, or None when no offer is due.
+    `ours` is whether /swapfile exists on disk; `ours_mb` its active size (None
+    when inactive); `foreign_mb` every other active swap device's total.
 
     Only Servette's own /swapfile is ever offered a resize; swap Servette didn't
     create (a partition, a distro-managed file) is left alone — resizing it would
-    fight whatever manages it. Enter always takes the recommendation; the skip
-    hint says what declining preserves, so no two options in the prompt are
-    redundant."""
+    fight whatever manages it, and its presence also suppresses the create offer,
+    since the host's swap is already someone else's decision. Enter always takes
+    the recommendation; the skip hint says what declining preserves, so no two
+    options in the prompt are redundant.
+
+    A swapfile within _SWAP_SLACK_MB of the recommendation counts as meeting it,
+    so a host that took the offer is not asked again for the megabyte mkswap
+    spends on its header."""
     if rec_mb is None:
         return None
-    if active_mb > 0 and not ours:
-        return None
     if not ours:
-        return "no swapfile", "skip"
-    if active_mb == 0:
+        return None if foreign_mb else ("no swapfile", "skip")
+    if not ours_mb:
         return "an inactive swapfile", "skip"
-    if active_mb >= rec_mb:
+    if ours_mb >= rec_mb - _SWAP_SLACK_MB:
         return None
-    return f"a {active_mb} MB swapfile", f"keep {active_mb}"
+    return f"a {ours_mb} MB swapfile", f"keep {ours_mb}"
 
 
 ```
@@ -626,17 +732,29 @@ def _root_on_sd_card():
 The interactive offer itself: present the measurement, take a size or a decline, then create (or grow) the swapfile — sized only after checking the disk can afford it, activated only after `mkswap` succeeds, and rolled back if any step fails.
 
 ```python
+# Making the swapfile
+def _make_swapfile(size):
+    """Allocate, format, and activate /swapfile at `size` bytes; raises on any
+    failure. Mode 0600 is set before content exists — never world-readable."""
+    with open(_SWAP_PATH, "wb") as f:
+        os.chmod(_SWAP_PATH, 0o600)
+        os.posix_fallocate(f.fileno(), 0, size)
+    subprocess.run(["mkswap", _SWAP_PATH], check=True, capture_output=True)
+    subprocess.run(["swapon", _SWAP_PATH], check=True, capture_output=True)
+
+
 # The swap offer
 def _ensure_swap():
     """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
     if _IS_MACOS:
         return  # macOS manages its own swap; mkswap/swapon/fallocate do not exist there
-    mem_kb, avail_kb, swap_kb = _meminfo()
+    mem_kb, avail_kb, _ = _meminfo()
     rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
     rec_mb    = rec // (1024 * 1024) if rec else None
     ours      = os.path.exists(_SWAP_PATH)
-    active_mb = (swap_kb or 0) // 1024  # total active swap; ≈ ours when ours is the only one
-    offer     = _swap_offer(rec_mb, ours, active_mb)
+    ours_mb, foreign_mb = _swap_sizes()
+    active_mb = ours_mb or 0            # OUR file's active size, not the host total
+    offer     = _swap_offer(rec_mb, ours, ours_mb, foreign_mb)
     if offer is None:
         return
     swap_desc, skip_hint = offer
@@ -656,8 +774,8 @@ def _ensure_swap():
         except ValueError:
             print("  Not a number — skipping swap setup.")
             return
-    if ours and mb == active_mb:
-        return  # keeping the current size — nothing to do
+    if ours and abs(mb - active_mb) <= _SWAP_SLACK_MB:
+        return  # the size asked for is the size already active — nothing to do
     size = mb * 1024 * 1024
     try:
         st        = os.statvfs("/")
@@ -673,11 +791,7 @@ def _ensure_swap():
             print("  Could not deactivate the current swapfile (heavily in use?) — try again later.")
             return
     try:
-        with open(_SWAP_PATH, "wb") as f:
-            os.chmod(_SWAP_PATH, 0o600)  # before content exists — never world-readable
-            os.posix_fallocate(f.fileno(), 0, size)
-        subprocess.run(["mkswap", _SWAP_PATH], check=True, capture_output=True)
-        subprocess.run(["swapon", _SWAP_PATH], check=True, capture_output=True)
+        _make_swapfile(size)
         with open("/etc/fstab") as f:
             fstab = f.read()
         if _SWAP_PATH not in fstab.split():
@@ -687,9 +801,33 @@ def _ensure_swap():
         log.info("Swapfile active: %d MB at %s", mb, _SWAP_PATH)
     except (OSError, subprocess.CalledProcessError) as e:
         print(f"  Could not set up swapfile: {e}")
+        # A failed RESIZE has already truncated the old file, so try to give
+        # the host back the swap it walked in with — a memory-tight host that
+        # accepted a grow offer must not end up worse than it started. Swap
+        # content is scratch (it was swapoff'd above), so rebuilding at the
+        # old size restores the prior state in full.
+        if ours and active_mb > 0:
+            try:
+                _make_swapfile(active_mb * 1024 * 1024)
+                print(f"  Restored the previous {active_mb} MB swapfile.")
+                return
+            except (OSError, subprocess.CalledProcessError):
+                pass
+        # Nothing to restore (or the restore failed): remove the dead file AND
+        # its fstab line — a line pointing at a missing or unformatted file is
+        # a failed swap unit at every boot from here on.
         try:
             subprocess.run(["swapoff", _SWAP_PATH], capture_output=True)
             os.remove(_SWAP_PATH)
+        except OSError:
+            pass
+        try:
+            with open("/etc/fstab") as f:
+                lines = f.readlines()
+            kept = [l for l in lines if _SWAP_PATH not in l.split()]
+            if kept != lines:
+                with open("/etc/fstab", "w") as f:
+                    f.writelines(kept)
         except OSError:
             pass
 
@@ -883,21 +1021,17 @@ def _runtime_sources():
     return paths
 
 
-def _provision_runtime():
-    """Copy the program and everything it imports into the data directory.
+def _build_runtime():
+    """Copy the program and everything it imports into a staging tree beside
+    the live runtime, and return its path. Building and committing are split
+    so verification can run between them: the staged copy is proved usable by
+    the service user before anything the service depends on is touched.
 
     Root-owned, world-readable, writable by nobody but root — the service reads
     it and the unit pins it ReadOnlyPaths on top, so a compromised serving
-    process cannot patch the program systemd will restart it into.
-
-    Built beside the live copy and swapped in, rather than written over it: a
-    half-copied runtime is a program that does not exist. The swap is two
-    renames, so a lazy import landing exactly between them would fail — the
-    service is restarted onto this runtime immediately afterwards, which is the
-    same moment it would have picked up the new code anyway."""
-    new, old = RUNTIME_DIR + ".new", RUNTIME_DIR + ".old"
-    for path in (new, old):
-        shutil.rmtree(path, ignore_errors=True)
+    process cannot patch the program systemd will restart it into."""
+    new = RUNTIME_DIR + ".new"
+    shutil.rmtree(new, ignore_errors=True)
     os.makedirs(new)
     for src in _runtime_sources():
         dest = os.path.join(new, os.path.basename(src))
@@ -911,7 +1045,22 @@ def _provision_runtime():
         for f in files:
             os.chmod(os.path.join(root, f), 0o644)
     os.chmod(new, 0o755)
+    return new
 
+
+def _commit_runtime(new):
+    """Swap a verified staging tree into place as the live runtime.
+
+    Called only after _verify_runtime has passed against the staged copy —
+    the old code swapped first and verified after, so a refused runtime was
+    already installed when the refusal printed, the known-good copy already
+    destroyed, and the next restart (reboot, certificate rotation) landed the
+    service on the very thing verification rejected. The swap is two renames,
+    so a lazy import landing exactly between them would fail — the service is
+    restarted onto this runtime immediately afterwards, which is the same
+    moment it would have picked up the new code anyway."""
+    old = RUNTIME_DIR + ".old"
+    shutil.rmtree(old, ignore_errors=True)
     if os.path.exists(RUNTIME_DIR):
         os.replace(RUNTIME_DIR, old)
     os.replace(new, RUNTIME_DIR)
@@ -1110,6 +1259,15 @@ def _service_env_drift():
     # writer, which says so in words.
     if m and wanted and m.group(1) != wanted:
         drift.append(f"interpreter: service uses {m.group(1)}, this shell runs {wanted}")
+    # A pinned interpreter an OS upgrade removed is worse than drift — the
+    # service is not merely stale, it cannot START: systemd retries 203/EXEC
+    # every few seconds without ever parking in 'failed' where monitoring
+    # would notice, and the journal is the only symptom. Say what is actually
+    # wrong, not just that the environments differ.
+    if m and not os.path.exists(m.group(1)):
+        drift.append(f"service interpreter {m.group(1)} no longer exists "
+                     "(removed by an OS upgrade?) — the service cannot start "
+                     "until 'enable' re-provisions it")
     return drift
 
 
@@ -1134,6 +1292,17 @@ def _write_unit_files():
         print("  and install path.")
         raise ValueError("unit path contains whitespace")
 
+    # Root, checked before anything is touched. Everything below mutates the
+    # host — the runtime swap included — and an unprivileged caller (the
+    # startup refresh in a checkout the operator owns) used to get exactly as
+    # far as its permissions allowed: on such a host that meant swapping the
+    # runtime copy, then failing at the unit write — a version-skewed,
+    # operator-owned runtime behind a unit that still described the old one.
+    # macOS is exempt: there is no systemd to write for, and the
+    # FileNotFoundError from the tools below is the message that says so.
+    if not _IS_MACOS and os.geteuid() != 0:
+        raise PermissionError("writing unit files requires root")
+
     updating = _service_file_exists()
 
     if not _servette_user_exists():
@@ -1144,8 +1313,9 @@ def _write_unit_files():
         print("Created system user 'servette'.")
 
     # The runtime is settled before the unit texts, which name what it decides —
-    # and proved before those texts reach disk, so a service that cannot import
-    # its own program is refused here rather than discovered at the next reboot.
+    # and proved before it replaces anything, so a copy the service could not
+    # import is discarded with the known-good runtime still in place, rather
+    # than installed for the next reboot to discover.
     if _installed_runtime_reachable():
         # Nothing to copy — and a copy left by an earlier install the service
         # could not reach would now be a second, stale program on the host.
@@ -1160,7 +1330,16 @@ def _write_unit_files():
             raise ValueError("no reachable interpreter for the service")
         print(f"  Copying Servette to {RUNTIME_DIR} — the service user cannot read")
         print("  where it is installed.")
-        _provision_runtime()
+        staged  = _build_runtime()
+        problem = _verify_runtime(_unit_python_path(),
+                                  os.path.join(staged, "servette.py"))
+        if problem:
+            shutil.rmtree(staged, ignore_errors=True)
+            print("  Error: the service user cannot run the copied Servette:")
+            print(f"    {problem}")
+            print("  Refusing to install it. The existing runtime and service are unchanged.")
+            raise ValueError(f"runtime unusable by the service user: {problem}")
+        _commit_runtime(staged)
 
     problem = _verify_runtime(_unit_python_path(), _unit_module_path())
     if problem:
@@ -1181,7 +1360,7 @@ def _write_unit_files():
                    check=True, capture_output=True)
 
     # chown files the service process needs to read, across every site
-    _chown_servette(config.CONFIG_FILE)
+    _chown_config(config.CONFIG_FILE)
     for site in config.sites:
         if site.cert_file:
             _chown_servette(_resolve(site.cert_file))
@@ -1423,13 +1602,21 @@ Reloading picks the mechanism the environment allows: inside the sandboxed servi
 
 ```python
 # Reloading
+_reload_requested = False  # lets --serve's exit log a restart as a restart
+
+
 def _reload_server():
     """Reload the server to pick up a new certificate."""
+    global _reload_requested
     if "--serve" in sys.argv:
         # Inside the service, the sandboxed unit user can't systemctl restart
         # (NoNewPrivileges, least privilege). Stop serving instead: _watch_server
         # sees the dead thread, --serve exits non-zero, and Restart=always
-        # relaunches the service with the new certificate loaded.
+        # relaunches the service with the new certificate loaded. The flag
+        # keeps the journal honest: without it every deliberate reload logged
+        # "stopped unexpectedly", teaching the operator that the error line
+        # is routine.
+        _reload_requested = True
         log.info("Stopping to load the new certificate — systemd restarts the service")
         stop_server()
     elif _service_is_active():
@@ -1694,7 +1881,17 @@ def _obtain_trusted_cert(domain, site):
     www_domain  = f"www.{domain}"
     last_error  = None
     include_www = True
+    issued      = None   # (fullchain, key_pem) once Let's Encrypt has signed
 
+    # The retry loop retries exactly one thing: the ACME exchange. Local work
+    # — writing files, saving config, reloading — used to sit inside it, and a
+    # local failure (the sandboxed service cannot write the data directory)
+    # was then retried as if Let's Encrypt had refused: each "retry" a full
+    # fresh issuance, three duplicate certificates burned per pass against the
+    # 5-per-week duplicate limit, and the reload never reached — the renewed
+    # certificate sat on disk while the server served the old one to expiry.
+    # Persistence now happens once, after the loop, and its failures are its
+    # own, not the protocol's.
     while True:
         names               = [domain, www_domain] if include_www else [domain]
         www_dns_only_failure = False
@@ -1724,26 +1921,7 @@ def _obtain_trusted_cert(domain, site):
                     client.new_account(config.email if config.email else None)
                     fullchain = client.issue(names, csr_der, challenge_dir)
 
-                    cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
-                    key_path  = os.path.join(CERTS_DIR, "privkey.pem")
-
-                    with open(cert_path, "w") as f:
-                        f.write(fullchain)
-                    _write_private_key(key_path, domain_key_pem)
-                    _chown_servette(CERTS_DIR)
-
-                site.cert_file = cert_path
-                site.key_file  = key_path
-                site.domain    = domain
-                config.save()
-
-                issued_names = f"{domain} and {www_domain}" if include_www else domain
-                print(f"  Certificate issued for {issued_names}.")
-                log.info("ACME certificate issued for %s", issued_names)
-
-                if _server_running() or _service_is_active():
-                    print("  Reloading server...")
-                    _reload_server()
+                issued     = (fullchain, domain_key_pem)
                 last_error = None
                 break
 
@@ -1768,13 +1946,64 @@ def _obtain_trusted_cert(domain, site):
 
         break  # real failure
 
-    if last_error:
-        print(f"  Error getting certificate: {last_error}")
-        log.error("ACME failed for %s after %d attempts: %s", domain, ACME_RETRIES, last_error)
-
     if tmp_server is not None:
         tmp_server.shutdown()
         tmp_server.server_close()
+
+    if last_error:
+        print(f"  Error getting certificate: {last_error}")
+        log.error("ACME failed for %s after %d attempts: %s", domain, ACME_RETRIES, last_error)
+        return
+
+    _persist_issued_cert(domain, site, CERTS_DIR, issued[0], issued[1],
+                         f"{domain} and {www_domain}" if include_www else domain)
+
+
+def _persist_issued_cert(domain, site, certs_dir, fullchain, key_pem, issued_names):
+    """Store an issued certificate and put it into service: write the pair,
+    point the site at it, persist the config where possible, reload.
+
+    Written through temp files and two os.replace calls, so a crash leaves
+    either the old pair or the new pair on disk in all but the instant
+    between the renames — the old code wrote both files in place, and a kill
+    landing between (or during) the writes left a fullchain that did not
+    match its privkey, which fails load_cert_chain at the next start and
+    restart-loops the whole box over one site's half-written renewal. Two
+    files can't be replaced in one atomic step, so a two-rename window
+    remains; it is two syscalls wide, down from a network exchange.
+
+    The config save is a no-op skip on renewal (the site already points at
+    these exact paths) and best-effort otherwise: the sandboxed service may
+    not write the data directory, and a certificate that IS on disk and
+    about to be served must not be reported as a failure over a bookkeeping
+    write the next root command will repeat anyway."""
+    cert_path = os.path.join(certs_dir, "fullchain.pem")
+    key_path  = os.path.join(certs_dir, "privkey.pem")
+
+    with open(cert_path + ".tmp", "w") as f:
+        f.write(fullchain)
+    _write_private_key(key_path + ".tmp", key_pem)
+    os.replace(key_path + ".tmp", key_path)
+    os.replace(cert_path + ".tmp", cert_path)
+    _chown_servette(certs_dir)
+
+    changed = (site.cert_file, site.key_file, site.domain) != (cert_path, key_path, domain)
+    site.cert_file = cert_path
+    site.key_file  = key_path
+    site.domain    = domain
+    if changed:
+        try:
+            config.save()
+        except OSError as e:
+            log.error("Certificate stored but config not saved (%s) — "
+                      "run 'config cert' as root to persist it", e)
+
+    print(f"  Certificate issued for {issued_names}.")
+    log.info("ACME certificate issued for %s", issued_names)
+
+    if _server_running() or _service_is_active():
+        print("  Reloading server...")
+        _reload_server()
 
 
 ```

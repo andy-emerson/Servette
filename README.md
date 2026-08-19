@@ -4,7 +4,7 @@
   <img alt="Servette" src="assets/servette-light.svg" width="300">
 </picture>
 
-### The Simple, Secure Static-Site Server
+### The Simple, Secure, Static-Site Server
 
 [![Tests](https://github.com/andy-emerson/servette/actions/workflows/test.yml/badge.svg)](https://github.com/andy-emerson/servette/actions/workflows/test.yml)
 [![CodeQL](https://github.com/andy-emerson/servette/actions/workflows/codeql.yml/badge.svg)](https://github.com/andy-emerson/servette/actions/workflows/codeql.yml)
@@ -25,7 +25,7 @@ The tools closest in spirit are small and focused, like Servette. Here is how a 
 | **Built for** | static sites | dynamic web apps | static sites | static sites |
 | Automatic trusted HTTPS | ✓ | ✗ | ✓ | ✗ |
 | Hardened for production | ✓ | ✗ | ✗ | ~ |
-| Readable source | ~4,500 lines | ~4,600 lines | binary | binary |
+| Readable source | ~4,900 lines | ~4,600 lines | binary | binary |
 | Actively maintained | ✓ | ✓ | ✗ | ✓ |
 | Runs on a Raspberry Pi out of the box | ✓ | ✓ | ✗ | ✗ |
 
@@ -35,7 +35,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 
 ## Who is Servette for?
 
-**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~4,500 lines of Python, no hidden machinery) that you can follow top to bottom in an afternoon.
+**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~4,900 lines of Python, no hidden machinery) that you can follow top to bottom in an afternoon.
 
 **People with a real site that needs a real server.** Development servers (like `http.server`) are perfect while you build, but they are not meant to face the internet (no trusted HTTPS, no auth, gone when you close the terminal). Servette is built to stay up: a trusted certificate that renews itself, and a hardened service that survives reboots.
 
@@ -92,7 +92,8 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
 
    | What you see | What it means |
    |---|---|
-   | `pipx: command not found` | `sudo apt install pipx`, then re-run. |
+   | `pipx: command not found` | `sudo apt install pipx`, then re-run. On macOS, `brew install pipx`. |
+   | `E: Unable to locate package pipx` | The package index is stale or the repository holding pipx is off. `sudo apt update` first; on Ubuntu, pipx lives in `universe` (`sudo add-apt-repository universe`), and on Debian 12 it is in `main` once the index is current. |
    | `No matching distribution found for servette` | Your Python is older than 3.11 — check `python3 --version`. |
    | `error: externally-managed-environment` | Something used `pip` against the system Python. Use `pipx`, which makes its own environment. |
    | `servette: command not found` after installing | pipx put it in `~/.local/bin`, which isn't on your `PATH` yet. Run `pipx ensurepath`, then open a new shell. |

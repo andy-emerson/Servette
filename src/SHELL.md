@@ -508,7 +508,13 @@ def _config_cache():
         age_str = _input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
         if age_str:
             try:
-                config.cache_max_age = int(age_str)
+                # Non-negative, same rule 'set' enforces: a negative max-age
+                # is not a shorter cache, it is a malformed Cache-Control
+                # header sent on every response.
+                age = int(age_str)
+                if age < 0:
+                    raise ValueError
+                config.cache_max_age = age
             except ValueError:
                 print("  → invalid number, keeping current max-age")
     config.save()
@@ -532,6 +538,16 @@ def _config_trusted_proxy():
     if new_value == current:
         print("  → unchanged")
         return
+    if new_value:
+        # The same rule 'set' enforces. A typo saved here was worse than a
+        # refusal: the peer-address comparison then never matches, XFF is
+        # never trusted, and every proxied visitor shares the proxy's single
+        # rate-limit bucket — the whole site throttles as one client.
+        try:
+            ipaddress.ip_address(new_value)
+        except ValueError:
+            print("  → must be an IP address, unchanged")
+            return
     config.trusted_proxy = new_value
     config.save()
     print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
@@ -823,9 +839,16 @@ def _extract_bundle(data, dest_dir):
     os.makedirs(dest_dir)
     dest_real = os.path.realpath(dest_dir)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-        members = tf.getmembers()
-        total = 0
-        for m in members:
+        # Members are walked with next() rather than getmembers(): walking a
+        # gzip stream decompresses it, so getmembers() paid the FULL
+        # decompression cost before the size cap ever ran — the cap bounded
+        # what was written, not the CPU a bomb burns. next() lets the walk
+        # abort at the ceiling. (Only a signed bundle gets here at all, so
+        # this bounds a compromised or buggy publisher, not the anonymous
+        # internet.)
+        members = []
+        total   = 0
+        while (m := tf.next()) is not None:
             if not (m.isfile() or m.isdir()):
                 raise ValueError(f"unsupported entry type in bundle: {m.name}")
             target = os.path.realpath(os.path.join(dest_dir, m.name))
@@ -834,6 +857,7 @@ def _extract_bundle(data, dest_dir):
             total += m.size
             if total > _MAX_BUNDLE_BYTES:
                 raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
+            members.append(m)
         # The PEP 706 feature probe: data_filter exists exactly when
         # extractall() accepts filter=. Debian 12's 3.11.2 predates the
         # backport — there the checks above are the (sufficient) guard.
@@ -856,13 +880,24 @@ def _swap_site_content(new_dir, serve_dir):
     new_dir must be on the same filesystem as serve_dir (both under BASE_DIR)
     so the renames are atomic; the only unavoidable risk window is the two
     renames themselves, each a single fast syscall back to back — proportionate
-    to Servette's scale, not a high-QPS system where that window would matter."""
+    to Servette's scale, not a high-QPS system where that window would matter.
+
+    The first rename is undone if the second fails: without the rollback a
+    failed swap left NO live directory at all — every request a 404 — while
+    the caller reported the pull merely 'rejected', and only a manual
+    restore-site would have noticed the site was down."""
     live_dir = _resolve(serve_dir).rstrip(os.sep)
     bak_dir  = live_dir + ".bak"
     shutil.rmtree(bak_dir, ignore_errors=True)
-    if os.path.isdir(live_dir):
+    had_live = os.path.isdir(live_dir)
+    if had_live:
         os.rename(live_dir, bak_dir)
-    os.rename(new_dir, live_dir)
+    try:
+        os.rename(new_dir, live_dir)
+    except OSError:
+        if had_live:
+            os.rename(bak_dir, live_dir)
+        raise
 
 
 _publish_lock = threading.Lock()  # serializes site-content mutation across every
@@ -1058,14 +1093,16 @@ def _production_issues():
             issues.append(f"no password protection{tag} — run 'config' to set credentials")
         if bool(site.publish_url) != bool(site.publish_key):
             issues.append(f"publish channel partially configured{tag} — run 'config publish' to finish setup")
-    mem_kb, avail_kb, swap_kb = _meminfo()
-    rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
-    active_mb = (swap_kb or 0) // 1024
-    offer     = _swap_offer(rec // (1024 * 1024) if rec else None,
-                            os.path.exists(_SWAP_PATH), active_mb)
+    mem_kb, avail_kb, _ = _meminfo()
+    rec     = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
+    ours_mb, foreign_mb = _swap_sizes()
+    offer   = _swap_offer(rec // (1024 * 1024) if rec else None,
+                          os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
     if offer is not None:
-        if active_mb:
-            issues.append(f"swapfile {active_mb} MB but {rec // (1024 * 1024)} MB "
+        if ours_mb:
+            # ours_mb, not SwapTotal: with a swap partition alongside, the
+            # total printed a size the swapfile does not have.
+            issues.append(f"swapfile {ours_mb} MB but {rec // (1024 * 1024)} MB "
                           "recommended — run 'enable' to resize")
         else:
             issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'enable' to add a swapfile")
@@ -1623,6 +1660,14 @@ def run_command(cmd, args):
     help stay in the interactive loop: they are about the loop itself."""
     if os.geteuid() != 0 and _needs_root(cmd):
         return _elevate(cmd, args)
+
+    # A root shell never elevates, so nothing else re-reads the file for it —
+    # and a long-lived root session would otherwise act on hours-old state,
+    # silently reverting anything written since (by tooling over SSH, or a
+    # service-side migration) with its next save. Unprivileged shells get the
+    # same freshness through _elevate's child, which loads from disk.
+    if os.geteuid() == 0:
+        config.reload_if_changed()
 
     if cmd == "setup":
         cmd_setup()

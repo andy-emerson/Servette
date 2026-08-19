@@ -19,7 +19,13 @@ jobs:
     strategy:
       matrix:
         include:
+          # Every supported minor, inclusive — the gap bit once: 3.13
+          # deprecated re.split's positional maxsplit, 3.11 predates the
+          # warning and 3.14's run didn't surface it, so the first to see it
+          # was an operator's terminal on Debian 13 (which ships 3.13).
           - { name: "ubuntu · 3.11", python-version: "3.11", container: "" }
+          - { name: "ubuntu · 3.12", python-version: "3.12", container: "" }
+          - { name: "ubuntu · 3.13", python-version: "3.13", container: "" }
           - { name: "ubuntu · 3.14", python-version: "3.14", container: "" }
           - { name: "debian 12",     container: "debian:12" }
     name: test (${{ matrix.name }})

@@ -3806,11 +3806,20 @@ def run_install_tests(s, tmpdir):
 
     section("Host health warning")
 
-    saved_meminfo = s._meminfo
-    saved_sizes   = s._swap_sizes
+    # Every sub-test pins whether /swapfile exists: GitHub's runners HAVE one,
+    # so a test that leaves os.path.exists real asserts about the runner's
+    # disk, not about the code — the first CI run of this section failed on
+    # exactly that, green locally (no /swapfile here) and red on the runner.
+    saved_meminfo   = s._meminfo
+    saved_sizes     = s._swap_sizes
+    saved_exists_hh = s.os.path.exists
+    def _pin_swapfile(present):
+        s.os.path.exists = (lambda real: lambda p:
+                            present if p == s._SWAP_PATH else real(p))(saved_exists_hh)
     try:
         s._meminfo    = lambda: (414 * 1024, 176 * 1024, 0)
         s._swap_sizes = lambda: (None, 0)
+        _pin_swapfile(False)
         check("No-swap host under demand pressure is flagged",
               any("no swap" in issue for issue in s._production_issues()))
         s._swap_sizes = lambda: (None, 1024)
@@ -3818,19 +3827,15 @@ def run_install_tests(s, tmpdir):
               not any("swap" in issue for issue in s._production_issues()))
         # The nag names OUR file's size from /proc/swaps — with a partition
         # alongside, SwapTotal printed a number the swapfile does not have.
-        saved_exists_hh = s.os.path.exists
-        s.os.path.exists = (lambda real: lambda p:
-                            True if p == s._SWAP_PATH else real(p))(saved_exists_hh)
-        try:
-            s._swap_sizes = lambda: (600, 1024)
-            flagged = [i for i in s._production_issues() if "swapfile" in i]
-            check("An undersized swapfile is named by its own size, not SwapTotal",
-                  flagged and "swapfile 600 MB" in flagged[0])
-        finally:
-            s.os.path.exists = saved_exists_hh
+        _pin_swapfile(True)
+        s._swap_sizes = lambda: (600, 1024)
+        flagged = [i for i in s._production_issues() if "swapfile" in i]
+        check("An undersized swapfile is named by its own size, not SwapTotal",
+              flagged and "swapfile 600 MB" in flagged[0])
     finally:
-        s._meminfo    = saved_meminfo
-        s._swap_sizes = saved_sizes
+        s._meminfo       = saved_meminfo
+        s._swap_sizes    = saved_sizes
+        s.os.path.exists = saved_exists_hh
 
     section("Publish channel config")
 

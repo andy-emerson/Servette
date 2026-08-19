@@ -716,13 +716,15 @@ def _mime_type(path):
 
 ```
 
-The two predicates path resolution is built on: containment within the site's own tree, and the dotfile refusal.
+Two predicates: containment for config-time checks, and the dotfile refusal. The request path deliberately does not use `_within` — its containment guard is written out inline below, where a scanner and a reader can both verify it at the security boundary itself.
 
 ```python
 # Containment
 def _within(base, target):
     """True if `target` is `base` or sits inside it. commonpath on already-resolved
-    absolute paths means a traversal or symlink escape lands outside `base` and fails."""
+    absolute paths means a traversal or symlink escape lands outside `base` and
+    fails. Used by the config-time serve_dir checks; the REQUEST path's
+    containment is inlined in _resolve_request_path instead — see there."""
     try:
         return os.path.commonpath([base, target]) == base
     except ValueError:   # different drives / mixed absolute-relative — treat as outside
@@ -746,7 +748,15 @@ URL to file, confined to the matched site's `serve_dir`. The hidden-name rule ru
 def _resolve_request_path(url_path, serve_dir):
     """Resolve a URL path to an absolute file path within the matched site's
     serve_dir. Returns (None, 403) on traversal or a hidden path, (None, 404) if
-    not found."""
+    not found.
+
+    The containment guards are written out inline — realpath, then a literal
+    startswith check — rather than through _within, on purpose: this is the one
+    place attacker-controlled text becomes a filesystem path, and the guard
+    should be verifiable at the boundary itself, by a reader without chasing a
+    helper and by a taint analyzer whose barrier recognition is per-function
+    (CodeQL flagged every downstream use of this path as uncontrolled because
+    the check it needed to see lived one call away)."""
     serve_dir = os.path.realpath(_resolve(serve_dir))
     clean     = unquote(url_path.split("?")[0]).lstrip("/")   # lstrip: never an absolute path
     # Refuse hidden files and directories. A dotfile is never meant to be public,
@@ -754,20 +764,20 @@ def _resolve_request_path(url_path, serve_dir):
     # .git checkout, a .env, an editor backup — so serving them leaks source and
     # secrets. This first pass reads the *requested* segments, closing the direct
     # case (GET /.git/config); the ".." of a traversal is caught here too, with
-    # _within below as the backstop.
+    # the containment check below as the backstop.
     if _hidden_segment(clean.split("/")):
         return None, 403
     abs_path  = os.path.realpath(os.path.join(serve_dir, clean))
-    if not _within(serve_dir, abs_path):
+    if abs_path != serve_dir and not abs_path.startswith(serve_dir + os.sep):
         return None, 403
     if os.path.isdir(abs_path):
         abs_path = os.path.realpath(os.path.join(abs_path, "index.html"))
-        if not _within(serve_dir, abs_path):
+        if not abs_path.startswith(serve_dir + os.sep):
             return None, 403
     # Re-check the *resolved* target's segments. The pass above reads the name
     # the client asked for; a symlink inside serve_dir whose own name is not a
     # dotfile can still resolve to a hidden target (serve_dir/x -> serve_dir/.git
-    # /config), and realpath keeps it within serve_dir, so _within passes.
+    # /config), and realpath keeps it within serve_dir, so containment passes.
     # Applying the same rule to the resolved path refuses a hidden target by
     # whatever name it was reached. abs_path is at or under serve_dir here, so
     # the slice yields the relative segments (empty at the root — no dotfile).

@@ -4,7 +4,7 @@
   <img alt="Servette" src="assets/servette-light.svg" width="300">
 </picture>
 
-### The Simple, Secure Static-Site Server
+### The Simple, Secure, Static-Site Server
 
 [![Tests](https://github.com/andy-emerson/servette/actions/workflows/test.yml/badge.svg)](https://github.com/andy-emerson/servette/actions/workflows/test.yml)
 [![CodeQL](https://github.com/andy-emerson/servette/actions/workflows/codeql.yml/badge.svg)](https://github.com/andy-emerson/servette/actions/workflows/codeql.yml)

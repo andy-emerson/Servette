@@ -3395,6 +3395,20 @@ def run_install_tests(s, tmpdir):
             check("A distribution's bare compiled module is found too, not just its package",
                   any(p.endswith(".so") for p in s._distribution_paths(dist)))
 
+    # Python 3.13 deprecated re.split's positional maxsplit, and `-m servette`
+    # runs as __main__, where deprecation warnings print to the operator: the
+    # first Debian 13 setup showed one mid-wizard, from this very reader.
+    # Executed with DeprecationWarning promoted to an error, so the next one
+    # fails here instead of in a wizard.
+    import warnings as _warnings
+    try:
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error", DeprecationWarning)
+            s._required_distributions()
+        check("The closure reader raises no DeprecationWarning", True)
+    except DeprecationWarning as e:
+        check(f"The closure reader raises no DeprecationWarning (raised {e})", False)
+
     # The seed for a checkout, which has no dist-info of its own to read, must
     # be what the package actually declares — a dependency added to pyproject
     # and not here would give a runtime missing a module.

@@ -2844,7 +2844,10 @@ def _required_distributions():
         for req in reqs:
             if "extra ==" in req:
                 continue
-            dep = re.split(r"[<>=!~;\[\s(]", req, 1)[0].strip()
+            # maxsplit spelled as a keyword: Python 3.13 deprecated the
+            # positional form, and `python -m servette` runs this module as
+            # __main__, where deprecation warnings print to the operator.
+            dep = re.split(r"[<>=!~;\[\s(]", req, maxsplit=1)[0].strip()
             if dep:
                 want.append(dep)
     return out

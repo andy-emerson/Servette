@@ -374,10 +374,16 @@ def _chown_servette(path):
     # unprivileged session or dev context where chown cannot succeed — found
     # when a non-root save() crashed the whole program at Config() import,
     # because check=True turned "cannot give files away" into a fatal error on
-    # any host where the servette user exists.
+    # any host where the servette user exists. Best-effort even for the
+    # permitted callers: the service's renewal runs this over the ACME webroot
+    # and the certs tree, and one stray root-owned file in either (an
+    # interrupted root issuance's leftover token) would otherwise turn every
+    # future renewal into a CalledProcessError before Let's Encrypt was even
+    # contacted, hourly, until the certificate expired.
     if os.geteuid() != 0 and os.geteuid() != _servette_uid():
         return
-    subprocess.run(["chown", "-R", "servette:servette", path], check=True)
+    subprocess.run(["chown", "-R", "servette:servette", path],
+                   check=False, capture_output=True)
 
 
 ```
@@ -1761,7 +1767,17 @@ def _obtain_trusted_cert(domain, site):
     www_domain  = f"www.{domain}"
     last_error  = None
     include_www = True
+    issued      = None   # (fullchain, key_pem) once Let's Encrypt has signed
 
+    # The retry loop retries exactly one thing: the ACME exchange. Local work
+    # — writing files, saving config, reloading — used to sit inside it, and a
+    # local failure (the sandboxed service cannot write the data directory)
+    # was then retried as if Let's Encrypt had refused: each "retry" a full
+    # fresh issuance, three duplicate certificates burned per pass against the
+    # 5-per-week duplicate limit, and the reload never reached — the renewed
+    # certificate sat on disk while the server served the old one to expiry.
+    # Persistence now happens once, after the loop, and its failures are its
+    # own, not the protocol's.
     while True:
         names               = [domain, www_domain] if include_www else [domain]
         www_dns_only_failure = False
@@ -1791,26 +1807,7 @@ def _obtain_trusted_cert(domain, site):
                     client.new_account(config.email if config.email else None)
                     fullchain = client.issue(names, csr_der, challenge_dir)
 
-                    cert_path = os.path.join(CERTS_DIR, "fullchain.pem")
-                    key_path  = os.path.join(CERTS_DIR, "privkey.pem")
-
-                    with open(cert_path, "w") as f:
-                        f.write(fullchain)
-                    _write_private_key(key_path, domain_key_pem)
-                    _chown_servette(CERTS_DIR)
-
-                site.cert_file = cert_path
-                site.key_file  = key_path
-                site.domain    = domain
-                config.save()
-
-                issued_names = f"{domain} and {www_domain}" if include_www else domain
-                print(f"  Certificate issued for {issued_names}.")
-                log.info("ACME certificate issued for %s", issued_names)
-
-                if _server_running() or _service_is_active():
-                    print("  Reloading server...")
-                    _reload_server()
+                issued     = (fullchain, domain_key_pem)
                 last_error = None
                 break
 
@@ -1835,13 +1832,64 @@ def _obtain_trusted_cert(domain, site):
 
         break  # real failure
 
-    if last_error:
-        print(f"  Error getting certificate: {last_error}")
-        log.error("ACME failed for %s after %d attempts: %s", domain, ACME_RETRIES, last_error)
-
     if tmp_server is not None:
         tmp_server.shutdown()
         tmp_server.server_close()
+
+    if last_error:
+        print(f"  Error getting certificate: {last_error}")
+        log.error("ACME failed for %s after %d attempts: %s", domain, ACME_RETRIES, last_error)
+        return
+
+    _persist_issued_cert(domain, site, CERTS_DIR, issued[0], issued[1],
+                         f"{domain} and {www_domain}" if include_www else domain)
+
+
+def _persist_issued_cert(domain, site, certs_dir, fullchain, key_pem, issued_names):
+    """Store an issued certificate and put it into service: write the pair,
+    point the site at it, persist the config where possible, reload.
+
+    Written through temp files and two os.replace calls, so a crash leaves
+    either the old pair or the new pair on disk in all but the instant
+    between the renames — the old code wrote both files in place, and a kill
+    landing between (or during) the writes left a fullchain that did not
+    match its privkey, which fails load_cert_chain at the next start and
+    restart-loops the whole box over one site's half-written renewal. Two
+    files can't be replaced in one atomic step, so a two-rename window
+    remains; it is two syscalls wide, down from a network exchange.
+
+    The config save is a no-op skip on renewal (the site already points at
+    these exact paths) and best-effort otherwise: the sandboxed service may
+    not write the data directory, and a certificate that IS on disk and
+    about to be served must not be reported as a failure over a bookkeeping
+    write the next root command will repeat anyway."""
+    cert_path = os.path.join(certs_dir, "fullchain.pem")
+    key_path  = os.path.join(certs_dir, "privkey.pem")
+
+    with open(cert_path + ".tmp", "w") as f:
+        f.write(fullchain)
+    _write_private_key(key_path + ".tmp", key_pem)
+    os.replace(key_path + ".tmp", key_path)
+    os.replace(cert_path + ".tmp", cert_path)
+    _chown_servette(certs_dir)
+
+    changed = (site.cert_file, site.key_file, site.domain) != (cert_path, key_path, domain)
+    site.cert_file = cert_path
+    site.key_file  = key_path
+    site.domain    = domain
+    if changed:
+        try:
+            config.save()
+        except OSError as e:
+            log.error("Certificate stored but config not saved (%s) — "
+                      "run 'config cert' as root to persist it", e)
+
+    print(f"  Certificate issued for {issued_names}.")
+    log.info("ACME certificate issued for %s", issued_names)
+
+    if _server_running() or _service_is_active():
+        print("  Reloading server...")
+        _reload_server()
 
 
 ```

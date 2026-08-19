@@ -1831,6 +1831,82 @@ def run_dispatch_tests(s):
         s._obtain_trusted_cert = saved_obtain
         s.config.sites        = saved_sites10
 
+    section("Issued-certificate persistence (the renewal path)")
+
+    # The retry loop retries exactly one thing: the ACME exchange. The live
+    # deployment's review found local persistence inside it — the sandboxed
+    # service cannot write the data directory, so a renewal that ISSUED fine
+    # then "retried" the save as if Let's Encrypt had refused: three duplicate
+    # certificates burned per pass, and the reload never reached, so the fresh
+    # cert sat on disk while the served one marched to expiry.
+    persist_dir = tempfile.mkdtemp()
+    saved_persist = {n: getattr(s, n) for n in
+                     ("_reload_server", "_server_running", "_service_is_active",
+                      "_chown_servette")}
+    saved_psave = s.Config.save
+    psite = s.Site({"serve_dir": "site"})
+    try:
+        reloads_p, saves_p = [], []
+        s._reload_server     = lambda: reloads_p.append(1)
+        s._server_running    = lambda: True
+        s._service_is_active = lambda: False
+        s._chown_servette    = lambda path: None
+        s.Config.save        = lambda self: saves_p.append(1)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            s._persist_issued_cert("p.test", psite, persist_dir,
+                                   "CERT-PEM", b"KEY-PEM", "p.test")
+        cert_p = os.path.join(persist_dir, "fullchain.pem")
+        key_p  = os.path.join(persist_dir, "privkey.pem")
+        check("First issuance writes the pair and saves once",
+              open(cert_p).read() == "CERT-PEM" and open(key_p, "rb").read() == b"KEY-PEM"
+              and saves_p == [1])
+        check("...points the site at the pair", psite.cert_file == cert_p
+              and psite.key_file == key_p and psite.domain == "p.test")
+        check("...leaves no temp files behind",
+              not [f for f in os.listdir(persist_dir) if f.endswith(".tmp")])
+        check("...keeps the key 0600", os.stat(key_p).st_mode & 0o777 == 0o600)
+        check("...and reloads the running server", reloads_p == [1])
+
+        # Renewal: the site already points at these exact paths — nothing to
+        # save, so the sandboxed service's inability to write the data
+        # directory costs nothing.
+        saves_p.clear(); reloads_p.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            s._persist_issued_cert("p.test", psite, persist_dir,
+                                   "CERT-PEM-2", b"KEY-PEM-2", "p.test")
+        check("Renewal skips the config save (nothing changed)",
+              saves_p == [] and open(cert_p).read() == "CERT-PEM-2")
+        check("...but still reloads onto the new certificate", reloads_p == [1])
+
+        # And when a first issuance's save DOES fail, the certificate that is
+        # already on disk and about to be served is not reported as a failure.
+        psite2 = s.Site({"serve_dir": "site"})
+        s.Config.save = lambda self: (_ for _ in ()).throw(
+            PermissionError(13, "Permission denied"))
+        reloads_p.clear()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._persist_issued_cert("p.test", psite2, persist_dir,
+                                       "CERT-PEM-3", b"KEY-PEM-3", "p.test")
+            check("A failed config save does not fail the issuance", True)
+        except Exception as e:
+            check(f"A failed config save does not fail the issuance (raised {e})", False)
+        check("...the pair is on disk and the server reloaded onto it",
+              open(cert_p).read() == "CERT-PEM-3" and reloads_p == [1])
+    finally:
+        s.Config.save = saved_psave
+        for n, v in saved_persist.items():
+            setattr(s, n, v)
+        shutil.rmtree(persist_dir, ignore_errors=True)
+
+    # Structural: issuance retries must contain no persistence to mis-retry.
+    import inspect as _inspect
+    obtain_src = _inspect.getsource(s._obtain_trusted_cert)
+    check("The ACME retry loop persists nothing (local failure ≠ re-issuance)",
+          "config.save" not in obtain_src
+          and "_persist_issued_cert" in obtain_src)
+
     section("Setup wizard smoke test")
 
     # cmd_setup calls _config_cert/_config_username/_config_password, which
@@ -4011,7 +4087,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         "cmd_setup",
         # Servette's own state: config, certificates, the ACME account.
         "save", "_generate_self_signed_cert", "_ensure_default_cert",
-        "_obtain_trusted_cert", "issue",
+        "_obtain_trusted_cert", "_persist_issued_cert", "issue",
         # Writes no content — sets the config's mode, which is a write all the
         # same, and the one kind of write the detector should never let past
         # unclaimed on a file holding a password hash.

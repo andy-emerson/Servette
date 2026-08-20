@@ -3688,8 +3688,16 @@ def run_install_tests(s, tmpdir):
     check("Covers networkd, NetworkManager, and dhcpcd",
           all(m in watch_service for m in ("systemd-networkd", "NetworkManager", "dhcpcd")))
     check("Service is oneshot",                      "Type=oneshot" in watch_service)
-    check("Timer fires every 5 minutes",             "OnUnitActiveSec=5min" in watch_timer)
-    check("Timer starts checking after boot",        "OnBootSec=5min" in watch_timer)
+    # One minute, not the original five: `ip route get` sends no packets (a
+    # local table lookup), so the interval buys only recovery time — the route
+    # drill measured ~5 dark minutes at the old setting, ~1 at this one.
+    check("Timer fires every minute",                "OnUnitActiveSec=1min" in watch_timer)
+    check("Timer starts checking after boot",        "OnBootSec=1min" in watch_timer)
+    # The run that acts must say so — in the drill's journal, the firing that
+    # recovered the box logged identically to every no-op around it, leaving
+    # no evidence of what fixed the host.
+    check("A watchdog run that acts logs that it acted",
+          'logger -t servette-netwatch' in watch_service)
 
     if shutil.which("systemd-analyze"):
         # Write both units first — verify resolves the timer's service by sibling file.

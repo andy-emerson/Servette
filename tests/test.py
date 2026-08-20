@@ -1924,6 +1924,89 @@ def run_dispatch_tests(s):
           "config.save" not in obtain_src
           and "_persist_issued_cert" in obtain_src)
 
+    section("ACME failures are classified: a refusal is not retried, a blip is")
+
+    # "Let's Encrypt answered no" and "the network ate a request" used to get
+    # identical treatment — three full orders each. Retrying a refusal burns
+    # fresh validation attempts against LE's per-hostname limits while the
+    # cause (usually DNS) hasn't changed; retrying a blip is what retries are
+    # for. The classification also feeds the watchdog: refusals cool down six
+    # hours, blips keep the ordinary hourly retry.
+    saved_acme = {n: getattr(s, n) for n in
+                  ("_ACMEClient", "_server_running", "_chown_servette")}
+    saved_sleep_a = s.time.sleep
+    acme_home = tempfile.mkdtemp()
+    saved_base_a, saved_rt_a = s.BASE_DIR, s.RUNTIME_DIR
+    issue_calls = []
+    class _StubClient:
+        def __init__(self, url, key): pass
+        def new_account(self, email): pass
+        def issue(self, names, csr, challenge_dir):
+            issue_calls.append(list(names))
+            raise _StubClient.error
+    try:
+        s.BASE_DIR        = acme_home   # account key and certs land here
+        s._ACMEClient     = _StubClient
+        s._server_running = lambda: True     # no temporary port-80 listener
+        s._chown_servette = lambda path: None
+        s.time.sleep      = lambda n: None
+        asite = s.Site({"serve_dir": "site"})
+
+        _StubClient.error = s._ACMEError("authorization failed", failed={"cls.test"})
+        issue_calls.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            outcome = s._obtain_trusted_cert("cls.test", asite)
+        check("A CA refusal is classified 'refused'", outcome == "refused")
+        check("...and asked exactly once, not retried",
+              len(issue_calls) == 1)
+
+        _StubClient.error = OSError("connection reset")
+        issue_calls.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            outcome = s._obtain_trusted_cert("cls.test", asite)
+        check("A network failure is classified 'transient'", outcome == "transient")
+        check("...and retried the full ACME_RETRIES times",
+              len(issue_calls) == s.ACME_RETRIES)
+    finally:
+        for n, v in saved_acme.items():
+            setattr(s, n, v)
+        s.time.sleep = saved_sleep_a
+        s.BASE_DIR, s.RUNTIME_DIR = saved_base_a, saved_rt_a
+        shutil.rmtree(acme_home, ignore_errors=True)
+
+    # The watchdog acts on the classification: a refusal pushes the next
+    # attempt ~6 hours out; success (None) leaves the hourly cadence alone.
+    saved_obtain_w = s._obtain_trusted_cert
+    saved_days_w   = s._cert_days_remaining
+    wsite = s.Site({"serve_dir": "site", "cert_file": "cert.pem"})
+    wsite.domain = "cool.test"
+    saved_sites_w = s.config.sites
+    try:
+        s.config.sites         = [wsite]
+        s._cert_days_remaining = lambda p: 10
+        s._obtain_trusted_cert = lambda d, st: "refused"
+        s._last_renewal_attempt.pop("cool.test", None)
+        s._cert_watchdog_tick()
+        now = s.time.monotonic()
+        check("A refusal cools the watchdog down ~6 hours",
+              s._last_renewal_attempt["cool.test"] > now + 4 * 3600)
+        s._obtain_trusted_cert = lambda d, st: None
+        s._last_renewal_attempt.pop("cool.test", None)
+        s._cert_watchdog_tick()
+        check("Success keeps the ordinary hourly stamp",
+              abs(s._last_renewal_attempt["cool.test"] - s.time.monotonic()) < 60)
+        # And the never-attempted default is "attempt now", not "attempted at
+        # boot": monotonic is seconds since boot, and the old 0.0 default made
+        # a host up less than an hour refuse every renewal until the clock
+        # caught up — found writing this very test on a young container.
+        check("A never-attempted domain is attempted immediately (young-host bug)",
+              "cool.test" in s._last_renewal_attempt)
+    finally:
+        s._obtain_trusted_cert = saved_obtain_w
+        s._cert_days_remaining = saved_days_w
+        s.config.sites         = saved_sites_w
+        s._last_renewal_attempt.pop("cool.test", None)
+
     section("Setup wizard smoke test")
 
     # cmd_setup calls _config_cert/_config_username/_config_password, which
@@ -2911,6 +2994,27 @@ def run_server_tests(s, serve_dir):
             resp_unmatched_post = req("POST", headers={"Host": "unrecognized.example.com"})
             check("POST to an unmatched Host is still the closed-system 404, not 405",
                   resp_unmatched_post.status == 404)
+
+            # A matched host's 429 carries HSTS like every other response —
+            # site selection runs before the limiter now, because the old
+            # order left rate-limited responses as the one un-pinned path a
+            # browser could be downgraded on. Unmatched hosts still throttle
+            # (and still get nothing: the closed system owes them no HSTS).
+            saved_rl = s.config.rate_limit
+            try:
+                s.config.rate_limit = 0    # every request is over the limit
+                resp429 = req("GET", headers={"Host": "first.example.com"})
+                check("A matched host's 429 carries HSTS",
+                      resp429.status == 429 and
+                      resp429.headers.get("Strict-Transport-Security") is not None)
+                resp429u = req("GET", headers={"Host": "unrecognized.example.com"})
+                check("An unmatched Host still throttles, without HSTS",
+                      resp429u.status == 429 and
+                      resp429u.headers.get("Strict-Transport-Security") is None)
+            finally:
+                s.config.rate_limit = saved_rl
+                with s._rate_lock:
+                    s._request_times.clear()
         finally:
             original_site.domain = saved_orig_domain
             s.config.sites = saved_sites

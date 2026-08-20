@@ -58,11 +58,25 @@ def _cert_watchdog_tick():
                 days = _cert_days_remaining(cert_path)
                 if days is not None and days < 30:
                     now  = time.monotonic()
-                    last = _last_renewal_attempt.get(site.domain, 0.0)
-                    if now - last >= 3600:
+                    # None means never attempted — attempt immediately. The old
+                    # default of 0.0 read as "attempted at boot": monotonic IS
+                    # seconds since boot, so a host up less than an hour
+                    # refused every renewal until the clock caught up.
+                    last = _last_renewal_attempt.get(site.domain)
+                    if last is None or now - last >= 3600:
                         _last_renewal_attempt[site.domain] = now
                         log.info("Certificate for %s expires in %d days — renewing", site.domain, days)
-                        _obtain_trusted_cert(site.domain, site)
+                        if _obtain_trusted_cert(site.domain, site) == "refused":
+                            # The CA answered no (failed authorization, refused
+                            # order) — the cause is on our side of the fence
+                            # (usually DNS) and rarely changes within the hour,
+                            # while each hourly re-ask burns validation
+                            # attempts against LE's per-hostname limits. Cool
+                            # down six hours; a transient network failure
+                            # keeps the ordinary hourly retry. With renewal
+                            # starting 30 days out, even the long cool-down
+                            # allows ~120 more attempts before expiry.
+                            _last_renewal_attempt[site.domain] = now + 5 * 3600
             else:
                 # Self-signed or externally managed cert: reload if the file changed on disk
                 try:
@@ -1904,7 +1918,11 @@ The full issuance flow around the client: account key handling, a temporary port
 def _obtain_trusted_cert(domain, site):
     """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
     minimal ACME client (_ACMEClient) on stdlib urllib + cryptography, and store it
-    on `site`."""
+    on `site`.
+
+    Returns None on success, else the failure's class for the watchdog's
+    backoff: "refused" (the CA answered no — retrying soon just burns its
+    rate limits) or "transient" (the network ate a request — retry freely)."""
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
@@ -1998,6 +2016,16 @@ def _obtain_trusted_cert(domain, site):
                 if isinstance(e, _ACMEError) and include_www and e.failed == {www_domain}:
                     www_dns_only_failure = True
                     break  # don't retry; fall back to bare domain
+                if isinstance(e, _ACMEError):
+                    # Let's Encrypt ANSWERED, and the answer was no — a failed
+                    # authorization, a refused order. Asking the same question
+                    # again ten seconds later gets the same no, and each retry
+                    # burns a fresh order and a validation attempt against
+                    # LE's own rate limits (~5 failed validations per hostname
+                    # per hour) while the underlying cause — usually DNS not
+                    # yet pointed here — hasn't changed. Retries are for the
+                    # network eating a request, not for the CA declining it.
+                    break
                 if attempt < ACME_RETRIES:
                     delay = 5 * attempt
                     log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
@@ -2020,11 +2048,15 @@ def _obtain_trusted_cert(domain, site):
 
     if last_error:
         print(f"  Error getting certificate: {last_error}")
-        log.error("ACME failed for %s after %d attempts: %s", domain, ACME_RETRIES, last_error)
-        return
+        log.error("ACME failed for %s: %s", domain, last_error)
+        # The failure's class, for the watchdog's backoff: "refused" is the CA
+        # answering no (not retried above either — same reasoning), "transient"
+        # is the network eating a request (retried above, hourly hereafter).
+        return "refused" if isinstance(last_error, _ACMEError) else "transient"
 
     _persist_issued_cert(domain, site, CERTS_DIR, issued[0], issued[1],
                          f"{domain} and {www_domain}" if include_www else domain)
+    return None
 
 
 def _persist_issued_cert(domain, site, certs_dir, fullchain, key_pem, issued_names):

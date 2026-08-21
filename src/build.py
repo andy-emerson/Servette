@@ -131,7 +131,7 @@ def section_counts(src_dir):
     """Lines per section, as (name, total, code) plus a ("Total", …) row.
 
     `code` counts lines that are neither blank nor comment-only. These are the
-    numbers the website publishes to back its "readable in an afternoon"
+    numbers the website publishes to back its "understood by one person"
     claim, computed the one way, here, so the page and the program cannot
     disagree about them."""
     rows, tot, tot_code = [], 0, 0

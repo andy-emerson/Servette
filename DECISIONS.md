@@ -6,6 +6,23 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The readability claim is "understood by one person," not "read in an afternoon"
+
+**Ruled (Human):** the line count stays as a data point — an order of
+magnitude under general-purpose servers, and the counts gate keeps whatever
+number is stated true — but it is no longer pitched as evidence of *easy*
+reading. The durable claim: the literate structure plus the size mean the
+code can be **fully understood by one person** — a weekend's honest work,
+not "an afternoon." The identity principle is renamed accordingly; README's
+who-is-it-for framing and the website copy carry the same reframe, the
+website fixed before its first publish so the site launches saying the true
+thing.
+**Rejected:** keeping "afternoon" (readers take it as a promise of an easy
+read, which the code cannot keep and does not need to make); dropping the
+line count (it is the measurable half of the claim, and the gates keep it
+honest).
+*(#108, 2026-08-21)*
+
 ## Swap demand is measured as Committed_AS, and the file cache is charged once
 
 **Ruled (Human):** the swap estimate's demand term is `Committed_AS` plus the

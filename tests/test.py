@@ -1944,8 +1944,15 @@ def run_dispatch_tests(s):
         def issue(self, names, csr, challenge_dir):
             issue_calls.append(list(names))
             raise _StubClient.error
+    saved_webroot_a = s.ACME_WEBROOT
     try:
         s.BASE_DIR        = acme_home   # account key and certs land here
+        # ACME_WEBROOT is an absolute constant OUTSIDE BASE_DIR — left real,
+        # the function's makedirs writes /var/lib/letsencrypt: silently
+        # succeeding as root (and polluting the machine), PermissionError on
+        # an unprivileged runner. The local unprivileged run even passed once
+        # because a root run had already created it — order-dependent truth.
+        s.ACME_WEBROOT    = os.path.join(acme_home, "webroot")
         s._ACMEClient     = _StubClient
         s._server_running = lambda: True     # no temporary port-80 listener
         s._chown_servette = lambda path: None
@@ -1970,7 +1977,8 @@ def run_dispatch_tests(s):
     finally:
         for n, v in saved_acme.items():
             setattr(s, n, v)
-        s.time.sleep = saved_sleep_a
+        s.time.sleep   = saved_sleep_a
+        s.ACME_WEBROOT = saved_webroot_a
         s.BASE_DIR, s.RUNTIME_DIR = saved_base_a, saved_rt_a
         shutil.rmtree(acme_home, ignore_errors=True)
 

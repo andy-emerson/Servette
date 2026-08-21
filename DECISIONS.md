@@ -6,6 +6,43 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## Swap demand is measured as Committed_AS, and the file cache is charged once
+
+**Ruled (Human):** the swap estimate's demand term is `Committed_AS` plus the
+file-cache ceiling not already inside it plus the spike allowance. The cache is
+charged only where no live process holds it, which orders the offer above the
+later status check by construction.
+**Why:** the previous demand term (resident usage, plus the cache ceiling
+unconditionally) had two faults, both measured rather than argued. It double-
+counted a warm cache — 200 MB of cached files raise `Committed_AS` by 201 MB
+and resident usage by 202 MB, so adding the ceiling on top cost up to 256 MB
+of phantom swap after doubling. And it was noisy: resident usage wandered
+9 MB over thirty seconds where `Committed_AS` did not move, and 9 MB becomes a
+100 MB step after the doubling and rounding — which is how a host holding
+exactly the recommended size was told to resize, with no size that would
+satisfy the check.
+**Rejected:** comparing against the recommendation recorded when the swapfile
+was created — the Human's objection stands, that a first measurement taken at
+an unrepresentative moment would become permanent truth and the check would be
+immune to the evidence that should correct it. Also rejected: a percentage
+tolerance band on the comparison, which was the Agent's recommendation until
+the ordering property made it unnecessary — it treated the symptom, and a
+threshold chosen to hide noise hides signal at the same width. Also rejected:
+PSI (`/proc/pressure/memory`) as the trigger, which is evidence rather than
+estimate and would be better, but is absent on kernels that ship it disabled
+by default (needing psi=1 on the kernel command line) and so cannot be
+depended on across Servette's platforms; and zram, which cannot absorb a spike larger than the RAM it
+consumes.
+**Accepted residual:** `Committed_AS` counts address space that may never be
+touched, so a generous reserver inflates the estimate — the conservative
+direction. The ×2 margin and the 700 MB spike allowance remain one
+observation of one host, kept because published guidance offers nothing
+better (Red Hat now calls its 2×RAM table impractical; Ubuntu's range spans
+√RAM to 2×RAM).
+**Reopen when:** PSI is dependably available across Debian, Ubuntu and
+Raspberry Pi OS — an estimate should yield to evidence of actual memory
+stalls the moment that evidence can be relied on. *(2026-08-19)*
+
 ## servette.toml is the operator's to read: servette:their group, 0640
 
 **Ruled (Human):** the config is owned by the service user with the operator's

@@ -909,7 +909,7 @@ def _loggable(s):
 
 ```
 
-The request core is one function, transport-agnostic and ordered deliberately: reload, rate limit (ahead of site selection, so unmatched Hosts still throttle), site selection (an unmatched Host gets the undifferentiated closed-system 404 — deliberately ahead of the method check, so no 405 leaks that something is here), method check, per-site auth with the scrypt gate, the reserved paths, then file resolution and the caching/range/gzip protocol. Every inline comment below marks one of those decisions where it takes effect.
+The request core is one function, transport-agnostic and ordered deliberately: reload, site selection (bound before the limiter so a matched host's 429 carries HSTS like every other response), rate limit (still ahead of the closed-system miss, so unmatched Hosts throttle too), the undifferentiated 404 for an unmatched Host (deliberately ahead of the method check, so no 405 leaks that something is here), method check, per-site auth with the scrypt gate, the reserved paths, then file resolution and the caching/range/gzip protocol. Every inline comment below marks one of those decisions where it takes effect.
 
 ```python
 # The request core
@@ -929,7 +929,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         if xff and ip == config.trusted_proxy:
             ip = _normalize_ip(xff.split(",")[-1].strip())
 
-    site = None  # resolved below by Host header; None until then, and if nothing matches
+    site = None  # bound by Host below; None until then, and if nothing matches
 
     def resp(status, hdrs, body=b""):
         # Security headers (and HSTS, gated on `site`) go on every response;
@@ -940,24 +940,28 @@ def _handle_request(method, url_path, headers, raw_ip):
 
     config.reload_if_changed()
 
-    # Rate limiting — host-level, shared across every site on the box. Ahead of
-    # site selection so a flood of requests carrying random/unmatched Host
-    # headers still gets throttled rather than dodging the limiter under the
-    # closed-system 404 below; the cost is that a rate-limited response never
-    # carries HSTS even for a real site's domain.
+    # Site selection — uniform regardless of site count (see _select_site).
+    # Selected BEFORE the rate limiter, deliberately: selection is a cheap
+    # in-memory comparison, and with `site` already bound, a matched host's
+    # 429 below carries its HSTS header like every other response — the old
+    # order left rate-limited responses as the one un-pinned path a browser
+    # could be downgraded on. An unmatched Host still reaches the limiter
+    # (site stays None, no HSTS — the closed system gives it nothing), so a
+    # flood of random Hosts throttles exactly as before.
+    site = _select_site(headers.get("Host", ""))
+
+    # Rate limiting — host-level, shared across every site on the box.
     bucket = _bucket_key(ip)   # /64 for IPv6 — logs keep the full address
     if _rate_limit_exceeded(_request_times, bucket, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
-    # Site selection — uniform regardless of site count (see _select_site). No
-    # match: the closed-system miss. Bare 404, no site-specific information of
-    # any kind (no HSTS either, since `site` stays None for resp() above) —
+    # No match: the closed-system miss. Bare 404, no site-specific information
+    # of any kind (no HSTS either, since `site` is None for resp() above) —
     # deliberately ahead of the method check below, so a POST/PUT/etc. to an
     # unmatched Host gets the same undifferentiated 404 a GET would, rather
     # than a 405 that would leak "something is here, it just doesn't take this
     # method."
-    site = _select_site(headers.get("Host", ""))
     if site is None:
         log.warning("404 (no matching site) Host=%r from %s", headers.get("Host", ""), ip)
         body_404 = b"Not found."

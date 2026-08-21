@@ -1450,7 +1450,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         if xff and ip == config.trusted_proxy:
             ip = _normalize_ip(xff.split(",")[-1].strip())
 
-    site = None  # resolved below by Host header; None until then, and if nothing matches
+    site = None  # bound by Host below; None until then, and if nothing matches
 
     def resp(status, hdrs, body=b""):
         # Security headers (and HSTS, gated on `site`) go on every response;
@@ -1461,24 +1461,28 @@ def _handle_request(method, url_path, headers, raw_ip):
 
     config.reload_if_changed()
 
-    # Rate limiting — host-level, shared across every site on the box. Ahead of
-    # site selection so a flood of requests carrying random/unmatched Host
-    # headers still gets throttled rather than dodging the limiter under the
-    # closed-system 404 below; the cost is that a rate-limited response never
-    # carries HSTS even for a real site's domain.
+    # Site selection — uniform regardless of site count (see _select_site).
+    # Selected BEFORE the rate limiter, deliberately: selection is a cheap
+    # in-memory comparison, and with `site` already bound, a matched host's
+    # 429 below carries its HSTS header like every other response — the old
+    # order left rate-limited responses as the one un-pinned path a browser
+    # could be downgraded on. An unmatched Host still reaches the limiter
+    # (site stays None, no HSTS — the closed system gives it nothing), so a
+    # flood of random Hosts throttles exactly as before.
+    site = _select_site(headers.get("Host", ""))
+
+    # Rate limiting — host-level, shared across every site on the box.
     bucket = _bucket_key(ip)   # /64 for IPv6 — logs keep the full address
     if _rate_limit_exceeded(_request_times, bucket, config.rate_limit):
         log.warning("Rate limited %s", ip)
         return resp(429, [(b"retry-after", str(RATE_WINDOW).encode()), (b"content-length", b"0")])
 
-    # Site selection — uniform regardless of site count (see _select_site). No
-    # match: the closed-system miss. Bare 404, no site-specific information of
-    # any kind (no HSTS either, since `site` stays None for resp() above) —
+    # No match: the closed-system miss. Bare 404, no site-specific information
+    # of any kind (no HSTS either, since `site` is None for resp() above) —
     # deliberately ahead of the method check below, so a POST/PUT/etc. to an
     # unmatched Host gets the same undifferentiated 404 a GET would, rather
     # than a 405 that would leak "something is here, it just doesn't take this
     # method."
-    site = _select_site(headers.get("Host", ""))
     if site is None:
         log.warning("404 (no matching site) Host=%r from %s", headers.get("Host", ""), ip)
         body_404 = b"Not found."
@@ -2020,11 +2024,25 @@ def _cert_watchdog_tick():
                 days = _cert_days_remaining(cert_path)
                 if days is not None and days < 30:
                     now  = time.monotonic()
-                    last = _last_renewal_attempt.get(site.domain, 0.0)
-                    if now - last >= 3600:
+                    # None means never attempted — attempt immediately. The old
+                    # default of 0.0 read as "attempted at boot": monotonic IS
+                    # seconds since boot, so a host up less than an hour
+                    # refused every renewal until the clock caught up.
+                    last = _last_renewal_attempt.get(site.domain)
+                    if last is None or now - last >= 3600:
                         _last_renewal_attempt[site.domain] = now
                         log.info("Certificate for %s expires in %d days — renewing", site.domain, days)
-                        _obtain_trusted_cert(site.domain, site)
+                        if _obtain_trusted_cert(site.domain, site) == "refused":
+                            # The CA answered no (failed authorization, refused
+                            # order) — the cause is on our side of the fence
+                            # (usually DNS) and rarely changes within the hour,
+                            # while each hourly re-ask burns validation
+                            # attempts against LE's per-hostname limits. Cool
+                            # down six hours; a transient network failure
+                            # keeps the ordinary hourly retry. With renewal
+                            # starting 30 days out, even the long cool-down
+                            # allows ~120 more attempts before expiry.
+                            _last_renewal_attempt[site.domain] = now + 5 * 3600
             else:
                 # Self-signed or externally managed cert: reload if the file changed on disk
                 try:
@@ -2452,28 +2470,40 @@ WantedBy=multi-user.target
 def _netwatch_units():
     """The (service, timer) unit pair for the network watchdog.
 
-    Every 5 minutes: if the host has no route out, ask the network manager to
+    Every minute: if the host has no route out, ask the network manager to
     start over. Recovers the observed failure where a netlink timeout leaves the
     link permanently 'Failed' — networkd never retries on its own, so the host
     stays dark until reboot. try-restart only touches a unit that is actually
     running, so of the three known managers (systemd-networkd on Ubuntu,
     NetworkManager on Raspberry Pi OS, dhcpcd on older Pi OS) exactly one acts;
-    the whole check is a no-op while the route is healthy."""
+    the whole check is a no-op while the route is healthy.
+
+    One minute rather than the original five because the check costs nothing
+    to run often: despite appearances, `ip route get` sends no packets — it
+    asks the local routing table which route it WOULD use — so the interval
+    buys only recovery time, and the route drill measured the cost of five
+    (dark until the next firing, ~5 minutes; now ~1). One minute is also
+    systemd's default timer accuracy, so a shorter interval would be fiction.
+
+    A run that acts says so via logger. Without that line the run that saved
+    the host logged exactly like the hundred no-ops around it — the route
+    drill's journal could not show WHAT recovered the box, which is below the
+    project's own evidence bar."""
     service = f"""# generated by servette {__version__}
 [Unit]
 Description=Servette network watchdog — recover a dropped default route
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'ip route get 1.1.1.1 >/dev/null 2>&1 && exit 0; for u in systemd-networkd NetworkManager dhcpcd; do systemctl try-restart "$u.service" 2>/dev/null || true; done'
+ExecStart=/bin/sh -c 'ip route get 1.1.1.1 >/dev/null 2>&1 && exit 0; logger -t servette-netwatch "default route missing — restarting the network manager"; for u in systemd-networkd NetworkManager dhcpcd; do systemctl try-restart "$u.service" 2>/dev/null || true; done'
 """
     timer = f"""# generated by servette {__version__}
 [Unit]
-Description=Run the Servette network watchdog every 5 minutes
+Description=Run the Servette network watchdog every minute
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=5min
+OnBootSec=1min
+OnUnitActiveSec=1min
 
 [Install]
 WantedBy=timers.target
@@ -2486,15 +2516,22 @@ _SWAP_PATH = "/swapfile"
 
 
 def _meminfo():
-    """Return (mem_total_kb, mem_available_kb, swap_total_kb) from /proc/meminfo,
-    or (None, None, None) where it can't be read (non-Linux)."""
+    """Return (mem_total_kb, mem_available_kb, committed_kb) from /proc/meminfo,
+    or (None, None, None) where it can't be read (non-Linux).
+
+    Committed_AS is the kernel's own answer to the question the swap sizing
+    asks: how much memory this host would need if every allocation it has
+    handed out were actually used. MemAvailable comes along for the prompt,
+    which reports free memory to the operator, not for the arithmetic.
+    SwapTotal is deliberately absent — it lumps every swap device together,
+    and the sizes that matter come per-device from _swap_sizes."""
     try:
         fields = {}
         with open("/proc/meminfo") as f:
             for line in f:
                 key, _, rest = line.partition(":")
                 fields[key.strip()] = int(rest.split()[0])  # values are in kB
-        return fields["MemTotal"], fields["MemAvailable"], fields["SwapTotal"]
+        return fields["MemTotal"], fields["MemAvailable"], fields["Committed_AS"]
     except (OSError, KeyError, ValueError, IndexError):
         return None, None, None
 
@@ -2526,19 +2563,57 @@ def _round_up_2sig(n):
     return _ceil_div(int(n), mag) * mag
 
 
+# The cache's share of demand
+def _cache_headroom_mb(cache_mb):
+    """How much of the configured file cache is NOT already in Committed_AS.
+
+    The cache holds file bytes on the Python heap, so a warm cache is
+    anonymous memory the kernel has already committed — measured: 200 MB of
+    cached files raised Committed_AS by 201 MB. Adding the configured ceiling
+    on top of that counts the same megabytes twice, and the doubling below
+    turns a 128 MB default into 256 MB of swap this host does not need.
+
+    So the ceiling is charged only where no live process is holding it yet: a
+    host being set up or enabled with nothing serving. Where a server IS
+    running, whatever its cache has taken is in the signal already and its
+    unfilled remainder is charged to nobody — deliberately, because that
+    keeps the two callers ordered. The offer (service down, ceiling charged)
+    can only ever be larger than the later status check (service up, ceiling
+    in the signal), so a host that accepts the offer is never afterwards told
+    to resize. The old formula had this backwards: the cache entered the
+    measurement between setup and status, so the check drifted upward past
+    the size the operator had just chosen, and nagged forever."""
+    return 0 if (_server_running() or _service_is_active()) else cache_mb
+
+
 # The recommendation
-def _swap_recommendation(mem_kb, avail_kb, cache_mb):
+def _swap_recommendation(mem_kb, committed_kb, cache_headroom_mb):
     """Recommended total swap in bytes for this host, or None when demand fits in RAM.
 
-    Supply is measured (MemTotal). Demand is what's resident now (MemTotal −
-    MemAvailable), plus Servette's configured cache, plus the spike allowance.
-    When demand exceeds supply, the deficit is doubled for margin, rounded up to
-    two significant digits, floored at 512 MB and capped at 2 GB — the threshold
-    emerges from the measurement rather than a hardcoded RAM ceiling. Whether to
-    act on the recommendation is _swap_offer's decision."""
-    if mem_kb is None or avail_kb is None:
+    Supply is measured (MemTotal). Demand is Committed_AS — the kernel's own
+    worst case, what this host needs if every allocation it has handed out is
+    actually used — plus the cache ceiling not yet inside it
+    (_cache_headroom_mb), plus the spike allowance. When demand exceeds
+    supply, the deficit is doubled for margin, rounded up to two significant
+    digits, floored at 512 MB and capped at 2 GB, so the threshold emerges
+    from the measurement rather than a hardcoded RAM ceiling. Whether to act
+    on the recommendation is _swap_offer's decision.
+
+    Committed_AS rather than resident usage (MemTotal − MemAvailable), for
+    two reasons found by measuring both: it is what swap actually backs
+    (commitments are anonymous; page cache is written back to its own file
+    and never swapped), and it holds still — sampled every two seconds for
+    thirty, resident usage wandered 9 MB while Committed_AS did not move at
+    all. Nine megabytes is nothing until the doubling and the two-significant
+    -digit rounding turn it into a 100 MB step, which is how a host that had
+    just taken the recommended size came to be told to resize. The honest
+    cost of the swap: Committed_AS counts address space that may never be
+    touched, so a process that reserves generously and writes little makes
+    this estimate high. Recommending too much swap wastes disk; recommending
+    too little loses the host."""
+    if mem_kb is None or committed_kb is None:
         return None
-    demand_kb  = (mem_kb - avail_kb) + cache_mb * 1024 + _SPIKE_ALLOWANCE_KB
+    demand_kb  = committed_kb + cache_headroom_mb * 1024 + _SPIKE_ALLOWANCE_KB
     deficit_kb = demand_kb - mem_kb
     if deficit_kb <= 0:
         return None
@@ -2625,8 +2700,9 @@ def _ensure_swap():
     """Offer to create — or grow — Servette's swapfile where demand can outrun RAM."""
     if _IS_MACOS:
         return  # macOS manages its own swap; mkswap/swapon/fallocate do not exist there
-    mem_kb, avail_kb, _ = _meminfo()
-    rec       = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
+    mem_kb, avail_kb, committed_kb = _meminfo()
+    rec       = _swap_recommendation(mem_kb, committed_kb,
+                                     _cache_headroom_mb(config.cache_size_mb))
     rec_mb    = rec // (1024 * 1024) if rec else None
     ours      = os.path.exists(_SWAP_PATH)
     ours_mb, foreign_mb = _swap_sizes()
@@ -3622,7 +3698,11 @@ class _ACMEClient:
 def _obtain_trusted_cert(domain, site):
     """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
     minimal ACME client (_ACMEClient) on stdlib urllib + cryptography, and store it
-    on `site`."""
+    on `site`.
+
+    Returns None on success, else the failure's class for the watchdog's
+    backoff: "refused" (the CA answered no — retrying soon just burns its
+    rate limits) or "transient" (the network ate a request — retry freely)."""
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
@@ -3716,6 +3796,16 @@ def _obtain_trusted_cert(domain, site):
                 if isinstance(e, _ACMEError) and include_www and e.failed == {www_domain}:
                     www_dns_only_failure = True
                     break  # don't retry; fall back to bare domain
+                if isinstance(e, _ACMEError):
+                    # Let's Encrypt ANSWERED, and the answer was no — a failed
+                    # authorization, a refused order. Asking the same question
+                    # again ten seconds later gets the same no, and each retry
+                    # burns a fresh order and a validation attempt against
+                    # LE's own rate limits (~5 failed validations per hostname
+                    # per hour) while the underlying cause — usually DNS not
+                    # yet pointed here — hasn't changed. Retries are for the
+                    # network eating a request, not for the CA declining it.
+                    break
                 if attempt < ACME_RETRIES:
                     delay = 5 * attempt
                     log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
@@ -3738,11 +3828,15 @@ def _obtain_trusted_cert(domain, site):
 
     if last_error:
         print(f"  Error getting certificate: {last_error}")
-        log.error("ACME failed for %s after %d attempts: %s", domain, ACME_RETRIES, last_error)
-        return
+        log.error("ACME failed for %s: %s", domain, last_error)
+        # The failure's class, for the watchdog's backoff: "refused" is the CA
+        # answering no (not retried above either — same reasoning), "transient"
+        # is the network eating a request (retried above, hourly hereafter).
+        return "refused" if isinstance(last_error, _ACMEError) else "transient"
 
     _persist_issued_cert(domain, site, CERTS_DIR, issued[0], issued[1],
                          f"{domain} and {www_domain}" if include_www else domain)
+    return None
 
 
 def _persist_issued_cert(domain, site, certs_dir, fullchain, key_pem, issued_names):
@@ -4787,8 +4881,9 @@ def _production_issues():
             issues.append(f"no password protection{tag} — run 'config' to set credentials")
         if bool(site.publish_url) != bool(site.publish_key):
             issues.append(f"publish channel partially configured{tag} — run 'config publish' to finish setup")
-    mem_kb, avail_kb, _ = _meminfo()
-    rec     = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
+    mem_kb, avail_kb, committed_kb = _meminfo()
+    rec     = _swap_recommendation(mem_kb, committed_kb,
+                                   _cache_headroom_mb(config.cache_size_mb))
     ours_mb, foreign_mb = _swap_sizes()
     offer   = _swap_offer(rec // (1024 * 1024) if rec else None,
                           os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)

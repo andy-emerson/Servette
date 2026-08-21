@@ -1093,8 +1093,9 @@ def _production_issues():
             issues.append(f"no password protection{tag} — run 'config' to set credentials")
         if bool(site.publish_url) != bool(site.publish_key):
             issues.append(f"publish channel partially configured{tag} — run 'config publish' to finish setup")
-    mem_kb, avail_kb, _ = _meminfo()
-    rec     = _swap_recommendation(mem_kb, avail_kb, config.cache_size_mb)
+    mem_kb, avail_kb, committed_kb = _meminfo()
+    rec     = _swap_recommendation(mem_kb, committed_kb,
+                                   _cache_headroom_mb(config.cache_size_mb))
     ours_mb, foreign_mb = _swap_sizes()
     offer   = _swap_offer(rec // (1024 * 1024) if rec else None,
                           os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)

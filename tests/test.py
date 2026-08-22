@@ -2333,6 +2333,43 @@ def run_dispatch_tests(s):
         s.config.sites[0].password_hash = saved_pw
     shutil.rmtree(tmpd, ignore_errors=True)
 
+    section("Auth timing: the hash runs regardless of the username")
+
+    # Both credential checks are evaluated before they are combined, so a
+    # wrong username must not skip the scrypt call — an early-out would make
+    # response timing confirm which usernames exist. Pinned behaviorally:
+    # the hash runs exactly once for a wrong user and a wrong password alike.
+    saved_auth_site = (s.config.sites[0].username, s.config.sites[0].password_hash,
+                       s.config.sites[0].password_salt, s.config.sites[0].serve_dir)
+    saved_checkpw = s._check_password
+    authdir = tempfile.mkdtemp()
+    hash_calls = []
+    try:
+        s.config.sites[0].username      = "realuser"
+        s.config.sites[0].password_hash = "ab" * 32
+        s.config.sites[0].password_salt = "cd" * 16
+        s.config.sites[0].serve_dir     = authdir
+        s._check_password = lambda pw, h, salt: hash_calls.append(pw) or False
+        s._auth_fail_times.clear()   # a prior test's strikes must not 429 this
+
+        def basic_msg(user, pw):
+            m = http.client.HTTPMessage()
+            m["Authorization"] = "Basic " + base64.b64encode(
+                f"{user}:{pw}".encode()).decode()
+            return m
+
+        st1, _, _ = s._handle_request("GET", "/", basic_msg("realuser", "wrong"), "127.0.0.1")
+        st2, _, _ = s._handle_request("GET", "/", basic_msg("ghost", "wrong"), "127.0.0.1")
+        check("Both attempts are refused", st1 == 401 and st2 == 401)
+        check("A wrong password and a wrong username each ran the hash exactly once",
+              hash_calls == ["wrong", "wrong"])
+    finally:
+        s._check_password = saved_checkpw
+        (s.config.sites[0].username, s.config.sites[0].password_hash,
+         s.config.sites[0].password_salt, s.config.sites[0].serve_dir) = saved_auth_site
+        s._auth_fail_times.clear()
+        shutil.rmtree(authdir, ignore_errors=True)
+
     section("Bundle extraction safety")
 
     def make_tar_gz(entries):

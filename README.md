@@ -120,7 +120,7 @@ servette   # then, at the prompt: setup
 
 Setup asks for your password when it reaches the work that needs root: writing the systemd unit and creating the restricted `servette` user — the server runs as that user, never as root. If Servette is installed under your home directory, setup also says it is copying itself into `/var/lib/servette/runtime`; that is deliberate, and it is what lets the service keep running when your home directory is unreadable to it. The wizard sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), sets an optional password, then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically.
 
-To put your site on it, use the admin page: add the one-time line setup printed to `~/.ssh/config` on your own computer (inside the entry you already use to reach the server — it makes every SSH session carry the page), then run `servette admin` and open the printed link. The page runs in your browser but is served by your server over that SSH connection — it exists nowhere on the public internet. Pick your site's folder, press Publish, and the content is staged, checked, and swapped in atomically; `restore-site` undoes it. Prefer to never leave the terminal, or need to publish with no SSH at all? The signed-bundle channel below does both.
+To put your site on it, use the admin page: add the one-time line setup printed to `~/.ssh/config` on your own computer (inside the entry you already use to reach the server — it makes every SSH session carry the page), then run `servette admin` and open the printed link. The page runs in your browser but is served by your server over that SSH connection — it exists nowhere on the public internet. Drop your site's folder on its card (or pick it), press Publish, and the content is staged, checked, and swapped in atomically; `restore-site` undoes it. Prefer to never leave the terminal, or need to publish with no SSH at all? The signed-bundle channel below does both.
 
 ### Operate it
 
@@ -148,7 +148,7 @@ Re-run `servette` any time for the interactive shell — or run any command belo
 
 ### Host several sites
 
-One machine can serve several sites, each with its own folder, certificate, and optional password. From the shell, `config` → `add-site` adds one (it asks for the folder, domain, password, and publish channel); `sites` lists what you have, and `remove-site <n>` drops one.
+One machine can serve several sites, each with its own certificate and optional password — and the admin page's Publish tab is the site list: one card per site to publish, plus add, reorder (drag a card's header, or its arrows), and remove. From the shell, `config` → `add-site` adds one, `sites` lists what you have, `remove-site <n>` drops one, and `move-site <n> <to>` reorders — order matters only for sites without a domain: the first of those answers requests that match no site.
 
 Every site has an index, shown by `sites` and starting at `0` — the one `setup` created. Commands that act on a single site take that index and default to `0`: `dir [n]`, `cert [n]`, `publish [n]`, and `username [n]` / `password [n]` under `config`, plus `pull [n]` and `restore-site [n]` from the main shell. So `cert 1` requests a certificate for the second site, and `pull 2` updates the third site's content from its channel.
 

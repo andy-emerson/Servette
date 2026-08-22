@@ -6,6 +6,65 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The folder is not a setting: serve_dir is retiring from the vocabulary
+
+**Ruled (Human):** where a site's content lives is Servette's business,
+not a question an operator answers. Content arrives only by publishing —
+the admin page's cards today, a terminal publish-from-folder to follow —
+and the folder it lands in is Servette-assigned. `dir` leaves the
+operator vocabulary (the Config tab already dropped it; `set dir=` and
+the config sub-shell's `dir` follow); setup stops asking. The build
+lands as its own commits at the end of this release's fixes, alongside
+the pull-channel removal it overlaps.
+**Why (user pov):** one less question with no wrong answer — every wrong
+answer to the folder question is a guard elsewhere (containment,
+secrets exposure, missing directory). **(developer pov):** those guards
+outlive the setting only where paths still enter from config files
+written by hand.
+**Rejected:** keeping `dir` as an advanced terminal knob (the knob is
+the footgun, not the surface it sits on).
+**First slice already in:** a page-added site is born with a
+Servette-invented folder (`_invent_site_dir`). *(2026-08-22)*
+
+## The Publish tab is the site list: cards add, move, and remove sites
+
+**Ruled (Human):** one card per configured site — the drop strip with
+the folder picker as a link inside it, and the card's own Publish
+button — and the cards are the list itself: add, delete, and reorder in
+place, in the notebook's cell grammar (drag the header — a ghost
+follows, neighbours swap live — or the arrow buttons; ✕ confirms with
+the terminal's exact promise). Order is config, not cosmetics: the
+first domainless site answers unmatched Hosts, so a move saves and
+reloads like any setting. Every op runs the same cores as the terminal
+(`add-site` / `remove-site` / the new `move-site`), the page re-renders
+from fresh `/config` truth after each, and `/upload` takes the card's
+site index. A page-added site is born domainless — domain stays
+terminal-bound to certificate issuance — and says so on its card.
+**Rejected:** a single-site page with Config's dropdown as the only
+multi-site surface (settings editable for sites the page couldn't
+publish — the asymmetry the ruling started from). *(2026-08-22)*
+
+## The Config tab is a password switch; the advanced knobs stay in the terminal
+
+**Ruled (Human):** password protection is one visible switch — a toggle
+that dims the username/password fields when off, states what saving
+will do, and on disable deletes the login. The one-switch rule
+("clearing the username clears the password with it") moves into the
+shared validator, so `set username=`, the page, and the interactive
+prompt behave identically — previously the first two left a stale hash.
+The page learns the state from a `has_password` boolean; the hash never
+crosses the wire, and a password riding with an emptied username is
+refused whole rather than half-applied. Off the page and terminal-kept:
+the serve folder, HTTPS port, and trusted proxy (behind-a-balancer
+territory), the pull channel's URL/key pair (dying with the channel),
+and every lifecycle verb. Every surviving field carries a one-line
+always-visible hint.
+**Rejected:** hover-only help icons (invisible until known, dead on
+touch); lifecycle toggles on the page (root-prompting verbs that
+narrate belong in the terminal, and a stop button one misclick from
+darkness is a footgun — reopen if an operator SSHes in only to flip
+the service). *(2026-08-22)*
+
 ## The connection check is its own reserved page; the 404 is a real 404
 
 **Ruled (Human):** two public pages, each with one job. The default 404

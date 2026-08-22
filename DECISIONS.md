@@ -6,6 +6,59 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## Multi-step features pair a shell flow with a loopback browser page
+
+**Ruled (Human):** every multi-step feature eventually exists twice — a
+guided SHELL flow and a browser page in the 404/pub visual family. The page
+server binds 127.0.0.1 only, lives only while the operator's command runs,
+and is reached through the operator's SSH tunnel: a one-time `LocalForward`
+line beside the existing `ssh` shortcut, which setup prints at the moment
+the operator is already paying attention. The command prints a clickable
+URL carrying a per-run token; the bare URL is bookmarkable and asks for the
+short code the terminal printed. Content entering through a page passes
+through the identical staging, extraction-guard, atomic-swap, and backup
+machinery the shell uses; the public surface is untouched — 405 to POST,
+nothing network-reachable changes the server. This is the shell wearing a
+friendlier skin (the transport is SSH), not a third way in.
+**Why:** Servette's user has already proven exactly one skill — SSH into
+their box. The page starts where they already stand and asks for nothing
+new: no account, no credential, no hosted shelf. Same trailhead as the
+terminal, easier grade.
+**Order:** publish first, as the proof of concept (the pub page is most of
+the visual work already); setup and config pages once it is proven.
+**Rejected:** a public admin subdomain (an internet-facing upload door
+guarded by a password — the most-scanned door on the web, and advertised in
+certificate-transparency logs the moment its certificate exists);
+auto-opening the browser from box output (terminals treat printed text as
+inert by design — any server could otherwise pop pages on the operator's
+screen); a client command installed on the operator's machine (client
+software to build, distribute, and maintain — reopen if the one click per
+publish session grates in practice, or a real browser-less-over-SSH need
+appears). *(#108, 2026-08-22)*
+
+## Tunnel uploads are authenticated by SSH; the pull channel is slated for removal
+
+**Ruled (Human):** content arriving through the loopback page carries no
+signature — every hop is the operator's machine or their SSH connection,
+and only the key holder can reach the door, so a signature would re-prove
+an identity the transport already proved. Signatures remain the pull
+channel's trust mechanism (they are what make an untrusted public shelf
+safe) for as long as that channel exists — and its removal is the plan:
+once the tunnel channel has served a real publish, the pull channel (the
+fetch, signature verification, `config publish`, and the signing half of
+the pub tool) is expected to go, with the Human confirming at that moment.
+The staging/swap/backup core is shared with the page path and stays
+regardless.
+**Why:** no mainstream static server owns a content channel at all — how
+files reach the folder is left to the operator. Pull was Servette's answer
+before the page existed, and it forked off the DIY path by demanding
+concepts from another world: signing keys, signatures, a hosted shelf.
+**Rejected:** keeping pull forever as the advanced path (delegation and
+cron-driven deploys are capability-shaped justifications, not
+principle-shaped); removing it now, before its successor has served a
+single real publish. **Reopen:** a real operator need to publish with no
+SSH access at all. *(#108, 2026-08-22)*
+
 ## The readability claim is "understood by one person," not "read in an afternoon"
 
 **Ruled (Human):** the line count stays as a data point — an order of

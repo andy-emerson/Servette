@@ -1049,6 +1049,10 @@ def run_dispatch_tests(s):
           "tab-config" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
     check("...with the Health checks card and the masked password field",
           "health-list" in s._UI_ADMIN_PAGE and "cfg-password" in s._UI_ADMIN_PAGE)
+    check("...and the Publish tab as site cards, add/move/remove wired to /sites",
+          "site-cards" in s._UI_ADMIN_PAGE and "btn-add-site" in s._UI_ADMIN_PAGE
+          and "/sites?t=" in s._UI_ADMIN_PAGE
+          and "attachCardDrag" in s._UI_ADMIN_PAGE)
     check("...as a protection toggle plus host basics — the advanced knobs stay in the terminal",
           "btn-auth-toggle" in s._UI_ADMIN_PAGE
           and "has_password" in s._UI_ADMIN_PAGE

@@ -2,8 +2,9 @@
 <!-- src/admin — the operator's page, the browser half of the paired
      surfaces. Served only by the loopback page server (127.0.0.1, reached
      through the operator's SSH tunnel via `servette admin`), never by the
-     public site. One page, tabs per feature: Status (the inside view) and
-     Publish now; Config when it earns its forms.
+     public site. One page, tabs per feature: Status (health from the
+     machine's side), Publish (one card per site — the cards are the site
+     list), Config (password protection and host basics).
      Constraints, all load-bearing:
 
      - No signature, no key. Being here IS the authentication: only the
@@ -197,13 +198,12 @@
 
     .hidden { display: none !important; }
 
-    #drop-card.drag {
+    .site-card.drag {
       border-color: rgba(90,132,102,0.7);
       background: rgba(90,132,102,0.08);
     }
 
     .dropstrip {
-      margin-top: 0.75rem;
       padding: 0.8rem;
       border: 1px dashed var(--border);
       border-radius: 4px;
@@ -212,7 +212,33 @@
       color: var(--muted);
       letter-spacing: 0.04em;
     }
-    #drop-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
+    .dropstrip a { color: #5A8466; text-decoration: none; }
+    .dropstrip a:hover { text-decoration: underline; }
+    .site-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
+
+    /* Card reordering, the notebook's grammar: grab the header, a ghost
+       follows the cursor, the source dims to a dashed placeholder, and
+       neighbours swap in place as the ghost crosses them. */
+    .site-card .card-head { cursor: grab; user-select: none; }
+    .site-card.drag-placeholder { opacity: 0.35; border-style: dashed; }
+    .card-ghost { box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+    .head-left, .head-right { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+    .head-left .card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .handle { color: var(--muted); font-size: 0.8rem; }
+    button.ca {
+      font-family: inherit;
+      font-size: 0.8rem;
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      line-height: 1;
+    }
+    button.ca:hover { color: var(--text); background: rgba(255,255,255,0.07); }
+    button.ca.del:hover { color: var(--red); }
+    .add-zone { display: flex; justify-content: center; margin-bottom: 1.5rem; }
 
     .cfg-field { margin-top: 0.7rem; }
     .cfg-field label {
@@ -313,45 +339,16 @@
 
   </div>
 
-  <!-- ══ Publish — pick a folder, send it through the tunnel ══ -->
+  <!-- ══ Publish — one card per site: drop or choose its folder, publish.
+       Cards can be added, removed, and reordered (drag the header, or the
+       arrows), because the cards ARE the site list: order is config —
+       the first domainless site answers unmatched Hosts. ══ -->
   <div id="panel-publish" role="tabpanel" class="hidden">
-
-    <div class="card" id="drop-card">
-      <div class="card-head">
-        <span class="card-title">1 · Site folder</span>
-        <span class="badge badge-dim" id="dir-badge">no folder chosen</span>
-      </div>
-      <div class="card-body">
-        <div class="btn-row">
-          <button class="action" id="btn-dir" type="button">Choose your site's folder</button>
-          <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
-        </div>
-        <div class="dropstrip">⤓&nbsp; or drop your site's folder anywhere on this card</div>
-        <p class="hint" id="dir-summary">It's the folder that holds your
-        <b>index.html</b>. Files are read here in the browser and travel only
-        through your SSH tunnel to your own server.</p>
-        <p class="error hidden" id="dir-error"></p>
-      </div>
+    <div id="site-cards"></div>
+    <div class="add-zone">
+      <button class="action" id="btn-add-site" type="button">+ Add a site</button>
     </div>
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">2 · Publish</span>
-        <span class="badge badge-dim" id="pub-badge">waiting</span>
-      </div>
-      <div class="card-body">
-        <div class="btn-row">
-          <button class="action primary" id="btn-publish" type="button" disabled>Publish to this server</button>
-        </div>
-        <div id="pub-done" class="hidden">
-          <p class="hint" id="pub-note" style="margin-top:0.75rem"></p>
-          <p class="hint">Want the previous content back? <b>restore-site</b>
-          in the terminal is the one step back.</p>
-        </div>
-        <p class="error hidden" id="pub-error"></p>
-      </div>
-    </div>
-
+    <p class="error hidden" id="sites-error"></p>
   </div>
 
   <!-- ══ Config — forms over the same validators `set` runs ══ -->
@@ -432,7 +429,9 @@
       $('tab-' + key).classList.toggle('active', key === name);
     }
     if (name === 'status') loadStatus();
-    if (name === 'config') loadConfig();
+    // The site cards and the Config forms render from the same /config
+    // truth, so both tabs refresh it on entry.
+    if (name === 'config' || name === 'publish') loadConfig();
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
@@ -593,11 +592,14 @@
       // A one-site server needs no site picker — it appears with a second site.
       sel.classList.toggle('hidden', (cfgData.sites || []).length < 2);
       renderConfig();
+      renderSiteCards();
     } catch (e) {
       setBadge($('cfg-site-badge'), 'badge-red', '✕ unreachable');
       setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
-      showError($('cfg-site-error'), (e instanceof TypeError) ? TUNNEL_DOWN
-        : 'Could not read settings: ' + e.message);
+      const msg = (e instanceof TypeError) ? TUNNEL_DOWN
+        : 'Could not read settings: ' + e.message;
+      showError($('cfg-site-error'), msg);
+      showError($('sites-error'), msg);
     }
   }
 
@@ -739,11 +741,6 @@
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  const state = {
-    files:  null,   // [{ path, file }]
-    folder: null,   // the picked folder's name, for messages
-  };
-
   function setBadge(el, cls, text) { el.className = 'badge ' + cls; el.textContent = text; }
   function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
   function clearError(el) { el.classList.add('hidden'); }
@@ -757,57 +754,90 @@
   const escapeHtml = (s) =>
     s.replace(/[&<>"']/g, (c) => '&#' + c.charCodeAt(0) + ';');
 
-  function refreshReady() {
-    const ready = !!(state.files && state.files.length);
-    $('btn-publish').disabled = !ready;
-    $('pub-done').classList.add('hidden');
-    setBadge($('pub-badge'), 'badge-dim', ready ? 'ready' : 'waiting');
-  }
-
   // The same hidden-path rule the server enforces: any '.'-segment except
   // .well-known is never served, so it is not bundled either — a .git or
   // .env under the site folder must not end up on the server.
   const isHiddenPath = (path) =>
     path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
 
-  // One intake for both doors — the picker and the drop — so they cannot
-  // drift on the hidden-path rule or the summary.
-  function useFolder(items, folderName) {
-    const kept = items.filter((e) => !isHiddenPath(e.path));
-    const hidden = items.length - kept.length;
+  const cardIndex = (el) =>
+    [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
 
-    if (!kept.length) {
-      showError($('dir-error'), 'That folder has no publishable files' +
-        (hidden ? ` (${hidden} hidden entries were excluded).` : '.'));
-      return;
+  // One op door for add, remove, and move: the server runs the same cores
+  // the terminal's add-site / remove-site / move-site run, then the cards
+  // re-render from fresh /config truth.
+  async function siteOp(body) {
+    clearError($('sites-error'));
+    try {
+      const r = await fetch('/sites?t=' + encodeURIComponent(CODE), {
+        method: 'POST', body: JSON.stringify(body),
+      });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'ok')
+        throw new Error(data.error || 'HTTP ' + r.status);
+      await loadConfig();
+    } catch (e) {
+      showError($('sites-error'), (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+      renderSiteCards();  // snap the cards back to the last loaded truth
     }
-    state.files  = kept;
-    state.folder = folderName;
-
-    const total = kept.reduce((n, e) => n + e.file.size, 0);
-    const hasIndex = kept.some((e) => e.path === 'index.html');
-    $('dir-summary').innerHTML =
-      `<b>${escapeHtml(state.folder)}/</b> — ${kept.length} file${kept.length === 1 ? '' : 's'}, ` +
-      `${fmtSize(total)}` +
-      (hidden ? ` · ${hidden} hidden entr${hidden === 1 ? 'y' : 'ies'} excluded ` +
-                `(paths starting with '.' are never served)` : '') +
-      (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
-                       `the site root would show a directory miss</span>`);
-    setBadge($('dir-badge'), 'badge-green', '✓ folder read');
-    refreshReady();
   }
 
-  $('btn-dir').addEventListener('click', () => $('dir-input').click());
-  $('dir-input').addEventListener('change', () => {
-    clearError($('dir-error'));
-    const all = [...$('dir-input').files];
-    if (!all.length) return;
-    // webkitRelativePath is '<picked folder>/rest…' — the folder name is
-    // stripped so index.html sits at the bundle root, where serve_dir wants it.
-    useFolder(all.map((f) => ({
-      path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
-    })).filter((e) => e.path), all[0].webkitRelativePath.split('/')[0]);
-  });
+  $('btn-add-site').addEventListener('click', () => siteOp({ op: 'add' }));
+
+  function renderSiteCards() {
+    const wrap = $('site-cards');
+    wrap.innerHTML = '';
+    const sites = (cfgData && cfgData.sites) || [];
+    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx, sites.length)));
+  }
+
+  // Reordering, in the notebook's grammar: grab the header, a ghost follows
+  // the cursor, the source dims to a placeholder, neighbours swap in place
+  // as the ghost crosses them — and the drop is a single move op.
+  function attachCardDrag(head, el) {
+    head.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || e.target.closest('button') || e.target.closest('a')) return;
+      const startX = e.clientX, startY = e.clientY;
+      const rect = el.getBoundingClientRect();
+      const offY = e.clientY - rect.top;
+      const startIdx = cardIndex(el);
+      let started = false, ghost = null;
+      const move = (ev) => {
+        if (!started) {
+          if (Math.abs(ev.clientX - startX) < 5 && Math.abs(ev.clientY - startY) < 5) return;
+          started = true;
+          ghost = el.cloneNode(true);
+          ghost.classList.add('card-ghost');
+          ghost.style.cssText = 'position:fixed;left:' + rect.left + 'px;top:' + rect.top +
+            'px;width:' + rect.width + 'px;margin:0;pointer-events:none;z-index:1000;opacity:0.93;';
+          document.body.appendChild(ghost);
+          el.classList.add('drag-placeholder');
+          document.body.style.userSelect = 'none';
+        }
+        ghost.style.top = (ev.clientY - offY) + 'px';
+        const cards = [...document.querySelectorAll('#site-cards .site-card')];
+        const i = cards.indexOf(el);
+        const gr = ghost.getBoundingClientRect();
+        if (i > 0 && gr.top < cards[i - 1].getBoundingClientRect().top)
+          el.parentNode.insertBefore(el, cards[i - 1]);
+        else if (i < cards.length - 1 && gr.bottom > cards[i + 1].getBoundingClientRect().bottom)
+          el.parentNode.insertBefore(cards[i + 1], el);
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        if (!started) return;
+        ghost.remove();
+        el.classList.remove('drag-placeholder');
+        document.body.style.userSelect = '';
+        const endIdx = cardIndex(el);
+        if (endIdx !== startIdx) siteOp({ op: 'move', from: startIdx, to: endIdx });
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+  }
 
   // The drop door: a dropped folder walks the same intake. A single dropped
   // directory is the site folder (its name stripped, exactly like the
@@ -826,89 +856,185 @@
     }
   }
 
-  const dropCard = $('drop-card');
-  dropCard.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropCard.classList.add('drag');
-  });
-  dropCard.addEventListener('dragleave', () => dropCard.classList.remove('drag'));
-  dropCard.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    dropCard.classList.remove('drag');
-    clearError($('dir-error'));
-    const entries = [...e.dataTransfer.items]
-      .map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry())
-      .filter(Boolean);
-    if (!entries.length) return;
-    try {
-      const items = [];
-      let folderName;
-      if (entries.length === 1 && entries[0].isDirectory) {
-        folderName = entries[0].name;
-        const reader = entries[0].createReader();
-        for (;;) {
-          const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
-          if (!batch.length) break;
-          for (const child of batch) await readDropped(child, '', items);
+  function buildSiteCard(siteData, idx, total) {
+    const label = siteData.domain || 'site ' + idx;
+    const card = document.createElement('div');
+    card.className = 'card site-card';
+    card.innerHTML =
+      `<div class="card-head">` +
+        `<span class="head-left"><span class="handle" title="Drag to reorder">⠿</span>` +
+        `<span class="card-title">${escapeHtml(label)}</span></span>` +
+        `<span class="head-right">` +
+          `<button class="ca up" type="button" title="Move up">↑</button>` +
+          `<button class="ca down" type="button" title="Move down">↓</button>` +
+          `<button class="ca del" type="button" title="Remove this site">✕</button>` +
+          `<span class="badge badge-dim">no folder chosen</span>` +
+        `</span>` +
+      `</div>` +
+      `<div class="card-body">` +
+        `<div class="dropstrip">⤓&nbsp; drop this site's folder here, or <a href="#">choose it</a></div>` +
+        `<input type="file" webkitdirectory multiple class="hidden">` +
+        `<p class="hint summary">` +
+          (siteData.domain
+            ? `Publishes to <b>${escapeHtml('https://' + siteData.domain)}</b>.`
+            : `No domain yet — this site answers requests no other site matches. ` +
+              `A domain and its certificate are set in the terminal (<b>config</b>).`) +
+          ` The folder to drop is the one holding the site's <b>index.html</b>.</p>` +
+        `<div class="btn-row" style="margin-top:0.75rem">` +
+          `<button class="action primary pub" type="button" disabled>Publish</button>` +
+        `</div>` +
+        `<div class="done hidden">` +
+          `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
+          `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
+          `in the terminal is the one step back.</p>` +
+        `</div>` +
+        `<p class="error hidden"></p>` +
+      `</div>`;
+
+    const q = (sel) => card.querySelector(sel);
+    const badge = q('.badge'), input = q('input'), pubBtn = q('.pub');
+    const errEl = q('.error'), summary = q('.summary'), done = q('.done');
+    let files = null, folderName = '';
+    const mark = (cls, text) => setBadge(badge, cls, text);
+
+    // One intake for both doors — the picker and the drop — so they cannot
+    // drift on the hidden-path rule or the summary.
+    function useFolder(items, name) {
+      const kept = items.filter((en) => !isHiddenPath(en.path));
+      const hidden = items.length - kept.length;
+      if (!kept.length) {
+        showError(errEl, 'That folder has no publishable files' +
+          (hidden ? ` (${hidden} hidden entries were excluded).` : '.'));
+        return;
+      }
+      files = kept;
+      folderName = name;
+      const totalBytes = kept.reduce((n, en) => n + en.file.size, 0);
+      const hasIndex = kept.some((en) => en.path === 'index.html');
+      summary.innerHTML =
+        `<b>${escapeHtml(name)}/</b> — ${kept.length} file${kept.length === 1 ? '' : 's'}, ` +
+        `${fmtSize(totalBytes)}` +
+        (hidden ? ` · ${hidden} hidden entr${hidden === 1 ? 'y' : 'ies'} excluded ` +
+                  `(paths starting with '.' are never served)` : '') +
+        (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
+                         `the site root would show a directory miss</span>`);
+      done.classList.add('hidden');
+      pubBtn.disabled = false;
+      mark('badge-green', '✓ folder read');
+    }
+
+    q('.dropstrip a').addEventListener('click', (e) => { e.preventDefault(); input.click(); });
+    input.addEventListener('change', () => {
+      clearError(errEl);
+      const all = [...input.files];
+      if (!all.length) return;
+      // webkitRelativePath is '<picked folder>/rest…' — the folder name is
+      // stripped so index.html sits at the bundle root, where the site wants it.
+      useFolder(all.map((f) => ({
+        path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
+      })).filter((en) => en.path), all[0].webkitRelativePath.split('/')[0]);
+    });
+
+    card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag'); });
+    card.addEventListener('dragleave', () => card.classList.remove('drag'));
+    card.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      card.classList.remove('drag');
+      clearError(errEl);
+      const entries = [...e.dataTransfer.items]
+        .map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry())
+        .filter(Boolean);
+      if (!entries.length) return;
+      try {
+        const items = [];
+        let name;
+        if (entries.length === 1 && entries[0].isDirectory) {
+          name = entries[0].name;
+          const reader = entries[0].createReader();
+          for (;;) {
+            const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+            if (!batch.length) break;
+            for (const child of batch) await readDropped(child, '', items);
+          }
+        } else {
+          name = 'dropped files';
+          for (const entry of entries) await readDropped(entry, '', items);
         }
-      } else {
-        folderName = 'dropped files';
-        for (const entry of entries) await readDropped(entry, '', items);
+        useFolder(items, name);
+      } catch (err) {
+        showError(errEl, 'Could not read the dropped folder: ' + err.message);
       }
-      useFolder(items, folderName);
-    } catch (err) {
-      showError($('dir-error'), 'Could not read the dropped folder: ' + err.message);
-    }
-  });
+    });
 
-  $('btn-publish').addEventListener('click', async () => {
-    clearError($('pub-error'));
-    $('btn-publish').disabled = true;
-    setBadge($('pub-badge'), 'badge-dim', 'building…');
-    try {
-      const entries = [];
-      let total = 0;
-      for (const { path, file } of state.files) {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        total += bytes.length;
-        if (total > MAX_BUNDLE_BYTES)
-          throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
-                          `the server would reject it`);
-        entries.push({ path, bytes });
+    pubBtn.addEventListener('click', async () => {
+      clearError(errEl);
+      pubBtn.disabled = true;
+      mark('badge-dim', 'building…');
+      try {
+        const entries = [];
+        let totalBytes = 0;
+        for (const { path, file } of files) {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          totalBytes += bytes.length;
+          if (totalBytes > MAX_BUNDLE_BYTES)
+            throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
+                            `the server would reject it`);
+          entries.push({ path, bytes });
+        }
+        const gz = await gzipBytes(buildTar(entries));
+
+        mark('badge-dim', 'publishing…');
+        const resp = await fetch('/upload?t=' + encodeURIComponent(CODE) +
+                                 '&site=' + cardIndex(card), { method: 'POST', body: gz });
+        let result = '';
+        try { result = (await resp.json()).result; } catch { result = ''; }
+
+        if (resp.ok && result === 'published') {
+          q('.note-done').innerHTML = `<b>${escapeHtml(folderName)}/</b> is live — ` +
+            `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
+            `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
+            `content kept as the one-step backup.`;
+          done.classList.remove('hidden');
+          mark('badge-green', '✓ published');
+        } else if (resp.status === 403) {
+          throw new Error('The server refused the pairing code — close this page, ' +
+                          'and open the fresh link the terminal prints for this run.');
+        } else {
+          throw new Error('The server rejected the bundle' +
+                          (result ? ` (${result})` : ` (HTTP ${resp.status})`) +
+                          ' — nothing was changed. The terminal log has the detail.');
+        }
+      } catch (e) {
+        // A dropped tunnel mid-upload cannot half-publish: the server swaps
+        // content in only after a complete, valid bundle has landed.
+        showError(errEl, (e instanceof TypeError)
+          ? TUNNEL_DOWN + ' Nothing was published.' : e.message);
+        mark('badge-red', '✕ failed');
       }
-      const gz = await gzipBytes(buildTar(entries));
+      pubBtn.disabled = !files;
+    });
 
-      setBadge($('pub-badge'), 'badge-dim', 'publishing…');
-      const resp = await fetch('/upload?t=' + encodeURIComponent(CODE), {
-        method: 'POST', body: gz,
-      });
-      let result = '';
-      try { result = (await resp.json()).result; } catch { result = ''; }
-
-      if (resp.ok && result === 'published') {
-        $('pub-note').innerHTML = `<b>${escapeHtml(state.folder)}/</b> is live — ` +
-          `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
-          `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
-          `content kept as the one-step backup.`;
-        $('pub-done').classList.remove('hidden');
-        setBadge($('pub-badge'), 'badge-green', '✓ published');
-      } else if (resp.status === 403) {
-        throw new Error('The server refused the pairing code — close this page, ' +
-                        'and open the fresh link the terminal prints for this run.');
-      } else {
-        throw new Error('The server rejected the bundle' +
-                        (result ? ` (${result})` : ` (HTTP ${resp.status})`) +
-                        ' — nothing was changed. The terminal log has the detail.');
+    q('.up').addEventListener('click', () => {
+      const i = cardIndex(card);
+      if (i > 0) siteOp({ op: 'move', from: i, to: i - 1 });
+    });
+    q('.down').addEventListener('click', () => {
+      const i = cardIndex(card);
+      const n = document.querySelectorAll('#site-cards .site-card').length;
+      if (i < n - 1) siteOp({ op: 'move', from: i, to: i + 1 });
+    });
+    q('.del').addEventListener('click', () => {
+      if (total === 1) {
+        showError(errEl, "Can't remove the only site — a box needs at least one.");
+        return;
       }
-    } catch (e) {
-      // A dropped tunnel mid-upload cannot half-publish: the server swaps
-      // content in only after a complete, valid bundle has landed.
-      showError($('pub-error'), (e instanceof TypeError)
-        ? TUNNEL_DOWN + ' Nothing was published.' : e.message);
-      setBadge($('pub-badge'), 'badge-red', '✕ failed');
-    }
-    $('btn-publish').disabled = false;
-  });
+      if (!confirm('Remove ' + label + ' from this server? Its config is discarded; ' +
+                   'its files on disk are not touched.')) return;
+      siteOp({ op: 'remove', site: cardIndex(card) });
+    });
+    attachCardDrag(q('.card-head'), card);
+    return card;
+  }
 
   /* ══ Feature gate & startup. ══ */
   const supported = typeof CompressionStream === 'function';

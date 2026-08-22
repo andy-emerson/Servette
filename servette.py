@@ -1186,7 +1186,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
   <div class="checks">
     <div class="checks-head">
-      <span class="checks-title">Diagnosis — live from your browser</span>
+      <span class="checks-title">Connection report — live from your browser</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>
@@ -1395,8 +1395,13 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       else if (r.ok === false) { paint(st, 'fail'); fail++; }
       else                     { paint(st, 'skip'); skip++; }
     }
-    $('t-summary').innerHTML =
-      '<b>' + pass + '</b> passed · <b>' + fail + '</b> failed · <b>' + skip + '</b> skipped';
+    // Green leads when nothing failed — the pitch and the test coincide on a
+    // healthy site. A failure count is never hidden: suppressing it would
+    // make the page lie by omission to the operator it exists to help.
+    $('t-summary').innerHTML = fail
+      ? '<b>' + pass + '</b> passed · <b>' + fail + '</b> failed · <b>' + skip + '</b> skipped'
+      : 'All <b>' + pass + '</b> checks passed' +
+        (skip ? ' · <b>' + skip + '</b> skipped' : '');
   }
 
   $('run-again').addEventListener('click', runTests);

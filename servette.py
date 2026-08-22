@@ -3979,6 +3979,7 @@ _COMMANDS = [
     ("sites [--json]",   "list configured sites"),
     ("set [n] k=v ...",  "change settings non-interactively"),
     ("log [n]",          "show the last n log entries"),
+    ("publish",          "one guided flow for site content: pull, roll back, channel"),
     ("pull [n]",         "check a site's publish channel and pull new content now"),
     ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
     ("help",             "show this message"),
@@ -4008,6 +4009,17 @@ _CONFIG_COMMANDS = [
     ("back",            "return to main shell"),
 ]
 CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
+
+
+# The publish commands
+_PUBLISH_COMMANDS = [
+    ("pull [n]",         "fetch and swap in new content from the site's channel"),
+    ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
+    ("channel [n]",      "view or edit the publish channel (watch URL and key)"),
+    ("show",             "show each site's channel and backup"),
+    ("back",             "return to main shell"),
+]
+PUBLISH_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _PUBLISH_COMMANDS)
 
 
 # Safe input
@@ -4843,6 +4855,58 @@ def cmd_restore_site(site):
         _chown_operator(live_dir, strip_world=True)
     print("  Site content restored from backup.")
 
+# The publish display
+def _publish_show():
+    _section("Publish")
+    for i, site in enumerate(config.sites):
+        backup = os.path.isdir(_resolve(site.serve_dir).rstrip(os.sep) + ".bak")
+        print(f"  [{i}] {site.domain or site.serve_dir}")
+        print(f"      channel: {site.publish_url if site.publish_url and site.publish_key else '(not set)'}")
+        print(f"      backup:  {'present — restore-site undoes the last pull' if backup else 'none'}")
+    print()
+
+
+# publish
+def cmd_publish():
+    _publish_show()
+    print(PUBLISH_HELP)
+
+    while True:
+        try:
+            raw = input("  publish> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not raw:
+            continue
+
+        parts = raw.split()
+        cmd   = parts[0].lower()
+        args  = parts[1:]
+
+        if cmd == "show":
+            _publish_show()
+        elif cmd == "pull":
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_pull(site)
+        elif cmd == "restore-site":
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_restore_site(site)
+        elif cmd == "channel":
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_publish(site)
+        elif cmd in ("back", "done", "exit", "quit"):
+            break
+        elif cmd in ("help", "?"):
+            print(PUBLISH_HELP)
+        else:
+            print(f"  Unknown command: {cmd}")
+            print(PUBLISH_HELP)
+
 
 # Formatting uptime
 def _format_uptime(seconds):
@@ -5292,8 +5356,8 @@ def _startup_refresh():
 # config the service reads, the unit files, or a site folder the service user
 # owns. Read-only ones (status, sites, log) are absent deliberately — they must
 # keep working without a password prompt.
-_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "pull",
-                  "restore-site")
+_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "publish",
+                  "pull", "restore-site")
 
 # What sudo made of the last elevated command. The one-shot `servette <command>`
 # form exits with it, so tooling driving Servette over SSH sees a refused
@@ -5419,6 +5483,8 @@ def run_command(cmd, args):
             cmd_log(int(args[0]) if args else 20)
         except ValueError:
             print("Usage: log [number]")
+    elif cmd == "publish":
+        cmd_publish()
     elif cmd == "pull":
         site = _config_site_arg(args)
         if site is not None:

@@ -889,7 +889,8 @@ def run_dispatch_tests(s):
     # live test server up for the integration tests that follow.
     calls       = []
     saved       = {n: getattr(s, n) for n in
-                   ("cmd_status", "cmd_start", "stop_server", "cmd_pull", "cmd_restore_site")}
+                   ("cmd_status", "cmd_start", "stop_server", "cmd_pull",
+                    "cmd_restore_site", "cmd_publish")}
     saved_input = builtins.input
     try:
         s.cmd_status       = lambda json_mode=False: calls.append("status")
@@ -897,7 +898,9 @@ def run_dispatch_tests(s):
         s.stop_server      = lambda: calls.append("stop")
         s.cmd_pull         = lambda site: calls.append(("pull", site))
         s.cmd_restore_site = lambda site: calls.append(("restore-site", site))
-        script = iter(["status", "start", "pull 0", "restore-site 0", "pull 99", "bogus", "quit"])
+        s.cmd_publish      = lambda: calls.append("publish")
+        script = iter(["status", "start", "pull 0", "restore-site 0", "publish",
+                       "pull 99", "bogus", "quit"])
         builtins.input = lambda prompt="": next(script, "quit")
         with contextlib.redirect_stdout(io.StringIO()):
             s.shell()
@@ -913,10 +916,53 @@ def run_dispatch_tests(s):
           ("pull", s.config.sites[0]) in calls)
     check("'restore-site 0' routes to cmd_restore_site with site 0",
           ("restore-site", s.config.sites[0]) in calls)
+    check("'publish' routed to cmd_publish", "publish" in calls)
     pull_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "pull"]
     check("'pull 99' (bad site index) does not call cmd_pull", len(pull_calls) == 1)
     check("'quit' stops server and exits", calls[-1] == "stop")
 
+
+    section("Publish sub-shell")
+
+    # Routing only, like the dispatch test above: every verb must delegate to
+    # the command it gathers, with the same [n] convention and bad-index guard.
+    sub_calls   = []
+    saved_sub   = {n: getattr(s, n) for n in
+                   ("cmd_pull", "cmd_restore_site", "_config_publish")}
+    saved_input = builtins.input
+    try:
+        s.cmd_pull         = lambda site: sub_calls.append(("pull", site))
+        s.cmd_restore_site = lambda site: sub_calls.append(("restore", site))
+        s._config_publish  = lambda site: sub_calls.append(("channel", site))
+        script = iter(["pull 0", "restore-site 0", "channel 0",
+                       "pull 99", "bogus", "back"])
+        builtins.input = lambda prompt="": next(script, "back")
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_publish()
+    finally:
+        builtins.input = saved_input
+        for n, fn in saved_sub.items():
+            setattr(s, n, fn)
+
+    sub_out = buf.getvalue()
+    check("'pull 0' delegates to cmd_pull with site 0",
+          ("pull", s.config.sites[0]) in sub_calls)
+    check("'restore-site 0' delegates to cmd_restore_site with site 0",
+          ("restore", s.config.sites[0]) in sub_calls)
+    check("'channel 0' delegates to the config sub-shell's publish prompt",
+          ("channel", s.config.sites[0]) in sub_calls)
+    check("'pull 99' (bad site index) is refused with the sites hint",
+          len([c for c in sub_calls if c[0] == "pull"]) == 1
+          and "No site 99" in sub_out)
+    check("unknown input reprints the publish help",
+          "Unknown command: bogus" in sub_out)
+    check("the display shows each site's channel and backup state",
+          "channel:" in sub_out and "backup:" in sub_out)
+
+    # publish elevates like config: its verbs write site content and the
+    # config file, so an unprivileged shell must hand it to root.
+    check("publish is in the elevation set",
+          s._needs_root("publish") or s._IS_MACOS)
 
     section("One-shot CLI: run_command and set")
 

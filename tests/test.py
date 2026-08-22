@@ -1049,6 +1049,13 @@ def run_dispatch_tests(s):
           "tab-config" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
     check("...with the Health checks card and the masked password field",
           "health-list" in s._UI_ADMIN_PAGE and "cfg-password" in s._UI_ADMIN_PAGE)
+    check("...as a protection toggle plus host basics — the advanced knobs stay in the terminal",
+          "btn-auth-toggle" in s._UI_ADMIN_PAGE
+          and "has_password" in s._UI_ADMIN_PAGE
+          and "cfg-port" not in s._UI_ADMIN_PAGE
+          and "cfg-dir" not in s._UI_ADMIN_PAGE
+          and "trusted_proxy" not in s._UI_ADMIN_PAGE
+          and "publish_url" not in s._UI_ADMIN_PAGE)
 
     section("Loopback page server")
 
@@ -1111,7 +1118,8 @@ def run_dispatch_tests(s):
 
         st, body = ui_req("GET", f"/config?t={ui_code}")
         check("GET /config with the code answers the set vocabulary with values",
-              st == 200 and b'"trusted_proxy"' in body and b'"sites"' in body)
+              st == 200 and b'"trusted_proxy"' in body and b'"sites"' in body
+              and b'"has_password"' in body)
         st, _ = ui_req("GET", "/config")
         check("GET /config without the code is refused", st == 403)
 
@@ -1146,6 +1154,19 @@ def run_dispatch_tests(s):
               st == 200 and s.config.sites[0].username == "cfg-auth"
               and s._check_password("pw-probe", s.config.sites[0].password_hash,
                                     s.config.sites[0].password_salt))
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"site": 0,
+                                        "values": {"username": "",
+                                                   "password": "pw-2"}}).encode())
+        check("A password riding with an emptied username is refused whole",
+              st == 422 and s.config.sites[0].username == "cfg-auth")
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"site": 0,
+                                        "values": {"username": ""}}).encode())
+        check("Clearing the username over HTTP deletes the stored password with it",
+              st == 200 and s.config.sites[0].username == ""
+              and s.config.sites[0].password_hash == ""
+              and s.config.sites[0].password_salt == "")
         s.config.sites[0].username = saved_cfg_user
         s.config.sites[0].password_hash, s.config.sites[0].password_salt = saved_pw
         s.config.save()
@@ -1267,6 +1288,20 @@ def run_dispatch_tests(s):
             s.cmd_set(["password=hunter2"])
         check("set refuses unknown keys (password is interactive-only)",
               "Unknown or malformed" in buf.getvalue())
+
+        saved_auth = (s.config.sites[0].username, s.config.sites[0].password_hash,
+                      s.config.sites[0].password_salt)
+        s.config.sites[0].username = "probe"
+        s.config.sites[0].password_hash = "stale-hash"
+        s.config.sites[0].password_salt = "stale-salt"
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["username="])
+        check("set username= is the one auth switch — the stored password clears with it",
+              s.config.sites[0].username == ""
+              and s.config.sites[0].password_hash == ""
+              and s.config.sites[0].password_salt == "")
+        (s.config.sites[0].username, s.config.sites[0].password_hash,
+         s.config.sites[0].password_salt) = saved_auth
 
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["dir=/etc"])

@@ -5480,6 +5480,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       width: 100%;
     }
     select.cfg-site { width: auto; }
+    .cfg-field input:disabled { opacity: 0.4; cursor: not-allowed; }
+    .cfg-field label.off { opacity: 0.4; }
+    .cfg-hint {
+      font-size: 0.68rem;
+      color: var(--muted);
+      line-height: 1.6;
+      margin-top: 0.3rem;
+    }
   </style>
 </head>
 <body>
@@ -5597,19 +5605,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Site settings</span>
+        <span class="card-title">Password protection</span>
         <span class="badge badge-dim" id="cfg-site-badge">loading…</span>
       </div>
       <div class="card-body">
-        <select class="cfg-site" id="cfg-site-select"></select>
+        <select class="cfg-site hidden" id="cfg-site-select"></select>
+        <div class="btn-row">
+          <button class="action" id="btn-auth-toggle" type="button">…</button>
+        </div>
         <div id="cfg-site-fields"></div>
         <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action primary" id="btn-save-site" type="button">Save site settings</button>
+          <button class="action primary" id="btn-save-site" type="button">Save</button>
         </div>
-        <p class="hint">The password saves only when the field is non-blank —
-        blank leaves it unchanged, and clearing the username is what turns
-        auth off. Domain stays in the terminal on purpose: it is bound up
-        with certificate issuance (<b>config &gt; cert</b>).</p>
+        <p class="hint" id="auth-hint"></p>
         <p class="error hidden" id="cfg-site-error"></p>
       </div>
     </div>
@@ -5729,7 +5737,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                attention ? attention + ' to review' : '✓ all healthy');
       $('health-list').innerHTML = checksRows.map((c) => {
         const mark = c.ok ? '<span class="good">✓</span>' : '<span class="warn">!</span>';
-        const goto = (!c.ok && (c.key === 'password' || c.key === 'channel'))
+        const goto = (!c.ok && c.key === 'password')
           ? ' <a href="#config" class="cfg-link">open the Config tab →</a>' : '';
         return `<div class="${c.ok ? '' : 'gap'}">${mark} <b>${escapeHtml(c.label)}</b>` +
                ` — <span class="${c.ok ? '' : 'warn'}">${escapeHtml(c.detail)}</span>${goto}</div>`;
@@ -5748,40 +5756,69 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   $('btn-refresh').addEventListener('click', loadStatus);
 
   /* ══ Config — forms over the same validators the `set` command runs, so a
-     value the terminal refuses the page refuses with the same sentence. ══ */
+     value the terminal refuses the page refuses with the same sentence.
+     Deliberately absent from the page (the terminal keeps them all): domain
+     (bound up with certificate issuance), the serve folder (publishing
+     manages it), port and trusted proxy (behind-a-balancer deployments),
+     the pull channel's URL/key pair, and every lifecycle verb. ══ */
 
   const HOST_FIELDS = [
-    ['port',            'HTTPS port'],
-    ['email',           'Email (ACME registration)'],
-    ['rate_limit',      'Rate limit (requests / minute / visitor)'],
-    ['auth_rate_limit', 'Auth rate limit (failed logins / minute)'],
-    ['cache_size_mb',   'File cache size (MB)'],
-    ['trusted_proxy',   'Trusted proxy IP (blank = none)'],
-  ];
-  const SITE_FIELDS = [
-    ['dir',         'Folder to serve'],
-    ['username',    'Login username (blank = no password gate)'],
-    ['publish_url', 'Publish channel URL (blank = none)'],
-    ['publish_key', 'Publish channel key (64 hex)'],
+    ['email', 'Email (ACME registration)',
+     'Where the certificate authority sends renewal and expiry notices. Never shown on the site.'],
+    ['rate_limit', 'Rate limit',
+     'Requests one visitor may make per minute before the server answers 429 and makes them wait.'],
+    ['auth_rate_limit', 'Auth rate limit',
+     'Wrong-password attempts one visitor may make per minute before being made to wait.'],
+    ['cache_size_mb', 'File cache size (MB)',
+     'Memory set aside to serve frequently requested files without re-reading the disk.'],
   ];
 
   let cfgData = null;
+  let authDesired = null;  // null = follow the server; true/false = the toggle's unsaved intent
 
-  const field = (key, label, value, type) =>
-    `<div class="cfg-field"><label for="cfg-${key}">${label}</label>` +
-    `<input id="cfg-${key}" type="${type || 'text'}"` +
-    ` value="${escapeHtml(String(value == null ? '' : value))}"></div>`;
+  const field = (key, label, value, opts) => {
+    const o = opts || {};
+    return `<div class="cfg-field">` +
+      `<label for="cfg-${key}"${o.off ? ' class="off"' : ''}>${label}</label>` +
+      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
+      ` value="${escapeHtml(String(value == null ? '' : value))}"${o.off ? ' disabled' : ''}>` +
+      (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
+      `</div>`;
+  };
+
+  function currentSite() {
+    const siteIdx = parseInt($('cfg-site-select').value || '0', 10) || 0;
+    return [(cfgData.sites || [])[siteIdx] || {}, siteIdx];
+  }
+
+  const authOn = (site) => (authDesired === null) ? !!site.username : authDesired;
 
   function renderConfig() {
-    const siteIdx = parseInt($('cfg-site-select').value || '0', 10) || 0;
-    const site = (cfgData.sites || [])[siteIdx] || {};
+    const [site] = currentSite();
+    const on = authOn(site);
+    const off = !on;
+
+    $('btn-auth-toggle').textContent =
+      on ? 'Turn password protection off' : 'Turn password protection on';
     $('cfg-site-fields').innerHTML =
-      SITE_FIELDS.map(([k, l]) => field(k, l, site[k])).join('') +
-      field('password', 'New password (blank = leave unchanged)', '', 'password');
+      field('username', 'Username', site.username,
+            { off, hint: 'What visitors type to open the site.' }) +
+      field('password',
+            site.has_password ? 'New password (blank = keep the current one)' : 'Password',
+            '', { off, type: 'password',
+                  hint: 'Stored only as a hash on your server. Spaces count; nothing is trimmed.' });
+    $('auth-hint').textContent = on
+      ? (site.has_password
+          ? 'The site asks every visitor for this login.'
+          : 'Choose a username and a password, then save — the site will ask every visitor for them.')
+      : (site.username
+          ? 'Saving now removes the login: the site becomes public and the stored password is deleted.'
+          : 'The site is public — anyone can view it. Turn protection on to require a login.');
+    setBadge($('cfg-site-badge'), on ? 'badge-green' : 'badge-dim',
+             on ? 'on' : 'off');
+
     $('cfg-host-fields').innerHTML =
-      HOST_FIELDS.map(([k, l]) => field(k, l, (cfgData.host || {})[k])).join('');
-    setBadge($('cfg-site-badge'), 'badge-dim',
-             site.domain ? site.domain : 'site ' + siteIdx);
+      HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
     setBadge($('cfg-host-badge'), 'badge-dim', 'host-wide');
   }
 
@@ -5792,12 +5829,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const r = await fetch('/config?t=' + encodeURIComponent(CODE));
       if (!r.ok) throw new Error('HTTP ' + r.status);
       cfgData = await r.json();
+      authDesired = null;  // fresh truth from the server resets the toggle
       const sel = $('cfg-site-select');
       const keep = sel.value;
       sel.innerHTML = (cfgData.sites || []).map((s) =>
         `<option value="${s.index}">site ${s.index}` +
         `${s.domain ? ' — ' + escapeHtml(s.domain) : ''}</option>`).join('');
       if (keep) sel.value = keep;
+      // A one-site server needs no site picker — it appears with a second site.
+      sel.classList.toggle('hidden', (cfgData.sites || []).length < 2);
       renderConfig();
     } catch (e) {
       setBadge($('cfg-site-badge'), 'badge-red', '✕ unreachable');
@@ -5807,7 +5847,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
   }
 
-  $('cfg-site-select').addEventListener('change', renderConfig);
+  $('cfg-site-select').addEventListener('change', () => {
+    authDesired = null;  // the toggle's unsaved intent belongs to one site
+    renderConfig();
+  });
+
+  $('btn-auth-toggle').addEventListener('click', () => {
+    authDesired = !authOn(currentSite()[0]);
+    renderConfig();
+  });
 
   async function saveSettings(fields, siteIdx, badge, errEl, extra) {
     clearError(errEl);
@@ -5836,13 +5884,27 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   }
 
   $('btn-save-site').addEventListener('click', () => {
+    const [site, siteIdx] = currentSite();
+    clearError($('cfg-site-error'));
+    if (!authOn(site)) {
+      // Off is one switch on the server too: a cleared username deletes the
+      // stored password with it. Saving off-over-off is a harmless no-op.
+      saveSettings([], siteIdx, $('cfg-site-badge'), $('cfg-site-error'),
+                   { username: '' });
+      return;
+    }
     // The password is never trimmed — spaces are password characters — and
     // only travels when non-blank: blank means unchanged, never cleared.
+    const username = $('cfg-username').value.trim();
     const pw = $('cfg-password').value;
-    saveSettings(
-      SITE_FIELDS, parseInt($('cfg-site-select').value || '0', 10) || 0,
-      $('cfg-site-badge'), $('cfg-site-error'),
-      pw ? { password: pw } : null);
+    if (!username)
+      return showError($('cfg-site-error'),
+        'A username is needed — or turn protection off.');
+    if (!site.has_password && !pw)
+      return showError($('cfg-site-error'),
+        'A password is needed the first time protection turns on.');
+    saveSettings([], siteIdx, $('cfg-site-badge'), $('cfg-site-error'),
+                 Object.assign({ username }, pw ? { password: pw } : {}));
   });
   $('btn-save-host').addEventListener('click', () => saveSettings(
     HOST_FIELDS, 0, $('cfg-host-badge'), $('cfg-host-error')));
@@ -6154,14 +6216,17 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._respond(200, json.dumps(_status_data()), "application/json")
         if path == "/config":
             # The Config tab's read half: exactly the vocabulary `set`
-            # accepts, plus current values to fill the forms.
+            # accepts, plus current values to fill the forms — and
+            # has_password, a boolean only, so the page can show whether
+            # protection is on without the hash ever crossing the wire.
             if auth != "ok":
                 return self._respond(403, "Not paired.")
             return self._respond(200, json.dumps({
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
                            "username": s.username, "publish_url": s.publish_url,
-                           "publish_key": s.publish_key}
+                           "publish_key": s.publish_key,
+                           "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
         if auth == "ok":
@@ -6205,14 +6270,18 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(422, json.dumps({"error": f"no site {idx}"}),
                                      "application/json")
             site = config.sites[idx]
+            # Judged before anything applies: a password riding with an empty
+            # (or emptied) username would otherwise half-write — the pairs
+            # land and save before the password check could object.
+            if password and not values.get("username", site.username):
+                return self._respond(422, json.dumps(
+                    {"error": "password: set a username first"}),
+                    "application/json")
             try:
                 err = _apply_settings(site, pairs) if pairs else ""
                 if not err and password:
-                    if not site.username:
-                        err = "password: set a username first"
-                    else:
-                        site.password_hash, site.password_salt = _hash_password(password)
-                        config.save()
+                    site.password_hash, site.password_salt = _hash_password(password)
+                    config.save()
             except PermissionError:
                 return self._respond(500, json.dumps(
                     {"error": "writing the config needs root — re-run 'admin' elevated"}),
@@ -6693,7 +6762,14 @@ def _set_site_value(target, key, value):
             return f"directory not found: {resolved}"
         target.serve_dir = value
     elif key == "username":
+        # Auth is one switch, not two half-states: a cleared username takes
+        # the stored password with it, on every surface that writes settings
+        # (`set` and the page alike, since both land here) — the same rule
+        # the interactive prompt has always kept.
         target.username = value
+        if not value:
+            target.password_hash = ""
+            target.password_salt = ""
     elif key == "publish_url":
         if value and not value.startswith("https://"):
             return "publish_url must be https:// (or empty to clear)"

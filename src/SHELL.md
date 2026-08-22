@@ -1305,14 +1305,17 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._respond(200, json.dumps(_status_data()), "application/json")
         if path == "/config":
             # The Config tab's read half: exactly the vocabulary `set`
-            # accepts, plus current values to fill the forms.
+            # accepts, plus current values to fill the forms — and
+            # has_password, a boolean only, so the page can show whether
+            # protection is on without the hash ever crossing the wire.
             if auth != "ok":
                 return self._respond(403, "Not paired.")
             return self._respond(200, json.dumps({
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
                            "username": s.username, "publish_url": s.publish_url,
-                           "publish_key": s.publish_key}
+                           "publish_key": s.publish_key,
+                           "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
         if auth == "ok":
@@ -1356,14 +1359,18 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(422, json.dumps({"error": f"no site {idx}"}),
                                      "application/json")
             site = config.sites[idx]
+            # Judged before anything applies: a password riding with an empty
+            # (or emptied) username would otherwise half-write — the pairs
+            # land and save before the password check could object.
+            if password and not values.get("username", site.username):
+                return self._respond(422, json.dumps(
+                    {"error": "password: set a username first"}),
+                    "application/json")
             try:
                 err = _apply_settings(site, pairs) if pairs else ""
                 if not err and password:
-                    if not site.username:
-                        err = "password: set a username first"
-                    else:
-                        site.password_hash, site.password_salt = _hash_password(password)
-                        config.save()
+                    site.password_hash, site.password_salt = _hash_password(password)
+                    config.save()
             except PermissionError:
                 return self._respond(500, json.dumps(
                     {"error": "writing the config needs root — re-run 'admin' elevated"}),
@@ -1904,7 +1911,14 @@ def _set_site_value(target, key, value):
             return f"directory not found: {resolved}"
         target.serve_dir = value
     elif key == "username":
+        # Auth is one switch, not two half-states: a cleared username takes
+        # the stored password with it, on every surface that writes settings
+        # (`set` and the page alike, since both land here) — the same rule
+        # the interactive prompt has always kept.
         target.username = value
+        if not value:
+            target.password_hash = ""
+            target.password_salt = ""
     elif key == "publish_url":
         if value and not value.startswith("https://"):
             return "publish_url must be https:// (or empty to clear)"

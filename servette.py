@@ -18,7 +18,7 @@ Architecture:
     Shell               — the interactive terminal interface
 """
 
-__version__ = "0.26.231"
+__version__ = "0.26.234"
 
 # Imports — standard library only
 import base64

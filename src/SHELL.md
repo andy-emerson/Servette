@@ -60,7 +60,7 @@ HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d i
 
 ```
 
-The config sub-shell's commands, ordered: sites first (list/add/remove — the multi-site entry points), then what a site serves and how it's reached (dir/port/cert/email — email is the ACME registration address, grouped with the certificate it belongs to), then access control, then traffic shaping, then advanced security tuning, then meta. `dir`/`cert`/`publish`/`username`/`password` take an optional site index (default 0) — the same `[n]` convention as the top-level `log [n]`.
+The config sub-shell's commands, ordered: sites first (list/add/remove/move — the multi-site entry points), then what a site serves and how it's reached (dir/port/cert/email — email is the ACME registration address, grouped with the certificate it belongs to), then access control, then traffic shaping, then advanced security tuning, then meta. `dir`/`cert`/`publish`/`username`/`password` take an optional site index (default 0) — the same `[n]` convention as the top-level `log [n]`.
 
 ```python
 # The config commands
@@ -68,6 +68,7 @@ _CONFIG_COMMANDS = [
     ("sites",           "list configured sites"),
     ("add-site",        "add a new site (folder, domain, password, publish channel)"),
     ("remove-site <n>", "remove a site"),
+    ("move-site <n> <to>", "reorder sites (the first domainless one answers unmatched Hosts)"),
     ("dir [n]",         "directory to serve"),
     ("port",            "HTTPS port"),
     ("cert [n]",        "SSL certificate and key"),
@@ -223,6 +224,43 @@ Adding a site asks the same questions setup asks for the first one, plus the fol
 
 ```python
 # add-site
+def _invent_site_dir():
+    """Create and own an empty folder for a page-added site. Servette names
+    it: the folder is where publishes land, not a question an operator
+    should have to answer (the add-card ruling — and the folder concept is
+    on its way out of the vocabulary entirely)."""
+    name = f"site-{os.urandom(3).hex()}"
+    os.makedirs(_resolve(name), exist_ok=True)
+    _chown_operator(_resolve(name))
+    return name
+
+
+def _append_site(serve_dir):
+    """Append a new site serving `serve_dir` (a path the caller has already
+    validated or created) and give it its own certificate identity. The one
+    site-creation core, shared by the terminal's add-site prompts and the
+    page's add-card. Returns the new site's index.
+
+    The self-signed pair is suffixed with randomness, not the site's list
+    position: a position-based name (cert-{idx}.pem) collides with a
+    surviving site's own files after a remove/add sequence shifts indices,
+    silently overwriting that site's live certificate. It is generated
+    unconditionally, before any domain enters the picture: if ACME issuance
+    later fails, cert_file/key_file must still point at real files on disk —
+    start_server()'s pre-flight existence check refuses to start the WHOLE
+    server, for every site, if any site's cert_file is missing."""
+    site = Site({"serve_dir": serve_dir})
+    config.sites.append(site)
+    suffix = os.urandom(4).hex()
+    site.cert_file = f"cert-{suffix}.pem"
+    site.key_file  = f"key-{suffix}.pem"
+    _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
+    _chown_servette(_resolve(site.cert_file))
+    _chown_servette(_resolve(site.key_file))
+    config.save()
+    return len(config.sites) - 1
+
+
 def _config_add_site():
     """Add a site — the same questions cmd_setup asks for the very first one
     (domain, password), plus the folder question the first site gets for free
@@ -252,30 +290,12 @@ def _config_add_site():
     if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
         print("  No index.html yet — the site will answer with Servette's error page until you publish one.")
 
-    site = Site({"serve_dir": folder})
-    config.sites.append(site)
-    idx = len(config.sites) - 1
-    # A unique self-signed cert/key pair, so a second self-signed site doesn't
-    # collide with the first's cert.pem/key.pem — overwritten if a domain is
-    # obtained below, which uses the domain-scoped certs/<domain>/ path instead.
-    # Suffixed with randomness, not the site's list position: a position-based
-    # name (cert-{idx}.pem) collides with a surviving site's own files after a
-    # remove-site/add-site sequence shifts indices, silently overwriting that
-    # site's live certificate.
-    suffix = os.urandom(4).hex()
-    site.cert_file = f"cert-{suffix}.pem"
-    site.key_file  = f"key-{suffix}.pem"
-    # Generated unconditionally, before the domain is even asked about: if a
-    # domain is given below and ACME issuance fails, cert_file/key_file must
-    # still point at real files on disk rather than a placeholder name that
-    # was config.save()'d but never written — start_server()'s pre-flight
-    # existence check refuses to start the WHOLE server, for every site, the
-    # next time anything restarts it, if a site's cert_file is missing.
+    # The self-signed pair keeps a second site from colliding with the
+    # first's cert.pem/key.pem — overwritten if a domain is obtained below,
+    # which uses the domain-scoped certs/<domain>/ path instead.
     print("  Generating self-signed certificate...")
-    _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
-    _chown_servette(_resolve(site.cert_file))
-    _chown_servette(_resolve(site.key_file))
-    config.save()
+    idx  = _append_site(folder)
+    site = config.sites[idx]
     print(f"  → site {idx} added.\n")
 
     domain = _input("  Domain name (leave blank for self-signed): ").strip()
@@ -321,10 +341,25 @@ def _config_add_site():
 
 ```
 
-Removal discards config only — files on disk are never touched — and the last site can't be removed.
+Removal discards config only — files on disk are never touched — and the last site can't be removed. The core is shared with the page's delete-card, which does its confirming in the browser.
 
 ```python
 # remove-site
+def _remove_site(idx):
+    """Drop site `idx` from config — files on disk are never touched, and
+    the last site can't be removed. Returns an error sentence, empty on
+    success. Shared by the terminal's remove-site and the page's cards."""
+    if not (0 <= idx < len(config.sites)):
+        return f"no site {idx}"
+    if len(config.sites) == 1:
+        return "can't remove the only site — a box needs at least one"
+    del config.sites[idx]
+    config.save()
+    if _server_running() or _service_is_active():
+        _reload_server()
+    return ""
+
+
 def _config_remove_site(args):
     if not args:
         print("  Usage: remove-site <site index>")
@@ -347,11 +382,37 @@ def _config_remove_site(args):
         print("  Cancelled.")
         return
 
-    del config.sites[idx]
-    config.save()
-    print(f"  → site {idx} removed.")
-    if _server_running() or _service_is_active():
-        _reload_server()
+    err = _remove_site(idx)
+    print(f"  {err}" if err else f"  → site {idx} removed.")
+
+
+```
+
+Order is config too: `_select_site` hands unmatched Hosts to the *first* domainless site, so where a site sits in the list is visible truth, moved and saved like any other setting.
+
+```python
+# move-site
+def _move_site(frm, to):
+    """Reorder: lift site `frm` out and reinsert it at position `to`.
+    Returns an error sentence, empty on success. Shared by the terminal's
+    move-site and the page's card drag."""
+    n = len(config.sites)
+    if not (0 <= frm < n and 0 <= to < n):
+        return f"site indexes must be 0-{n - 1}"
+    if frm != to:
+        config.sites.insert(to, config.sites.pop(frm))
+        config.save()
+        if _server_running() or _service_is_active():
+            _reload_server()
+    return ""
+
+
+def _config_move_site(args):
+    if len(args) != 2 or not all(a.isdigit() for a in args):
+        print("  Usage: move-site <from> <to>")
+        return
+    err = _move_site(int(args[0]), int(args[1]))
+    print(f"  {err}" if err else "  → moved.")
 
 
 ```
@@ -693,6 +754,8 @@ def cmd_config():
             _config_add_site()
         elif cmd == "remove-site":
             _config_remove_site(args)
+        elif cmd == "move-site":
+            _config_move_site(args)
         elif cmd in ("dir", "directory"):
             site = _config_site_arg(args)
             if site is not None:
@@ -1324,7 +1387,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path not in ("/upload", "/config"):
+        if path not in ("/upload", "/config", "/sites"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
             return self._respond(403, "Not paired.")
@@ -1334,6 +1397,44 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             length = 0
         if length <= 0:
             return self._respond(400, "Empty upload.")
+
+        if path == "/sites":
+            # The page's card row: add, remove, move — the same cores the
+            # terminal's add-site / remove-site / move-site run. Add invents
+            # the folder itself (a Servette-assigned name under the data
+            # directory): the folder is where publishes land, not a question
+            # an operator should have to answer.
+            if length > 4096:
+                return self._respond(413, "Body too large.")
+            try:
+                body = json.loads(self.rfile.read(length))
+                op   = str(body.get("op") or "")
+            except (ValueError, TypeError):
+                return self._respond(400, "Malformed body.")
+            try:
+                if op == "add":
+                    _append_site(_invent_site_dir())
+                    err = ""
+                    if _server_running() or _service_is_active():
+                        _reload_server()
+                elif op in ("remove", "move"):
+                    try:
+                        err = (_remove_site(int(body.get("site")))
+                               if op == "remove"
+                               else _move_site(int(body.get("from")),
+                                               int(body.get("to"))))
+                    except (TypeError, ValueError):
+                        err = "site indexes must be whole numbers"
+                else:
+                    err = "unknown op"
+            except PermissionError:
+                return self._respond(500, json.dumps(
+                    {"error": "writing the config needs root — re-run 'admin' elevated"}),
+                    "application/json")
+            return self._respond(200 if not err else 422,
+                                 json.dumps({"result": "ok"} if not err
+                                            else {"error": err}),
+                                 "application/json")
 
         if path == "/config":
             # The Config tab's write half: the same validate-then-apply path
@@ -1382,9 +1483,22 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
         if length > _MAX_BUNDLE_BYTES:
             return self._respond(413, "Bundle too large.")
-        result = _land_bundle(self.server.site, self.rfile.read(length), "browser upload")
+        # The page names the site each card publishes; without the parameter
+        # (older callers, the tests' bare posts) the command's own site stands.
+        site = self.server.site
+        picked = parse_qs(urlsplit(self.path).query).get("site")
+        if picked:
+            try:
+                idx = int(picked[0])
+            except ValueError:
+                idx = -1
+            if not (0 <= idx < len(config.sites)):
+                return self._respond(422, json.dumps({"result": "rejected"}),
+                                     "application/json")
+            site = config.sites[idx]
+        result = _land_bundle(site, self.rfile.read(length), "browser upload")
         if result == "published" and getattr(self.server, "on_publish", None):
-            self.server.on_publish()  # the terminal narrates what the browser did
+            self.server.on_publish(site)  # the terminal narrates what the browser did
         self._respond(200 if result == "published" else 422,
                       json.dumps({"result": result}), "application/json")
 
@@ -1420,20 +1534,20 @@ def _stop_ui(httpd):
 ```python
 # admin
 def cmd_admin():
-    site = config.sites[0]  # the page publishes site 0 until it grows a picker
+    site = config.sites[0]  # the fallback when an upload names no site
     try:
         httpd, code = _start_ui(site, _UI_ADMIN_PAGE)
     except OSError as e:
         print(f"  Could not open the page (port {_UI_PORT}: {e.strerror or e}).")
         return
-    httpd.on_publish = lambda: print(
-        "\n  Published from browser: content swapped in — restore-site undoes it.")
+    httpd.on_publish = lambda s: print(
+        f"\n  Published from browser to {s.domain or s.serve_dir}: "
+        "content swapped in — restore-site undoes it.")
 
     try:
-        target = f" (publishes site 0: {site.domain or site.serve_dir})" if len(config.sites) > 1 else ""
         # The happy path pays one line; the troubleshooting lives behind
         # 'help', summoned exactly when the page fails to load.
-        print(f"  The admin page is up{target}:")
+        print("  The admin page is up:")
         print(f"    open  http://localhost:{_UI_PORT}/?t={code}")
         print("    (page won't load? type 'help')")
         print()

@@ -1191,6 +1191,95 @@ def run_dispatch_tests(s):
               and not os.path.exists(os.path.join(ui_dir, "evil.html"))
               and os.path.exists(os.path.join(ui_dir, "live", "new.html")))
 
+        # Site management ops — the page's card row runs the same cores the
+        # terminal's add-site / remove-site / move-site run. Reload guards
+        # are stubbed: these tests exercise config truth, not the restart.
+        saved_running = s._server_running
+        saved_active  = s._service_is_active
+        s._server_running    = lambda: False
+        s._service_is_active = lambda: False
+        added = None
+        try:
+            st, _ = ui_req("POST", "/sites",
+                           body=json.dumps({"op": "add"}).encode())
+            check("Site ops without the code are refused", st == 403)
+
+            n0 = len(s.config.sites)
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "add"}).encode())
+            added = s.config.sites[-1]
+            check("op=add appends a site with an assigned folder and its own cert pair",
+                  st == 200 and len(s.config.sites) == n0 + 1
+                  and added.serve_dir.startswith("site-")
+                  and os.path.isdir(s._resolve(added.serve_dir))
+                  and os.path.exists(s._resolve(added.cert_file))
+                  and added.cert_file != s.config.sites[0].cert_file)
+            added_base = s._resolve(added.serve_dir)
+
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "move", "from": n0, "to": 0}).encode())
+            check("op=move reorders — the new site leads the list",
+                  st == 200 and s.config.sites[0] is added)
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "move", "from": 0, "to": n0}).encode())
+            check("...and moves back", st == 200 and s.config.sites[-1] is added)
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "move", "from": 0, "to": 99}).encode())
+            check("op=move refuses an index off the list", st == 422)
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "sudo"}).encode())
+            check("An unknown op is refused", st == 422)
+
+            st, _ = ui_req("POST", f"/upload?t={ui_code}&site={n0}",
+                           body=_ui_tar([("second.html", "two")]))
+            check("An upload naming a site lands on that site, not the command's",
+                  st == 200
+                  and os.path.exists(os.path.join(added_base, "second.html"))
+                  and not os.path.exists(os.path.join(ui_dir, "live", "second.html")))
+            st, _ = ui_req("POST", f"/upload?t={ui_code}&site=99",
+                           body=_ui_tar([("x.html", "x")]))
+            check("An upload naming a site off the list is rejected", st == 422)
+
+            saved_sites_list = s.config.sites
+            s.config.sites = [s.config.sites[0]]
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "remove", "site": 0}).encode())
+            check("The last site can't be removed from the page either",
+                  st == 422 and b"only site" in body)
+            s.config.sites = saved_sites_list
+
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "remove",
+                                            "site": len(s.config.sites) - 1}).encode())
+            check("op=remove drops the config and leaves the files alone",
+                  st == 200 and len(s.config.sites) == n0
+                  and added not in s.config.sites and os.path.isdir(added_base))
+
+            check("move-site is in the config sub-shell's vocabulary",
+                  any(c.startswith("move-site") for c, _ in s._CONFIG_COMMANDS))
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                s._config_move_site(["1"])
+            check("move-site wants two indexes", "Usage" in buf.getvalue())
+        finally:
+            s._server_running    = saved_running
+            s._service_is_active = saved_active
+            if added is not None:
+                if added in s.config.sites:
+                    s.config.sites.remove(added)
+                    s.config.save()
+                base = s._resolve(added.serve_dir)
+                for suffix in ("", ".a", ".b", ".bak", ".new"):
+                    p = base + suffix
+                    if os.path.islink(p):
+                        os.unlink(p)
+                    elif os.path.isdir(p):
+                        shutil.rmtree(p, ignore_errors=True)
+                for leftover in (added.cert_file, added.key_file):
+                    try:
+                        os.remove(s._resolve(leftover))
+                    except OSError:
+                        pass
+
         # An oversize claim must be refused before the body is read — sent
         # raw, because http.client would insist on sending a real body.
         sk = socket.create_connection(("127.0.0.1", ui_port), timeout=10)
@@ -4912,8 +5001,10 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # the flip era (a symlink) and the era before it (a directory).
         "_land_bundle", "_swap_site_content", "cmd_restore_site",
         "_drop_backup",
-        # A site FOLDER, created empty — setup must never leave nothing to serve.
-        "cmd_setup",
+        # A site FOLDER, created empty — setup must never leave nothing to
+        # serve, and a page-added site gets a Servette-named folder because
+        # the folder is not a question an operator should have to answer.
+        "cmd_setup", "_invent_site_dir",
         # Servette's own state: config, certificates, the ACME account.
         "save", "_generate_self_signed_cert", "_ensure_default_cert",
         "_obtain_trusted_cert", "_persist_issued_cert", "issue",

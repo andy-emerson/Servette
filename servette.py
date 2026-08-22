@@ -6332,13 +6332,20 @@ def _set_site_value(target, key, value):
     a scratch Site during the validation pass). Returns an error string,
     empty on success."""
     if key == "dir":
+        # The same inline-barrier discipline as _resolve_request_path, for
+        # the same reason: this value can arrive over HTTP (the admin page's
+        # Config tab — loopback and paired, but HTTP all the same), so the
+        # containment check is written out where an analyzer can see it
+        # dominate every probe below — a guard folded into a helper is, to
+        # it and strictly speaking, not a guard. Containment first, the
+        # filesystem probe last.
         resolved = os.path.realpath(_resolve(value))
-        if not os.path.isdir(resolved):
-            return f"directory not found: {resolved}"
-        if not _is_within_base_dir(resolved):
+        if not resolved.startswith(os.path.realpath(BASE_DIR) + os.sep):
             return f"dir must live under {BASE_DIR} (the publish swap and the service sandbox depend on it)"
         if _serve_dir_exposes_secrets(resolved):
             return "dir would serve Servette's own config and keys — refused"
+        if not os.path.isdir(resolved):
+            return f"directory not found: {resolved}"
         target.serve_dir = value
     elif key == "username":
         target.username = value

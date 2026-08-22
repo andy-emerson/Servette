@@ -174,6 +174,60 @@
 
     .notfound-links a:hover { text-decoration: underline; }
 
+    /* ── Connection card ── */
+    .verified {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 1.5rem;
+    }
+
+    .verified-header {
+      background: var(--surface);
+      padding: 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .verified-label {
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.25rem;
+    }
+
+    .verified-value { font-size: 0.9rem; color: var(--text); }
+
+    .badge {
+      font-size: 0.7rem;
+      font-weight: 500;
+      padding: 0.3rem 0.7rem;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
+    .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
+
+    .verified-links {
+      padding: 0.75rem 1.25rem;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .verified-links a {
+      font-size: 0.75rem;
+      color: #5A8466;
+      text-decoration: none;
+    }
+
+    .verified-links a:hover { text-decoration: underline; }
+
     .note {
       font-size: 0.7rem;
       color: var(--muted);
@@ -219,6 +273,18 @@
     </p>
     <div class="notfound-links">
       <a href="/">← the site's home page</a>
+    </div>
+  </div>
+
+  <div class="verified">
+    <div class="verified-header">
+      <div>
+        <div class="verified-label">Connection</div>
+        <div class="verified-value" id="url">—</div>
+      </div>
+      <div class="badge" id="badge">—</div>
+    </div>
+    <div class="verified-links">
       <a href="/.well-known/servette-check">run the connection check →</a>
     </div>
   </div>
@@ -234,18 +300,27 @@
 <script>
   const $ = (id) => document.getElementById(id);
 
-  // ── The path the reader asked for ─────────────────────────────────
-  // textContent, never innerHTML: the path is whatever the client asked for.
-  // decodeURI so an escaped path reads as the reader typed it, with the raw
-  // value kept when it is malformed enough to throw.
-  let shown = location.pathname + location.search;
+  // ── The address the reader asked for ──────────────────────────────
+  // The complete URL, not the bare path: a miss at the site root would
+  // otherwise display as a lone "/", which reads as a typo rather than an
+  // address. textContent, never innerHTML — the path half is whatever the
+  // client asked for. decodeURI so an escaped path reads as the reader
+  // typed it, with the raw value kept when malformed enough to throw.
+  let shown = location.href.split('#')[0];
   try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
   $('notfound-path').textContent = shown;
 
   // The one live judgment this page keeps: whether the connection carrying
-  // it is encrypted. Everything deeper belongs to the connection check.
-  if (location.protocol !== 'https:') {
-    $('dot').className = 'dot red';
+  // it is encrypted. Everything deeper belongs to the connection check,
+  // linked on the card below.
+  $('url').textContent = location.protocol + '//' + location.host;
+  if (location.protocol === 'https:') {
+    $('badge').textContent = '✓ Verified encrypted';
+    $('badge').className   = 'badge badge-green';
+  } else {
+    $('badge').textContent = '⚠ Not encrypted';
+    $('badge').className   = 'badge badge-red';
+    $('dot').className     = 'dot red';
     $('tagline-text').textContent = 'Connection is not secure';
   }
 </script>

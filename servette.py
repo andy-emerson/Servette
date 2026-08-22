@@ -5344,6 +5344,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 
     .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
+    .rows a.cfg-link { color: #5A8466; text-decoration: none; white-space: nowrap; }
+    .rows a.cfg-link:hover { text-decoration: underline; }
     .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
     .rows .gap { margin-top: 0.55rem; }
     .rows b { color: var(--text); font-weight: 500; }
@@ -5453,7 +5455,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Server</span>
+        <span class="card-title">Server status</span>
         <span class="badge badge-dim" id="st-badge">loading…</span>
       </div>
       <div class="card-body">
@@ -5461,23 +5463,26 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <p class="error hidden" id="st-error"></p>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-refresh" type="button">Refresh</button>
-          <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once the status shows a domain">Run the connection check</button>
         </div>
-        <p class="hint">The connection check opens your site's own check page
-        in a new tab: its report is served from the public internet's side of
-        the wire — the vantage this page, living on your SSH tunnel, cannot
-        have.</p>
       </div>
     </div>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Needs attention</span>
-        <span class="badge badge-dim" id="issue-badge">…</span>
+        <span class="card-title">Health checks</span>
+        <span class="badge badge-dim" id="health-badge">…</span>
       </div>
       <div class="card-body">
-        <div class="rows" id="issue-list"></div>
+        <div class="rows" id="health-list"></div>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action" id="btn-outside" type="button" disabled
+                  title="Loads once the status shows a domain">Run the connection check</button>
+        </div>
+        <p class="hint">These rows are what the machine knows about itself.
+        The connection check is the counterpart: it opens your site's own
+        check page in a new tab, reporting from the public internet's side of
+        the wire — the vantage this page, living on your SSH tunnel, cannot
+        have.</p>
       </div>
     </div>
 
@@ -5537,10 +5542,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action primary" id="btn-save-site" type="button">Save site settings</button>
         </div>
-        <p class="hint">Password and domain stay in the terminal on purpose:
-        a password is a secret with a guided prompt (<b>config &gt;
-        password</b>), and a domain is bound up with certificate issuance
-        (<b>config &gt; cert</b>).</p>
+        <p class="hint">The password saves only when the field is non-blank —
+        blank leaves it unchanged, and clearing the username is what turns
+        auth off. Domain stays in the terminal on purpose: it is bound up
+        with certificate issuance (<b>config &gt; cert</b>).</p>
         <p class="error hidden" id="cfg-site-error"></p>
       </div>
     </div>
@@ -5633,13 +5638,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         h += row('Site ' + s.index, s.domain
           ? `<b>${escapeHtml('https://' + s.domain)}</b>` : '(no domain)', 'gap');
         h += row('Folder', escapeHtml(s.serve_dir || '(not set)'));
-        h += row('Password', s.auth ? 'enabled' : 'off');
-        h += row('Certificate', s.cert_days == null
-          ? '<span class="warn">none readable</span>'
-          : s.cert_days <= 0 ? '<span class="bad">expired</span>'
-          : s.cert_days < 30 ? `<span class="warn">${s.cert_days} days remaining</span>`
-          : `<span class="good">${s.cert_days} days remaining</span>`);
-        h += row('Channel', s.publish ? 'configured' : 'none (this page publishes directly)');
       }
       $('st-rows').innerHTML = h;
 
@@ -5649,18 +5647,25 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
         : 'Needs a domain — a LAN or self-signed site has no public vantage to check from';
 
-      const problems = [...(d.issues || []), ...(d.warnings || [])];
-      if (problems.length) {
-        setBadge($('issue-badge'), 'badge-red', problems.length + ' to review');
-        $('issue-list').innerHTML = problems
-          .map((p) => `<div class="warn">· ${escapeHtml(p)}</div>`).join('');
-      } else {
-        setBadge($('issue-badge'), 'badge-green', '✓ all clear');
-        $('issue-list').innerHTML =
-          '<div class="good">Nothing needs attention.</div>';
-      }
+      // Health rows: green said as plainly as amber, and the rows the
+      // Config tab can fix carry a link straight to it.
+      const checksRows = d.checks || [];
+      const attention = checksRows.filter((c) => !c.ok).length;
+      setBadge($('health-badge'),
+               attention ? 'badge-red' : 'badge-green',
+               attention ? attention + ' to review' : '✓ all healthy');
+      $('health-list').innerHTML = checksRows.map((c) => {
+        const mark = c.ok ? '<span class="good">✓</span>' : '<span class="warn">!</span>';
+        const goto = (!c.ok && (c.key === 'password' || c.key === 'channel'))
+          ? ' <a href="#config" class="cfg-link">open the Config tab →</a>' : '';
+        return `<div class="${c.ok ? '' : 'gap'}">${mark} <b>${escapeHtml(c.label)}</b>` +
+               ` — <span class="${c.ok ? '' : 'warn'}">${escapeHtml(c.detail)}</span>${goto}</div>`;
+      }).join('');
+      for (const a of document.querySelectorAll('.cfg-link'))
+        a.addEventListener('click', (e) => { e.preventDefault(); showTab('config'); });
     } catch (e) {
       setBadge($('st-badge'), 'badge-red', '✕ unreachable');
+      setBadge($('health-badge'), 'badge-red', '✕ unreachable');
       showError($('st-error'), 'Could not read status: ' + e.message +
         ' — if the terminal command was closed, re-run it and open the fresh link.');
     }
@@ -5688,15 +5693,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   let cfgData = null;
 
-  const field = (key, label, value) =>
+  const field = (key, label, value, type) =>
     `<div class="cfg-field"><label for="cfg-${key}">${label}</label>` +
-    `<input id="cfg-${key}" value="${escapeHtml(String(value == null ? '' : value))}"></div>`;
+    `<input id="cfg-${key}" type="${type || 'text'}"` +
+    ` value="${escapeHtml(String(value == null ? '' : value))}"></div>`;
 
   function renderConfig() {
     const siteIdx = parseInt($('cfg-site-select').value || '0', 10) || 0;
     const site = (cfgData.sites || [])[siteIdx] || {};
     $('cfg-site-fields').innerHTML =
-      SITE_FIELDS.map(([k, l]) => field(k, l, site[k])).join('');
+      SITE_FIELDS.map(([k, l]) => field(k, l, site[k])).join('') +
+      field('password', 'New password (blank = leave unchanged)', '', 'password');
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l]) => field(k, l, (cfgData.host || {})[k])).join('');
     setBadge($('cfg-site-badge'), 'badge-dim',
@@ -5727,9 +5734,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   $('cfg-site-select').addEventListener('change', renderConfig);
 
-  async function saveSettings(fields, siteIdx, badge, errEl) {
+  async function saveSettings(fields, siteIdx, badge, errEl, extra) {
     clearError(errEl);
-    const values = {};
+    const values = Object.assign({}, extra || {});
     for (const [k] of fields) values[k] = $('cfg-' + k).value.trim();
     setBadge(badge, 'badge-dim', 'saving…');
     try {
@@ -5751,9 +5758,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
   }
 
-  $('btn-save-site').addEventListener('click', () => saveSettings(
-    SITE_FIELDS, parseInt($('cfg-site-select').value || '0', 10) || 0,
-    $('cfg-site-badge'), $('cfg-site-error')));
+  $('btn-save-site').addEventListener('click', () => {
+    // The password is never trimmed — spaces are password characters — and
+    // only travels when non-blank: blank means unchanged, never cleared.
+    const pw = $('cfg-password').value;
+    saveSettings(
+      SITE_FIELDS, parseInt($('cfg-site-select').value || '0', 10) || 0,
+      $('cfg-site-badge'), $('cfg-site-error'),
+      pw ? { password: pw } : null);
+  });
   $('btn-save-host').addEventListener('click', () => saveSettings(
     HOST_FIELDS, 0, $('cfg-host-badge'), $('cfg-host-error')));
 
@@ -6091,23 +6104,35 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         if path == "/config":
             # The Config tab's write half: the same validate-then-apply path
             # `set` runs, so a value the terminal refuses the page refuses
-            # with the same sentence.
+            # with the same sentence. The password travels only here — never
+            # on argv, which is why `set` excludes it — and mirrors the
+            # terminal prompt's rules: a username must exist, and blank
+            # means unchanged, never cleared.
             if length > 65536:
                 return self._respond(413, "Settings body too large.")
             try:
                 body = json.loads(self.rfile.read(length))
                 idx  = int(body.get("site") or 0)
-                pairs = [(str(k).strip().lower(), str(v))
-                         for k, v in dict(body.get("values") or {}).items()]
+                values = {str(k).strip().lower(): str(v)
+                          for k, v in dict(body.get("values") or {}).items()}
             except (ValueError, TypeError):
                 return self._respond(400, "Malformed settings body.")
-            if not pairs:
+            password = values.pop("password", "")
+            pairs = list(values.items())
+            if not pairs and not password:
                 return self._respond(400, "No settings given.")
             if not (0 <= idx < len(config.sites)):
                 return self._respond(422, json.dumps({"error": f"no site {idx}"}),
                                      "application/json")
+            site = config.sites[idx]
             try:
-                err = _apply_settings(config.sites[idx], pairs)
+                err = _apply_settings(site, pairs) if pairs else ""
+                if not err and password:
+                    if not site.username:
+                        err = "password: set a username first"
+                    else:
+                        site.password_hash, site.password_salt = _hash_password(password)
+                        config.save()
             except PermissionError:
                 return self._respond(500, json.dumps(
                     {"error": "writing the config needs root — re-run 'admin' elevated"}),
@@ -6158,12 +6183,11 @@ def cmd_admin():
 
     try:
         target = f" (publishes site 0: {site.domain or site.serve_dir})" if len(config.sites) > 1 else ""
+        # The happy path pays one line; the troubleshooting lives behind
+        # 'help', summoned exactly when the page fails to load.
         print(f"  The admin page is up{target}:")
         print(f"    open  http://localhost:{_UI_PORT}/?t={code}")
-        print(f"    (or your bookmark http://localhost:{_UI_PORT}/ and enter code {code})")
-        print()
-        print("  If the page won't load, your ssh config needs the one-time line:")
-        print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
+        print("    (page won't load? type 'help')")
         print()
         while True:
             try:
@@ -6171,6 +6195,14 @@ def cmd_admin():
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
+            if raw in ("help", "?"):
+                print("  A page that won't load means this SSH connection isn't carrying")
+                print("  the tunnel. Add this line once to ~/.ssh/config on the computer")
+                print("  you ssh FROM, inside this server's entry, then reconnect:")
+                print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
+                print(f"  You can also bookmark http://localhost:{_UI_PORT}/ — the bare page")
+                print(f"  asks for this run's code: {code}")
+                continue
             if raw in ("back", "done", "exit", "quit", "q"):
                 break
     finally:
@@ -6335,9 +6367,67 @@ def _site_rows():
     } for i, site in enumerate(config.sites)]
 
 
+def _health_checks():
+    """Every health fact as a row, green included — the admin page's Health
+    checks card. The same ground _production_issues walks, saying what passes
+    as plainly as what needs attention: ok True is healthy, False needs it.
+    `key` is stable for consumers (the page routes password and channel rows
+    to its Config tab); `site` carries the index where the row is
+    site-scoped, None where it is host-wide."""
+    rows = []
+    service_active = _service_is_active()
+    running        = service_active or _server_running()
+    rows.append({"key": "service", "site": None, "ok": running, "label": "Service",
+                 "detail": "running as a system service — survives reboots" if service_active
+                 else ("running in this session only — 'enable' outlives the terminal" if running
+                       else "stopped — 'start' brings it up")})
+    if not _IS_MACOS:
+        armed = os.path.exists(NETWATCH_PATH + ".timer")
+        rows.append({"key": "netwatch", "site": None, "ok": armed, "label": "Network watchdog",
+                     "detail": "armed — a dropped default route recovers within a minute" if armed
+                     else "not installed — 'enable' provisions it"})
+        mem_kb, _avail_kb, committed_kb = _meminfo()
+        rec = _swap_recommendation(mem_kb, committed_kb,
+                                   _cache_headroom_mb(config.cache_size_mb))
+        ours_mb, foreign_mb = _swap_sizes()
+        offer = _swap_offer(rec // (1024 * 1024) if rec else None,
+                            os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
+        have = (ours_mb or 0) + foreign_mb
+        rows.append({"key": "swap", "site": None, "ok": offer is None, "label": "Swap",
+                     "detail": ((f"{have} MB active" if have else "not needed at this host's memory")
+                                if offer is None else
+                                (f"{have} MB active, below the {offer} MB recommendation — setup offers a resize"
+                                 if have else f"none — setup offers a {offer} MB swapfile"))})
+    labeled = len(config.sites) > 1
+    for i, site in enumerate(config.sites):
+        tag = f"Site {i} · " if labeled else ""
+        dir_ok = bool(site.serve_dir) and os.path.exists(_resolve(site.serve_dir))
+        rows.append({"key": "dir", "site": i, "ok": dir_ok, "label": tag + "Folder",
+                     "detail": site.serve_dir if dir_ok else "not configured"})
+        days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
+        cert_ok = days is not None and days > 0 and bool(site.domain)
+        rows.append({"key": "cert", "site": i, "ok": cert_ok, "label": tag + "Certificate",
+                     "detail": (f"trusted, {days} days remaining — renews itself" if cert_ok
+                                else "expired" if (days is not None and days <= 0)
+                                else "self-signed — a domain earns a trusted one" if days is not None
+                                else "not configured")})
+        rows.append({"key": "password", "site": i, "ok": bool(site.username),
+                     "label": tag + "Password",
+                     "detail": "enabled" if site.username
+                     else "none — optional; the Config tab sets one"})
+        half = bool(site.publish_url) != bool(site.publish_key)
+        rows.append({"key": "channel", "site": i, "ok": not half,
+                     "label": tag + "Publish channel",
+                     "detail": ("partially configured — finish or clear it on the Config tab" if half
+                                else ("configured — 'pull' fetches from it" if site.publish_url
+                                      else "none — the admin page publishes directly"))})
+    return rows
+
+
 def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
-    external tooling. cert_days is None when no certificate is readable."""
+    external tooling. cert_days is None when no certificate is readable;
+    `checks` is the health-row form of the same facts."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
     return {
@@ -6347,6 +6437,7 @@ def _status_data():
         "sites":    _site_rows(),
         "issues":   _production_issues(),
         "warnings": _cache_warnings(),
+        "checks":   _health_checks(),
     }
 
 

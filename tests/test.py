@@ -993,7 +993,7 @@ def run_dispatch_tests(s):
         s._start_ui = lambda site, page, port=None: (
             ui_started.append((site, page)) or (fake_ui, "abc123"))
         s._stop_ui  = lambda h: adm_calls.append(("stop", h))
-        script = iter(["back"])
+        script = iter(["help", "back"])
         builtins.input = lambda prompt="": next(script, "back")
         with contextlib.redirect_stdout(io.StringIO()) as adm_buf:
             s.cmd_admin()
@@ -1012,10 +1012,11 @@ def run_dispatch_tests(s):
           ui_started == [(s.config.sites[0], s._UI_ADMIN_PAGE)])
     check("...prints the printed-URL door with this run's code",
           f"http://localhost:{s._UI_PORT}/?t=abc123" in adm_out)
-    check("...the bookmark door with the same code",
-          "enter code abc123" in adm_out)
-    check("...and the LocalForward line for a tunnel that isn't there yet",
-          f"LocalForward {s._UI_PORT} 127.0.0.1:{s._UI_PORT}" in adm_out)
+    check("...keeps the happy path to one pointer line",
+          "page won't load? type 'help'" in adm_out)
+    check("...and 'help' summons the tunnel line and the bookmark door",
+          f"LocalForward {s._UI_PORT} 127.0.0.1:{s._UI_PORT}" in adm_out
+          and "this run's code: abc123" in adm_out)
     check("...sets the terminal narration hook",
           callable(getattr(fake_ui, "on_publish", None)))
     check("...and closes the page on the way out",
@@ -1046,6 +1047,8 @@ def run_dispatch_tests(s):
           "btn-outside" in s._UI_ADMIN_PAGE)
     check("...and the Config tab wired to the set vocabulary",
           "tab-config" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
+    check("...with the Health checks card and the masked password field",
+          "health-list" in s._UI_ADMIN_PAGE and "cfg-password" in s._UI_ADMIN_PAGE)
 
     section("Loopback page server")
 
@@ -1096,7 +1099,13 @@ def run_dispatch_tests(s):
 
         st, body = ui_req("GET", f"/status?t={ui_code}")
         check("GET /status with the code answers the inside view",
-              st == 200 and b'"version"' in body and b'"sites"' in body)
+              st == 200 and b'"version"' in body and b'"sites"' in body
+              and b'"checks"' in body)
+
+        health_keys = {r["key"] for r in s._health_checks()}
+        check("The health rows cover the roster, green included",
+              {"service", "dir", "cert", "password", "channel"} <= health_keys
+              and (s._IS_MACOS or {"netwatch", "swap"} <= health_keys))
         st, _ = ui_req("GET", "/status")
         check("GET /status without the code is refused", st == 403)
 
@@ -1121,7 +1130,24 @@ def run_dispatch_tests(s):
         check("...and an unknown setting", st == 422)
         st, _ = ui_req("POST", f"/config?t={ui_code}", body=b"not json{")
         check("...and a malformed settings body", st == 400)
+
+        # The password travels only here — never on argv — and mirrors the
+        # terminal prompt's rules: username first, blank means unchanged.
+        saved_pw = (s.config.sites[0].password_hash, s.config.sites[0].password_salt)
+        s.config.sites[0].username = ""
+        st, body = ui_req("POST", f"/config?t={ui_code}",
+                          body=json.dumps({"values": {"password": "pw-probe"}}).encode())
+        check("A password without a username is refused, like the terminal",
+              st == 422 and b"set a username first" in body)
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"values": {"username": "cfg-auth",
+                                                   "password": "pw-probe"}}).encode())
+        check("Username and password land together, hashed server-side",
+              st == 200 and s.config.sites[0].username == "cfg-auth"
+              and s._check_password("pw-probe", s.config.sites[0].password_hash,
+                                    s.config.sites[0].password_salt))
         s.config.sites[0].username = saved_cfg_user
+        s.config.sites[0].password_hash, s.config.sites[0].password_salt = saved_pw
         s.config.save()
 
         st, _ = ui_req("POST", "/upload")

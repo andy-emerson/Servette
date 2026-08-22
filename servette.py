@@ -6630,8 +6630,8 @@ def run_command(cmd, args):
 # The shell
 def shell():
     _banner("Servette — The Simple Secure Server")
-    _startup_refresh()
     print(HELP)
+    _startup_refresh()
 
     while True:
         try:

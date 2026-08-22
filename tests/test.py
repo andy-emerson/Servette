@@ -890,7 +890,8 @@ def run_dispatch_tests(s):
     calls       = []
     saved       = {n: getattr(s, n) for n in
                    ("cmd_status", "cmd_start", "stop_server", "cmd_pull",
-                    "cmd_restore_site", "cmd_publish", "cmd_admin")}
+                    "cmd_restore_site", "cmd_publish", "cmd_admin",
+                    "_startup_refresh")}
     saved_input = builtins.input
     try:
         s.cmd_status       = lambda json_mode=False: calls.append("status")
@@ -900,16 +901,21 @@ def run_dispatch_tests(s):
         s.cmd_restore_site = lambda site: calls.append(("restore-site", site))
         s.cmd_publish      = lambda: calls.append("publish")
         s.cmd_admin        = lambda: calls.append("admin")
+        s._startup_refresh = lambda: print("STARTUP-NOTICE-MARKER")
         script = iter(["status", "start", "pull 0", "restore-site 0", "publish",
                        "admin", "pull 99", "bogus", "quit"])
         builtins.input = lambda prompt="": next(script, "quit")
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()) as launch_buf:
             s.shell()
     finally:
         builtins.input = saved_input
         for n, fn in saved.items():
             setattr(s, n, fn)
         s.os.geteuid = saved_dispatch_euid
+
+    launch_out = launch_buf.getvalue()
+    check("A startup notice is the last thing before the prompt, not buried above the help",
+          launch_out.index("Commands") < launch_out.index("STARTUP-NOTICE-MARKER"))
 
     check("'status' routed to cmd_status", "status" in calls)
     check("'start' routed to cmd_start",   "start" in calls)

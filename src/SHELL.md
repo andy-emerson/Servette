@@ -2134,14 +2134,14 @@ def run_command(cmd, args):
 
 ```
 
-The interactive loop: banner, startup refresh, help, then dispatch until quit.
+The interactive loop: banner, help, then the startup refresh — in that order deliberately, so an actionable notice ("run 'enable'") is the last thing printed before the prompt rather than the first thing the sixteen-line command list scrolls away.
 
 ```python
 # The shell
 def shell():
     _banner("Servette — The Simple Secure Server")
-    _startup_refresh()
     print(HELP)
+    _startup_refresh()
 
     while True:
         try:

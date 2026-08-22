@@ -58,7 +58,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 | Automatic recovery | A dead server process is restarted by systemd within seconds; a watchdog timer recovers a dropped network route |
 | A browser admin page | `servette admin` serves a status, publish, and settings page to your browser over your own SSH tunnel — it never exists on the public internet, and being there is the login |
-| An error page that diagnoses | A missing path returns `404` with a page that reports the live connection — the certificate, the headers, and whether your site root is published at all — instead of a bare `Not found.` Drop in your own `404.html` and it takes over |
+| A connection check built in | Every site serves a live check page at `/.well-known/servette-check`: the encryption, the security headers, and whether your site root is published at all, reported from a real browser's vantage. The default 404 page links it — and your own `404.html` can take the error page over without ever losing the check |
 
 **Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette), and that is by design, not a limitation to work around; see [Scope & non-goals](DESIGN.md#scope--non-goals) for what is out of scope and why.
 
@@ -170,8 +170,8 @@ Each site can have a **publish channel** — the path for publishing when no SSH
 
 | Path | What it is |
 |---|---|
-| `servette.py` | The entire product — server, system, and shell in one module, generated from `src/` and committed to be read. The package build regenerates it from `src/` at every install, and CI holds the committed copy equal to the sources. The error and admin pages are inlined into it from `src/404.html` and `src/admin.html`, so an install is Python only |
-| `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`), the two embedded pages (`404.html`, `admin.html`), and the build — `build.py`, plus the backend that runs it inside every package build |
+| `servette.py` | The entire product — server, system, and shell in one module, generated from `src/` and committed to be read. The package build regenerates it from `src/` at every install, and CI holds the committed copy equal to the sources. The error, connection-check, and admin pages are inlined into it from `src/404.html`, `src/check.html`, and `src/admin.html`, so an install is Python only |
+| `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`), the three embedded pages (`404.html`, `check.html`, `admin.html`), and the build — `build.py`, plus the backend that runs it inside every package build |
 | `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 and 3.14) and Debian 12 |
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |

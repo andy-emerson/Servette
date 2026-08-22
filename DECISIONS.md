@@ -6,6 +6,50 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The connection check is its own reserved page; the 404 is a real 404
+
+**Ruled (Human):** two public pages, each with one job. The default 404
+body is a traditional error page — the path, the server-is-up sentence, a
+home link, and a link to the check — and an operator's `404.html` takes
+that role by simply existing. The connection check is its own embedded
+page (`src/check.html`) at `/.well-known/servette-check`: code-first, so
+no site content ever shadows it; behind the site's own auth; answering
+200, because the page really is there; its report rendering every row
+upfront in a dimmed pending state and resolving each in place. The admin
+page's Status tab pairs the two vantages by name: **Health checks** (what
+the machine knows about itself) and the **connection check** (what a
+browser sees from the internet's side of the wire).
+**Why:** with the checks living inside the 404 body, the outside vantage
+vanished the moment an operator shipped a custom 404.html — and the page
+read as a contradiction, titled 404 while explaining there was no 404
+page. This supersedes "The page has one role" below on that ruling's own
+reopen trigger: the check returns as one named thing, not as a second
+role — under `/.well-known/`, the namespace the hidden-path rule already
+sets apart and the version endpoint already lives in, so the site's own
+namespace stays unreserved.
+**Rejected:** one dual-role page keyed off its own pathname (two headlines
+in one file, forever); build-time page-include machinery to share the
+check code between pages (new machinery for the same outcome);
+"inside/outside" as the vantage names (reads as metaphor — the Human's
+call). *(2026-08-22)*
+
+## The Config tab sets the password; argv still never does
+
+**Ruled (Human):** the admin page's Config tab carries a masked password
+field. It travels only in the paired loopback POST — through the
+operator's own SSH tunnel — and is hashed server-side by the same scrypt
+path as the terminal prompt, under the prompt's own rules: username
+first; blank means unchanged, never cleared; clearing the username is
+what turns auth off. `set` keeps excluding password, because its
+rationale is argv-specific — a secret on the command line leaks into
+shell history and the process table — and never applied to the page.
+Domain stays terminal-only on both surfaces: it is bound up with
+certificate issuance.
+**Rejected:** pointing the page's no-password attention row at a terminal
+command — a browser page telling its reader to go run a shell is the
+comprehension cliff again; the row links the Config tab instead.
+*(2026-08-22)*
+
 ## The structural pass adopted the marks, not the moves
 
 **Ruled (Human):** of the external feedback's six principles (#108), what
@@ -500,7 +544,7 @@ network fetch in the publish tool). **Superseded within this ruling:** a second
 role at a reserved `/selftest/` path answering 200, retired below.
 *(#79, 2026-08-16; narrowed 2026-08-17)*
 
-## The page has one role: there is no reserved path
+## The page has one role: there is no reserved path — *superseded*
 
 **Ruled:** the page is Servette's 404 body and nothing else. `/selftest/` is an
 ordinary path that 404s like any other, and no directory in a site root shadows
@@ -524,6 +568,10 @@ a second framing to buy a convenience a missing path already provides.
 **Reopen if:** operators are found routinely wanting a 200 health endpoint on a
 site with no content, in which case it returns as one named thing, not as a
 second role for this page. *(2026-08-17)*
+**Superseded** (2026-08-22) by exactly that reopen condition: the check
+returned as one named thing — see [the connection check's own reserved
+page](#the-connection-check-is-its-own-reserved-page-the-404-is-a-real-404).
+The 404 body keeps exactly one role, as this ruling wanted.
 
 ## site/pub/ is the operator tools page — *moved*
 

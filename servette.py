@@ -837,6 +837,7 @@ def _security_headers(site):
 
 # Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
+_CHECK_PATH              = "/.well-known/servette-check"
 
 # The default 404 body (DECISIONS.md: "The error page is server-delivered,
 # client-executed"): authored as src/404.html and inlined by build.py, so it is
@@ -850,20 +851,16 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
      client-executed"). Served for any miss where the site publishes no
      404.html of its own.
 
-     Every server needs an error page, and a bare "Not found." spends a whole
-     response saying only that the reader was wrong. This one also reports that
-     the server is up, which host answered, what it is sending, and whether the
-     site has anything published at all — the diagnosis is free, since the
-     request was already made.
+     Every server needs an error page, and a bare "Not found." spends a
+     whole response saying only that the reader was wrong. This one leads
+     with the path and says the true thing: the server is up and answered —
+     only the path is missing. The full diagnosis lives on its own page at
+     the reserved path /.well-known/servette-check, linked below; splitting
+     the two keeps this page a real 404 and keeps the check reachable even
+     after an operator's own 404.html takes this role over.
 
-     Same-origin by construction, so it can read what a cross-origin probe
-     never could: it checks the connection it was itself loaded over. It never
-     enumerates the filesystem — no "did you mean" suggestions — because that
-     would turn an error page into a file-discovery oracle for strangers. The
-     version-discovery row needs the operator's session (the endpoint is
-     auth-gated) and shows for a logged-in reader only. Because this file ships
-     with the server, its checks can never drift from the features they
-     check. -->
+     The requested path is attacker-controlled text: written with
+     textContent, never innerHTML. -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -956,7 +953,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
     .dot.red { background: var(--red); animation: none; }
 
-    /* ── Not-found banner (404 role only) ── */
     .notfound {
       border: 1px solid var(--border);
       border-left: 3px solid var(--muted);
@@ -1010,15 +1006,216 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       font-size: 0.72rem;
     }
 
-    .notfound-home {
-      display: inline-block;
+    .notfound-links {
       margin-top: 0.85rem;
+      display: flex;
+      gap: 1.25rem;
+      flex-wrap: wrap;
+    }
+
+    .notfound-links a {
       font-size: 0.75rem;
       color: #5A8466;
       text-decoration: none;
     }
 
-    .notfound-home:hover { text-decoration: underline; }
+    .notfound-links a:hover { text-decoration: underline; }
+
+    .note {
+      font-size: 0.7rem;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .note a { color: #60a5fa; text-decoration: none; }
+    .note a:hover { text-decoration: underline; }
+    .note a.brand { color: #5A8466; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; opacity: 1 !important; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="header">
+    <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
+    <div class="tagline" id="tagline">
+      <span class="dot" id="dot"></span><span id="tagline-text">THE SERVER IS RUNNING — THIS PATH IS NOT</span>
+    </div>
+  </div>
+
+  <!-- The server is up and answered — the path is what is missing — so this
+       leads with the path rather than with blame. -->
+  <div class="notfound">
+    <div class="notfound-head">
+      <span class="notfound-code">404</span>
+      <span class="notfound-msg">Nothing published here</span>
+    </div>
+    <div class="notfound-path" id="notfound-path">—</div>
+    <p class="notfound-why" id="notfound-why">
+      The server is running and answered this request, so the connection is
+      fine — only the path is missing. You are seeing this page because the
+      site publishes no <code>404.html</code> of its own.
+    </p>
+    <div class="notfound-links">
+      <a href="/">← the site's home page</a>
+      <a href="/.well-known/servette-check">run the connection check →</a>
+    </div>
+  </div>
+
+  <div class="note">
+    This page ships inside Servette itself. Served by
+    <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
+    The Simple, Secure, Static-Site Server.
+  </div>
+
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  // ── The path the reader asked for ─────────────────────────────────
+  // textContent, never innerHTML: the path is whatever the client asked for.
+  // decodeURI so an escaped path reads as the reader typed it, with the raw
+  // value kept when it is malformed enough to throw.
+  let shown = location.pathname + location.search;
+  try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
+  $('notfound-path').textContent = shown;
+
+  // The one live judgment this page keeps: whether the connection carrying
+  // it is encrypted. Everything deeper belongs to the connection check.
+  if (location.protocol !== 'https:') {
+    $('dot').className = 'dot red';
+    $('tagline-text').textContent = 'Connection is not secure';
+  }
+</script>
+
+</body>
+</html>
+""".encode()
+_NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
+
+# The connection check (src/check.html), served at _CHECK_PATH on every site —
+# a reserved path under /.well-known/, the one namespace the hidden-path rule
+# already sets apart, so an operator's content never shadows the outside
+# vantage the way a custom 404.html takes over the miss body.
+_CHECK_PAGE = """<!DOCTYPE html>
+<!-- src/check.html — the connection check, inlined into the module by
+     build.py and served at the reserved path /.well-known/servette-check
+     (DECISIONS.md, "The connection check has its own reserved page").
+     Linked from the default 404 body and from the admin page's Status tab.
+
+     Same-origin by construction, so it can read what a cross-origin probe
+     never could: it checks the connection it was itself loaded over. It
+     never enumerates the filesystem — no "did you mean" suggestions —
+     because that would turn a public page into a file-discovery oracle for
+     strangers. The version-discovery row needs the operator's session (the
+     endpoint is auth-gated) and shows for a logged-in reader only. Because
+     this file ships with the server, its checks can never drift from the
+     features they check — and because its path is reserved, an operator's
+     own content never takes it over, so the outside vantage survives a
+     custom 404.html.
+
+     No triple double-quote and no backslash anywhere in this file: it lands
+     inside a triple-quoted Python literal, and the build refuses both. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connection check</title>
+  <style>
+    :root {
+      --bg:      #0e0e0e;
+      --surface: #161616;
+      --border:  #2a2a2a;
+      --text:    #e8e8e8;
+      --muted:   #555;
+      --green:   #4ade80;
+      --red:     #f87171;
+      /* No web fonts: a page that demonstrates a self-hosted server has no
+         business fetching anything from a third party. */
+      --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+              'Liberation Mono', 'Courier New', monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      opacity: 0.4;
+      z-index: 0;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 480px;
+      width: 100%;
+    }
+
+    .header {
+      margin-bottom: 3rem;
+    }
+
+    .servette-logo {
+      font-family: var(--mono);
+      font-weight: 500;
+      font-size: 3rem;
+      letter-spacing: 0;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .servette-logo .ette   { color: #5A8466; }
+    .servette-logo .cursor { color: inherit; animation: servette-blink 1.1s steps(1) infinite; }
+
+    @keyframes servette-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+    .tagline {
+      margin-top: 0.5rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      margin-right: 0.5rem;
+      animation: pulse 2s ease infinite;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+    }
+
+    .dot.red { background: var(--red); animation: none; }
 
     /* ── Connection card ── */
     .verified {
@@ -1060,7 +1257,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
 
-    /* ── Diagnosis ── */
+    /* ── The report ── */
     .checks {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1107,6 +1304,10 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       line-height: 1.45;
     }
 
+    /* Rows render all at once in the pending state and resolve in place —
+       dim, then verdict — so the report never appears to assemble itself. */
+    .t-row.pending .t-req, .t-row.pending .t-obs { opacity: 0.45; }
+
     .t-st       { flex: 0 0 2.6em; font-weight: 500; }
     .t-pass     { color: var(--green); }
     .t-fail     { color: var(--red); }
@@ -1124,7 +1325,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       color: var(--muted);
     }
     .t-summary b { color: var(--text); font-weight: 500; }
-
 
     /* ── Footer ── */
     .note {
@@ -1157,23 +1357,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Shown only in the 404 role. The server is up and answered — the path is
-       what is missing — so this leads with the path rather than with blame. -->
-  <div class="notfound">
-    <div class="notfound-head">
-      <span class="notfound-code">404</span>
-      <span class="notfound-msg">Nothing published here</span>
-    </div>
-    <div class="notfound-path" id="notfound-path">—</div>
-    <p class="notfound-why" id="notfound-why">
-      The server is running and answered this request, so the connection is
-      fine — only the path is missing. You are seeing this page because the
-      site publishes no <code>404.html</code> of its own; the checks below
-      report what the server is actually sending.
-    </p>
-    <a class="notfound-home" id="notfound-home" href="/">← the site's home page</a>
-  </div>
-
   <div class="verified">
     <div class="verified-header">
       <div>
@@ -1186,7 +1369,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
   <div class="checks">
     <div class="checks-head">
-      <span class="checks-title">Connection report — live from your browser</span>
+      <span class="checks-title">Connection check — live from your browser</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>
@@ -1194,8 +1377,9 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
   </div>
 
   <div class="note">
-    This page ships inside Servette itself and runs on this site's own
-    domain — that is why it can read what it tests. Served by
+    This page ships inside Servette itself, on a reserved path, and runs on
+    this site's own domain — that is why it can read what it tests, and why
+    it keeps answering whatever the site publishes. Served by
     <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
@@ -1205,14 +1389,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 <script>
   const $ = (id) => document.getElementById(id);
 
-  // ── The path the reader asked for ─────────────────────────────────
-  // textContent, never innerHTML: the path is whatever the client asked for.
-  // decodeURI so an escaped path reads as the reader typed it, with the raw
-  // value kept when it is malformed enough to throw.
-  let shown = location.pathname + location.search;
-  try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
-  $('notfound-path').textContent = shown;
-
   // ── Connection card ───────────────────────────────────────────────
   const isHttps = location.protocol === 'https:';
   $('url').textContent = location.protocol + '//' + location.host;
@@ -1221,8 +1397,8 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     $('badge').textContent = '✓ Verified encrypted';
     $('badge').className    = 'badge badge-green';
     // Deliberately not "your server": this page serves on every Servette
-    // site, and most readers are visitors, not the operator.
-    $('tagline-text').textContent = 'THE SERVER IS RUNNING — THIS PATH IS NOT';
+    // site, and the reader may be anyone the operator sent the link to.
+    $('tagline-text').textContent = 'THE SERVER IS RUNNING — CHECKED FROM YOUR BROWSER';
   } else {
     $('badge').textContent = '⚠ Not encrypted';
     $('badge').className    = 'badge badge-red';
@@ -1240,42 +1416,22 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
   // choice, and reporting that choice as a defect would be a lie in the
   // other direction.
   const here = location.href.split('#')[0];
-
-  // Rows that probe `here` are labelled with the path actually requested,
-  // not a hard-coded "/". In the 404 role that path is whatever the reader
-  // typed, and a label naming a request the page never made is a small lie
-  // it can avoid. Truncated to keep the column from being pushed sideways by
-  // a long path.
-  const P = (() => {
-    let p = location.pathname || '/';
-    try { p = decodeURI(p); } catch (e) { /* keep the raw form */ }
-    return p.length > 24 ? p.slice(0, 23) + '…' : p;
-  })();
+  const P = '/.well-known/servette-check';
 
   let _hdrs = null;
   const H = async () => (_hdrs ||= (await fetch(here, { cache: 'no-store' })).headers);
   const seen = (v) => v || '(absent)';
 
-  // Diagnosis rows, in the 404 role only. They answer the two questions a
-  // bare "Not found." leaves open: is this response shaped like an error
-  // page at all, and is the *site* deployed or is nothing published anywhere?
-  // A visitor who mistyped one path sees a working home page; an operator
-  // whose deploy never landed sees that the root misses too. Both are read
-  // from same-origin requests a visitor could make by hand — the page adds
-  // no disclosure, and deliberately never lists directory contents or
-  // guesses near-miss filenames, which would make an error page into a
-  // file-discovery oracle.
-  const errorChecks = [
+  const checks = [
+    // This page's own response first — it is the reserved path answering.
     { req: 'GET ' + P, run: async () => {
         const r = await fetch(here, { cache: 'no-store' });
         const ct = r.headers.get('Content-Type') || '(absent)';
-        return { ok: r.status === 404 && ct.includes('text/html'),
+        return { ok: r.status === 200 && ct.includes('text/html'),
                  obs: '→ ' + r.status + ', ' + ct }; } },
 
-    // Skipped when this page *is* the root: the row above already reported
-    // that exact request, and two identical GET / rows disagreeing on PASS
-    // and FAIL reads as a contradiction rather than a diagnosis.
-    ...(location.pathname === '/' ? [] : [
+    // Is anything published? A working home page and a passworded one both
+    // count as answers; anything else is the deploy-never-landed signal.
     { req: 'GET /', run: async () => {
         const s = (await fetch('/', { cache: 'no-store' })).status;
         if (s === 200)
@@ -1283,10 +1439,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
         if (s === 401)
           return { ok: null, obs: '→ 401 — home page needs a password' };
         return { ok: false, obs: '→ ' + s + ' — nothing is published at the root' }; } },
-    ]),
-  ];
 
-  const checks = [
     { req: 'GET ' + P, run: async () => {
         const v = (await H()).get('X-Frame-Options');
         return { ok: v === 'DENY', obs: 'X-Frame-Options: ' + seen(v) }; } },
@@ -1347,11 +1500,10 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
           : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
 
     // Version discovery — same-origin, password-gated: the one check only
-    // this page can make (planned in #42). Servette serves it solely on a
-    // password-gated site, so the exact version reaches a party that already
-    // holds the password (this browser, once you logged in) and never an
-    // anonymous scanner. Absent is a choice or an older Servette, not a
-    // defect.
+    // this page can make. Servette serves it solely on a password-gated
+    // site, so the exact version reaches a party that already holds the
+    // password (this browser, once you logged in) and never an anonymous
+    // scanner. Absent is a choice or an older Servette, not a defect.
     { req: 'GET /.well-known/servette', run: async () => {
         const r = await fetch('/.well-known/servette', { cache: 'no-store' });
         if (r.status !== 200)
@@ -1369,31 +1521,34 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     const obs = document.createElement('span'); obs.className = 't-obs';  obs.textContent = '';
     const body = document.createElement('span'); body.className = 't-body';
     body.append(req, document.createTextNode('  '), obs);
-    const row = document.createElement('div'); row.className = 't-row';
+    const row = document.createElement('div'); row.className = 't-row pending';
     row.append(st, body);
     logEl.appendChild(row);
-    return { st, obs };
+    return { row, st, obs };
   }
 
-  function paint(st, state) { st.textContent = LABEL[state]; st.className = 't-st t-' + state; }
+  function paint(row, st, state) {
+    st.textContent = LABEL[state];
+    st.className = 't-st t-' + state;
+    row.classList.remove('pending');
+  }
 
   async function runTests() {
     _hdrs = null;                 // force fresh requests on each run
     logEl.innerHTML = '';
     $('t-summary').textContent = 'running…';
     let pass = 0, fail = 0, skip = 0;
-    // The two diagnosis rows come first: what this response is, and whether
-    // the site is deployed at all. They frame the header checks that follow
-    // rather than being buried under them.
-    for (const c of errorChecks.concat(checks)) {
-      const { st, obs } = addRow(c.req);
+    // Every row exists before any check runs — the full report is visible
+    // immediately, dimmed, and each row resolves in place.
+    const rows = checks.map((c) => ({ c, el: addRow(c.req) }));
+    for (const { c, el } of rows) {
       let r;
       try { r = await c.run(); }
       catch (e) { r = { ok: null, obs: 'could not run' }; }
-      obs.textContent = r.obs;
-      if (r.ok === true)       { paint(st, 'pass'); pass++; }
-      else if (r.ok === false) { paint(st, 'fail'); fail++; }
-      else                     { paint(st, 'skip'); skip++; }
+      el.obs.textContent = r.obs;
+      if (r.ok === true)       { paint(el.row, el.st, 'pass'); pass++; }
+      else if (r.ok === false) { paint(el.row, el.st, 'fail'); fail++; }
+      else                     { paint(el.row, el.st, 'skip'); skip++; }
     }
     // Green leads when nothing failed — the pitch and the test coincide on a
     // healthy site. A failure count is never hidden: suppressing it would
@@ -1411,7 +1566,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 </body>
 </html>
 """.encode()
-_NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
+_CHECK_ETAG = '"' + hashlib.sha256(_CHECK_PAGE).hexdigest()[:16] + '"'
 
 
 # Log escaping
@@ -1544,6 +1699,28 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
 
+    # The connection check, on its reserved path — code-first, so it answers
+    # whatever the site publishes: an operator's 404.html takes the miss body
+    # by existing, but it can never take the outside vantage with it. Behind
+    # the site's own auth like everything else, and carrying the same
+    # revalidate-always caching contract as the 404 body, for the same
+    # reason: the page's checks probe the URL it was served from.
+    if url_path.split("?", 1)[0] == _CHECK_PATH:
+        cache = _cache_control_header(site.username)
+        if "max-age" in cache:
+            cache = ("private" if site.username else "public") + ", no-cache"
+        if headers.get("If-None-Match", "") == _CHECK_ETAG:
+            log.info("304 Not Modified %s to %s", log_path, ip)
+            return resp(304, [(b"etag", _CHECK_ETAG.encode()),
+                              (b"cache-control", cache.encode())])
+        log.info("200 %s (connection check) to %s", log_path, ip)
+        return resp(200, [
+            (b"content-type",   b"text/html; charset=utf-8"),
+            (b"content-length", str(len(_CHECK_PAGE)).encode()),
+            (b"etag",           _CHECK_ETAG.encode()),
+            (b"cache-control",  cache.encode()),
+        ], _CHECK_PAGE)
+
     # Resolve request path to a file within the matched site's own serve_dir
     try:
         file_path, status = _resolve_request_path(url_path, site.serve_dir)
@@ -1560,19 +1737,17 @@ def _handle_request(method, url_path, headers, raw_ip):
     if status == 404 or file_path is None:
         # Every server needs an error page, and a bare "Not found." spends a
         # whole response telling the reader only that they were wrong. This one
-        # also says what the server is, that it is up, and what it is actually
-        # sending — the diagnosis is free, the request was already made. The
-        # operator's own 404.html wins by simply existing.
+        # leads with the path, says the server is up and answered, and links
+        # the connection check on its reserved path above — the split that
+        # keeps this a real 404 while the diagnosis survives an operator's
+        # own 404.html, which wins this role by simply existing.
         #
         # It also covers a site's own root while nothing is published there: no
         # index.html means the root is itself a miss, so the domain reports on
         # itself instead of answering with ten bytes of text.
         #
-        # The response mirrors the file path's caching contract (ETag,
-        # Cache-Control, 304) because the page's own checks probe the URL it
-        # was served from; without validators it would report a defect that is
-        # really this response's shape. The page checks, in the visitor's
-        # browser, the connection it arrived over, behind the site's own auth.
+        # The response keeps the caching contract (ETag, Cache-Control, 304),
+        # with any positive lifetime downgraded below.
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
         if not os.path.isfile(custom_404):
@@ -5287,12 +5462,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-refresh" type="button">Refresh</button>
           <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once the status shows a domain">Run the outside check</button>
+                  title="Loads once the status shows a domain">Run the connection check</button>
         </div>
-        <p class="hint">The outside check opens a missing path on your site in
-        a new tab: the connection report that answers is served from the
-        public internet's side of the wire — the vantage this page, living on
-        your SSH tunnel, cannot have.</p>
+        <p class="hint">The connection check opens your site's own check page
+        in a new tab: its report is served from the public internet's side of
+        the wire — the vantage this page, living on your SSH tunnel, cannot
+        have.</p>
       </div>
     </div>
 
@@ -5431,15 +5606,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const row = (k, v, cls) =>
     `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
 
-  // The outside check: opens a missing path on the site itself, so the
-  // connection report answers from the public internet's vantage — the one
-  // view a page living on the tunnel cannot compute (cross-origin responses
-  // are opaque to it, by the browser's own rules).
+  // The connection check: opens the site's own check page — a reserved path
+  // no content shadows — so the report answers from the public internet's
+  // vantage, the one view a page living on the tunnel cannot compute
+  // (cross-origin responses are opaque to it, by the browser's own rules).
   let outsideDomain = '';
   $('btn-outside').addEventListener('click', () => {
     if (!outsideDomain) return;
-    const probe = 'servette-check-' + Math.random().toString(36).slice(2, 8);
-    window.open('https://' + outsideDomain + '/' + probe, '_blank');
+    window.open('https://' + outsideDomain + '/.well-known/servette-check', '_blank');
   });
 
   async function loadStatus() {
@@ -5472,7 +5646,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       outsideDomain = ((d.sites || [])[0] || {}).domain || '';
       $('btn-outside').disabled = !outsideDomain;
       $('btn-outside').title = outsideDomain
-        ? 'Opens https://' + outsideDomain + '/<a-missing-path> in a new tab'
+        ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
         : 'Needs a domain — a LAN or self-signed site has no public vantage to check from';
 
       const problems = [...(d.issues || []), ...(d.warnings || [])];

@@ -3395,6 +3395,38 @@ def run_server_tests(s, serve_dir):
     s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
+    section("The connection check on its reserved path")
+
+    chk = req("GET", path="/.well-known/servette-check")
+    check("The check page answers 200 as HTML on its reserved path",
+          chk.status == 200 and b"Connection check" in chk.body
+          and "text/html" in chk.headers.get("Content-Type", ""))
+    etag_chk = chk.headers.get("ETag")
+    check("...with validators, revalidating to 304",
+          bool(etag_chk)
+          and req("GET", path="/.well-known/servette-check",
+                  headers={"If-None-Match": etag_chk}).status == 304)
+    check("...rendering every row pending upfront — dim, then resolve",
+          b"t-row pending" in chk.body and b"classList.remove('pending')" in chk.body)
+    check("The slim 404 links the check instead of running it",
+          b"run the connection check" in req("GET", path="/nonexistent.html").body
+          and b"t-log" not in req("GET", path="/nonexistent.html").body)
+
+    # The split's whole point: an operator's 404.html takes the miss body by
+    # existing — and can never take the check page with it.
+    live_root = os.path.realpath(s._resolve(s.config.sites[0].serve_dir))
+    custom = os.path.join(live_root, "404.html")
+    try:
+        with open(custom, "w") as f:
+            f.write("<h1>my own miss page</h1>")
+        check("A custom 404.html wins the miss body",
+              b"my own miss page" in req("GET", path="/nonexistent.html").body)
+        check("...and cannot shadow the check page",
+              b"Connection check" in req("GET", path="/.well-known/servette-check").body)
+    finally:
+        os.remove(custom)
+        s._file_cache.clear()
+
     section("The embedded error page under auth")
 
     # It is a response like any other: it rides the site's own gate. An error
@@ -4894,6 +4926,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
             ("GET",  "/index.html",            200),
             ("HEAD", "/index.html",            200),
             ("GET",  "/nothing-here",          404),   # the embedded error page
+            ("GET",  "/.well-known/servette-check", 200),  # the reserved check page
             ("POST", "/index.html",            405),
             ("GET",  "/../etc/passwd",         403),
             ("GET",  "/.well-known/servette",  404),   # no password on this site

@@ -291,12 +291,12 @@
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-refresh" type="button">Refresh</button>
           <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once the status shows a domain">Run the outside check</button>
+                  title="Loads once the status shows a domain">Run the connection check</button>
         </div>
-        <p class="hint">The outside check opens a missing path on your site in
-        a new tab: the connection report that answers is served from the
-        public internet's side of the wire — the vantage this page, living on
-        your SSH tunnel, cannot have.</p>
+        <p class="hint">The connection check opens your site's own check page
+        in a new tab: its report is served from the public internet's side of
+        the wire — the vantage this page, living on your SSH tunnel, cannot
+        have.</p>
       </div>
     </div>
 
@@ -435,15 +435,14 @@
   const row = (k, v, cls) =>
     `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
 
-  // The outside check: opens a missing path on the site itself, so the
-  // connection report answers from the public internet's vantage — the one
-  // view a page living on the tunnel cannot compute (cross-origin responses
-  // are opaque to it, by the browser's own rules).
+  // The connection check: opens the site's own check page — a reserved path
+  // no content shadows — so the report answers from the public internet's
+  // vantage, the one view a page living on the tunnel cannot compute
+  // (cross-origin responses are opaque to it, by the browser's own rules).
   let outsideDomain = '';
   $('btn-outside').addEventListener('click', () => {
     if (!outsideDomain) return;
-    const probe = 'servette-check-' + Math.random().toString(36).slice(2, 8);
-    window.open('https://' + outsideDomain + '/' + probe, '_blank');
+    window.open('https://' + outsideDomain + '/.well-known/servette-check', '_blank');
   });
 
   async function loadStatus() {
@@ -476,7 +475,7 @@
       outsideDomain = ((d.sites || [])[0] || {}).domain || '';
       $('btn-outside').disabled = !outsideDomain;
       $('btn-outside').title = outsideDomain
-        ? 'Opens https://' + outsideDomain + '/<a-missing-path> in a new tab'
+        ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
         : 'Needs a domain — a LAN or self-signed site has no public vantage to check from';
 
       const problems = [...(d.issues || []), ...(d.warnings || [])];

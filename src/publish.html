@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<!-- src/publish — the loopback publish page, the browser half of the
+     `publish` pair. Served only by the loopback page server (127.0.0.1,
+     reached through the operator's SSH tunnel), never by the public site.
+     Constraints, all load-bearing:
+
+     - No signature, no key. Being here IS the authentication: only the
+       holder of the operator's SSH key can reach this address, so the
+       page carries none of the pub tool's key custody machinery
+       (DECISIONS.md, "Tunnel uploads are authenticated by SSH").
+     - Dependency-free and network-silent, like the 404 page: browser
+       primitives only (CompressionStream, a hand-rolled ustar writer
+       emitting only the entry types _extract_bundle accepts). Its only
+       request is the upload itself, to the same loopback server that
+       served it.
+     - Inlined into servette.py by build.py, like 404.html: no triple
+       double-quote and no backslash anywhere in this file, or the build
+       fails rather than emit a broken literal. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Servette — Publish</title>
+  <style>
+    :root {
+      --bg:      #0e0e0e;
+      --surface: #161616;
+      --border:  #2a2a2a;
+      --text:    #e8e8e8;
+      --muted:   #555;
+      --green:   #4ade80;
+      --red:     #f87171;
+      --amber:   #fbbf24;
+      --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+              'Liberation Mono', 'Courier New', monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 3rem 2rem;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      opacity: 0.4;
+      z-index: 0;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 560px;
+      width: 100%;
+    }
+
+    .header {
+      margin-bottom: 2.5rem;
+      opacity: 0;
+      animation: rise 0.6s ease forwards;
+    }
+
+    .servette-logo {
+      font-family: var(--mono);
+      font-weight: 500;
+      font-size: 3rem;
+      letter-spacing: 0;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .servette-logo .ette   { color: #5A8466; }
+    .servette-logo .cursor { color: inherit; animation: servette-blink 1.1s steps(1) infinite; }
+
+    @keyframes servette-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+    .tagline {
+      margin-top: 0.5rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--surface);
+      margin-bottom: 1.5rem;
+      opacity: 0;
+      animation: rise 0.5s ease forwards;
+    }
+    .card:nth-of-type(1) { animation-delay: 0.15s; }
+    .card:nth-of-type(2) { animation-delay: 0.25s; }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .card-title {
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .card-body { padding: 1rem 1.25rem; }
+
+    .badge {
+      font-size: 0.7rem;
+      font-weight: 500;
+      padding: 0.3rem 0.7rem;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
+    .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
+    .badge-dim   { background: rgba(255,255,255,0.04); color: var(--muted); border: 1px solid var(--border); }
+
+    button.action {
+      font-family: inherit;
+      font-size: 0.75rem;
+      color: var(--text);
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.5rem 0.9rem;
+      cursor: pointer;
+      letter-spacing: 0.03em;
+    }
+    button.action:hover:not(:disabled) { border-color: #3a3a3a; background: rgba(255,255,255,0.08); }
+    button.action:disabled { color: var(--muted); cursor: not-allowed; }
+    button.action.primary { border-color: rgba(90,132,102,0.6); background: rgba(90,132,102,0.15); }
+    button.action.primary:hover:not(:disabled) { background: rgba(90,132,102,0.25); }
+
+    .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+
+    .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
+    .hint b { color: var(--text); font-weight: 500; }
+    .warn  { color: var(--amber); }
+    .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
+
+    pre.shell {
+      font-family: inherit;
+      font-size: 0.72rem;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.7rem 0.9rem;
+      line-height: 1.7;
+      overflow-x: auto;
+      margin-top: 0.4rem;
+    }
+    pre.shell .c { color: var(--muted); }
+
+    .note {
+      font-size: 0.7rem;
+      color: var(--muted);
+      line-height: 1.7;
+      opacity: 0;
+      animation: rise 0.5s ease 0.35s forwards;
+    }
+    .note b { color: var(--text); font-weight: 500; }
+
+    .hidden { display: none !important; }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; opacity: 1 !important; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="header">
+    <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
+    <div class="tagline">Publish — send your site through your SSH tunnel</div>
+  </div>
+
+  <!-- Shown instead of the cards when the browser lacks the pipeline. -->
+  <div class="card hidden" id="unsupported">
+    <div class="card-head">
+      <span class="card-title">Browser not supported</span>
+      <span class="badge badge-red">✕ missing gzip</span>
+    </div>
+    <div class="card-body">
+      <p class="hint">This page builds the bundle with the browser's own
+      <b>CompressionStream</b>, and this browser does not provide it. Recent
+      versions of Chrome, Firefox (113+), and Safari (16.4+) do. Nothing is
+      downloaded to work around it — this page loads no third-party code.</p>
+    </div>
+  </div>
+
+  <div id="app" class="hidden">
+
+  <!-- ── Step 1: folder ── -->
+  <div class="card">
+    <div class="card-head">
+      <span class="card-title">1 · Site folder</span>
+      <span class="badge badge-dim" id="dir-badge">no folder chosen</span>
+    </div>
+    <div class="card-body">
+      <div class="btn-row">
+        <button class="action" id="btn-dir" type="button">Choose your site's folder</button>
+        <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
+      </div>
+      <p class="hint" id="dir-summary">Pick the folder whose contents should
+      become the site — the folder that holds your <b>index.html</b>. Files
+      are read here in the browser and travel only through your SSH tunnel
+      to your own server.</p>
+      <p class="error hidden" id="dir-error"></p>
+    </div>
+  </div>
+
+  <!-- ── Step 2: publish ── -->
+  <div class="card">
+    <div class="card-head">
+      <span class="card-title">2 · Publish</span>
+      <span class="badge badge-dim" id="pub-badge">waiting</span>
+    </div>
+    <div class="card-body">
+      <div class="btn-row">
+        <button class="action primary" id="btn-publish" type="button" disabled>Publish to this server</button>
+      </div>
+      <div id="pub-done" class="hidden">
+        <p class="hint" id="pub-note" style="margin-top:0.75rem"></p>
+        <pre class="shell">restore-site     <span class="c"># in the terminal: one step back, if you want the previous content</span></pre>
+      </div>
+      <p class="error hidden" id="pub-error"></p>
+    </div>
+  </div>
+
+  </div><!-- /app -->
+
+  <div class="note">
+    This page is served by your own server on <b>127.0.0.1</b> and reached
+    only through your SSH tunnel — the address does not exist on the public
+    internet. No signature, no key: <b>being here is the authentication</b>,
+    because only your SSH key opens this pipe. The bundle is built in this
+    tab and lands through the same staging, checks, atomic swap, and backup
+    as every other publish.
+  </div>
+
+</div>
+
+<script>
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+
+  /* ════════════════════════════════════════════════════════════════════
+     The pipeline: the pub tool's bundle builder with the signing removed.
+     The server's contract (_extract_bundle / _land_bundle):
+       - a tar.gz of plain files and directories, paths relative to the
+         site root, no entry escaping it, under 500 MB uncompressed
+       - POSTed to /upload with this run's pairing code
+     ════════════════════════════════════════════════════════════════════ */
+
+  const MAX_BUNDLE_BYTES = 500 * 1024 * 1024;  // mirrors _MAX_BUNDLE_BYTES server-side
+  const CODE = new URLSearchParams(location.search).get('t') || '';
+
+  // ── ustar writer ──────────────────────────────────────────────────────
+  // Plain files and directories only — exactly the two entry types
+  // _extract_bundle accepts. POSIX ustar, which Python's tarfile reads
+  // natively.
+
+  function splitTarName(path) {
+    const len = (s) => new TextEncoder().encode(s).length;
+    if (len(path) <= 100) return ['', path];
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const prefix = parts.slice(0, i).join('/');
+      const name   = parts.slice(i).join('/');
+      if (len(prefix) <= 155 && len(name) <= 100) return [prefix, name];
+    }
+    throw new Error(`path too long for a tar header: ${path}`);
+  }
+
+  function tarHeader(path, size, isDir, mtime) {
+    const block = new Uint8Array(512);
+    const enc = new TextEncoder();
+    const putStr   = (off, s) => block.set(enc.encode(s), off);
+    const putOctal = (off, width, n) => putStr(off, n.toString(8).padStart(width - 1, '0'));
+
+    const [prefix, name] = splitTarName(isDir ? path + '/' : path);
+    putStr(0, name);
+    putOctal(100, 8, isDir ? 0o755 : 0o644);                // mode
+    putOctal(108, 8, 0);                                    // uid
+    putOctal(116, 8, 0);                                    // gid
+    putOctal(124, 12, isDir ? 0 : size);                    // size
+    putOctal(136, 12, mtime);                               // mtime
+    block.set(enc.encode('        '), 148);                 // chksum: spaces while summing
+    block[156] = isDir ? 0x35 : 0x30;                       // typeflag: '5' dir, '0' file
+    putStr(257, 'ustar');                                   // magic (NUL-terminated)
+    putStr(263, '00');                                      // version
+    putOctal(329, 8, 0);                                    // devmajor
+    putOctal(337, 8, 0);                                    // devminor
+    putStr(345, prefix);
+
+    let sum = 0;
+    for (const b of block) sum += b;
+    putOctal(148, 7, sum);                                  // 6 digits + NUL, then the space stays
+    return block;
+  }
+
+  // entries: [{ path, bytes }] with '/'-separated site-root-relative paths.
+  function buildTar(entries) {
+    const mtime = Math.floor(Date.now() / 1000);
+    const dirs = new Set();
+    for (const e of entries)
+      for (let i = e.path.indexOf('/'); i !== -1; i = e.path.indexOf('/', i + 1))
+        dirs.add(e.path.slice(0, i));
+
+    const blocks = [];
+    for (const d of [...dirs].sort())
+      blocks.push(tarHeader(d, 0, true, mtime));
+    for (const e of [...entries].sort((a, b) => a.path < b.path ? -1 : 1)) {
+      blocks.push(tarHeader(e.path, e.bytes.length, false, mtime));
+      blocks.push(e.bytes);
+      const pad = (512 - (e.bytes.length % 512)) % 512;
+      if (pad) blocks.push(new Uint8Array(pad));
+    }
+    blocks.push(new Uint8Array(1024));                      // end-of-archive
+
+    const total = blocks.reduce((n, b) => n + b.length, 0);
+    const tar = new Uint8Array(total);
+    let off = 0;
+    for (const b of blocks) { tar.set(b, off); off += b.length; }
+    return tar;
+  }
+
+  async function gzipBytes(u8) {
+    const stream = new Blob([u8]).stream().pipeThrough(new CompressionStream('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  /* ════════════════════════════════════════════════════════════════════
+     The page.
+     ════════════════════════════════════════════════════════════════════ */
+
+  const state = {
+    files:  null,   // [{ path, file }]
+    folder: null,   // the picked folder's name, for messages
+  };
+
+  function setBadge(el, cls, text) { el.className = 'badge ' + cls; el.textContent = text; }
+  function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
+  function clearError(el) { el.classList.add('hidden'); }
+
+  function fmtSize(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  const escapeHtml = (s) =>
+    s.replace(/[&<>"']/g, (c) => '&#' + c.charCodeAt(0) + ';');
+
+  function refreshReady() {
+    const ready = !!(state.files && state.files.length);
+    $('btn-publish').disabled = !ready;
+    $('pub-done').classList.add('hidden');
+    setBadge($('pub-badge'), 'badge-dim', ready ? 'ready' : 'waiting');
+  }
+
+  // ── Step 1: folder ──
+  // The same hidden-path rule the server enforces: any '.'-segment except
+  // .well-known is never served, so it is not bundled either — a .git or
+  // .env under the site folder must not end up on the server.
+  const isHiddenPath = (path) =>
+    path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
+
+  $('btn-dir').addEventListener('click', () => $('dir-input').click());
+  $('dir-input').addEventListener('change', () => {
+    clearError($('dir-error'));
+    const all = [...$('dir-input').files];
+    if (!all.length) return;
+
+    // webkitRelativePath is '<picked folder>/rest…' — the folder name is
+    // stripped so index.html sits at the bundle root, where serve_dir wants it.
+    const items = all.map((f) => ({
+      path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
+    })).filter((e) => e.path);
+    const kept = items.filter((e) => !isHiddenPath(e.path));
+    const hidden = items.length - kept.length;
+
+    if (!kept.length) {
+      showError($('dir-error'), 'That folder has no publishable files' +
+        (hidden ? ` (${hidden} hidden entries were excluded).` : '.'));
+      return;
+    }
+    state.files  = kept;
+    state.folder = all[0].webkitRelativePath.split('/')[0];
+
+    const total = kept.reduce((n, e) => n + e.file.size, 0);
+    const hasIndex = kept.some((e) => e.path === 'index.html');
+    $('dir-summary').innerHTML =
+      `<b>${escapeHtml(state.folder)}/</b> — ${kept.length} file${kept.length === 1 ? '' : 's'}, ` +
+      `${fmtSize(total)}` +
+      (hidden ? ` · ${hidden} hidden entr${hidden === 1 ? 'y' : 'ies'} excluded ` +
+                `(paths starting with '.' are never served)` : '') +
+      (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
+                       `the site root would show a directory miss</span>`);
+    setBadge($('dir-badge'), 'badge-green', '✓ folder read');
+    refreshReady();
+  });
+
+  // ── Step 2: publish ──
+  $('btn-publish').addEventListener('click', async () => {
+    clearError($('pub-error'));
+    $('btn-publish').disabled = true;
+    setBadge($('pub-badge'), 'badge-dim', 'building…');
+    try {
+      const entries = [];
+      let total = 0;
+      for (const { path, file } of state.files) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        total += bytes.length;
+        if (total > MAX_BUNDLE_BYTES)
+          throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
+                          `the server would reject it`);
+        entries.push({ path, bytes });
+      }
+      const gz = await gzipBytes(buildTar(entries));
+
+      setBadge($('pub-badge'), 'badge-dim', 'publishing…');
+      const resp = await fetch('/upload?t=' + encodeURIComponent(CODE), {
+        method: 'POST', body: gz,
+      });
+      let result = '';
+      try { result = (await resp.json()).result; } catch { result = ''; }
+
+      if (resp.ok && result === 'published') {
+        $('pub-note').innerHTML = `<b>${escapeHtml(state.folder)}/</b> is live — ` +
+          `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
+          `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
+          `content kept as the one-step backup.`;
+        $('pub-done').classList.remove('hidden');
+        setBadge($('pub-badge'), 'badge-green', '✓ published');
+      } else if (resp.status === 403) {
+        throw new Error('The server refused the pairing code — close this page, ' +
+                        'and open the fresh link the terminal prints for this run.');
+      } else {
+        throw new Error('The server rejected the bundle' +
+                        (result ? ` (${result})` : ` (HTTP ${resp.status})`) +
+                        ' — nothing was changed. The terminal log has the detail.');
+      }
+    } catch (e) {
+      showError($('pub-error'), e.message);
+      setBadge($('pub-badge'), 'badge-red', '✕ failed');
+    }
+    $('btn-publish').disabled = false;
+  });
+
+  // ── Feature gate ──
+  // The bundle needs gzip from the browser itself; without it the page says
+  // so instead of half-working.
+  $(typeof CompressionStream === 'function' ? 'app' : 'unsupported')
+    .classList.remove('hidden');
+</script>
+
+</body>
+</html>

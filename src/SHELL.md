@@ -1095,49 +1095,73 @@ def _publish_show():
 
 ```
 
-The loop itself: show the state, then dispatch until `back`.
+The loop itself: start the page server for the run, show the state and both doors, then dispatch until `back` — stopping the server on every way out.
 
 ```python
 # publish
 def cmd_publish():
+    """The publish sub-shell with the browser half alongside: the loopback
+    page server runs for exactly this command's lifetime, and the terminal
+    keeps working whether or not the page is ever opened — a busy port costs
+    the page, never the flow."""
+    site  = config.sites[0]
+    httpd = None
+    try:
+        httpd, code = _start_ui(site, _UI_PUBLISH_PAGE)
+    except OSError as e:
+        print(f"  No browser page this run (port {_UI_PORT}: {e.strerror or e}).")
+
     _publish_show()
+    if httpd is not None:
+        httpd.on_publish = lambda: print(
+            "\n  Published from browser: content swapped in — restore-site undoes it.")
+        target = f" (site 0: {site.domain or site.serve_dir})" if len(config.sites) > 1 else ""
+        print(f"  In a browser{target}:")
+        print(f"    open  http://localhost:{_UI_PORT}/?t={code}")
+        print(f"    (or your bookmark http://localhost:{_UI_PORT}/ and enter code {code})")
+        print()
+
     print(PUBLISH_HELP)
 
-    while True:
-        try:
-            raw = input("  publish> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
+    try:
+        while True:
+            try:
+                raw = input("  publish> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
 
-        if not raw:
-            continue
+            if not raw:
+                continue
 
-        parts = raw.split()
-        cmd   = parts[0].lower()
-        args  = parts[1:]
+            parts = raw.split()
+            cmd   = parts[0].lower()
+            args  = parts[1:]
 
-        if cmd == "show":
-            _publish_show()
-        elif cmd == "pull":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_pull(site)
-        elif cmd == "restore-site":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_restore_site(site)
-        elif cmd == "channel":
-            site = _config_site_arg(args)
-            if site is not None:
-                _config_publish(site)
-        elif cmd in ("back", "done", "exit", "quit"):
-            break
-        elif cmd in ("help", "?"):
-            print(PUBLISH_HELP)
-        else:
-            print(f"  Unknown command: {cmd}")
-            print(PUBLISH_HELP)
+            if cmd == "show":
+                _publish_show()
+            elif cmd == "pull":
+                site = _config_site_arg(args)
+                if site is not None:
+                    cmd_pull(site)
+            elif cmd == "restore-site":
+                site = _config_site_arg(args)
+                if site is not None:
+                    cmd_restore_site(site)
+            elif cmd == "channel":
+                site = _config_site_arg(args)
+                if site is not None:
+                    _config_publish(site)
+            elif cmd in ("back", "done", "exit", "quit"):
+                break
+            elif cmd in ("help", "?"):
+                print(PUBLISH_HELP)
+            else:
+                print(f"  Unknown command: {cmd}")
+                print(PUBLISH_HELP)
+    finally:
+        if httpd is not None:
+            _stop_ui(httpd)
 
 
 ```
@@ -1170,6 +1194,15 @@ _UI_PAIR_PAGE = """<!doctype html>
 <button>Open</button></form>
 </body></html>
 """
+
+
+```
+
+The publish page itself is inlined by the build exactly as the 404 page is — authored as `src/publish.html`, counted apart from the Python figures. It is the pub tool's bundle builder with every trace of key custody removed: on this page, being here is the authentication.
+
+```python
+# The publish page
+_UI_PUBLISH_PAGE = """@@PUBLISH_HTML@@"""
 
 
 ```
@@ -1235,6 +1268,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         if length > _MAX_BUNDLE_BYTES:
             return self._respond(413, "Bundle too large.")
         result = _land_bundle(self.server.site, self.rfile.read(length), "browser upload")
+        if result == "published" and getattr(self.server, "on_publish", None):
+            self.server.on_publish()  # the terminal narrates what the browser did
         self._respond(200 if result == "published" else 422,
                       json.dumps({"result": result}), "application/json")
 
@@ -1582,6 +1617,14 @@ def cmd_setup():
         cmd_start()
     else:
         print("  Run 'start' when you're ready.")
+
+    # The one-time client-side line for the browser half of `publish` — said
+    # here because setup is the moment the operator is already reading.
+    print()
+    print("  Optional, once, on the computer you ssh FROM: add this line to")
+    print("  ~/.ssh/config inside this server's entry, and 'publish' can open")
+    print("  a browser page over this same SSH connection:")
+    print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
 
 
 ```

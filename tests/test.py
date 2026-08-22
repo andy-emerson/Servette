@@ -1034,8 +1034,12 @@ def run_dispatch_tests(s):
           "webkitGetAsEntry" in s._UI_ADMIN_PAGE
           and "dragover" in s._UI_ADMIN_PAGE
           and "useFolder" in s._UI_ADMIN_PAGE)
+    check("...with a drop strip visible before anything is dragged",
+          "dropstrip" in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
           "btn-outside" in s._UI_ADMIN_PAGE)
+    check("...and the Config tab wired to the set vocabulary",
+          "tab-config" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
 
     section("Loopback page server")
 
@@ -1089,6 +1093,30 @@ def run_dispatch_tests(s):
               st == 200 and b'"version"' in body and b'"sites"' in body)
         st, _ = ui_req("GET", "/status")
         check("GET /status without the code is refused", st == 403)
+
+        st, body = ui_req("GET", f"/config?t={ui_code}")
+        check("GET /config with the code answers the set vocabulary with values",
+              st == 200 and b'"trusted_proxy"' in body and b'"sites"' in body)
+        st, _ = ui_req("GET", "/config")
+        check("GET /config without the code is refused", st == 403)
+
+        saved_cfg_user = s.config.sites[0].username
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"site": 0,
+                                        "values": {"username": "cfg-probe"}}).encode())
+        check("POST /config applies through the same path as `set`",
+              st == 200 and s.config.sites[0].username == "cfg-probe")
+        st, body = ui_req("POST", f"/config?t={ui_code}",
+                          body=json.dumps({"values": {"port": "99999"}}).encode())
+        check("...refuses what `set` refuses, with `set`'s own sentence",
+              st == 422 and b"port must be 1-65535" in body)
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"values": {"bogus_key": "1"}}).encode())
+        check("...and an unknown setting", st == 422)
+        st, _ = ui_req("POST", f"/config?t={ui_code}", body=b"not json{")
+        check("...and a malformed settings body", st == 400)
+        s.config.sites[0].username = saved_cfg_user
+        s.config.save()
 
         st, _ = ui_req("POST", "/upload")
         check("An upload without the code is refused", st == 403)

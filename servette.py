@@ -5207,6 +5207,39 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       border-color: rgba(90,132,102,0.7);
       background: rgba(90,132,102,0.08);
     }
+
+    .dropstrip {
+      margin-top: 0.75rem;
+      padding: 0.8rem;
+      border: 1px dashed var(--border);
+      border-radius: 4px;
+      text-align: center;
+      font-size: 0.72rem;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+    }
+    #drop-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
+
+    .cfg-field { margin-top: 0.7rem; }
+    .cfg-field label {
+      display: block;
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.25rem;
+    }
+    .cfg-field input, select.cfg-site {
+      font-family: inherit;
+      font-size: 0.75rem;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.5rem 0.7rem;
+      width: 100%;
+    }
+    select.cfg-site { width: auto; }
   </style>
 </head>
 <body>
@@ -5237,6 +5270,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <nav class="tabs" role="tablist">
     <button class="tab active" id="tab-status" type="button" role="tab">Status</button>
     <button class="tab" id="tab-publish" type="button" role="tab">Publish</button>
+    <button class="tab" id="tab-config" type="button" role="tab">Config</button>
   </nav>
 
   <!-- ══ Status — the inside view ══ -->
@@ -5287,9 +5321,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           <button class="action" id="btn-dir" type="button">Choose your site's folder</button>
           <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
         </div>
-        <p class="hint" id="dir-summary">Pick the folder whose contents should
-        become the site — or drag it from your file manager and drop it
-        anywhere on this card. It's the folder that holds your
+        <div class="dropstrip">⤓&nbsp; or drop your site's folder anywhere on this card</div>
+        <p class="hint" id="dir-summary">It's the folder that holds your
         <b>index.html</b>. Files are read here in the browser and travel only
         through your SSH tunnel to your own server.</p>
         <p class="error hidden" id="dir-error"></p>
@@ -5310,6 +5343,44 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           <pre class="shell">restore-site     <span class="c"># in the terminal: one step back, if you want the previous content</span></pre>
         </div>
         <p class="error hidden" id="pub-error"></p>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══ Config — forms over the same validators `set` runs ══ -->
+  <div id="panel-config" role="tabpanel" class="hidden">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Site settings</span>
+        <span class="badge badge-dim" id="cfg-site-badge">loading…</span>
+      </div>
+      <div class="card-body">
+        <select class="cfg-site" id="cfg-site-select"></select>
+        <div id="cfg-site-fields"></div>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action primary" id="btn-save-site" type="button">Save site settings</button>
+        </div>
+        <p class="hint">Password and domain stay in the terminal on purpose:
+        a password is a secret with a guided prompt (<b>config &gt;
+        password</b>), and a domain is bound up with certificate issuance
+        (<b>config &gt; cert</b>).</p>
+        <p class="error hidden" id="cfg-site-error"></p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Host settings</span>
+        <span class="badge badge-dim" id="cfg-host-badge">loading…</span>
+      </div>
+      <div class="card-body">
+        <div id="cfg-host-fields"></div>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action primary" id="btn-save-host" type="button">Save host settings</button>
+        </div>
+        <p class="error hidden" id="cfg-host-error"></p>
       </div>
     </div>
 
@@ -5337,7 +5408,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
-  const PANELS = { status: 'panel-status', publish: 'panel-publish' };
+  const PANELS = { status: 'panel-status', publish: 'panel-publish', config: 'panel-config' };
 
   function showTab(name) {
     if (!PANELS[name]) name = 'status';
@@ -5346,12 +5417,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       $('tab-' + key).classList.toggle('active', key === name);
     }
     if (name === 'status') loadStatus();
+    if (name === 'config') loadConfig();
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
 
   $('tab-status').addEventListener('click', () => showTab('status'));
   $('tab-publish').addEventListener('click', () => showTab('publish'));
+  $('tab-config').addEventListener('click', () => showTab('config'));
 
   /* ══ Status — the inside view, rendered from GET /status. ══ */
 
@@ -5420,6 +5493,95 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   }
 
   $('btn-refresh').addEventListener('click', loadStatus);
+
+  /* ══ Config — forms over the same validators the `set` command runs, so a
+     value the terminal refuses the page refuses with the same sentence. ══ */
+
+  const HOST_FIELDS = [
+    ['port',            'HTTPS port'],
+    ['email',           'Email (ACME registration)'],
+    ['rate_limit',      'Rate limit (requests / minute / visitor)'],
+    ['auth_rate_limit', 'Auth rate limit (failed logins / minute)'],
+    ['cache_size_mb',   'File cache size (MB)'],
+    ['trusted_proxy',   'Trusted proxy IP (blank = none)'],
+  ];
+  const SITE_FIELDS = [
+    ['dir',         'Folder to serve'],
+    ['username',    'Login username (blank = no password gate)'],
+    ['publish_url', 'Publish channel URL (blank = none)'],
+    ['publish_key', 'Publish channel key (64 hex)'],
+  ];
+
+  let cfgData = null;
+
+  const field = (key, label, value) =>
+    `<div class="cfg-field"><label for="cfg-${key}">${label}</label>` +
+    `<input id="cfg-${key}" value="${escapeHtml(String(value == null ? '' : value))}"></div>`;
+
+  function renderConfig() {
+    const siteIdx = parseInt($('cfg-site-select').value || '0', 10) || 0;
+    const site = (cfgData.sites || [])[siteIdx] || {};
+    $('cfg-site-fields').innerHTML =
+      SITE_FIELDS.map(([k, l]) => field(k, l, site[k])).join('');
+    $('cfg-host-fields').innerHTML =
+      HOST_FIELDS.map(([k, l]) => field(k, l, (cfgData.host || {})[k])).join('');
+    setBadge($('cfg-site-badge'), 'badge-dim',
+             site.domain ? site.domain : 'site ' + siteIdx);
+    setBadge($('cfg-host-badge'), 'badge-dim', 'host-wide');
+  }
+
+  async function loadConfig() {
+    clearError($('cfg-site-error'));
+    clearError($('cfg-host-error'));
+    try {
+      const r = await fetch('/config?t=' + encodeURIComponent(CODE));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      cfgData = await r.json();
+      const sel = $('cfg-site-select');
+      const keep = sel.value;
+      sel.innerHTML = (cfgData.sites || []).map((s) =>
+        `<option value="${s.index}">site ${s.index}` +
+        `${s.domain ? ' — ' + escapeHtml(s.domain) : ''}</option>`).join('');
+      if (keep) sel.value = keep;
+      renderConfig();
+    } catch (e) {
+      setBadge($('cfg-site-badge'), 'badge-red', '✕ unreachable');
+      setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
+      showError($('cfg-site-error'), 'Could not read settings: ' + e.message);
+    }
+  }
+
+  $('cfg-site-select').addEventListener('change', renderConfig);
+
+  async function saveSettings(fields, siteIdx, badge, errEl) {
+    clearError(errEl);
+    const values = {};
+    for (const [k] of fields) values[k] = $('cfg-' + k).value.trim();
+    setBadge(badge, 'badge-dim', 'saving…');
+    try {
+      const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
+        method: 'POST',
+        body: JSON.stringify({ site: siteIdx, values }),
+      });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (r.ok && data.result === 'saved') {
+        setBadge(badge, 'badge-green', '✓ saved');
+        loadConfig();
+      } else {
+        throw new Error(data.error || 'HTTP ' + r.status);
+      }
+    } catch (e) {
+      setBadge(badge, 'badge-red', '✕ not saved');
+      showError(errEl, e.message + ' — nothing was changed.');
+    }
+  }
+
+  $('btn-save-site').addEventListener('click', () => saveSettings(
+    SITE_FIELDS, parseInt($('cfg-site-select').value || '0', 10) || 0,
+    $('cfg-site-badge'), $('cfg-site-error')));
+  $('btn-save-host').addEventListener('click', () => saveSettings(
+    HOST_FIELDS, 0, $('cfg-host-badge'), $('cfg-host-error')));
 
   /* ══ Publish — the pub tool's bundle builder with the signing removed.
      The server's contract (_extract_bundle / _land_bundle): a tar.gz of
@@ -5712,7 +5874,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path not in ("/", "/status"):
+        if path not in ("/", "/status", "/config"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -5723,12 +5885,25 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             if auth != "ok":
                 return self._respond(403, "Not paired.")
             return self._respond(200, json.dumps(_status_data()), "application/json")
+        if path == "/config":
+            # The Config tab's read half: exactly the vocabulary `set`
+            # accepts, plus current values to fill the forms.
+            if auth != "ok":
+                return self._respond(403, "Not paired.")
+            return self._respond(200, json.dumps({
+                "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
+                "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
+                           "username": s.username, "publish_url": s.publish_url,
+                           "publish_key": s.publish_key}
+                          for i, s in enumerate(config.sites)],
+            }), "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)
         return self._respond(200, _UI_PAIR_PAGE)
 
     def do_POST(self):
-        if urlsplit(self.path).path != "/upload":
+        path = urlsplit(self.path).path
+        if path not in ("/upload", "/config"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
             return self._respond(403, "Not paired.")
@@ -5738,6 +5913,36 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             length = 0
         if length <= 0:
             return self._respond(400, "Empty upload.")
+
+        if path == "/config":
+            # The Config tab's write half: the same validate-then-apply path
+            # `set` runs, so a value the terminal refuses the page refuses
+            # with the same sentence.
+            if length > 65536:
+                return self._respond(413, "Settings body too large.")
+            try:
+                body = json.loads(self.rfile.read(length))
+                idx  = int(body.get("site") or 0)
+                pairs = [(str(k).strip().lower(), str(v))
+                         for k, v in dict(body.get("values") or {}).items()]
+            except (ValueError, TypeError):
+                return self._respond(400, "Malformed settings body.")
+            if not pairs:
+                return self._respond(400, "No settings given.")
+            if not (0 <= idx < len(config.sites)):
+                return self._respond(422, json.dumps({"error": f"no site {idx}"}),
+                                     "application/json")
+            try:
+                err = _apply_settings(config.sites[idx], pairs)
+            except PermissionError:
+                return self._respond(500, json.dumps(
+                    {"error": "writing the config needs root — re-run 'admin' elevated"}),
+                    "application/json")
+            return self._respond(200 if not err else 422,
+                                 json.dumps({"result": "saved"} if not err
+                                            else {"error": err}),
+                                 "application/json")
+
         if length > _MAX_BUNDLE_BYTES:
             return self._respond(413, "Bundle too large.")
         result = _land_bundle(self.server.site, self.rfile.read(length), "browser upload")
@@ -6162,6 +6367,33 @@ def _set_usage():
 
 
 # set
+def _apply_settings(site, pairs):
+    """Validate `pairs` ([(key, value)]) against scratch objects, then apply
+    them to config/`site` and save — the one settings write path, shared by
+    `set` and the admin page's Config tab so the two surfaces cannot drift.
+    Returns an error string, empty on success; every pair is checked before
+    any is applied, so a bad pair never leaves the config half-written.
+    PermissionError from the save propagates — each caller words its own
+    hint."""
+    class _ScratchHost:
+        pass
+    scratch_host, scratch_site = _ScratchHost(), Site()
+    for key, value in pairs:
+        if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
+            return f"unknown setting: {key}"
+        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
+               else _set_site_value(scratch_site, key, value))
+        if err:
+            return f"{key}: {err}"
+    for key, value in pairs:
+        if key in _SET_HOST_KEYS:
+            _set_host_value(config, key, value)
+        else:
+            _set_site_value(site, key, value)
+    config.save()
+    return ""
+
+
 def cmd_set(args):
     """`set [n] key=value ...` — non-interactive configuration for tooling.
     The optional leading index picks the site for site keys (default 0).
@@ -6187,24 +6419,13 @@ def cmd_set(args):
     if not pairs:
         _set_usage()
         return
-    class _ScratchHost:
-        pass
-    scratch_host, scratch_site = _ScratchHost(), Site()
-    for key, value in pairs:
-        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
-               else _set_site_value(scratch_site, key, value))
-        if err:
-            print(f"  {key}: {err}")
-            return
-    for key, value in pairs:
-        if key in _SET_HOST_KEYS:
-            _set_host_value(config, key, value)
-        else:
-            _set_site_value(site, key, value)
     try:
-        config.save()
+        err = _apply_settings(site, pairs)
     except PermissionError:
         print("  Error: writing the config needs root, and sudo is unavailable — re-run as root.")
+        return
+    if err:
+        print(f"  {err}")
         return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 

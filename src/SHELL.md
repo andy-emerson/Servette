@@ -1292,7 +1292,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path not in ("/", "/status"):
+        if path not in ("/", "/status", "/config"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -1303,12 +1303,25 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             if auth != "ok":
                 return self._respond(403, "Not paired.")
             return self._respond(200, json.dumps(_status_data()), "application/json")
+        if path == "/config":
+            # The Config tab's read half: exactly the vocabulary `set`
+            # accepts, plus current values to fill the forms.
+            if auth != "ok":
+                return self._respond(403, "Not paired.")
+            return self._respond(200, json.dumps({
+                "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
+                "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
+                           "username": s.username, "publish_url": s.publish_url,
+                           "publish_key": s.publish_key}
+                          for i, s in enumerate(config.sites)],
+            }), "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)
         return self._respond(200, _UI_PAIR_PAGE)
 
     def do_POST(self):
-        if urlsplit(self.path).path != "/upload":
+        path = urlsplit(self.path).path
+        if path not in ("/upload", "/config"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
             return self._respond(403, "Not paired.")
@@ -1318,6 +1331,36 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             length = 0
         if length <= 0:
             return self._respond(400, "Empty upload.")
+
+        if path == "/config":
+            # The Config tab's write half: the same validate-then-apply path
+            # `set` runs, so a value the terminal refuses the page refuses
+            # with the same sentence.
+            if length > 65536:
+                return self._respond(413, "Settings body too large.")
+            try:
+                body = json.loads(self.rfile.read(length))
+                idx  = int(body.get("site") or 0)
+                pairs = [(str(k).strip().lower(), str(v))
+                         for k, v in dict(body.get("values") or {}).items()]
+            except (ValueError, TypeError):
+                return self._respond(400, "Malformed settings body.")
+            if not pairs:
+                return self._respond(400, "No settings given.")
+            if not (0 <= idx < len(config.sites)):
+                return self._respond(422, json.dumps({"error": f"no site {idx}"}),
+                                     "application/json")
+            try:
+                err = _apply_settings(config.sites[idx], pairs)
+            except PermissionError:
+                return self._respond(500, json.dumps(
+                    {"error": "writing the config needs root — re-run 'admin' elevated"}),
+                    "application/json")
+            return self._respond(200 if not err else 422,
+                                 json.dumps({"result": "saved"} if not err
+                                            else {"error": err}),
+                                 "application/json")
+
         if length > _MAX_BUNDLE_BYTES:
             return self._respond(413, "Bundle too large.")
         result = _land_bundle(self.server.site, self.rfile.read(length), "browser upload")
@@ -1812,6 +1855,33 @@ The command itself. Two keys are deliberately absent: password (a secret on argv
 
 ```python
 # set
+def _apply_settings(site, pairs):
+    """Validate `pairs` ([(key, value)]) against scratch objects, then apply
+    them to config/`site` and save — the one settings write path, shared by
+    `set` and the admin page's Config tab so the two surfaces cannot drift.
+    Returns an error string, empty on success; every pair is checked before
+    any is applied, so a bad pair never leaves the config half-written.
+    PermissionError from the save propagates — each caller words its own
+    hint."""
+    class _ScratchHost:
+        pass
+    scratch_host, scratch_site = _ScratchHost(), Site()
+    for key, value in pairs:
+        if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
+            return f"unknown setting: {key}"
+        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
+               else _set_site_value(scratch_site, key, value))
+        if err:
+            return f"{key}: {err}"
+    for key, value in pairs:
+        if key in _SET_HOST_KEYS:
+            _set_host_value(config, key, value)
+        else:
+            _set_site_value(site, key, value)
+    config.save()
+    return ""
+
+
 def cmd_set(args):
     """`set [n] key=value ...` — non-interactive configuration for tooling.
     The optional leading index picks the site for site keys (default 0).
@@ -1837,24 +1907,13 @@ def cmd_set(args):
     if not pairs:
         _set_usage()
         return
-    class _ScratchHost:
-        pass
-    scratch_host, scratch_site = _ScratchHost(), Site()
-    for key, value in pairs:
-        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
-               else _set_site_value(scratch_site, key, value))
-        if err:
-            print(f"  {key}: {err}")
-            return
-    for key, value in pairs:
-        if key in _SET_HOST_KEYS:
-            _set_host_value(config, key, value)
-        else:
-            _set_site_value(site, key, value)
     try:
-        config.save()
+        err = _apply_settings(site, pairs)
     except PermissionError:
         print("  Error: writing the config needs root, and sudo is unavailable — re-run as root.")
+        return
+    if err:
+        print(f"  {err}")
         return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 

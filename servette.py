@@ -5308,7 +5308,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .container {
       position: relative;
       z-index: 1;
-      max-width: 560px;
+      /* Wider than the public pages (480px): those are read, this one is
+         worked in — forms, health rows, and publish summaries need room. */
+      max-width: 760px;
       width: 100%;
     }
 
@@ -5431,20 +5433,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .good  { color: var(--green); }
     .bad   { color: var(--red); }
     .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
-
-    pre.shell {
-      font-family: inherit;
-      font-size: 0.72rem;
-      color: var(--text);
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 0.7rem 0.9rem;
-      line-height: 1.7;
-      overflow-x: auto;
-      margin-top: 0.4rem;
-    }
-    pre.shell .c { color: var(--muted); }
 
     .note {
       font-size: 0.7rem;
@@ -5595,7 +5583,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         </div>
         <div id="pub-done" class="hidden">
           <p class="hint" id="pub-note" style="margin-top:0.75rem"></p>
-          <pre class="shell">restore-site     <span class="c"># in the terminal: one step back, if you want the previous content</span></pre>
+          <p class="hint">Want the previous content back? <b>restore-site</b>
+          in the terminal is the one step back.</p>
         </div>
         <p class="error hidden" id="pub-error"></p>
       </div>
@@ -5660,6 +5649,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   const MAX_BUNDLE_BYTES = 500 * 1024 * 1024;  // mirrors _MAX_BUNDLE_BYTES server-side
   const CODE = new URLSearchParams(location.search).get('t') || '';
+
+  // A fetch that dies with no HTTP response at all surfaces as a TypeError
+  // ('Failed to fetch') — the wire itself is gone, not the server saying
+  // no. On this page the wire is the SSH tunnel, so say that instead of
+  // echoing the browser's bare message (learned the hard way: issue #114).
+  const TUNNEL_DOWN = 'Could not reach the server — the SSH tunnel is ' +
+    'probably down. Check the terminal: if the ssh session or the admin ' +
+    'command has ended, reconnect, run servette admin again, and open the ' +
+    'fresh link it prints.';
 
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
@@ -5741,8 +5739,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     } catch (e) {
       setBadge($('st-badge'), 'badge-red', '✕ unreachable');
       setBadge($('health-badge'), 'badge-red', '✕ unreachable');
-      showError($('st-error'), 'Could not read status: ' + e.message +
-        ' — if the terminal command was closed, re-run it and open the fresh link.');
+      showError($('st-error'), (e instanceof TypeError) ? TUNNEL_DOWN
+        : 'Could not read status: ' + e.message +
+          ' — if the terminal command was closed, re-run it and open the fresh link.');
     }
   }
 
@@ -5803,7 +5802,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     } catch (e) {
       setBadge($('cfg-site-badge'), 'badge-red', '✕ unreachable');
       setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
-      showError($('cfg-site-error'), 'Could not read settings: ' + e.message);
+      showError($('cfg-site-error'), (e instanceof TypeError) ? TUNNEL_DOWN
+        : 'Could not read settings: ' + e.message);
     }
   }
 
@@ -5829,7 +5829,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       }
     } catch (e) {
       setBadge(badge, 'badge-red', '✕ not saved');
-      showError(errEl, e.message + ' — nothing was changed.');
+      showError(errEl, (e instanceof TypeError)
+        ? TUNNEL_DOWN + ' Nothing was changed.'
+        : e.message + ' — nothing was changed.');
     }
   }
 
@@ -6083,7 +6085,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                         ' — nothing was changed. The terminal log has the detail.');
       }
     } catch (e) {
-      showError($('pub-error'), e.message);
+      // A dropped tunnel mid-upload cannot half-publish: the server swaps
+      // content in only after a complete, valid bundle has landed.
+      showError($('pub-error'), (e instanceof TypeError)
+        ? TUNNEL_DOWN + ' Nothing was published.' : e.message);
       setBadge($('pub-badge'), 'badge-red', '✕ failed');
     }
     $('btn-publish').disabled = false;

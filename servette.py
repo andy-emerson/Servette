@@ -4690,31 +4690,75 @@ def _extract_bundle(data, dest_dir):
             tf.extractall(dest_dir, members=members)
 
 
+# The content slots
+def _content_slots(serve_dir):
+    """The two sibling trees the serve_dir symlink flips between."""
+    base = _resolve(serve_dir).rstrip(os.sep)
+    return base + ".a", base + ".b"
+
+
+def _drop_backup(bak):
+    """Remove the single-shot backup marker, whichever era made it: a symlink
+    from the flip design (the tree it names is handled by the caller), or a
+    real directory from before it."""
+    if os.path.islink(bak):
+        os.remove(bak)
+    elif os.path.isdir(bak):
+        shutil.rmtree(bak, ignore_errors=True)
+
+
 # The content swap
 def _swap_site_content(new_dir, serve_dir):
-    """Atomically replace the live serve_dir with new_dir's contents, keeping
-    a single-shot backup: serve_dir.bak holds the one previous state, and a
-    successful restore-site consumes it.
-    new_dir must be on the same filesystem as serve_dir (both under BASE_DIR)
-    so the renames are atomic; the only unavoidable risk window is the two
-    renames themselves, each a single fast syscall back to back — proportionate
-    to Servette's scale, not a high-QPS system where that window would matter.
+    """Make new_dir the live content behind serve_dir, keeping the previous
+    tree as the single-shot backup that restore-site consumes.
 
-    The first rename is undone if the second fails: without the rollback a
-    failed swap left NO live directory at all — every request a 404 — while
-    the caller reported the pull merely 'rejected', and only a manual
-    restore-site would have noticed the site was down."""
-    live_dir = _resolve(serve_dir).rstrip(os.sep)
-    bak_dir  = live_dir + ".bak"
-    shutil.rmtree(bak_dir, ignore_errors=True)
-    had_live = os.path.isdir(live_dir)
+    serve_dir is a symlink into one of two sibling slots (.a/.b): new_dir's
+    tree moves into the idle slot and one atomic os.replace flips the link —
+    no window, crash-safe. `serve_dir.bak` then points at the previous slot.
+    A legacy real directory at serve_dir is converted on its first swap: the
+    old content becomes the .bak directory and the link lands — the one swap
+    that still carries the old rename gap, once per site ever, with the same
+    rollback the old design had (a failed conversion must never leave NO live
+    directory — every request a 404 — while the caller reports merely
+    'rejected')."""
+    if not os.path.isdir(new_dir):
+        # A dangling symlink would "succeed" — the old rename raised here,
+        # and the flip must fail just as loudly rather than serve nothing.
+        raise FileNotFoundError(f"new content tree missing: {new_dir}")
+    live = _resolve(serve_dir).rstrip(os.sep)
+    bak  = live + ".bak"
+    a, b = _content_slots(serve_dir)
+
+    if os.path.islink(live):
+        old_target = os.path.realpath(live)
+        dest = b if old_target == os.path.realpath(a) else a
+        if os.path.realpath(new_dir) != os.path.realpath(dest):
+            _drop_backup(bak)                    # single-shot: newest wins
+            shutil.rmtree(dest, ignore_errors=True)
+            os.rename(new_dir, dest)
+        flip = live + ".flip"
+        if os.path.lexists(flip):
+            os.remove(flip)                      # a crash's leftover, harmless
+        os.symlink(dest, flip)
+        os.replace(flip, live)                   # the swap: one atomic syscall
+        _drop_backup(bak)
+        if os.path.isdir(old_target) and old_target != os.path.realpath(live):
+            os.symlink(old_target, bak)
+        return
+
+    # Legacy: a real directory (or nothing yet) at serve_dir — convert.
+    had_live = os.path.isdir(live)
+    if os.path.realpath(new_dir) != os.path.realpath(a):
+        shutil.rmtree(a, ignore_errors=True)
+        os.rename(new_dir, a)
     if had_live:
-        os.rename(live_dir, bak_dir)
+        _drop_backup(bak)
+        os.rename(live, bak)
     try:
-        os.rename(new_dir, live_dir)
+        os.symlink(a, live)
     except OSError:
         if had_live:
-            os.rename(bak_dir, live_dir)
+            os.rename(bak, live)
         raise
 
 
@@ -4735,23 +4779,21 @@ def _land_bundle(site, bundle, source):
         shutil.rmtree(staging, ignore_errors=True)
         try:
             _extract_bundle(bundle, staging)
+            # Extracted by this process — root, since every content channel
+            # elevates — so re-establish what enable establishes BEFORE the
+            # tree goes live: the operator owns their content, the service
+            # reads through its group. strip_world because the extraction's
+            # own 644/755 modes are Servette's writing, not the operator's,
+            # and must honour the never-world-bits promise. The backup needs
+            # nothing: it was the live tree a moment ago and keeps the
+            # ownership it already has. A failed extraction dies here, in
+            # staging, with the live content and its backup untouched.
+            _chown_operator(staging, strip_world=True)
             _swap_site_content(staging, site.serve_dir)
         except Exception as e:
             log.error("Publish bundle rejected: %s", e)
             shutil.rmtree(staging, ignore_errors=True)
             return "rejected"
-
-        # The tree just swapped in was extracted by this process — root, since
-        # every content channel elevates — so re-establish what enable
-        # establishes: the operator owns their content, the service reads
-        # through its group. strip_world because the extraction's own 644/755
-        # modes are Servette's writing, not the operator's, and must honour
-        # the never-world-bits promise. Without this, every publish left the
-        # site root-owned — the operator locked out of their own folder — and
-        # world-readable.
-        live = _resolve(site.serve_dir).rstrip(os.sep)
-        _chown_operator(live, strip_world=True)
-        _chown_operator(live + ".bak", strip_world=True)
 
     log.info("Published new content for %s from %s", site.domain or site.serve_dir, source)
     return "published"
@@ -4832,7 +4874,10 @@ def cmd_pull(site):
 
 def cmd_restore_site(site):
     """Roll back to the content saved by the last successful publish. The
-    backup is single-shot: one is kept, and a successful restore consumes it."""
+    backup is single-shot: one is kept, and a successful restore consumes it.
+    On a converted site the restore is the same atomic flip as the publish —
+    instant, no window; the tree being rolled away is then removed. A legacy
+    real-directory backup restores the old way (its window rides along, once)."""
     live_dir = _resolve(site.serve_dir).rstrip(os.sep)
     bak_dir  = live_dir + ".bak"
 
@@ -4848,12 +4893,30 @@ def cmd_restore_site(site):
         if not os.path.isdir(bak_dir):
             print("  Nothing to restore — a publish ran while you were deciding and consumed the backup.")
             return
-        if os.path.isdir(live_dir):
-            shutil.rmtree(live_dir)
-        os.rename(bak_dir, live_dir)
-        # The backup was made by a pull, which extracted it as root — same
-        # ownership repair as the pull itself, for the same reason.
-        _chown_operator(live_dir, strip_world=True)
+        if os.path.islink(live_dir) and os.path.islink(bak_dir):
+            bad    = os.path.realpath(live_dir)
+            target = os.path.realpath(bak_dir)
+            flip   = live_dir + ".flip"
+            if os.path.lexists(flip):
+                os.remove(flip)
+            os.symlink(target, flip)
+            os.replace(flip, live_dir)          # the restore: one atomic flip
+            os.remove(bak_dir)                  # consumed
+            if os.path.isdir(bad) and bad != target:
+                shutil.rmtree(bad, ignore_errors=True)
+        else:
+            # A legacy real-directory backup — possibly behind a converted
+            # site, so the link (or old directory) is cleared first.
+            if os.path.islink(live_dir):
+                bad = os.path.realpath(live_dir)
+                os.remove(live_dir)
+                shutil.rmtree(bad, ignore_errors=True)
+            elif os.path.isdir(live_dir):
+                shutil.rmtree(live_dir)
+            os.rename(bak_dir, live_dir)
+        # The restored tree may date from a pre-flip pull that extracted as
+        # root — the same ownership repair as a publish, for the same reason.
+        _chown_operator(os.path.realpath(live_dir), strip_world=True)
     print("  Site content restored from backup.")
 
 # The publish display
@@ -5139,6 +5202,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .note b { color: var(--text); font-weight: 500; }
 
     .hidden { display: none !important; }
+
+    #drop-card.drag {
+      border-color: rgba(90,132,102,0.7);
+      background: rgba(90,132,102,0.08);
+    }
   </style>
 </head>
 <body>
@@ -5184,7 +5252,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <p class="error hidden" id="st-error"></p>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-refresh" type="button">Refresh</button>
+          <button class="action" id="btn-outside" type="button" disabled
+                  title="Loads once the status shows a domain">Run the outside check</button>
         </div>
+        <p class="hint">The outside check opens a missing path on your site in
+        a new tab: the connection report that answers is served from the
+        public internet's side of the wire — the vantage this page, living on
+        your SSH tunnel, cannot have.</p>
       </div>
     </div>
 
@@ -5203,7 +5277,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <!-- ══ Publish — pick a folder, send it through the tunnel ══ -->
   <div id="panel-publish" role="tabpanel" class="hidden">
 
-    <div class="card">
+    <div class="card" id="drop-card">
       <div class="card-head">
         <span class="card-title">1 · Site folder</span>
         <span class="badge badge-dim" id="dir-badge">no folder chosen</span>
@@ -5214,9 +5288,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
         </div>
         <p class="hint" id="dir-summary">Pick the folder whose contents should
-        become the site — the folder that holds your <b>index.html</b>. Files
-        are read here in the browser and travel only through your SSH tunnel
-        to your own server.</p>
+        become the site — or drag it from your file manager and drop it
+        anywhere on this card. It's the folder that holds your
+        <b>index.html</b>. Files are read here in the browser and travel only
+        through your SSH tunnel to your own server.</p>
         <p class="error hidden" id="dir-error"></p>
       </div>
     </div>
@@ -5283,6 +5358,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const row = (k, v, cls) =>
     `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
 
+  // The outside check: opens a missing path on the site itself, so the
+  // connection report answers from the public internet's vantage — the one
+  // view a page living on the tunnel cannot compute (cross-origin responses
+  // are opaque to it, by the browser's own rules).
+  let outsideDomain = '';
+  $('btn-outside').addEventListener('click', () => {
+    if (!outsideDomain) return;
+    const probe = 'servette-check-' + Math.random().toString(36).slice(2, 8);
+    window.open('https://' + outsideDomain + '/' + probe, '_blank');
+  });
+
   async function loadStatus() {
     setBadge($('st-badge'), 'badge-dim', 'loading…');
     clearError($('st-error'));
@@ -5309,6 +5395,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         h += row('Channel', s.publish ? 'configured' : 'none (this page publishes directly)');
       }
       $('st-rows').innerHTML = h;
+
+      outsideDomain = ((d.sites || [])[0] || {}).domain || '';
+      $('btn-outside').disabled = !outsideDomain;
+      $('btn-outside').title = outsideDomain
+        ? 'Opens https://' + outsideDomain + '/<a-missing-path> in a new tab'
+        : 'Needs a domain — a LAN or self-signed site has no public vantage to check from';
 
       const problems = [...(d.issues || []), ...(d.warnings || [])];
       if (problems.length) {
@@ -5436,17 +5528,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const isHiddenPath = (path) =>
     path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
 
-  $('btn-dir').addEventListener('click', () => $('dir-input').click());
-  $('dir-input').addEventListener('change', () => {
-    clearError($('dir-error'));
-    const all = [...$('dir-input').files];
-    if (!all.length) return;
-
-    // webkitRelativePath is '<picked folder>/rest…' — the folder name is
-    // stripped so index.html sits at the bundle root, where serve_dir wants it.
-    const items = all.map((f) => ({
-      path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
-    })).filter((e) => e.path);
+  // One intake for both doors — the picker and the drop — so they cannot
+  // drift on the hidden-path rule or the summary.
+  function useFolder(items, folderName) {
     const kept = items.filter((e) => !isHiddenPath(e.path));
     const hidden = items.length - kept.length;
 
@@ -5456,7 +5540,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       return;
     }
     state.files  = kept;
-    state.folder = all[0].webkitRelativePath.split('/')[0];
+    state.folder = folderName;
 
     const total = kept.reduce((n, e) => n + e.file.size, 0);
     const hasIndex = kept.some((e) => e.path === 'index.html');
@@ -5469,6 +5553,70 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                        `the site root would show a directory miss</span>`);
     setBadge($('dir-badge'), 'badge-green', '✓ folder read');
     refreshReady();
+  }
+
+  $('btn-dir').addEventListener('click', () => $('dir-input').click());
+  $('dir-input').addEventListener('change', () => {
+    clearError($('dir-error'));
+    const all = [...$('dir-input').files];
+    if (!all.length) return;
+    // webkitRelativePath is '<picked folder>/rest…' — the folder name is
+    // stripped so index.html sits at the bundle root, where serve_dir wants it.
+    useFolder(all.map((f) => ({
+      path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
+    })).filter((e) => e.path), all[0].webkitRelativePath.split('/')[0]);
+  });
+
+  // The drop door: a dropped folder walks the same intake. A single dropped
+  // directory is the site folder (its name stripped, exactly like the
+  // picker); several dropped items land as the site root's own entries.
+  async function readDropped(entry, prefix, out) {
+    if (entry.isFile) {
+      const file = await new Promise((res, rej) => entry.file(res, rej));
+      out.push({ path: prefix + entry.name, file });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const e of batch) await readDropped(e, prefix + entry.name + '/', out);
+      }
+    }
+  }
+
+  const dropCard = $('drop-card');
+  dropCard.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropCard.classList.add('drag');
+  });
+  dropCard.addEventListener('dragleave', () => dropCard.classList.remove('drag'));
+  dropCard.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dropCard.classList.remove('drag');
+    clearError($('dir-error'));
+    const entries = [...e.dataTransfer.items]
+      .map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry())
+      .filter(Boolean);
+    if (!entries.length) return;
+    try {
+      const items = [];
+      let folderName;
+      if (entries.length === 1 && entries[0].isDirectory) {
+        folderName = entries[0].name;
+        const reader = entries[0].createReader();
+        for (;;) {
+          const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+          if (!batch.length) break;
+          for (const child of batch) await readDropped(child, '', items);
+        }
+      } else {
+        folderName = 'dropped files';
+        for (const entry of entries) await readDropped(entry, '', items);
+      }
+      useFolder(items, folderName);
+    } catch (err) {
+      showError($('dir-error'), 'Could not read the dropped folder: ' + err.message);
+    }
   });
 
   $('btn-publish').addEventListener('click', async () => {

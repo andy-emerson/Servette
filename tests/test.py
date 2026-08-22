@@ -1030,6 +1030,12 @@ def run_dispatch_tests(s):
     check("...and carries no key ceremony — SSH is the authentication",
           "Ed25519" not in s._UI_ADMIN_PAGE
           and "indexedDB" not in s._UI_ADMIN_PAGE)
+    check("...offers the drop door beside the picker, sharing one intake",
+          "webkitGetAsEntry" in s._UI_ADMIN_PAGE
+          and "dragover" in s._UI_ADMIN_PAGE
+          and "useFolder" in s._UI_ADMIN_PAGE)
+    check("...and the outside check the tunnel vantage cannot compute itself",
+          "btn-outside" in s._UI_ADMIN_PAGE)
 
     section("Loopback page server")
 
@@ -2494,6 +2500,10 @@ def run_dispatch_tests(s):
         s._swap_site_content(new1, s.config.sites[0].serve_dir)
         check("First swap: content is live",
               open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v1")
+        check("First swap: serve_dir is now a symlink into a slot",
+              os.path.islink(s.config.sites[0].serve_dir)
+              and os.path.realpath(s.config.sites[0].serve_dir)
+                  in [os.path.realpath(p) for p in s._content_slots(s.config.sites[0].serve_dir)])
         check("First swap: no backup (nothing existed to back up)",
               not os.path.isdir(s.config.sites[0].serve_dir + ".bak"))
 
@@ -2501,9 +2511,13 @@ def run_dispatch_tests(s):
         os.makedirs(new2)
         with open(os.path.join(new2, "marker.txt"), "w") as f:
             f.write("v2")
+        link_before = os.path.realpath(s.config.sites[0].serve_dir)
         s._swap_site_content(new2, s.config.sites[0].serve_dir)
         check("Second swap: new content is live",
               open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
+        check("Second swap: the link flipped to the other slot — no rename gap",
+              os.path.islink(s.config.sites[0].serve_dir)
+              and os.path.realpath(s.config.sites[0].serve_dir) != link_before)
         check("Second swap: previous content became the backup",
               open(os.path.join(s.config.sites[0].serve_dir + ".bak", "marker.txt")).read() == "v1")
 
@@ -2527,7 +2541,7 @@ def run_dispatch_tests(s):
             builtins.input = saved_input
             s._chown_operator = saved_chownop_r
         check("Restore re-establishes operator ownership (the backup came from a pull)",
-              (s._resolve(s.config.sites[0].serve_dir).rstrip(os.sep), True) in restore_chowns)
+              (os.path.realpath(s.config.sites[0].serve_dir), True) in restore_chowns)
         check("Restore: live content reverts to the backup (v2)",
               open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
         check("Restore: backup is consumed",
@@ -2538,9 +2552,9 @@ def run_dispatch_tests(s):
         check("Restoring again with nothing to restore reports cleanly, does not raise",
               "Nothing to restore" in buf.getvalue())
 
-        # A failed second rename must put the live directory back: without the
-        # rollback the site was left with NO directory at all — every request
-        # a 404 — while the pull reported merely 'rejected'.
+        # A missing new tree must fail loudly BEFORE anything moves: the old
+        # design raised on its second rename; a symlink flip would happily
+        # "succeed" dangling and serve nothing.
         ghost = os.path.join(swap_root, "never-created")
         raised_swap = False
         try:
@@ -2548,8 +2562,38 @@ def run_dispatch_tests(s):
         except OSError:
             raised_swap = True
         check("A failed swap raises instead of passing as silence", raised_swap)
-        check("...and the live content is rolled back, not gone",
+        check("...and the live content is untouched, not gone",
               open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
+
+        # Legacy conversion: a real directory (the pre-flip layout) becomes a
+        # linked site on its first swap, its old content the .bak directory —
+        # and a legacy backup restores the old way, un-converting cleanly.
+        legacy = os.path.join(swap_root, "legacy-site")
+        os.makedirs(legacy)
+        with open(os.path.join(legacy, "old.txt"), "w") as f:
+            f.write("pre-flip")
+        s.config.sites[0].serve_dir = legacy
+        fresh = os.path.join(swap_root, "fresh")
+        os.makedirs(fresh)
+        with open(os.path.join(fresh, "new.txt"), "w") as f:
+            f.write("post-flip")
+        s._swap_site_content(fresh, legacy)
+        check("Legacy conversion: the site is a symlink and the new content live",
+              os.path.islink(legacy)
+              and open(os.path.join(legacy, "new.txt")).read() == "post-flip")
+        check("...its old content is the backup, as a real directory",
+              not os.path.islink(legacy + ".bak")
+              and open(os.path.join(legacy + ".bak", "old.txt")).read() == "pre-flip")
+        saved_input_lr = builtins.input
+        try:
+            builtins.input = lambda prompt="": "y"
+            with contextlib.redirect_stdout(io.StringIO()):
+                s.cmd_restore_site(s.config.sites[0])
+        finally:
+            builtins.input = saved_input_lr
+        check("A legacy backup restores and consumes, through the link",
+              open(os.path.join(legacy, "old.txt")).read() == "pre-flip"
+              and not os.path.isdir(legacy + ".bak"))
     finally:
         s.config.sites[0].serve_dir = saved_serve_dir
         shutil.rmtree(swap_root, ignore_errors=True)
@@ -2621,10 +2665,10 @@ def run_dispatch_tests(s):
               open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
         check("Returns 'published'", result == "published")
         live2 = s._resolve(s.config.sites[0].serve_dir).rstrip(os.sep)
-        check("Pull re-establishes operator ownership, world bits stripped",
-              (live2, True) in chown_calls)
-        check("...and on the backup it left behind",
-              (live2 + ".bak", True) in chown_calls)
+        check("Pull re-establishes operator ownership BEFORE the tree goes live",
+              (live2 + ".new", True) in chown_calls)
+        check("...and leaves the backup alone — it was the live tree a moment ago",
+              not any(p == live2 + ".bak" for p, _ in chown_calls))
 
         other_key = Ed25519PrivateKey.generate()
         bad_sig   = other_key.sign(bundle_bytes)
@@ -4699,8 +4743,11 @@ def run_invariant_tests(s, serve_dir, tmpdir):
     expected = {
         # Site content: the publish pipeline, and nothing else. _land_bundle
         # is the shared landing every channel funnels through — pull after
-        # its signature check, the loopback page after its pairing code.
+        # its signature check, the loopback page after its pairing code —
+        # and _drop_backup retires the single-shot backup marker for both
+        # the flip era (a symlink) and the era before it (a directory).
         "_land_bundle", "_swap_site_content", "cmd_restore_site",
+        "_drop_backup",
         # A site FOLDER, created empty — setup must never leave nothing to serve.
         "cmd_setup",
         # Servette's own state: config, certificates, the ACME account.
@@ -4729,7 +4776,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
 
     # And of those, the ones that touch a site's content.
     content_writers = {"_land_bundle", "_swap_site_content",
-                       "cmd_restore_site"}
+                       "cmd_restore_site", "_drop_backup"}
     check("Site content is written only by the publish channel",
           content_writers <= set(writers)
           and not (content_writers & {"cmd_setup"}))

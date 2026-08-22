@@ -6,6 +6,42 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## One admin page with tabs is the browser surface
+
+**Ruled (Human):** amending the paired-surfaces ruling below: the browser
+half is one embedded page — `src/admin.html`, opened by `servette admin` —
+with a tab per feature, not a page per feature. A feature earns a tab where
+the browser genuinely beats the terminal: dashboards (Status) and file
+picking (Publish) now, forms (Config) when built. Setup gets no tab — it
+runs before the tunnel exists, so a browser setup page cannot reach its own
+audience — and the lifecycle verbs (start/stop/enable/disable) stay
+terminal-only: one-word commands with no multi-step pain, and a browser
+button that stops the server serving the button is a footgun. Tabs are
+fragment-addressable, so a paired terminal command can deep-link its own
+tab. The loopback mechanism and every edge of the carve-out are unchanged.
+Net shape: two embedded pages, one per audience — 404 for visitors on the
+public surface, admin for the operator on the loopback surface.
+**Rejected:** a page per feature (each page re-ships the scaffold, and the
+operator collects a bookmark per feature — the duplication was already
+visible with one page built). *(#108, 2026-08-22)*
+
+## The 404 page is the outside view; the admin page is the inside view
+
+**Ruled (Human):** the public error page keeps its connection report.
+Everything it shows is computed from the response any client already holds
+— headers, certificate, redirect, whether the root is published — so it
+discloses nothing a one-request scan does not; the version readout stays
+behind auth. Its copy leads green (a pitch, which on a secure-by-default
+server is simply the checks passing), and failure rows are never hidden:
+suppressing "nothing is published at the site root" would make the page lie
+by omission to the operator it exists to help. Deeper self-testing —
+service state, renewal watchdog, swap, disk — is the admin page's Status
+tab, behind the tunnel, where the clearance is the SSH key.
+**Rejected:** moving the self-test off the public page (deletes the outside
+vantage — proof from the internet's side of the wire — and the no-login
+diagnosis story, while denying an attacker nothing); showing only what
+works. *(#108, 2026-08-22)*
+
 ## Multi-step features pair a shell flow with a loopback browser page
 
 **Ruled (Human):** every multi-step feature eventually exists twice — a

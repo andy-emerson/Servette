@@ -135,6 +135,7 @@ Re-run `servette` any time for the interactive shell — or run any command belo
 | `log [n]` | Show recent activity |
 | `sites [--json]` | List configured sites |
 | `set [n] k=v ...` | Change settings non-interactively (`servette set 0 publish_url=…`) |
+| `admin` | Open the browser admin page (status, publish) over your SSH tunnel |
 | `publish` | One guided flow for site content: pull, roll back, channel settings |
 | `pull [n]` | Pull new site content from a site's publish channel |
 | `restore-site [n]` | Roll back a site's content to before its last pull |

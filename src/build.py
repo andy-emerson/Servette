@@ -56,12 +56,14 @@ SECTION_FILES = ["INIT.md", "SERVER.md", "SYSTEM.md", "SHELL.md", "MAIN.md"]
 # and the error body cannot go missing with it.
 NOT_FOUND_SOURCE = "404.html"
 _NOT_FOUND_MARKER = "@@NOT_FOUND_HTML@@"
-PUBLISH_SOURCE = "publish.html"
-_PUBLISH_MARKER = "@@PUBLISH_HTML@@"
+ADMIN_SOURCE = "admin.html"
+_ADMIN_MARKER = "@@ADMIN_HTML@@"
 # Every page the module embeds: (source file, the marker it replaces). Each
-# marker sits inside a triple-quoted literal in the sources.
+# marker sits inside a triple-quoted literal in the sources. Two pages, one
+# per audience: 404 for visitors on the public surface, admin for the
+# operator on the loopback surface.
 EMBEDDED_PAGES = [(NOT_FOUND_SOURCE, _NOT_FOUND_MARKER),
-                  (PUBLISH_SOURCE, _PUBLISH_MARKER)]
+                  (ADMIN_SOURCE, _ADMIN_MARKER)]
 
 _FENCE_OPEN  = "```python"
 _FENCE_CLOSE = "```"

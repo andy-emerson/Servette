@@ -49,6 +49,7 @@ _COMMANDS = [
     ("sites [--json]",   "list configured sites"),
     ("set [n] k=v ...",  "change settings non-interactively"),
     ("log [n]",          "show the last n log entries"),
+    ("admin",            "open the browser admin page over your SSH tunnel"),
     ("publish",          "one guided flow for site content: pull, roll back, channel"),
     ("pull [n]",         "check a site's publish channel and pull new content now"),
     ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
@@ -1095,73 +1096,50 @@ def _publish_show():
 
 ```
 
-The loop itself: start the page server for the run, show the state and both doors, then dispatch until `back` — stopping the server on every way out.
+The loop itself: show the state, then dispatch until `back`. Pure terminal — the browser door is the `admin` command's job, and one hint line points there.
 
 ```python
 # publish
 def cmd_publish():
-    """The publish sub-shell with the browser half alongside: the loopback
-    page server runs for exactly this command's lifetime, and the terminal
-    keeps working whether or not the page is ever opened — a busy port costs
-    the page, never the flow."""
-    site  = config.sites[0]
-    httpd = None
-    try:
-        httpd, code = _start_ui(site, _UI_PUBLISH_PAGE)
-    except OSError as e:
-        print(f"  No browser page this run (port {_UI_PORT}: {e.strerror or e}).")
-
     _publish_show()
-    if httpd is not None:
-        httpd.on_publish = lambda: print(
-            "\n  Published from browser: content swapped in — restore-site undoes it.")
-        target = f" (site 0: {site.domain or site.serve_dir})" if len(config.sites) > 1 else ""
-        print(f"  In a browser{target}:")
-        print(f"    open  http://localhost:{_UI_PORT}/?t={code}")
-        print(f"    (or your bookmark http://localhost:{_UI_PORT}/ and enter code {code})")
-        print()
-
+    print("  Prefer a browser? 'admin' opens the publish page over your SSH tunnel.")
     print(PUBLISH_HELP)
 
-    try:
-        while True:
-            try:
-                raw = input("  publish> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
+    while True:
+        try:
+            raw = input("  publish> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
 
-            if not raw:
-                continue
+        if not raw:
+            continue
 
-            parts = raw.split()
-            cmd   = parts[0].lower()
-            args  = parts[1:]
+        parts = raw.split()
+        cmd   = parts[0].lower()
+        args  = parts[1:]
 
-            if cmd == "show":
-                _publish_show()
-            elif cmd == "pull":
-                site = _config_site_arg(args)
-                if site is not None:
-                    cmd_pull(site)
-            elif cmd == "restore-site":
-                site = _config_site_arg(args)
-                if site is not None:
-                    cmd_restore_site(site)
-            elif cmd == "channel":
-                site = _config_site_arg(args)
-                if site is not None:
-                    _config_publish(site)
-            elif cmd in ("back", "done", "exit", "quit"):
-                break
-            elif cmd in ("help", "?"):
-                print(PUBLISH_HELP)
-            else:
-                print(f"  Unknown command: {cmd}")
-                print(PUBLISH_HELP)
-    finally:
-        if httpd is not None:
-            _stop_ui(httpd)
+        if cmd == "show":
+            _publish_show()
+        elif cmd == "pull":
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_pull(site)
+        elif cmd == "restore-site":
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_restore_site(site)
+        elif cmd == "channel":
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_publish(site)
+        elif cmd in ("back", "done", "exit", "quit"):
+            break
+        elif cmd in ("help", "?"):
+            print(PUBLISH_HELP)
+        else:
+            print(f"  Unknown command: {cmd}")
+            print(PUBLISH_HELP)
 
 
 ```
@@ -1198,11 +1176,11 @@ _UI_PAIR_PAGE = """<!doctype html>
 
 ```
 
-The publish page itself is inlined by the build exactly as the 404 page is — authored as `src/publish.html`, counted apart from the Python figures. It is the pub tool's bundle builder with every trace of key custody removed: on this page, being here is the authentication.
+The admin page is inlined by the build exactly as the 404 page is — authored as `src/admin.html`, counted apart from the Python figures. One page, tabs per feature (Status, Publish; Config when it earns its forms), so every feature shares one scaffold, one bookmark, one code. The publish tab is the pub tool's bundle builder with every trace of key custody removed: on this page, being here is the authentication.
 
 ```python
-# The publish page
-_UI_PUBLISH_PAGE = """@@PUBLISH_HTML@@"""
+# The admin page
+_UI_ADMIN_PAGE = """@@ADMIN_HTML@@"""
 
 
 ```
@@ -1245,13 +1223,20 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         return "bad"
 
     def do_GET(self):
-        if urlsplit(self.path).path != "/":
+        path = urlsplit(self.path).path
+        if path not in ("/", "/status"):
             return self._respond(404, "Not found.")
         auth = self._auth()
-        if auth == "ok":
-            return self._respond(200, self.server.page)
         if auth == "locked":
             return self._respond(403, "Too many wrong codes. Close this page and re-run the command.")
+        if path == "/status":
+            # The inside view, for the page's Status tab: exactly what
+            # `status --json` prints, because it is the same function.
+            if auth != "ok":
+                return self._respond(403, "Not paired.")
+            return self._respond(200, json.dumps(_status_data()), "application/json")
+        if auth == "ok":
+            return self._respond(200, self.server.page)
         return self._respond(200, _UI_PAIR_PAGE)
 
     def do_POST(self):
@@ -1296,6 +1281,44 @@ def _stop_ui(httpd):
     """The page dies with the command: stop accepting, close the socket."""
     httpd.shutdown()
     httpd.server_close()
+
+
+```
+
+`admin` is the door: it runs the page server for exactly its own lifetime, prints the two ways in, narrates what the browser does, and closes the page on the way out. Its terminal side is deliberately thin — every capability the page exposes already has its own shell command.
+
+```python
+# admin
+def cmd_admin():
+    site = config.sites[0]  # the page publishes site 0 until it grows a picker
+    try:
+        httpd, code = _start_ui(site, _UI_ADMIN_PAGE)
+    except OSError as e:
+        print(f"  Could not open the page (port {_UI_PORT}: {e.strerror or e}).")
+        return
+    httpd.on_publish = lambda: print(
+        "\n  Published from browser: content swapped in — restore-site undoes it.")
+
+    try:
+        target = f" (publishes site 0: {site.domain or site.serve_dir})" if len(config.sites) > 1 else ""
+        print(f"  The admin page is up{target}:")
+        print(f"    open  http://localhost:{_UI_PORT}/?t={code}")
+        print(f"    (or your bookmark http://localhost:{_UI_PORT}/ and enter code {code})")
+        print()
+        print("  If the page won't load, your ssh config needs the one-time line:")
+        print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
+        print()
+        while True:
+            try:
+                raw = input("  admin — 'back' closes the page: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if raw in ("back", "done", "exit", "quit", "q"):
+                break
+    finally:
+        _stop_ui(httpd)
+        print("  Page closed.")
 
 
 ```
@@ -1618,12 +1641,12 @@ def cmd_setup():
     else:
         print("  Run 'start' when you're ready.")
 
-    # The one-time client-side line for the browser half of `publish` — said
-    # here because setup is the moment the operator is already reading.
+    # The one-time client-side line for the browser admin page — said here
+    # because setup is the moment the operator is already reading.
     print()
     print("  Optional, once, on the computer you ssh FROM: add this line to")
-    print("  ~/.ssh/config inside this server's entry, and 'publish' can open")
-    print("  a browser page over this same SSH connection:")
+    print("  ~/.ssh/config inside this server's entry, and 'admin' opens a")
+    print("  browser page over this same SSH connection:")
     print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
 
 
@@ -1826,8 +1849,8 @@ Servette needs root for a handful of things — the systemd unit, the service us
 # config the service reads, the unit files, or a site folder the service user
 # owns. Read-only ones (status, sites, log) are absent deliberately — they must
 # keep working without a password prompt.
-_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "publish",
-                  "pull", "restore-site")
+_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "admin",
+                  "publish", "pull", "restore-site")
 
 # What sudo made of the last elevated command. The one-shot `servette <command>`
 # form exits with it, so tooling driving Servette over SSH sees a refused
@@ -1958,6 +1981,8 @@ def run_command(cmd, args):
             cmd_log(int(args[0]) if args else 20)
         except ValueError:
             print("Usage: log [number]")
+    elif cmd == "admin":
+        cmd_admin()
     elif cmd == "publish":
         cmd_publish()
     elif cmd == "pull":

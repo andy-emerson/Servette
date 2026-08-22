@@ -917,8 +917,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
     .header {
       margin-bottom: 3rem;
-      opacity: 0;
-      animation: rise 0.6s ease forwards;
     }
 
     .servette-logo {
@@ -966,8 +964,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       background: var(--surface);
       padding: 1.25rem;
       margin-bottom: 1.5rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.1s forwards;
     }
 
     .notfound-head {
@@ -1030,8 +1026,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       border-radius: 8px;
       overflow: hidden;
       margin-bottom: 1.5rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.2s forwards;
     }
 
     .verified-header {
@@ -1073,8 +1067,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       overflow: hidden;
       background: var(--surface);
       margin-bottom: 1.5rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.35s forwards;
     }
 
     .checks-head {
@@ -1139,17 +1131,10 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       font-size: 0.7rem;
       color: var(--muted);
       line-height: 1.7;
-      opacity: 0;
-      animation: rise 0.5s ease 0.55s forwards;
     }
     .note a { color: #60a5fa; text-decoration: none; }
     .note a:hover { text-decoration: underline; }
     .note a.brand { color: #5A8466; }
-
-    @keyframes rise {
-      from { opacity: 0; transform: translateY(10px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -3979,6 +3964,7 @@ _COMMANDS = [
     ("sites [--json]",   "list configured sites"),
     ("set [n] k=v ...",  "change settings non-interactively"),
     ("log [n]",          "show the last n log entries"),
+    ("admin",            "open the browser admin page over your SSH tunnel"),
     ("publish",          "one guided flow for site content: pull, roll back, channel"),
     ("pull [n]",         "check a site's publish channel and pull new content now"),
     ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
@@ -4878,68 +4864,45 @@ def _publish_show():
 
 # publish
 def cmd_publish():
-    """The publish sub-shell with the browser half alongside: the loopback
-    page server runs for exactly this command's lifetime, and the terminal
-    keeps working whether or not the page is ever opened — a busy port costs
-    the page, never the flow."""
-    site  = config.sites[0]
-    httpd = None
-    try:
-        httpd, code = _start_ui(site, _UI_PUBLISH_PAGE)
-    except OSError as e:
-        print(f"  No browser page this run (port {_UI_PORT}: {e.strerror or e}).")
-
     _publish_show()
-    if httpd is not None:
-        httpd.on_publish = lambda: print(
-            "\n  Published from browser: content swapped in — restore-site undoes it.")
-        target = f" (site 0: {site.domain or site.serve_dir})" if len(config.sites) > 1 else ""
-        print(f"  In a browser{target}:")
-        print(f"    open  http://localhost:{_UI_PORT}/?t={code}")
-        print(f"    (or your bookmark http://localhost:{_UI_PORT}/ and enter code {code})")
-        print()
-
+    print("  Prefer a browser? 'admin' opens the publish page over your SSH tunnel.")
     print(PUBLISH_HELP)
 
-    try:
-        while True:
-            try:
-                raw = input("  publish> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
+    while True:
+        try:
+            raw = input("  publish> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
 
-            if not raw:
-                continue
+        if not raw:
+            continue
 
-            parts = raw.split()
-            cmd   = parts[0].lower()
-            args  = parts[1:]
+        parts = raw.split()
+        cmd   = parts[0].lower()
+        args  = parts[1:]
 
-            if cmd == "show":
-                _publish_show()
-            elif cmd == "pull":
-                site = _config_site_arg(args)
-                if site is not None:
-                    cmd_pull(site)
-            elif cmd == "restore-site":
-                site = _config_site_arg(args)
-                if site is not None:
-                    cmd_restore_site(site)
-            elif cmd == "channel":
-                site = _config_site_arg(args)
-                if site is not None:
-                    _config_publish(site)
-            elif cmd in ("back", "done", "exit", "quit"):
-                break
-            elif cmd in ("help", "?"):
-                print(PUBLISH_HELP)
-            else:
-                print(f"  Unknown command: {cmd}")
-                print(PUBLISH_HELP)
-    finally:
-        if httpd is not None:
-            _stop_ui(httpd)
+        if cmd == "show":
+            _publish_show()
+        elif cmd == "pull":
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_pull(site)
+        elif cmd == "restore-site":
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_restore_site(site)
+        elif cmd == "channel":
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_publish(site)
+        elif cmd in ("back", "done", "exit", "quit"):
+            break
+        elif cmd in ("help", "?"):
+            print(PUBLISH_HELP)
+        else:
+            print(f"  Unknown command: {cmd}")
+            print(PUBLISH_HELP)
 
 
 # The loopback server's shape
@@ -4962,22 +4925,23 @@ _UI_PAIR_PAGE = """<!doctype html>
 """
 
 
-# The publish page
-_UI_PUBLISH_PAGE = """<!DOCTYPE html>
-<!-- src/publish — the loopback publish page, the browser half of the
-     `publish` pair. Served only by the loopback page server (127.0.0.1,
-     reached through the operator's SSH tunnel), never by the public site.
+# The admin page
+_UI_ADMIN_PAGE = """<!DOCTYPE html>
+<!-- src/admin — the operator's page, the browser half of the paired
+     surfaces. Served only by the loopback page server (127.0.0.1, reached
+     through the operator's SSH tunnel via `servette admin`), never by the
+     public site. One page, tabs per feature: Status (the inside view) and
+     Publish now; Config when it earns its forms.
      Constraints, all load-bearing:
 
      - No signature, no key. Being here IS the authentication: only the
        holder of the operator's SSH key can reach this address, so the
        page carries none of the pub tool's key custody machinery
        (DECISIONS.md, "Tunnel uploads are authenticated by SSH").
-     - Dependency-free and network-silent, like the 404 page: browser
-       primitives only (CompressionStream, a hand-rolled ustar writer
-       emitting only the entry types _extract_bundle accepts). Its only
-       request is the upload itself, to the same loopback server that
-       served it.
+     - Dependency-free. Browser primitives only (CompressionStream, a
+       hand-rolled ustar writer emitting only the entry types
+       _extract_bundle accepts); its only requests are to the same
+       loopback server that served it.
      - Inlined into servette.py by build.py, like 404.html: no triple
        double-quote and no backslash anywhere in this file, or the build
        fails rather than emit a broken literal. -->
@@ -4985,7 +4949,7 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Servette — Publish</title>
+  <title>Servette — Admin</title>
   <style>
     :root {
       --bg:      #0e0e0e;
@@ -5030,11 +4994,7 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
       width: 100%;
     }
 
-    .header {
-      margin-bottom: 2.5rem;
-      opacity: 0;
-      animation: rise 0.6s ease forwards;
-    }
+    .header { margin-bottom: 1.75rem; }
 
     .servette-logo {
       font-family: var(--mono);
@@ -5058,17 +5018,38 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
       text-transform: uppercase;
     }
 
+    .tabs {
+      display: flex;
+      gap: 0.4rem;
+      margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    button.tab {
+      font-family: inherit;
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      padding: 0.55rem 0.9rem;
+      cursor: pointer;
+    }
+    button.tab:hover { color: var(--text); }
+    button.tab.active {
+      color: var(--text);
+      border-bottom-color: #5A8466;
+    }
+
     .card {
       border: 1px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
       background: var(--surface);
       margin-bottom: 1.5rem;
-      opacity: 0;
-      animation: rise 0.5s ease forwards;
     }
-    .card:nth-of-type(1) { animation-delay: 0.15s; }
-    .card:nth-of-type(2) { animation-delay: 0.25s; }
 
     .card-head {
       display: flex;
@@ -5119,9 +5100,16 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
 
     .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 
+    .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
+    .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
+    .rows .gap { margin-top: 0.55rem; }
+    .rows b { color: var(--text); font-weight: 500; }
+
     .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
     .hint b { color: var(--text); font-weight: 500; }
     .warn  { color: var(--amber); }
+    .good  { color: var(--green); }
+    .bad   { color: var(--red); }
     .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
 
     pre.shell {
@@ -5142,21 +5130,10 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
       font-size: 0.7rem;
       color: var(--muted);
       line-height: 1.7;
-      opacity: 0;
-      animation: rise 0.5s ease 0.35s forwards;
     }
     .note b { color: var(--text); font-weight: 500; }
 
     .hidden { display: none !important; }
-
-    @keyframes rise {
-      from { opacity: 0; transform: translateY(10px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { animation: none !important; opacity: 1 !important; }
-    }
   </style>
 </head>
 <body>
@@ -5165,17 +5142,17 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline">Publish — send your site through your SSH tunnel</div>
+    <div class="tagline">Admin — your server, through your SSH tunnel</div>
   </div>
 
-  <!-- Shown instead of the cards when the browser lacks the pipeline. -->
+  <!-- Shown instead of the app when the browser lacks the pipeline. -->
   <div class="card hidden" id="unsupported">
     <div class="card-head">
       <span class="card-title">Browser not supported</span>
       <span class="badge badge-red">✕ missing gzip</span>
     </div>
     <div class="card-body">
-      <p class="hint">This page builds the bundle with the browser's own
+      <p class="hint">This page builds content bundles with the browser's own
       <b>CompressionStream</b>, and this browser does not provide it. Recent
       versions of Chrome, Firefox (113+), and Safari (16.4+) do. Nothing is
       downloaded to work around it — this page loads no third-party code.</p>
@@ -5184,41 +5161,78 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
 
   <div id="app" class="hidden">
 
-  <!-- ── Step 1: folder ── -->
-  <div class="card">
-    <div class="card-head">
-      <span class="card-title">1 · Site folder</span>
-      <span class="badge badge-dim" id="dir-badge">no folder chosen</span>
-    </div>
-    <div class="card-body">
-      <div class="btn-row">
-        <button class="action" id="btn-dir" type="button">Choose your site's folder</button>
-        <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
+  <nav class="tabs" role="tablist">
+    <button class="tab active" id="tab-status" type="button" role="tab">Status</button>
+    <button class="tab" id="tab-publish" type="button" role="tab">Publish</button>
+  </nav>
+
+  <!-- ══ Status — the inside view ══ -->
+  <div id="panel-status" role="tabpanel">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Server</span>
+        <span class="badge badge-dim" id="st-badge">loading…</span>
       </div>
-      <p class="hint" id="dir-summary">Pick the folder whose contents should
-      become the site — the folder that holds your <b>index.html</b>. Files
-      are read here in the browser and travel only through your SSH tunnel
-      to your own server.</p>
-      <p class="error hidden" id="dir-error"></p>
+      <div class="card-body">
+        <div class="rows" id="st-rows"></div>
+        <p class="error hidden" id="st-error"></p>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action" id="btn-refresh" type="button">Refresh</button>
+        </div>
+      </div>
     </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Needs attention</span>
+        <span class="badge badge-dim" id="issue-badge">…</span>
+      </div>
+      <div class="card-body">
+        <div class="rows" id="issue-list"></div>
+      </div>
+    </div>
+
   </div>
 
-  <!-- ── Step 2: publish ── -->
-  <div class="card">
-    <div class="card-head">
-      <span class="card-title">2 · Publish</span>
-      <span class="badge badge-dim" id="pub-badge">waiting</span>
-    </div>
-    <div class="card-body">
-      <div class="btn-row">
-        <button class="action primary" id="btn-publish" type="button" disabled>Publish to this server</button>
+  <!-- ══ Publish — pick a folder, send it through the tunnel ══ -->
+  <div id="panel-publish" role="tabpanel" class="hidden">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">1 · Site folder</span>
+        <span class="badge badge-dim" id="dir-badge">no folder chosen</span>
       </div>
-      <div id="pub-done" class="hidden">
-        <p class="hint" id="pub-note" style="margin-top:0.75rem"></p>
-        <pre class="shell">restore-site     <span class="c"># in the terminal: one step back, if you want the previous content</span></pre>
+      <div class="card-body">
+        <div class="btn-row">
+          <button class="action" id="btn-dir" type="button">Choose your site's folder</button>
+          <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
+        </div>
+        <p class="hint" id="dir-summary">Pick the folder whose contents should
+        become the site — the folder that holds your <b>index.html</b>. Files
+        are read here in the browser and travel only through your SSH tunnel
+        to your own server.</p>
+        <p class="error hidden" id="dir-error"></p>
       </div>
-      <p class="error hidden" id="pub-error"></p>
     </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">2 · Publish</span>
+        <span class="badge badge-dim" id="pub-badge">waiting</span>
+      </div>
+      <div class="card-body">
+        <div class="btn-row">
+          <button class="action primary" id="btn-publish" type="button" disabled>Publish to this server</button>
+        </div>
+        <div id="pub-done" class="hidden">
+          <p class="hint" id="pub-note" style="margin-top:0.75rem"></p>
+          <pre class="shell">restore-site     <span class="c"># in the terminal: one step back, if you want the previous content</span></pre>
+        </div>
+        <p class="error hidden" id="pub-error"></p>
+      </div>
+    </div>
+
   </div>
 
   </div><!-- /app -->
@@ -5227,9 +5241,9 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
     This page is served by your own server on <b>127.0.0.1</b> and reached
     only through your SSH tunnel — the address does not exist on the public
     internet. No signature, no key: <b>being here is the authentication</b>,
-    because only your SSH key opens this pipe. The bundle is built in this
-    tab and lands through the same staging, checks, atomic swap, and backup
-    as every other publish.
+    because only your SSH key opens this pipe. Published content lands
+    through the same staging, checks, atomic swap, and backup as every
+    other publish.
   </div>
 
 </div>
@@ -5238,21 +5252,83 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
   'use strict';
   const $ = (id) => document.getElementById(id);
 
-  /* ════════════════════════════════════════════════════════════════════
-     The pipeline: the pub tool's bundle builder with the signing removed.
-     The server's contract (_extract_bundle / _land_bundle):
-       - a tar.gz of plain files and directories, paths relative to the
-         site root, no entry escaping it, under 500 MB uncompressed
-       - POSTed to /upload with this run's pairing code
-     ════════════════════════════════════════════════════════════════════ */
-
   const MAX_BUNDLE_BYTES = 500 * 1024 * 1024;  // mirrors _MAX_BUNDLE_BYTES server-side
   const CODE = new URLSearchParams(location.search).get('t') || '';
 
-  // ── ustar writer ──────────────────────────────────────────────────────
-  // Plain files and directories only — exactly the two entry types
-  // _extract_bundle accepts. POSIX ustar, which Python's tarfile reads
-  // natively.
+  /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
+
+  const PANELS = { status: 'panel-status', publish: 'panel-publish' };
+
+  function showTab(name) {
+    if (!PANELS[name]) name = 'status';
+    for (const key of Object.keys(PANELS)) {
+      $(PANELS[key]).classList.toggle('hidden', key !== name);
+      $('tab-' + key).classList.toggle('active', key === name);
+    }
+    if (name === 'status') loadStatus();
+    if (location.hash !== '#' + name)
+      history.replaceState(null, '', '#' + name + location.search);
+  }
+
+  $('tab-status').addEventListener('click', () => showTab('status'));
+  $('tab-publish').addEventListener('click', () => showTab('publish'));
+
+  /* ══ Status — the inside view, rendered from GET /status. ══ */
+
+  const row = (k, v, cls) =>
+    `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
+
+  async function loadStatus() {
+    setBadge($('st-badge'), 'badge-dim', 'loading…');
+    clearError($('st-error'));
+    try {
+      const r = await fetch('/status?t=' + encodeURIComponent(CODE));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+
+      setBadge($('st-badge'), d.running ? 'badge-green' : 'badge-red',
+               d.running ? '● running · v' + d.version : '○ stopped · v' + d.version);
+      let h = row('Mode', d.mode === 'service'
+        ? 'system service (survives reboots)'
+        : d.mode === 'session' ? 'session only' : 'stopped');
+      for (const s of d.sites || []) {
+        h += row('Site ' + s.index, s.domain
+          ? `<b>${escapeHtml('https://' + s.domain)}</b>` : '(no domain)', 'gap');
+        h += row('Folder', escapeHtml(s.serve_dir || '(not set)'));
+        h += row('Password', s.auth ? 'enabled' : 'off');
+        h += row('Certificate', s.cert_days == null
+          ? '<span class="warn">none readable</span>'
+          : s.cert_days <= 0 ? '<span class="bad">expired</span>'
+          : s.cert_days < 30 ? `<span class="warn">${s.cert_days} days remaining</span>`
+          : `<span class="good">${s.cert_days} days remaining</span>`);
+        h += row('Channel', s.publish ? 'configured' : 'none (this page publishes directly)');
+      }
+      $('st-rows').innerHTML = h;
+
+      const problems = [...(d.issues || []), ...(d.warnings || [])];
+      if (problems.length) {
+        setBadge($('issue-badge'), 'badge-red', problems.length + ' to review');
+        $('issue-list').innerHTML = problems
+          .map((p) => `<div class="warn">· ${escapeHtml(p)}</div>`).join('');
+      } else {
+        setBadge($('issue-badge'), 'badge-green', '✓ all clear');
+        $('issue-list').innerHTML =
+          '<div class="good">Nothing needs attention.</div>';
+      }
+    } catch (e) {
+      setBadge($('st-badge'), 'badge-red', '✕ unreachable');
+      showError($('st-error'), 'Could not read status: ' + e.message +
+        ' — if the terminal command was closed, re-run it and open the fresh link.');
+    }
+  }
+
+  $('btn-refresh').addEventListener('click', loadStatus);
+
+  /* ══ Publish — the pub tool's bundle builder with the signing removed.
+     The server's contract (_extract_bundle / _land_bundle): a tar.gz of
+     plain files and directories, paths relative to the site root, no entry
+     escaping it, under 500 MB uncompressed — POSTed to /upload with this
+     run's pairing code. ══ */
 
   function splitTarName(path) {
     const len = (s) => new TextEncoder().encode(s).length;
@@ -5324,10 +5400,6 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  /* ════════════════════════════════════════════════════════════════════
-     The page.
-     ════════════════════════════════════════════════════════════════════ */
-
   const state = {
     files:  null,   // [{ path, file }]
     folder: null,   // the picked folder's name, for messages
@@ -5353,7 +5425,6 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
     setBadge($('pub-badge'), 'badge-dim', ready ? 'ready' : 'waiting');
   }
 
-  // ── Step 1: folder ──
   // The same hidden-path rule the server enforces: any '.'-segment except
   // .well-known is never served, so it is not bundled either — a .git or
   // .env under the site folder must not end up on the server.
@@ -5395,7 +5466,6 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
     refreshReady();
   });
 
-  // ── Step 2: publish ──
   $('btn-publish').addEventListener('click', async () => {
     clearError($('pub-error'));
     $('btn-publish').disabled = true;
@@ -5442,11 +5512,10 @@ _UI_PUBLISH_PAGE = """<!DOCTYPE html>
     $('btn-publish').disabled = false;
   });
 
-  // ── Feature gate ──
-  // The bundle needs gzip from the browser itself; without it the page says
-  // so instead of half-working.
-  $(typeof CompressionStream === 'function' ? 'app' : 'unsupported')
-    .classList.remove('hidden');
+  /* ══ Feature gate & startup. ══ */
+  const supported = typeof CompressionStream === 'function';
+  $(supported ? 'app' : 'unsupported').classList.remove('hidden');
+  if (supported) showTab((location.hash || '').replace('#', ''));
 </script>
 
 </body>
@@ -5489,13 +5558,20 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         return "bad"
 
     def do_GET(self):
-        if urlsplit(self.path).path != "/":
+        path = urlsplit(self.path).path
+        if path not in ("/", "/status"):
             return self._respond(404, "Not found.")
         auth = self._auth()
-        if auth == "ok":
-            return self._respond(200, self.server.page)
         if auth == "locked":
             return self._respond(403, "Too many wrong codes. Close this page and re-run the command.")
+        if path == "/status":
+            # The inside view, for the page's Status tab: exactly what
+            # `status --json` prints, because it is the same function.
+            if auth != "ok":
+                return self._respond(403, "Not paired.")
+            return self._respond(200, json.dumps(_status_data()), "application/json")
+        if auth == "ok":
+            return self._respond(200, self.server.page)
         return self._respond(200, _UI_PAIR_PAGE)
 
     def do_POST(self):
@@ -5535,6 +5611,39 @@ def _stop_ui(httpd):
     """The page dies with the command: stop accepting, close the socket."""
     httpd.shutdown()
     httpd.server_close()
+
+
+# admin
+def cmd_admin():
+    site = config.sites[0]  # the page publishes site 0 until it grows a picker
+    try:
+        httpd, code = _start_ui(site, _UI_ADMIN_PAGE)
+    except OSError as e:
+        print(f"  Could not open the page (port {_UI_PORT}: {e.strerror or e}).")
+        return
+    httpd.on_publish = lambda: print(
+        "\n  Published from browser: content swapped in — restore-site undoes it.")
+
+    try:
+        target = f" (publishes site 0: {site.domain or site.serve_dir})" if len(config.sites) > 1 else ""
+        print(f"  The admin page is up{target}:")
+        print(f"    open  http://localhost:{_UI_PORT}/?t={code}")
+        print(f"    (or your bookmark http://localhost:{_UI_PORT}/ and enter code {code})")
+        print()
+        print("  If the page won't load, your ssh config needs the one-time line:")
+        print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
+        print()
+        while True:
+            try:
+                raw = input("  admin — 'back' closes the page: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if raw in ("back", "done", "exit", "quit", "q"):
+                break
+    finally:
+        _stop_ui(httpd)
+        print("  Page closed.")
 
 
 # Formatting uptime
@@ -5818,12 +5927,12 @@ def cmd_setup():
     else:
         print("  Run 'start' when you're ready.")
 
-    # The one-time client-side line for the browser half of `publish` — said
-    # here because setup is the moment the operator is already reading.
+    # The one-time client-side line for the browser admin page — said here
+    # because setup is the moment the operator is already reading.
     print()
     print("  Optional, once, on the computer you ssh FROM: add this line to")
-    print("  ~/.ssh/config inside this server's entry, and 'publish' can open")
-    print("  a browser page over this same SSH connection:")
+    print("  ~/.ssh/config inside this server's entry, and 'admin' opens a")
+    print("  browser page over this same SSH connection:")
     print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
 
 
@@ -5993,8 +6102,8 @@ def _startup_refresh():
 # config the service reads, the unit files, or a site folder the service user
 # owns. Read-only ones (status, sites, log) are absent deliberately — they must
 # keep working without a password prompt.
-_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "publish",
-                  "pull", "restore-site")
+_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "admin",
+                  "publish", "pull", "restore-site")
 
 # What sudo made of the last elevated command. The one-shot `servette <command>`
 # form exits with it, so tooling driving Servette over SSH sees a refused
@@ -6120,6 +6229,8 @@ def run_command(cmd, args):
             cmd_log(int(args[0]) if args else 20)
         except ValueError:
             print("Usage: log [number]")
+    elif cmd == "admin":
+        cmd_admin()
     elif cmd == "publish":
         cmd_publish()
     elif cmd == "pull":

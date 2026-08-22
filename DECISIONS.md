@@ -6,6 +6,42 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The publish swap is a symlink flip; the window is gone
+
+**Ruled (Human):** a site's content lives in one of two sibling slots
+(`<serve_dir>.a`/`.b`) behind a `serve_dir` symlink. Publishing stages into
+`<serve_dir>.new`, owns the tree to the operator before it goes live, moves
+it into the idle slot, and swaps with one atomic `os.replace` of the link;
+`serve_dir.bak` stays the single-shot marker (now a symlink to the previous
+tree — the pre-flip era's real directory still restores), and restore-site
+is the same flip in reverse, instant. A legacy real directory converts on
+its first swap, paying the retired design's rename gap once per site ever.
+**Why:** the two-rename swap had a moment in which the live directory did
+not exist — a 404 under traffic, and a crash inside it left NO live content
+behind a log line that said only "rejected." Measured rather than argued:
+under the same four-reader hammer across 3,000 swaps, the old design missed
+51,906 reads; the flip missed zero (the hammer exaggerates real request
+rates — what it proves is a window existing versus being structurally
+impossible).
+**Rejected:** keeping the window as documented-and-proportionate (the
+Human's question — "it can't be fixed?" — was the right one);
+generation-numbered content directories (garbage collection and unbounded
+states, where two slots need neither). *(#108, 2026-08-22)*
+
+## Balancer compatibility is passive; active accommodations are out of scope
+
+**Ruled (Human):** an external load balancer can front Servette on the
+fittings that already exist — `trusted_proxy` with rightmost
+X-Forwarded-For, the per-IP connection cap standing down behind a declared
+proxy — plus the balancer's own configuration: health probes carrying the
+site's Host header, and re-encryption to the HTTPS backend. Servette adds
+no feature whose only justification is balancer convenience: no dedicated
+health endpoint, no plain-HTTP backend mode, no PROXY protocol, no
+multi-backend ACME — capability-shaped complexity, and multi-backend
+scale-out sits outside "one site you own" by the scope principles besides.
+**Reopen:** a real operator running Servette behind a balancer hits a wall
+the fittings cannot configure around. *(#108, 2026-08-22)*
+
 ## One admin page with tabs is the browser surface
 
 **Ruled (Human):** amending the paired-surfaces ruling below: the browser

@@ -56,6 +56,14 @@ SECTION_FILES = ["INIT.md", "SERVER.md", "SYSTEM.md", "SHELL.md", "MAIN.md"]
 # and the error body cannot go missing with it.
 NOT_FOUND_SOURCE = "404.html"
 _NOT_FOUND_MARKER = "@@NOT_FOUND_HTML@@"
+ADMIN_SOURCE = "admin.html"
+_ADMIN_MARKER = "@@ADMIN_HTML@@"
+# Every page the module embeds: (source file, the marker it replaces). Each
+# marker sits inside a triple-quoted literal in the sources. Two pages, one
+# per audience: 404 for visitors on the public surface, admin for the
+# operator on the loopback surface.
+EMBEDDED_PAGES = [(NOT_FOUND_SOURCE, _NOT_FOUND_MARKER),
+                  (ADMIN_SOURCE, _ADMIN_MARKER)]
 
 _FENCE_OPEN  = "```python"
 _FENCE_CLOSE = "```"
@@ -101,37 +109,40 @@ def md_to_code(md_text, filename):
 
 
 def build(src_dir):
-    """Concatenate the reconstructed sections, then inline the 404 page.
+    """Concatenate the reconstructed sections, then inline the embedded pages.
 
     The substitution happens here and not in md_to_code, so the per-section
-    line counts stay a measure of the program rather than of an embedded
-    asset."""
+    line counts stay a measure of the program rather than of embedded
+    assets."""
     parts = []
     for name in SECTION_FILES:
         with open(os.path.join(src_dir, name), "r", encoding="utf-8") as f:
             parts.append(md_to_code(f.read(), name))
     out = "".join(parts)
 
-    with open(os.path.join(src_dir, NOT_FOUND_SOURCE), "r", encoding="utf-8") as f:
-        html = f.read()
-    # The page lands inside a triple-quoted literal. A `"""` in the HTML would
-    # close it early and a backslash would be read as an escape, so both fail
-    # the build rather than producing a module that is subtly not the page.
-    if '"""' in html:
-        raise ValueError(f"{NOT_FOUND_SOURCE}: contains \"\"\", which would end the literal")
-    if "\\" in html:
-        raise ValueError(f"{NOT_FOUND_SOURCE}: contains a backslash, which the literal would escape")
-    if out.count(_NOT_FOUND_MARKER) != 1:
-        raise ValueError(f"expected exactly one {_NOT_FOUND_MARKER} in the sources, "
-                         f"found {out.count(_NOT_FOUND_MARKER)}")
-    return out.replace(_NOT_FOUND_MARKER, html)
+    for src_name, marker in EMBEDDED_PAGES:
+        with open(os.path.join(src_dir, src_name), "r", encoding="utf-8") as f:
+            html = f.read()
+        # Each page lands inside a triple-quoted literal. A `"""` in the HTML
+        # would close it early and a backslash would be read as an escape, so
+        # both fail the build rather than producing a module that is subtly
+        # not the page.
+        if '"""' in html:
+            raise ValueError(f"{src_name}: contains \"\"\", which would end the literal")
+        if "\\" in html:
+            raise ValueError(f"{src_name}: contains a backslash, which the literal would escape")
+        if out.count(marker) != 1:
+            raise ValueError(f"expected exactly one {marker} in the sources, "
+                             f"found {out.count(marker)}")
+        out = out.replace(marker, html)
+    return out
 
 
 def section_counts(src_dir):
     """Lines per section, as (name, total, code) plus a ("Total", …) row.
 
     `code` counts lines that are neither blank nor comment-only. These are the
-    numbers the website publishes to back its "readable in an afternoon"
+    numbers the website publishes to back its "understood by one person"
     claim, computed the one way, here, so the page and the program cannot
     disagree about them."""
     rows, tot, tot_code = [], 0, 0
@@ -148,15 +159,19 @@ def section_counts(src_dir):
     return rows
 
 
-def not_found_lines(src_dir):
-    """Lines in the authored 404 page.
+def embedded_page_lines(src_dir):
+    """Lines per authored embedded page, as (name, lines).
 
     Reported apart from the section counts, not folded into them. The counts
     back a claim about reading the *program*; an embedded HTML page is shipped
-    by it, not read as part of it, and burying 630 lines of markup inside the
-    Python figure would overstate what an auditor has to work through."""
-    with open(os.path.join(src_dir, NOT_FOUND_SOURCE), "r", encoding="utf-8") as f:
-        return len(f.read().splitlines())
+    by it, not read as part of it, and burying hundreds of lines of markup
+    inside the Python figure would overstate what an auditor has to work
+    through."""
+    rows = []
+    for src_name, _marker in EMBEDDED_PAGES:
+        with open(os.path.join(src_dir, src_name), "r", encoding="utf-8") as f:
+            rows.append((src_name, len(f.read().splitlines())))
+    return rows
 
 
 # Where this repository states its own size, and how to find it. Each entry is
@@ -537,8 +552,9 @@ def main(argv=None):
     if args.counts:
         for name, total, code in section_counts(src_dir):
             print(f"{name:8} {total:>6,} total  {code:>6,} code")
-        print(f"{'':8} {'':>6}         {not_found_lines(src_dir):>6,} "
-              f"embedded page ({NOT_FOUND_SOURCE}, not Python)")
+        for page, n in embedded_page_lines(src_dir):
+            print(f"{'':8} {'':>6}         {n:>6,} "
+                  f"embedded page ({page}, not Python)")
         return 0
 
     built = build(src_dir)

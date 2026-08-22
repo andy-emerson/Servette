@@ -889,7 +889,8 @@ def run_dispatch_tests(s):
     # live test server up for the integration tests that follow.
     calls       = []
     saved       = {n: getattr(s, n) for n in
-                   ("cmd_status", "cmd_start", "stop_server", "cmd_pull", "cmd_restore_site")}
+                   ("cmd_status", "cmd_start", "stop_server", "cmd_pull",
+                    "cmd_restore_site", "cmd_publish", "cmd_admin")}
     saved_input = builtins.input
     try:
         s.cmd_status       = lambda json_mode=False: calls.append("status")
@@ -897,7 +898,10 @@ def run_dispatch_tests(s):
         s.stop_server      = lambda: calls.append("stop")
         s.cmd_pull         = lambda site: calls.append(("pull", site))
         s.cmd_restore_site = lambda site: calls.append(("restore-site", site))
-        script = iter(["status", "start", "pull 0", "restore-site 0", "pull 99", "bogus", "quit"])
+        s.cmd_publish      = lambda: calls.append("publish")
+        s.cmd_admin        = lambda: calls.append("admin")
+        script = iter(["status", "start", "pull 0", "restore-site 0", "publish",
+                       "admin", "pull 99", "bogus", "quit"])
         builtins.input = lambda prompt="": next(script, "quit")
         with contextlib.redirect_stdout(io.StringIO()):
             s.shell()
@@ -913,10 +917,222 @@ def run_dispatch_tests(s):
           ("pull", s.config.sites[0]) in calls)
     check("'restore-site 0' routes to cmd_restore_site with site 0",
           ("restore-site", s.config.sites[0]) in calls)
+    check("'publish' routed to cmd_publish", "publish" in calls)
+    check("'admin' routed to cmd_admin", "admin" in calls)
     pull_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "pull"]
     check("'pull 99' (bad site index) does not call cmd_pull", len(pull_calls) == 1)
     check("'quit' stops server and exits", calls[-1] == "stop")
 
+
+    section("Publish sub-shell")
+
+    # Routing only, like the dispatch test above: every verb must delegate to
+    # the command it gathers, with the same [n] convention and bad-index guard.
+    sub_calls   = []
+    saved_sub   = {n: getattr(s, n) for n in
+                   ("cmd_pull", "cmd_restore_site", "_config_publish")}
+    saved_input = builtins.input
+    try:
+        s.cmd_pull         = lambda site: sub_calls.append(("pull", site))
+        s.cmd_restore_site = lambda site: sub_calls.append(("restore", site))
+        s._config_publish  = lambda site: sub_calls.append(("channel", site))
+        script = iter(["pull 0", "restore-site 0", "channel 0",
+                       "pull 99", "bogus", "back"])
+        builtins.input = lambda prompt="": next(script, "back")
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_publish()
+    finally:
+        builtins.input = saved_input
+        for n, fn in saved_sub.items():
+            setattr(s, n, fn)
+
+    sub_out = buf.getvalue()
+    check("'pull 0' delegates to cmd_pull with site 0",
+          ("pull", s.config.sites[0]) in sub_calls)
+    check("'restore-site 0' delegates to cmd_restore_site with site 0",
+          ("restore", s.config.sites[0]) in sub_calls)
+    check("'channel 0' delegates to the config sub-shell's publish prompt",
+          ("channel", s.config.sites[0]) in sub_calls)
+    check("'pull 99' (bad site index) is refused with the sites hint",
+          len([c for c in sub_calls if c[0] == "pull"]) == 1
+          and "No site 99" in sub_out)
+    check("unknown input reprints the publish help",
+          "Unknown command: bogus" in sub_out)
+    check("the display shows each site's channel and backup state",
+          "channel:" in sub_out and "backup:" in sub_out)
+
+    # publish and admin elevate like config: their verbs write site content
+    # and the config file, so an unprivileged shell must hand them to root.
+    check("publish and admin are in the elevation set",
+          (s._needs_root("publish") and s._needs_root("admin")) or s._IS_MACOS)
+
+    check("publish is pure terminal, with one hint at the browser door",
+          "'admin' opens the publish page" in sub_out
+          and "http://localhost" not in sub_out)
+
+    section("Admin command")
+
+    # The door to the browser half: the page server brackets exactly this
+    # command's run, and a busy port is one printed sentence, not a traceback.
+    adm_calls  = []
+    ui_started = []
+
+    class _FakeUI:
+        pass
+    fake_ui = _FakeUI()
+
+    saved_adm = {n: getattr(s, n) for n in ("_start_ui", "_stop_ui")}
+    saved_input = builtins.input
+    try:
+        s._start_ui = lambda site, page, port=None: (
+            ui_started.append((site, page)) or (fake_ui, "abc123"))
+        s._stop_ui  = lambda h: adm_calls.append(("stop", h))
+        script = iter(["back"])
+        builtins.input = lambda prompt="": next(script, "back")
+        with contextlib.redirect_stdout(io.StringIO()) as adm_buf:
+            s.cmd_admin()
+
+        s._start_ui = lambda site, page, port=None: (
+            (_ for _ in ()).throw(OSError(98, "Address already in use")))
+        with contextlib.redirect_stdout(io.StringIO()) as busy_buf:
+            s.cmd_admin()
+    finally:
+        builtins.input = saved_input
+        for n, fn in saved_adm.items():
+            setattr(s, n, fn)
+
+    adm_out = adm_buf.getvalue()
+    check("admin starts the page server with site 0 and the embedded page",
+          ui_started == [(s.config.sites[0], s._UI_ADMIN_PAGE)])
+    check("...prints the printed-URL door with this run's code",
+          f"http://localhost:{s._UI_PORT}/?t=abc123" in adm_out)
+    check("...the bookmark door with the same code",
+          "enter code abc123" in adm_out)
+    check("...and the LocalForward line for a tunnel that isn't there yet",
+          f"LocalForward {s._UI_PORT} 127.0.0.1:{s._UI_PORT}" in adm_out)
+    check("...sets the terminal narration hook",
+          callable(getattr(fake_ui, "on_publish", None)))
+    check("...and closes the page on the way out",
+          adm_calls == [("stop", fake_ui)] and "Page closed." in adm_out)
+    check("A busy port is one sentence, and no page to close",
+          "Could not open the page" in busy_buf.getvalue()
+          and len(adm_calls) == 1)
+
+    # The embedded page itself: inlined by the build, tabbed, key-free by ruling.
+    check("The admin page is inlined whole, marker consumed",
+          s._UI_ADMIN_PAGE.startswith("<!DOCTYPE html>")
+          and "@@ADMIN_HTML@@" not in s._UI_ADMIN_PAGE)
+    check("...carries the Status and Publish tabs",
+          "tab-status" in s._UI_ADMIN_PAGE and "tab-publish" in s._UI_ADMIN_PAGE
+          and "/status?t=" in s._UI_ADMIN_PAGE)
+    check("...posts to the upload endpoint with the run's code",
+          "/upload?t=" in s._UI_ADMIN_PAGE)
+    check("...and carries no key ceremony — SSH is the authentication",
+          "Ed25519" not in s._UI_ADMIN_PAGE
+          and "indexedDB" not in s._UI_ADMIN_PAGE)
+
+    section("Loopback page server")
+
+    # The carve-out's edges, each attempted rather than argued: the bind is
+    # loopback-only, the code gates everything but the pairing page, five
+    # wrong guesses end the run, uploads land through the shared pipeline,
+    # and the server dies with the command.
+    def _ui_tar(entries):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for name, content in entries:
+                data = content.encode()
+                info = tarfile.TarInfo(name=name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    ui_dir = tempfile.mkdtemp()
+    os.makedirs(os.path.join(ui_dir, "live"))
+    with open(os.path.join(ui_dir, "live", "old.html"), "w") as f:
+        f.write("old")
+    saved_ui_serve = s.config.sites[0].serve_dir
+    s.config.sites[0].serve_dir = os.path.join(ui_dir, "live")
+    httpd, ui_code = s._start_ui(s.config.sites[0], "<html>publish page</html>", port=0)
+    ui_port = httpd.socket.getsockname()[1]
+
+    def ui_req(method, path, body=None):
+        conn = http.client.HTTPConnection("127.0.0.1", ui_port, timeout=10)
+        conn.request(method, path, body=body)
+        r = conn.getresponse()
+        data = r.read()
+        conn.close()
+        return r.status, data
+
+    try:
+        check("The server binds loopback only",
+              httpd.socket.getsockname()[0] == "127.0.0.1")
+
+        st, body = ui_req("GET", "/")
+        check("The bare URL answers the pairing page, never content",
+              st == 200 and b"code printed in your terminal" in body
+              and b"publish page" not in body)
+        check("...and the pairing page does not leak the code",
+              ui_code.encode() not in body)
+        st, body = ui_req("GET", f"/?t={ui_code}")
+        check("The printed URL's code opens the page",
+              st == 200 and b"publish page" in body)
+
+        st, body = ui_req("GET", f"/status?t={ui_code}")
+        check("GET /status with the code answers the inside view",
+              st == 200 and b'"version"' in body and b'"sites"' in body)
+        st, _ = ui_req("GET", "/status")
+        check("GET /status without the code is refused", st == 403)
+
+        st, _ = ui_req("POST", "/upload")
+        check("An upload without the code is refused", st == 403)
+        st, _ = ui_req("POST", f"/upload?t={ui_code}", body=b"")
+        check("An empty upload is refused", st == 400)
+
+        st, body = ui_req("POST", f"/upload?t={ui_code}",
+                          body=_ui_tar([("new.html", "fresh")]))
+        check("A paired upload lands through the shared pipeline",
+              st == 200 and b'"published"' in body
+              and os.path.exists(os.path.join(ui_dir, "live", "new.html")))
+        check("...keeping the single-shot backup",
+              os.path.exists(os.path.join(ui_dir, "live.bak", "old.html")))
+
+        st, body = ui_req("POST", f"/upload?t={ui_code}",
+                          body=_ui_tar([("../evil.html", "pwned")]))
+        check("A malicious upload hits the same extraction guards",
+              st == 422 and b'"rejected"' in body
+              and not os.path.exists(os.path.join(ui_dir, "evil.html"))
+              and os.path.exists(os.path.join(ui_dir, "live", "new.html")))
+
+        # An oversize claim must be refused before the body is read — sent
+        # raw, because http.client would insist on sending a real body.
+        sk = socket.create_connection(("127.0.0.1", ui_port), timeout=10)
+        sk.sendall((f"POST /upload?t={ui_code} HTTP/1.1\r\nHost: ui\r\n"
+                    f"Content-Length: {s._MAX_BUNDLE_BYTES + 1}\r\n\r\n").encode())
+        first_line = sk.recv(200).split(b"\r\n")[0]
+        sk.close()
+        check("An oversize claim is refused before the body is read",
+              b"413" in first_line)
+
+        for _ in range(s._UI_MAX_BAD_CODES):
+            ui_req("GET", "/?t=wrong")
+        st, _ = ui_req("GET", f"/?t={ui_code}")
+        st2, _ = ui_req("POST", f"/upload?t={ui_code}",
+                        body=_ui_tar([("late.html", "late")]))
+        check("Five wrong guesses end the run's authentication — even for the right code",
+              st == 403 and st2 == 403
+              and not os.path.exists(os.path.join(ui_dir, "live", "late.html")))
+    finally:
+        s._stop_ui(httpd)
+        s.config.sites[0].serve_dir = saved_ui_serve
+        shutil.rmtree(ui_dir, ignore_errors=True)
+
+    try:
+        ui_req("GET", "/")
+        ui_stopped = False
+    except OSError:
+        ui_stopped = True
+    check("The page dies with the command: the port refuses after stop", ui_stopped)
 
     section("One-shot CLI: run_command and set")
 
@@ -2034,9 +2250,12 @@ def run_dispatch_tests(s):
         script = iter(["", ""])  # domain blank (self-signed), username blank
         builtins.input = lambda prompt="": next(script, "")
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(io.StringIO()) as setup_buf:
                 s.cmd_setup()
             check("cmd_setup runs end to end without raising", True)
+            check("setup prints the one-time LocalForward line for the browser half",
+                  f"LocalForward {s._UI_PORT} 127.0.0.1:{s._UI_PORT}"
+                  in setup_buf.getvalue())
         except Exception as e:
             check(f"cmd_setup runs end to end without raising (raised {e})", False)
     finally:
@@ -4478,8 +4697,10 @@ def run_invariant_tests(s, serve_dir, tmpdir):
     # fails this until it is added here — which is the point: it forces someone
     # to say which of the claims below it belongs to.
     expected = {
-        # Site content: the publish pipeline, and nothing else.
-        "_check_for_content_update", "_swap_site_content", "cmd_restore_site",
+        # Site content: the publish pipeline, and nothing else. _land_bundle
+        # is the shared landing every channel funnels through — pull after
+        # its signature check, the loopback page after its pairing code.
+        "_land_bundle", "_swap_site_content", "cmd_restore_site",
         # A site FOLDER, created empty — setup must never leave nothing to serve.
         "cmd_setup",
         # Servette's own state: config, certificates, the ACME account.
@@ -4507,7 +4728,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         print(f"      pinned writers that no longer write: {sorted(missing)}")
 
     # And of those, the ones that touch a site's content.
-    content_writers = {"_check_for_content_update", "_swap_site_content",
+    content_writers = {"_land_bundle", "_swap_site_content",
                        "cmd_restore_site"}
     check("Site content is written only by the publish channel",
           content_writers <= set(writers)

@@ -49,7 +49,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 # Paths
 #
@@ -917,8 +917,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
     .header {
       margin-bottom: 3rem;
-      opacity: 0;
-      animation: rise 0.6s ease forwards;
     }
 
     .servette-logo {
@@ -966,8 +964,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       background: var(--surface);
       padding: 1.25rem;
       margin-bottom: 1.5rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.1s forwards;
     }
 
     .notfound-head {
@@ -1030,8 +1026,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       border-radius: 8px;
       overflow: hidden;
       margin-bottom: 1.5rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.2s forwards;
     }
 
     .verified-header {
@@ -1073,8 +1067,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       overflow: hidden;
       background: var(--surface);
       margin-bottom: 1.5rem;
-      opacity: 0;
-      animation: rise 0.5s ease 0.35s forwards;
     }
 
     .checks-head {
@@ -1139,17 +1131,10 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       font-size: 0.7rem;
       color: var(--muted);
       line-height: 1.7;
-      opacity: 0;
-      animation: rise 0.5s ease 0.55s forwards;
     }
     .note a { color: #60a5fa; text-decoration: none; }
     .note a:hover { text-decoration: underline; }
     .note a.brand { color: #5A8466; }
-
-    @keyframes rise {
-      from { opacity: 0; transform: translateY(10px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -1201,7 +1186,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
   <div class="checks">
     <div class="checks-head">
-      <span class="checks-title">Diagnosis — live from your browser</span>
+      <span class="checks-title">Connection report — live from your browser</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>
@@ -1410,8 +1395,13 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       else if (r.ok === false) { paint(st, 'fail'); fail++; }
       else                     { paint(st, 'skip'); skip++; }
     }
-    $('t-summary').innerHTML =
-      '<b>' + pass + '</b> passed · <b>' + fail + '</b> failed · <b>' + skip + '</b> skipped';
+    // Green leads when nothing failed — the pitch and the test coincide on a
+    // healthy site. A failure count is never hidden: suppressing it would
+    // make the page lie by omission to the operator it exists to help.
+    $('t-summary').innerHTML = fail
+      ? '<b>' + pass + '</b> passed · <b>' + fail + '</b> failed · <b>' + skip + '</b> skipped'
+      : 'All <b>' + pass + '</b> checks passed' +
+        (skip ? ' · <b>' + skip + '</b> skipped' : '');
   }
 
   $('run-again').addEventListener('click', runTests);
@@ -3979,6 +3969,8 @@ _COMMANDS = [
     ("sites [--json]",   "list configured sites"),
     ("set [n] k=v ...",  "change settings non-interactively"),
     ("log [n]",          "show the last n log entries"),
+    ("admin",            "open the browser admin page over your SSH tunnel"),
+    ("publish",          "one guided flow for site content: pull, roll back, channel"),
     ("pull [n]",         "check a site's publish channel and pull new content now"),
     ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
     ("help",             "show this message"),
@@ -4008,6 +4000,17 @@ _CONFIG_COMMANDS = [
     ("back",            "return to main shell"),
 ]
 CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
+
+
+# The publish commands
+_PUBLISH_COMMANDS = [
+    ("pull [n]",         "fetch and swap in new content from the site's channel"),
+    ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
+    ("channel [n]",      "view or edit the publish channel (watch URL and key)"),
+    ("show",             "show each site's channel and backup"),
+    ("back",             "return to main shell"),
+]
+PUBLISH_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _PUBLISH_COMMANDS)
 
 
 # Safe input
@@ -4721,6 +4724,39 @@ _publish_lock = threading.Lock()  # serializes site-content mutation across ever
                                    # multiple unguarded filesystem ops, not one.
 
 
+# Landing a bundle
+def _land_bundle(site, bundle, source):
+    """Extract `bundle` into staging and swap it live for `site`, with the
+    single-shot backup and ownership repair — the shared tail of every content
+    channel. `source` is only for the log line. Returns "rejected" or
+    "published"."""
+    with _publish_lock:
+        staging = _resolve(site.serve_dir).rstrip(os.sep) + ".new"
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            _extract_bundle(bundle, staging)
+            _swap_site_content(staging, site.serve_dir)
+        except Exception as e:
+            log.error("Publish bundle rejected: %s", e)
+            shutil.rmtree(staging, ignore_errors=True)
+            return "rejected"
+
+        # The tree just swapped in was extracted by this process — root, since
+        # every content channel elevates — so re-establish what enable
+        # establishes: the operator owns their content, the service reads
+        # through its group. strip_world because the extraction's own 644/755
+        # modes are Servette's writing, not the operator's, and must honour
+        # the never-world-bits promise. Without this, every publish left the
+        # site root-owned — the operator locked out of their own folder — and
+        # world-readable.
+        live = _resolve(site.serve_dir).rstrip(os.sep)
+        _chown_operator(live, strip_world=True)
+        _chown_operator(live + ".bak", strip_world=True)
+
+    log.info("Published new content for %s from %s", site.domain or site.serve_dir, source)
+    return "published"
+
+
 # The .sig companion
 def _publish_sig_url(url):
     """url's own '.sig' companion, with '.sig' appended to the path rather than
@@ -4754,48 +4790,25 @@ def _check_for_content_update(site):
         log.error("publish_key is not a valid Ed25519 public key — publishing disabled")
         return "invalid-key"
 
-    with _publish_lock:
-        try:
-            # Capped read: bounds memory to _MAX_BUNDLE_BYTES regardless of what
-            # the response claims or how much data is actually sent.
-            bundle = urllib.request.urlopen(site.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
-            if len(bundle) > _MAX_BUNDLE_BYTES:
-                log.error("Publish bundle exceeds %d bytes — rejecting before signature check", _MAX_BUNDLE_BYTES)
-                return "too-large"
-            signature = urllib.request.urlopen(_publish_sig_url(site.publish_url), timeout=15).read(4096)
-        except Exception as e:
-            log.warning("Could not fetch publish bundle: %s", e)
-            return "fetch-failed"
+    try:
+        # Capped read: bounds memory to _MAX_BUNDLE_BYTES regardless of what
+        # the response claims or how much data is actually sent.
+        bundle = urllib.request.urlopen(site.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
+        if len(bundle) > _MAX_BUNDLE_BYTES:
+            log.error("Publish bundle exceeds %d bytes — rejecting before signature check", _MAX_BUNDLE_BYTES)
+            return "too-large"
+        signature = urllib.request.urlopen(_publish_sig_url(site.publish_url), timeout=15).read(4096)
+    except Exception as e:
+        log.warning("Could not fetch publish bundle: %s", e)
+        return "fetch-failed"
 
-        try:
-            pub_key.verify(signature, bundle)
-        except InvalidSignature:
-            log.error("Publish bundle signature verification failed — rejecting")
-            return "bad-signature"
+    try:
+        pub_key.verify(signature, bundle)
+    except InvalidSignature:
+        log.error("Publish bundle signature verification failed — rejecting")
+        return "bad-signature"
 
-        staging = _resolve(site.serve_dir).rstrip(os.sep) + ".new"
-        shutil.rmtree(staging, ignore_errors=True)
-        try:
-            _extract_bundle(bundle, staging)
-            _swap_site_content(staging, site.serve_dir)
-        except Exception as e:
-            log.error("Publish bundle rejected: %s", e)
-            shutil.rmtree(staging, ignore_errors=True)
-            return "rejected"
-
-        # The tree just swapped in was extracted by this process — root, since
-        # pull elevates — so re-establish what enable establishes: the operator
-        # owns their content, the service reads through its group. strip_world
-        # because the extraction's own 644/755 modes are Servette's writing,
-        # not the operator's, and must honour the never-world-bits promise.
-        # Without this, every pull left the site root-owned — the operator
-        # locked out of their own folder — and world-readable.
-        live = _resolve(site.serve_dir).rstrip(os.sep)
-        _chown_operator(live, strip_world=True)
-        _chown_operator(live + ".bak", strip_world=True)
-
-    log.info("Published new content for %s from %s", site.domain or site.serve_dir, site.publish_url)
-    return "published"
+    return _land_bundle(site, bundle, site.publish_url)
 
 
 # pull
@@ -4842,6 +4855,800 @@ def cmd_restore_site(site):
         # ownership repair as the pull itself, for the same reason.
         _chown_operator(live_dir, strip_world=True)
     print("  Site content restored from backup.")
+
+# The publish display
+def _publish_show():
+    _section("Publish")
+    for i, site in enumerate(config.sites):
+        backup = os.path.isdir(_resolve(site.serve_dir).rstrip(os.sep) + ".bak")
+        print(f"  [{i}] {site.domain or site.serve_dir}")
+        print(f"      channel: {site.publish_url if site.publish_url and site.publish_key else '(not set)'}")
+        print(f"      backup:  {'present — restore-site undoes the last pull' if backup else 'none'}")
+    print()
+
+
+# publish
+def cmd_publish():
+    _publish_show()
+    print("  Prefer a browser? 'admin' opens the publish page over your SSH tunnel.")
+    print(PUBLISH_HELP)
+
+    while True:
+        try:
+            raw = input("  publish> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not raw:
+            continue
+
+        parts = raw.split()
+        cmd   = parts[0].lower()
+        args  = parts[1:]
+
+        if cmd == "show":
+            _publish_show()
+        elif cmd == "pull":
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_pull(site)
+        elif cmd == "restore-site":
+            site = _config_site_arg(args)
+            if site is not None:
+                cmd_restore_site(site)
+        elif cmd == "channel":
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_publish(site)
+        elif cmd in ("back", "done", "exit", "quit"):
+            break
+        elif cmd in ("help", "?"):
+            print(PUBLISH_HELP)
+        else:
+            print(f"  Unknown command: {cmd}")
+            print(PUBLISH_HELP)
+
+
+# The loopback server's shape
+_UI_HOST          = "127.0.0.1"
+_UI_PORT          = 8377  # the LocalForward line in the operator's ssh config names it
+_UI_MAX_BAD_CODES = 5     # then the run stops authenticating anyone: a six-character
+                          # code holds against five guesses, not against a local
+                          # process free to try millions over loopback
+
+
+# The pairing page
+_UI_PAIR_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Servette</title></head>
+<body style="font-family: system-ui, sans-serif; max-width: 26rem; margin: 4rem auto;">
+<h1>Servette</h1>
+<p>Enter the code printed in your terminal:</p>
+<form method="get" action="/"><input name="t" autofocus autocomplete="off">
+<button>Open</button></form>
+</body></html>
+"""
+
+
+# The admin page
+_UI_ADMIN_PAGE = """<!DOCTYPE html>
+<!-- src/admin — the operator's page, the browser half of the paired
+     surfaces. Served only by the loopback page server (127.0.0.1, reached
+     through the operator's SSH tunnel via `servette admin`), never by the
+     public site. One page, tabs per feature: Status (the inside view) and
+     Publish now; Config when it earns its forms.
+     Constraints, all load-bearing:
+
+     - No signature, no key. Being here IS the authentication: only the
+       holder of the operator's SSH key can reach this address, so the
+       page carries none of the pub tool's key custody machinery
+       (DECISIONS.md, "Tunnel uploads are authenticated by SSH").
+     - Dependency-free. Browser primitives only (CompressionStream, a
+       hand-rolled ustar writer emitting only the entry types
+       _extract_bundle accepts); its only requests are to the same
+       loopback server that served it.
+     - Inlined into servette.py by build.py, like 404.html: no triple
+       double-quote and no backslash anywhere in this file, or the build
+       fails rather than emit a broken literal. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Servette — Admin</title>
+  <style>
+    :root {
+      --bg:      #0e0e0e;
+      --surface: #161616;
+      --border:  #2a2a2a;
+      --text:    #e8e8e8;
+      --muted:   #555;
+      --green:   #4ade80;
+      --red:     #f87171;
+      --amber:   #fbbf24;
+      --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+              'Liberation Mono', 'Courier New', monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 3rem 2rem;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      opacity: 0.4;
+      z-index: 0;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 560px;
+      width: 100%;
+    }
+
+    .header { margin-bottom: 1.75rem; }
+
+    .servette-logo {
+      font-family: var(--mono);
+      font-weight: 500;
+      font-size: 3rem;
+      letter-spacing: 0;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .servette-logo .ette   { color: #5A8466; }
+    .servette-logo .cursor { color: inherit; animation: servette-blink 1.1s steps(1) infinite; }
+
+    @keyframes servette-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+    .tagline {
+      margin-top: 0.5rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 0.4rem;
+      margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    button.tab {
+      font-family: inherit;
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      padding: 0.55rem 0.9rem;
+      cursor: pointer;
+    }
+    button.tab:hover { color: var(--text); }
+    button.tab.active {
+      color: var(--text);
+      border-bottom-color: #5A8466;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--surface);
+      margin-bottom: 1.5rem;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .card-title {
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .card-body { padding: 1rem 1.25rem; }
+
+    .badge {
+      font-size: 0.7rem;
+      font-weight: 500;
+      padding: 0.3rem 0.7rem;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
+    .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
+    .badge-dim   { background: rgba(255,255,255,0.04); color: var(--muted); border: 1px solid var(--border); }
+
+    button.action {
+      font-family: inherit;
+      font-size: 0.75rem;
+      color: var(--text);
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.5rem 0.9rem;
+      cursor: pointer;
+      letter-spacing: 0.03em;
+    }
+    button.action:hover:not(:disabled) { border-color: #3a3a3a; background: rgba(255,255,255,0.08); }
+    button.action:disabled { color: var(--muted); cursor: not-allowed; }
+    button.action.primary { border-color: rgba(90,132,102,0.6); background: rgba(90,132,102,0.15); }
+    button.action.primary:hover:not(:disabled) { background: rgba(90,132,102,0.25); }
+
+    .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+
+    .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
+    .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
+    .rows .gap { margin-top: 0.55rem; }
+    .rows b { color: var(--text); font-weight: 500; }
+
+    .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
+    .hint b { color: var(--text); font-weight: 500; }
+    .warn  { color: var(--amber); }
+    .good  { color: var(--green); }
+    .bad   { color: var(--red); }
+    .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
+
+    pre.shell {
+      font-family: inherit;
+      font-size: 0.72rem;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.7rem 0.9rem;
+      line-height: 1.7;
+      overflow-x: auto;
+      margin-top: 0.4rem;
+    }
+    pre.shell .c { color: var(--muted); }
+
+    .note {
+      font-size: 0.7rem;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .note b { color: var(--text); font-weight: 500; }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="header">
+    <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
+    <div class="tagline">Admin — your server, through your SSH tunnel</div>
+  </div>
+
+  <!-- Shown instead of the app when the browser lacks the pipeline. -->
+  <div class="card hidden" id="unsupported">
+    <div class="card-head">
+      <span class="card-title">Browser not supported</span>
+      <span class="badge badge-red">✕ missing gzip</span>
+    </div>
+    <div class="card-body">
+      <p class="hint">This page builds content bundles with the browser's own
+      <b>CompressionStream</b>, and this browser does not provide it. Recent
+      versions of Chrome, Firefox (113+), and Safari (16.4+) do. Nothing is
+      downloaded to work around it — this page loads no third-party code.</p>
+    </div>
+  </div>
+
+  <div id="app" class="hidden">
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" id="tab-status" type="button" role="tab">Status</button>
+    <button class="tab" id="tab-publish" type="button" role="tab">Publish</button>
+  </nav>
+
+  <!-- ══ Status — the inside view ══ -->
+  <div id="panel-status" role="tabpanel">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Server</span>
+        <span class="badge badge-dim" id="st-badge">loading…</span>
+      </div>
+      <div class="card-body">
+        <div class="rows" id="st-rows"></div>
+        <p class="error hidden" id="st-error"></p>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action" id="btn-refresh" type="button">Refresh</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Needs attention</span>
+        <span class="badge badge-dim" id="issue-badge">…</span>
+      </div>
+      <div class="card-body">
+        <div class="rows" id="issue-list"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══ Publish — pick a folder, send it through the tunnel ══ -->
+  <div id="panel-publish" role="tabpanel" class="hidden">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">1 · Site folder</span>
+        <span class="badge badge-dim" id="dir-badge">no folder chosen</span>
+      </div>
+      <div class="card-body">
+        <div class="btn-row">
+          <button class="action" id="btn-dir" type="button">Choose your site's folder</button>
+          <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
+        </div>
+        <p class="hint" id="dir-summary">Pick the folder whose contents should
+        become the site — the folder that holds your <b>index.html</b>. Files
+        are read here in the browser and travel only through your SSH tunnel
+        to your own server.</p>
+        <p class="error hidden" id="dir-error"></p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">2 · Publish</span>
+        <span class="badge badge-dim" id="pub-badge">waiting</span>
+      </div>
+      <div class="card-body">
+        <div class="btn-row">
+          <button class="action primary" id="btn-publish" type="button" disabled>Publish to this server</button>
+        </div>
+        <div id="pub-done" class="hidden">
+          <p class="hint" id="pub-note" style="margin-top:0.75rem"></p>
+          <pre class="shell">restore-site     <span class="c"># in the terminal: one step back, if you want the previous content</span></pre>
+        </div>
+        <p class="error hidden" id="pub-error"></p>
+      </div>
+    </div>
+
+  </div>
+
+  </div><!-- /app -->
+
+  <div class="note">
+    This page is served by your own server on <b>127.0.0.1</b> and reached
+    only through your SSH tunnel — the address does not exist on the public
+    internet. No signature, no key: <b>being here is the authentication</b>,
+    because only your SSH key opens this pipe. Published content lands
+    through the same staging, checks, atomic swap, and backup as every
+    other publish.
+  </div>
+
+</div>
+
+<script>
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+
+  const MAX_BUNDLE_BYTES = 500 * 1024 * 1024;  // mirrors _MAX_BUNDLE_BYTES server-side
+  const CODE = new URLSearchParams(location.search).get('t') || '';
+
+  /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
+
+  const PANELS = { status: 'panel-status', publish: 'panel-publish' };
+
+  function showTab(name) {
+    if (!PANELS[name]) name = 'status';
+    for (const key of Object.keys(PANELS)) {
+      $(PANELS[key]).classList.toggle('hidden', key !== name);
+      $('tab-' + key).classList.toggle('active', key === name);
+    }
+    if (name === 'status') loadStatus();
+    if (location.hash !== '#' + name)
+      history.replaceState(null, '', '#' + name + location.search);
+  }
+
+  $('tab-status').addEventListener('click', () => showTab('status'));
+  $('tab-publish').addEventListener('click', () => showTab('publish'));
+
+  /* ══ Status — the inside view, rendered from GET /status. ══ */
+
+  const row = (k, v, cls) =>
+    `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
+
+  async function loadStatus() {
+    setBadge($('st-badge'), 'badge-dim', 'loading…');
+    clearError($('st-error'));
+    try {
+      const r = await fetch('/status?t=' + encodeURIComponent(CODE));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+
+      setBadge($('st-badge'), d.running ? 'badge-green' : 'badge-red',
+               d.running ? '● running · v' + d.version : '○ stopped · v' + d.version);
+      let h = row('Mode', d.mode === 'service'
+        ? 'system service (survives reboots)'
+        : d.mode === 'session' ? 'session only' : 'stopped');
+      for (const s of d.sites || []) {
+        h += row('Site ' + s.index, s.domain
+          ? `<b>${escapeHtml('https://' + s.domain)}</b>` : '(no domain)', 'gap');
+        h += row('Folder', escapeHtml(s.serve_dir || '(not set)'));
+        h += row('Password', s.auth ? 'enabled' : 'off');
+        h += row('Certificate', s.cert_days == null
+          ? '<span class="warn">none readable</span>'
+          : s.cert_days <= 0 ? '<span class="bad">expired</span>'
+          : s.cert_days < 30 ? `<span class="warn">${s.cert_days} days remaining</span>`
+          : `<span class="good">${s.cert_days} days remaining</span>`);
+        h += row('Channel', s.publish ? 'configured' : 'none (this page publishes directly)');
+      }
+      $('st-rows').innerHTML = h;
+
+      const problems = [...(d.issues || []), ...(d.warnings || [])];
+      if (problems.length) {
+        setBadge($('issue-badge'), 'badge-red', problems.length + ' to review');
+        $('issue-list').innerHTML = problems
+          .map((p) => `<div class="warn">· ${escapeHtml(p)}</div>`).join('');
+      } else {
+        setBadge($('issue-badge'), 'badge-green', '✓ all clear');
+        $('issue-list').innerHTML =
+          '<div class="good">Nothing needs attention.</div>';
+      }
+    } catch (e) {
+      setBadge($('st-badge'), 'badge-red', '✕ unreachable');
+      showError($('st-error'), 'Could not read status: ' + e.message +
+        ' — if the terminal command was closed, re-run it and open the fresh link.');
+    }
+  }
+
+  $('btn-refresh').addEventListener('click', loadStatus);
+
+  /* ══ Publish — the pub tool's bundle builder with the signing removed.
+     The server's contract (_extract_bundle / _land_bundle): a tar.gz of
+     plain files and directories, paths relative to the site root, no entry
+     escaping it, under 500 MB uncompressed — POSTed to /upload with this
+     run's pairing code. ══ */
+
+  function splitTarName(path) {
+    const len = (s) => new TextEncoder().encode(s).length;
+    if (len(path) <= 100) return ['', path];
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const prefix = parts.slice(0, i).join('/');
+      const name   = parts.slice(i).join('/');
+      if (len(prefix) <= 155 && len(name) <= 100) return [prefix, name];
+    }
+    throw new Error(`path too long for a tar header: ${path}`);
+  }
+
+  function tarHeader(path, size, isDir, mtime) {
+    const block = new Uint8Array(512);
+    const enc = new TextEncoder();
+    const putStr   = (off, s) => block.set(enc.encode(s), off);
+    const putOctal = (off, width, n) => putStr(off, n.toString(8).padStart(width - 1, '0'));
+
+    const [prefix, name] = splitTarName(isDir ? path + '/' : path);
+    putStr(0, name);
+    putOctal(100, 8, isDir ? 0o755 : 0o644);                // mode
+    putOctal(108, 8, 0);                                    // uid
+    putOctal(116, 8, 0);                                    // gid
+    putOctal(124, 12, isDir ? 0 : size);                    // size
+    putOctal(136, 12, mtime);                               // mtime
+    block.set(enc.encode('        '), 148);                 // chksum: spaces while summing
+    block[156] = isDir ? 0x35 : 0x30;                       // typeflag: '5' dir, '0' file
+    putStr(257, 'ustar');                                   // magic (NUL-terminated)
+    putStr(263, '00');                                      // version
+    putOctal(329, 8, 0);                                    // devmajor
+    putOctal(337, 8, 0);                                    // devminor
+    putStr(345, prefix);
+
+    let sum = 0;
+    for (const b of block) sum += b;
+    putOctal(148, 7, sum);                                  // 6 digits + NUL, then the space stays
+    return block;
+  }
+
+  // entries: [{ path, bytes }] with '/'-separated site-root-relative paths.
+  function buildTar(entries) {
+    const mtime = Math.floor(Date.now() / 1000);
+    const dirs = new Set();
+    for (const e of entries)
+      for (let i = e.path.indexOf('/'); i !== -1; i = e.path.indexOf('/', i + 1))
+        dirs.add(e.path.slice(0, i));
+
+    const blocks = [];
+    for (const d of [...dirs].sort())
+      blocks.push(tarHeader(d, 0, true, mtime));
+    for (const e of [...entries].sort((a, b) => a.path < b.path ? -1 : 1)) {
+      blocks.push(tarHeader(e.path, e.bytes.length, false, mtime));
+      blocks.push(e.bytes);
+      const pad = (512 - (e.bytes.length % 512)) % 512;
+      if (pad) blocks.push(new Uint8Array(pad));
+    }
+    blocks.push(new Uint8Array(1024));                      // end-of-archive
+
+    const total = blocks.reduce((n, b) => n + b.length, 0);
+    const tar = new Uint8Array(total);
+    let off = 0;
+    for (const b of blocks) { tar.set(b, off); off += b.length; }
+    return tar;
+  }
+
+  async function gzipBytes(u8) {
+    const stream = new Blob([u8]).stream().pipeThrough(new CompressionStream('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  const state = {
+    files:  null,   // [{ path, file }]
+    folder: null,   // the picked folder's name, for messages
+  };
+
+  function setBadge(el, cls, text) { el.className = 'badge ' + cls; el.textContent = text; }
+  function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
+  function clearError(el) { el.classList.add('hidden'); }
+
+  function fmtSize(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  const escapeHtml = (s) =>
+    s.replace(/[&<>"']/g, (c) => '&#' + c.charCodeAt(0) + ';');
+
+  function refreshReady() {
+    const ready = !!(state.files && state.files.length);
+    $('btn-publish').disabled = !ready;
+    $('pub-done').classList.add('hidden');
+    setBadge($('pub-badge'), 'badge-dim', ready ? 'ready' : 'waiting');
+  }
+
+  // The same hidden-path rule the server enforces: any '.'-segment except
+  // .well-known is never served, so it is not bundled either — a .git or
+  // .env under the site folder must not end up on the server.
+  const isHiddenPath = (path) =>
+    path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
+
+  $('btn-dir').addEventListener('click', () => $('dir-input').click());
+  $('dir-input').addEventListener('change', () => {
+    clearError($('dir-error'));
+    const all = [...$('dir-input').files];
+    if (!all.length) return;
+
+    // webkitRelativePath is '<picked folder>/rest…' — the folder name is
+    // stripped so index.html sits at the bundle root, where serve_dir wants it.
+    const items = all.map((f) => ({
+      path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
+    })).filter((e) => e.path);
+    const kept = items.filter((e) => !isHiddenPath(e.path));
+    const hidden = items.length - kept.length;
+
+    if (!kept.length) {
+      showError($('dir-error'), 'That folder has no publishable files' +
+        (hidden ? ` (${hidden} hidden entries were excluded).` : '.'));
+      return;
+    }
+    state.files  = kept;
+    state.folder = all[0].webkitRelativePath.split('/')[0];
+
+    const total = kept.reduce((n, e) => n + e.file.size, 0);
+    const hasIndex = kept.some((e) => e.path === 'index.html');
+    $('dir-summary').innerHTML =
+      `<b>${escapeHtml(state.folder)}/</b> — ${kept.length} file${kept.length === 1 ? '' : 's'}, ` +
+      `${fmtSize(total)}` +
+      (hidden ? ` · ${hidden} hidden entr${hidden === 1 ? 'y' : 'ies'} excluded ` +
+                `(paths starting with '.' are never served)` : '') +
+      (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
+                       `the site root would show a directory miss</span>`);
+    setBadge($('dir-badge'), 'badge-green', '✓ folder read');
+    refreshReady();
+  });
+
+  $('btn-publish').addEventListener('click', async () => {
+    clearError($('pub-error'));
+    $('btn-publish').disabled = true;
+    setBadge($('pub-badge'), 'badge-dim', 'building…');
+    try {
+      const entries = [];
+      let total = 0;
+      for (const { path, file } of state.files) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        total += bytes.length;
+        if (total > MAX_BUNDLE_BYTES)
+          throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
+                          `the server would reject it`);
+        entries.push({ path, bytes });
+      }
+      const gz = await gzipBytes(buildTar(entries));
+
+      setBadge($('pub-badge'), 'badge-dim', 'publishing…');
+      const resp = await fetch('/upload?t=' + encodeURIComponent(CODE), {
+        method: 'POST', body: gz,
+      });
+      let result = '';
+      try { result = (await resp.json()).result; } catch { result = ''; }
+
+      if (resp.ok && result === 'published') {
+        $('pub-note').innerHTML = `<b>${escapeHtml(state.folder)}/</b> is live — ` +
+          `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
+          `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
+          `content kept as the one-step backup.`;
+        $('pub-done').classList.remove('hidden');
+        setBadge($('pub-badge'), 'badge-green', '✓ published');
+      } else if (resp.status === 403) {
+        throw new Error('The server refused the pairing code — close this page, ' +
+                        'and open the fresh link the terminal prints for this run.');
+      } else {
+        throw new Error('The server rejected the bundle' +
+                        (result ? ` (${result})` : ` (HTTP ${resp.status})`) +
+                        ' — nothing was changed. The terminal log has the detail.');
+      }
+    } catch (e) {
+      showError($('pub-error'), e.message);
+      setBadge($('pub-badge'), 'badge-red', '✕ failed');
+    }
+    $('btn-publish').disabled = false;
+  });
+
+  /* ══ Feature gate & startup. ══ */
+  const supported = typeof CompressionStream === 'function';
+  $(supported ? 'app' : 'unsupported').classList.remove('hidden');
+  if (supported) showTab((location.hash || '').replace('#', ''));
+</script>
+
+</body>
+</html>
+"""
+
+
+# The loopback handler
+class _UIHandler(http.server.BaseHTTPRequestHandler):
+    """The loopback server's one handler. GET / is the page (pairing page
+    until the code is presented); POST /upload lands a content bundle. After
+    _UI_MAX_BAD_CODES wrong guesses the run stops authenticating anyone,
+    including the right code — re-run the command for a fresh one."""
+
+    def log_message(self, fmt, *args):
+        log.info("ui: " + fmt % args)  # the default writes to stderr, past the log
+
+    def _respond(self, status, body, ctype="text/html; charset=utf-8"):
+        data = body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _auth(self):
+        """"ok", "locked", "bad", or "none". A wrong code is a guess and is
+        counted; a missing one is not. Compared as bytes so any input gets
+        the constant-time path rather than a TypeError."""
+        qs   = parse_qs(urlsplit(self.path).query)
+        code = (qs.get("t") or [""])[0] or self.headers.get("X-Servette-Code", "")
+        if self.server.bad_codes >= _UI_MAX_BAD_CODES:
+            return "locked"
+        if not code:
+            return "none"
+        if hmac.compare_digest(code.encode(), self.server.code.encode()):
+            return "ok"
+        self.server.bad_codes += 1
+        return "bad"
+
+    def do_GET(self):
+        path = urlsplit(self.path).path
+        if path not in ("/", "/status"):
+            return self._respond(404, "Not found.")
+        auth = self._auth()
+        if auth == "locked":
+            return self._respond(403, "Too many wrong codes. Close this page and re-run the command.")
+        if path == "/status":
+            # The inside view, for the page's Status tab: exactly what
+            # `status --json` prints, because it is the same function.
+            if auth != "ok":
+                return self._respond(403, "Not paired.")
+            return self._respond(200, json.dumps(_status_data()), "application/json")
+        if auth == "ok":
+            return self._respond(200, self.server.page)
+        return self._respond(200, _UI_PAIR_PAGE)
+
+    def do_POST(self):
+        if urlsplit(self.path).path != "/upload":
+            return self._respond(404, "Not found.")
+        if self._auth() != "ok":
+            return self._respond(403, "Not paired.")
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return self._respond(400, "Empty upload.")
+        if length > _MAX_BUNDLE_BYTES:
+            return self._respond(413, "Bundle too large.")
+        result = _land_bundle(self.server.site, self.rfile.read(length), "browser upload")
+        if result == "published" and getattr(self.server, "on_publish", None):
+            self.server.on_publish()  # the terminal narrates what the browser did
+        self._respond(200 if result == "published" else 422,
+                      json.dumps({"result": result}), "application/json")
+
+
+# Starting and stopping
+def _start_ui(site, page, port=_UI_PORT):
+    """Start the loopback page server for one command's lifetime: bound to
+    127.0.0.1 only, one fresh code per run. Returns (httpd, code); the caller
+    prints the URL and later hands httpd back to _stop_ui. A port already in
+    use raises OSError for the caller to report."""
+    httpd = http.server.ThreadingHTTPServer((_UI_HOST, port), _UIHandler)
+    httpd.site, httpd.page = site, page
+    httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, httpd.code
+
+
+def _stop_ui(httpd):
+    """The page dies with the command: stop accepting, close the socket."""
+    httpd.shutdown()
+    httpd.server_close()
+
+
+# admin
+def cmd_admin():
+    site = config.sites[0]  # the page publishes site 0 until it grows a picker
+    try:
+        httpd, code = _start_ui(site, _UI_ADMIN_PAGE)
+    except OSError as e:
+        print(f"  Could not open the page (port {_UI_PORT}: {e.strerror or e}).")
+        return
+    httpd.on_publish = lambda: print(
+        "\n  Published from browser: content swapped in — restore-site undoes it.")
+
+    try:
+        target = f" (publishes site 0: {site.domain or site.serve_dir})" if len(config.sites) > 1 else ""
+        print(f"  The admin page is up{target}:")
+        print(f"    open  http://localhost:{_UI_PORT}/?t={code}")
+        print(f"    (or your bookmark http://localhost:{_UI_PORT}/ and enter code {code})")
+        print()
+        print("  If the page won't load, your ssh config needs the one-time line:")
+        print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
+        print()
+        while True:
+            try:
+                raw = input("  admin — 'back' closes the page: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if raw in ("back", "done", "exit", "quit", "q"):
+                break
+    finally:
+        _stop_ui(httpd)
+        print("  Page closed.")
 
 
 # Formatting uptime
@@ -5125,6 +5932,14 @@ def cmd_setup():
     else:
         print("  Run 'start' when you're ready.")
 
+    # The one-time client-side line for the browser admin page — said here
+    # because setup is the moment the operator is already reading.
+    print()
+    print("  Optional, once, on the computer you ssh FROM: add this line to")
+    print("  ~/.ssh/config inside this server's entry, and 'admin' opens a")
+    print("  browser page over this same SSH connection:")
+    print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
+
 
 # `set [n] key=value ...` is the write half of the tooling surface (`status
 # --json` and `sites --json` are the read half): external tools drive it over
@@ -5292,8 +6107,8 @@ def _startup_refresh():
 # config the service reads, the unit files, or a site folder the service user
 # owns. Read-only ones (status, sites, log) are absent deliberately — they must
 # keep working without a password prompt.
-_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "pull",
-                  "restore-site")
+_ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "admin",
+                  "publish", "pull", "restore-site")
 
 # What sudo made of the last elevated command. The one-shot `servette <command>`
 # form exits with it, so tooling driving Servette over SSH sees a refused
@@ -5419,6 +6234,10 @@ def run_command(cmd, args):
             cmd_log(int(args[0]) if args else 20)
         except ValueError:
             print("Usage: log [number]")
+    elif cmd == "admin":
+        cmd_admin()
+    elif cmd == "publish":
+        cmd_publish()
     elif cmd == "pull":
         site = _config_site_arg(args)
         if site is not None:

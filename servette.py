@@ -2198,6 +2198,573 @@ def _watch_server(poll=2, grace=5):
         time.sleep(poll)
 
 
+# The spinner
+def _spin(message, stop_event):
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    i = 0
+    while not stop_event.is_set():
+        sys.stdout.write(f"\r  {frames[i % len(frames)]}  {message}")
+        sys.stdout.flush()
+        time.sleep(0.1)
+        i += 1
+    sys.stdout.write(f"\r  {' ' * (len(message) + 5)}\r")
+    sys.stdout.flush()
+
+
+class _spinner:
+    """Context manager that runs _spin(message) for the duration of the block —
+    TTY only, so non-interactive runs (service renewals, pipes) stay clean."""
+
+    def __init__(self, message):
+        self._message = message
+        self._stop    = threading.Event()
+        self._thread  = None
+
+    def __enter__(self):
+        if sys.stdout.isatty():
+            self._thread = threading.Thread(target=_spin, args=(self._message, self._stop), daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+        return False
+
+
+# Writing private keys
+def _write_private_key(path, data):
+    """Write key material with 0600 set at file creation, not chmod'd after:
+    under a permissive umask, write-then-chmod leaves a window where another
+    local user can open the key (an open fd survives the chmod), and a crash
+    between the two leaves it world-readable permanently. Same pattern the
+    swapfile creation uses — the mode exists before the content does."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
+# The self-signed certificate
+def _generate_self_signed_cert(cert_path, key_path):
+    """Generate a self-signed certificate and write it to cert_path/key_path."""
+    from cryptography import x509 as _x509
+    from cryptography.x509.oid import NameOID as _NameOID
+    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+
+    key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = _x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, "servette")])
+
+    san = [_x509.DNSName("localhost"), _x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))]
+    try:
+        import socket as _socket
+        ip = _socket.gethostbyname(_socket.gethostname())
+        san.append(_x509.IPAddress(ipaddress.IPv4Address(ip)))
+    except Exception:
+        pass
+
+    cert = (
+        _x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(_x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650))
+        .add_extension(_x509.SubjectAlternativeName(san), critical=False)
+        .sign(key, _hashes.SHA256())
+    )
+
+    _write_private_key(key_path, key.private_bytes(
+        _serialization.Encoding.PEM,
+        _serialization.PrivateFormat.TraditionalOpenSSL,
+        _serialization.NoEncryption()
+    ))
+
+    with open(cert_path, "wb") as f:
+        f.write(cert.public_bytes(_serialization.Encoding.PEM))
+
+    log.info("Generated self-signed certificate at %s", cert_path)
+
+
+# Waiting for the port
+def _wait_for_port_free(port, timeout=15):
+    import socket as _socket
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                # Bind all interfaces (0.0.0.0) by design: Servette is a public-facing
+                # server, and this probe must mirror its bind to detect a real conflict.
+                s.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            time.sleep(0.5)
+    log.warning("Port %d did not free up within %ds", port, timeout)
+    return False
+
+
+# Reloading
+_reload_requested = False  # lets --serve's exit log a restart as a restart
+
+
+def _reload_server():
+    """Reload the server to pick up a new certificate."""
+    global _reload_requested
+    if "--serve" in sys.argv:
+        # Inside the service, the sandboxed unit user can't systemctl restart
+        # (NoNewPrivileges, least privilege). Stop serving instead: _watch_server
+        # sees the dead thread, --serve exits non-zero, and Restart=always
+        # relaunches the service with the new certificate loaded. The flag
+        # keeps the journal honest: without it every deliberate reload logged
+        # "stopped unexpectedly", teaching the operator that the error line
+        # is routine.
+        _reload_requested = True
+        log.info("Stopping to load the new certificate — systemd restarts the service")
+        stop_server()
+    elif _service_is_active():
+        try:
+            subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
+            print("  Server restarted.")
+        except Exception as e:
+            print(f"  Could not restart service: {e}")
+    elif _server_running():
+        stop_server()
+        _wait_for_port_free(config.port)
+        start_server()
+
+
+# base64url
+def _b64url(data):
+    """base64url without padding — the encoding JOSE/ACME uses everywhere."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_int(n):
+    """A non-negative integer as a base64url big-endian byte string (for JWK n/e)."""
+    length = max(_ceil_div(n.bit_length(), 8), 1)   # zero still encodes as one byte
+    return _b64url(n.to_bytes(length, "big"))
+
+
+# The response holder
+class _Resp:
+    """A tiny HTTP response holder so the ACME client can read status/headers/body
+    uniformly whether urllib returned success or raised HTTPError."""
+    __slots__ = ("status", "headers", "body")
+
+    def __init__(self, status, headers, body):
+        self.status, self.headers, self.body = status, headers, body
+
+    def json(self):
+        return json.loads(self.body)
+
+    @property
+    def text(self):
+        return self.body.decode()
+
+
+class _ACMEError(Exception):
+    """An ACME failure. `failed` holds the DNS names whose authorization was rejected,
+    so the caller can decide whether to fall back (e.g. drop a www with no DNS)."""
+
+    def __init__(self, message, failed=None):
+        super().__init__(message)
+        self.failed = failed or set()
+
+
+# The ACME client
+class _ACMEClient:
+    """A minimal ACME (RFC 8555) client — just enough of the protocol for HTTP-01
+    issuance with a single account key, replacing the certbot `acme` + `josepy`
+    libraries with stdlib urllib + cryptography. Deliberately narrow: HTTP-01 only,
+    no revocation, no key rollover. Requests are RS256-signed JWS; the replay nonce
+    is tracked from each response's Replay-Nonce header. The directory is fetched
+    lazily, so constructing a client touches no network (and stays unit-testable)."""
+
+    def __init__(self, directory_url, account_key):
+        self._url   = directory_url
+        self._key   = account_key   # a cryptography RSA private key
+        self._nonce = None
+        self._kid   = None          # account URL; until set, requests carry the JWK
+        self._dir   = None
+
+    def _directory(self):
+        if self._dir is None:
+            self._dir = self._request(self._url).json()
+        return self._dir
+
+    # HTTP + nonce
+    def _request(self, url, data=None, method=None):
+        headers = {"User-Agent": "servette"}
+        if data is not None:
+            headers["Content-Type"] = "application/jose+json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            r    = urllib.request.urlopen(req, timeout=30)
+            resp = _Resp(r.status, r.headers, r.read())
+        except urllib.error.HTTPError as e:
+            resp = _Resp(e.code, e.headers, e.read())
+        if resp.headers.get("Replay-Nonce"):
+            self._nonce = resp.headers["Replay-Nonce"]
+        return resp
+
+    # JWS
+    def _jwk(self):
+        nums = self._key.public_key().public_numbers()
+        return {"e": _b64url_int(nums.e), "kty": "RSA", "n": _b64url_int(nums.n)}
+
+    def thumbprint(self):
+        canon = json.dumps(self._jwk(), sort_keys=True, separators=(",", ":")).encode()
+        return _b64url(hashlib.sha256(canon).digest())
+
+    def key_authorization(self, token):
+        return f"{token}.{self.thumbprint()}"
+
+    def _sign(self, url, payload):
+        from cryptography.hazmat.primitives import hashes as _hashes
+        from cryptography.hazmat.primitives.asymmetric import padding as _padding
+        protected = {"alg": "RS256", "nonce": self._nonce, "url": url}
+        protected["kid" if self._kid else "jwk"] = self._kid or self._jwk()
+        p = _b64url(json.dumps(protected, separators=(",", ":")).encode())
+        # payload=None is ACME "POST-as-GET" (empty string); {} is a real empty object.
+        y = "" if payload is None else _b64url(json.dumps(payload, separators=(",", ":")).encode())
+        sig = self._key.sign(f"{p}.{y}".encode(), _padding.PKCS1v15(), _hashes.SHA256())
+        return json.dumps({"protected": p, "payload": y, "signature": _b64url(sig)}).encode()
+
+    def _post(self, url, payload):
+        # Two attempts: a badNonce is the one error worth retrying, because the failing
+        # response hands back a fresh nonce. Any other error fails immediately.
+        for attempt in range(2):
+            if self._nonce is None:
+                self._request(self._directory()["newNonce"], method="HEAD")
+            resp = self._request(url, data=self._sign(url, payload))
+            if resp.status < 400:
+                return resp
+            problem = {}
+            try:
+                problem = resp.json()
+            except Exception:
+                pass
+            if attempt == 0 and problem.get("type", "").endswith("badNonce"):
+                continue
+            raise _ACMEError(problem.get("detail") or f"ACME error {resp.status} at {url}")
+        raise _ACMEError("ACME request failed after a nonce retry")
+
+    def _post_as_get(self, url):
+        return self._post(url, None)
+
+    # protocol steps
+    def new_account(self, email):
+        payload = {"termsOfServiceAgreed": True}
+        if email:
+            payload["contact"] = [f"mailto:{email}"]
+        resp = self._post(self._directory()["newAccount"], payload)
+        self._kid = resp.headers.get("Location")
+        if not self._kid:
+            raise _ACMEError("ACME did not return an account URL")
+
+    def _poll(self, url, tries=20, delay=2):
+        """POST-as-GET a resource until it settles (valid/invalid) or we give up."""
+        for _ in range(tries):
+            obj = self._post_as_get(url).json()
+            if obj.get("status") in ("valid", "invalid"):
+                return obj
+            time.sleep(delay)
+        return obj
+
+    def issue(self, names, csr_der, challenge_dir):
+        """Run one HTTP-01 issuance for `names`, writing challenge files under
+        challenge_dir and returning the PEM certificate chain. Raises _ACMEError on
+        failure, with `.failed` set to the names whose validation was rejected."""
+        resp      = self._post(self._directory()["newOrder"],
+                               {"identifiers": [{"type": "dns", "value": n} for n in names]})
+        order     = resp.json()
+        order_url = resp.headers.get("Location")
+
+        written = []
+        try:
+            for authz_url in order["authorizations"]:
+                authz = self._post_as_get(authz_url).json()
+                chall = next(c for c in authz["challenges"] if c["type"] == "http-01")
+                path  = os.path.join(challenge_dir, chall["token"])
+                with open(path, "w") as f:
+                    f.write(self.key_authorization(chall["token"]))
+                written.append(path)
+                self._post(chall["url"], {})   # tell the server the file is in place
+
+            failed = set()
+            for authz_url in order["authorizations"]:
+                authz = self._poll(authz_url)
+                if authz.get("status") != "valid":
+                    failed.add(authz["identifier"]["value"])
+            if failed:
+                raise _ACMEError("domain validation failed", failed=failed)
+
+            self._post(order["finalize"], {"csr": _b64url(csr_der)})
+            final = self._poll(order_url)
+            if final.get("status") != "valid":
+                raise _ACMEError(f"order did not complete (status: {final.get('status')})")
+            return self._post_as_get(final["certificate"]).text
+        finally:
+            for p in written:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
+# Issuance
+def _obtain_trusted_cert(domain, site):
+    """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
+    minimal ACME client (_ACMEClient) on stdlib urllib + cryptography, and store it
+    on `site`.
+
+    Returns None on success, else the failure's class for the watchdog's
+    backoff: "refused" (the CA answered no — retrying soon just burns its
+    rate limits) or "transient" (the network ate a request — retry freely)."""
+    from cryptography import x509 as _x509
+    from cryptography.x509.oid import NameOID as _NameOID
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _serialization
+
+    ACME_URL         = "https://acme-v02.api.letsencrypt.org/directory"
+    ACCOUNT_KEY_FILE = os.path.join(BASE_DIR, ".acme-account.pem")
+    CERTS_DIR        = os.path.join(BASE_DIR, "certs", domain)
+    challenge_dir    = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
+
+    print(f"\nGetting a trusted SSL certificate for {domain}...")
+    print("Make sure your domain points to this server's IP first.\n")
+
+    os.makedirs(challenge_dir, exist_ok=True)
+    os.makedirs(CERTS_DIR, exist_ok=True)
+    _chown_servette(ACME_WEBROOT)
+    _chown_servette(CERTS_DIR)
+
+    # Load or create the ACME account key — a standard RSA PEM (any existing
+    # .acme-account.pem from the old josepy path loads unchanged).
+    if os.path.exists(ACCOUNT_KEY_FILE):
+        with open(ACCOUNT_KEY_FILE, "rb") as f:
+            account_key = _serialization.load_pem_private_key(f.read(), password=None)
+    else:
+        account_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        _write_private_key(ACCOUNT_KEY_FILE, account_key.private_bytes(
+            _serialization.Encoding.PEM,
+            _serialization.PrivateFormat.TraditionalOpenSSL,
+            _serialization.NoEncryption()
+        ))
+        _chown_servette(ACCOUNT_KEY_FILE)
+
+    # start a temporary port-80 listener if the main server isn't running
+    tmp_server = None
+    if not _server_running():
+        try:
+            tmp_server = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
+            threading.Thread(target=tmp_server.serve_forever, daemon=True).start()
+        except OSError as e:
+            log.warning("Could not start temporary port-80 listener: %s", e)
+
+    www_domain  = f"www.{domain}"
+    last_error  = None
+    include_www = True
+    issued      = None   # (fullchain, key_pem) once Let's Encrypt has signed
+
+    # The retry loop retries exactly one thing: the ACME exchange. Local work
+    # — writing files, saving config, reloading — stays outside it, because a
+    # local failure (the sandboxed service cannot write the data directory)
+    # retried as an exchange failure is a fresh issuance per "retry": three
+    # duplicate certificates burned per pass against the 5-per-week duplicate
+    # limit, the reload never reached, and the renewed certificate sits on
+    # disk while the server serves the old one to expiry.
+    # Persistence now happens once, after the loop, and its failures are its
+    # own, not the protocol's.
+    while True:
+        names               = [domain, www_domain] if include_www else [domain]
+        www_dns_only_failure = False
+
+        for attempt in range(1, ACME_RETRIES + 1):
+            label = (f"Requesting certificate for {domain}..." if attempt == 1
+                     else f"Retry {attempt - 1} of {ACME_RETRIES - 1}...")
+            try:
+                with _spinner(label):
+                    domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                    domain_key_pem = domain_key.private_bytes(
+                        _serialization.Encoding.PEM,
+                        _serialization.PrivateFormat.TraditionalOpenSSL,
+                        _serialization.NoEncryption()
+                    )
+                    csr_der = (
+                        _x509.CertificateSigningRequestBuilder()
+                        .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
+                        .add_extension(_x509.SubjectAlternativeName([
+                            _x509.DNSName(n) for n in names
+                        ]), critical=False)
+                        .sign(domain_key, _hashes.SHA256())
+                        .public_bytes(_serialization.Encoding.DER)
+                    )
+
+                    client = _ACMEClient(ACME_URL, account_key)
+                    client.new_account(config.email if config.email else None)
+                    fullchain = client.issue(names, csr_der, challenge_dir)
+
+                issued     = (fullchain, domain_key_pem)
+                last_error = None
+                break
+
+            except Exception as e:
+                last_error = e
+                if isinstance(e, _ACMEError) and include_www and e.failed == {www_domain}:
+                    www_dns_only_failure = True
+                    break  # don't retry; fall back to bare domain
+                if isinstance(e, _ACMEError):
+                    # Let's Encrypt ANSWERED, and the answer was no — a failed
+                    # authorization, a refused order. Asking the same question
+                    # again ten seconds later gets the same no, and each retry
+                    # burns a fresh order and a validation attempt against
+                    # LE's own rate limits (~5 failed validations per hostname
+                    # per hour) while the underlying cause — usually DNS not
+                    # yet pointed here — hasn't changed. Retries are for the
+                    # network eating a request, not for the CA declining it.
+                    break
+                if attempt < ACME_RETRIES:
+                    delay = 5 * attempt
+                    log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
+                    time.sleep(delay)
+
+        if last_error is None:
+            break  # success
+
+        if www_dns_only_failure:
+            include_www = False
+            print(f"\n  Note: {www_domain} has no DNS record — certificate issued for {domain} only.")
+            print(f"  To add www support later, point {www_domain} to this server and run 'config cert'.\n")
+            continue
+
+        break  # real failure
+
+    if tmp_server is not None:
+        tmp_server.shutdown()
+        tmp_server.server_close()
+
+    if last_error:
+        print(f"  Error getting certificate: {last_error}")
+        log.error("ACME failed for %s: %s", domain, last_error)
+        # The failure's class, for the watchdog's backoff: "refused" is the CA
+        # answering no (not retried above either — same reasoning), "transient"
+        # is the network eating a request (retried above, hourly hereafter).
+        return "refused" if isinstance(last_error, _ACMEError) else "transient"
+
+    _persist_issued_cert(domain, site, CERTS_DIR, issued[0], issued[1],
+                         f"{domain} and {www_domain}" if include_www else domain)
+    return None
+
+
+def _persist_issued_cert(domain, site, certs_dir, fullchain, key_pem, issued_names):
+    """Store an issued certificate and put it into service: write the pair,
+    point the site at it, persist the config where possible, reload.
+
+    Written through temp files and two os.replace calls, so a crash leaves
+    either the old pair or the new pair on disk in all but the instant
+    between the renames — the old code wrote both files in place, and a kill
+    landing between (or during) the writes left a fullchain that did not
+    match its privkey, which fails load_cert_chain at the next start and
+    restart-loops the whole box over one site's half-written renewal. Two
+    files can't be replaced in one atomic step, so a two-rename window
+    remains; it is two syscalls wide, down from a network exchange.
+
+    The config save is a no-op skip on renewal (the site already points at
+    these exact paths) and best-effort otherwise: the sandboxed service may
+    not write the data directory, and a certificate that IS on disk and
+    about to be served must not be reported as a failure over a bookkeeping
+    write the next root command will repeat anyway."""
+    cert_path = os.path.join(certs_dir, "fullchain.pem")
+    key_path  = os.path.join(certs_dir, "privkey.pem")
+
+    with open(cert_path + ".tmp", "w") as f:
+        f.write(fullchain)
+    _write_private_key(key_path + ".tmp", key_pem)
+    os.replace(key_path + ".tmp", key_path)
+    os.replace(cert_path + ".tmp", cert_path)
+    _chown_servette(certs_dir)
+
+    changed = (site.cert_file, site.key_file, site.domain) != (cert_path, key_path, domain)
+    site.cert_file = cert_path
+    site.key_file  = key_path
+    site.domain    = domain
+    if changed:
+        try:
+            config.save()
+        except OSError as e:
+            log.error("Certificate stored but config not saved (%s) — "
+                      "run 'config cert' as root to persist it", e)
+
+    print(f"  Certificate issued for {issued_names}.")
+    log.info("ACME certificate issued for %s", issued_names)
+
+    if _server_running() or _service_is_active():
+        print("  Reloading server...")
+        _reload_server()
+
+
+# Loading a certificate
+def _load_cert(cert_path):
+    """Return a cryptography X.509 certificate object, or None on failure."""
+    try:
+        from cryptography import x509 as _x509
+        with open(cert_path, "rb") as f:
+            return _x509.load_pem_x509_certificate(f.read())
+    except Exception:
+        return None
+
+
+# The domain a certificate names
+def _is_real_domain(s):
+    if s in ("localhost", "servette"):
+        return False
+    try:
+        ipaddress.ip_address(s)
+        return False  # it's an IP, not a domain
+    except ValueError:
+        return bool(s)
+
+
+def _domain_from_cert(cert_path):
+    if not cert_path:
+        return None
+    cert = _load_cert(cert_path)
+    if cert is None:
+        return None
+    try:
+        from cryptography import x509 as _x509
+        san = cert.extensions.get_extension_for_class(_x509.SubjectAlternativeName)
+        for name in san.value.get_values_for_type(_x509.DNSName):
+            if _is_real_domain(name):
+                return name
+    except Exception:
+        pass
+    try:
+        from cryptography.x509.oid import NameOID as _NameOID
+        cn = cert.subject.get_attributes_for_oid(_NameOID.COMMON_NAME)
+        if cn and _is_real_domain(cn[0].value):
+            return cn[0].value
+    except Exception:
+        pass
+    return None
+
+
+# Days to expiry
+def _cert_days_remaining(cert_path):
+    cert = _load_cert(cert_path)
+    if cert is None:
+        return None
+    try:
+        expiry = cert.not_valid_after_utc
+    except AttributeError:
+        expiry = cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+    return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
+
+
 # Service probes
 def _service_file_exists():
     return os.path.exists(SERVICE_PATH)
@@ -3207,10 +3774,10 @@ def _write_unit_files():
 
     # Root, checked before anything is touched. Everything below mutates the
     # host — the runtime swap included — and an unprivileged caller (the
-    # startup refresh in a checkout the operator owns) used to get exactly as
-    # far as its permissions allowed: on such a host that meant swapping the
-    # runtime copy, then failing at the unit write — a version-skewed,
-    # operator-owned runtime behind a unit that still described the old one.
+    # startup refresh in a checkout the operator owns) would otherwise get
+    # exactly as far as its permissions allow: swapping the runtime copy,
+    # then failing at the unit write — a version-skewed, operator-owned
+    # runtime behind a unit that still describes the old one.
     # macOS is exempt: there is no systemd to write for, and the
     # FileNotFoundError from the tools below is the message that says so.
     if not _IS_MACOS and os.geteuid() != 0:
@@ -3365,573 +3932,6 @@ def cmd_disable():
         print("Error: disable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
         print(f"Error during disable: {e}")
-
-
-# The spinner
-def _spin(message, stop_event):
-    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    i = 0
-    while not stop_event.is_set():
-        sys.stdout.write(f"\r  {frames[i % len(frames)]}  {message}")
-        sys.stdout.flush()
-        time.sleep(0.1)
-        i += 1
-    sys.stdout.write(f"\r  {' ' * (len(message) + 5)}\r")
-    sys.stdout.flush()
-
-
-class _spinner:
-    """Context manager that runs _spin(message) for the duration of the block —
-    TTY only, so non-interactive runs (service renewals, pipes) stay clean."""
-
-    def __init__(self, message):
-        self._message = message
-        self._stop    = threading.Event()
-        self._thread  = None
-
-    def __enter__(self):
-        if sys.stdout.isatty():
-            self._thread = threading.Thread(target=_spin, args=(self._message, self._stop), daemon=True)
-            self._thread.start()
-        return self
-
-    def __exit__(self, *exc):
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join()
-        return False
-
-
-# Writing private keys
-def _write_private_key(path, data):
-    """Write key material with 0600 set at file creation, not chmod'd after:
-    under a permissive umask, write-then-chmod leaves a window where another
-    local user can open the key (an open fd survives the chmod), and a crash
-    between the two leaves it world-readable permanently. Same pattern the
-    swapfile creation uses — the mode exists before the content does."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-
-
-# The self-signed certificate
-def _generate_self_signed_cert(cert_path, key_path):
-    """Generate a self-signed certificate and write it to cert_path/key_path."""
-    from cryptography import x509 as _x509
-    from cryptography.x509.oid import NameOID as _NameOID
-    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
-
-    key  = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = _x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, "servette")])
-
-    san = [_x509.DNSName("localhost"), _x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))]
-    try:
-        import socket as _socket
-        ip = _socket.gethostbyname(_socket.gethostname())
-        san.append(_x509.IPAddress(ipaddress.IPv4Address(ip)))
-    except Exception:
-        pass
-
-    cert = (
-        _x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(_x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650))
-        .add_extension(_x509.SubjectAlternativeName(san), critical=False)
-        .sign(key, _hashes.SHA256())
-    )
-
-    _write_private_key(key_path, key.private_bytes(
-        _serialization.Encoding.PEM,
-        _serialization.PrivateFormat.TraditionalOpenSSL,
-        _serialization.NoEncryption()
-    ))
-
-    with open(cert_path, "wb") as f:
-        f.write(cert.public_bytes(_serialization.Encoding.PEM))
-
-    log.info("Generated self-signed certificate at %s", cert_path)
-
-
-# Waiting for the port
-def _wait_for_port_free(port, timeout=15):
-    import socket as _socket
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-                # Bind all interfaces (0.0.0.0) by design: Servette is a public-facing
-                # server, and this probe must mirror its bind to detect a real conflict.
-                s.bind(("0.0.0.0", port))
-            return True
-        except OSError:
-            time.sleep(0.5)
-    log.warning("Port %d did not free up within %ds", port, timeout)
-    return False
-
-
-# Reloading
-_reload_requested = False  # lets --serve's exit log a restart as a restart
-
-
-def _reload_server():
-    """Reload the server to pick up a new certificate."""
-    global _reload_requested
-    if "--serve" in sys.argv:
-        # Inside the service, the sandboxed unit user can't systemctl restart
-        # (NoNewPrivileges, least privilege). Stop serving instead: _watch_server
-        # sees the dead thread, --serve exits non-zero, and Restart=always
-        # relaunches the service with the new certificate loaded. The flag
-        # keeps the journal honest: without it every deliberate reload logged
-        # "stopped unexpectedly", teaching the operator that the error line
-        # is routine.
-        _reload_requested = True
-        log.info("Stopping to load the new certificate — systemd restarts the service")
-        stop_server()
-    elif _service_is_active():
-        try:
-            subprocess.run(["systemctl", "restart", "servette"], check=True, capture_output=True)
-            print("  Server restarted.")
-        except Exception as e:
-            print(f"  Could not restart service: {e}")
-    elif _server_running():
-        stop_server()
-        _wait_for_port_free(config.port)
-        start_server()
-
-
-# base64url
-def _b64url(data):
-    """base64url without padding — the encoding JOSE/ACME uses everywhere."""
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _b64url_int(n):
-    """A non-negative integer as a base64url big-endian byte string (for JWK n/e)."""
-    length = max(_ceil_div(n.bit_length(), 8), 1)   # zero still encodes as one byte
-    return _b64url(n.to_bytes(length, "big"))
-
-
-# The response holder
-class _Resp:
-    """A tiny HTTP response holder so the ACME client can read status/headers/body
-    uniformly whether urllib returned success or raised HTTPError."""
-    __slots__ = ("status", "headers", "body")
-
-    def __init__(self, status, headers, body):
-        self.status, self.headers, self.body = status, headers, body
-
-    def json(self):
-        return json.loads(self.body)
-
-    @property
-    def text(self):
-        return self.body.decode()
-
-
-class _ACMEError(Exception):
-    """An ACME failure. `failed` holds the DNS names whose authorization was rejected,
-    so the caller can decide whether to fall back (e.g. drop a www with no DNS)."""
-
-    def __init__(self, message, failed=None):
-        super().__init__(message)
-        self.failed = failed or set()
-
-
-# The ACME client
-class _ACMEClient:
-    """A minimal ACME (RFC 8555) client — just enough of the protocol for HTTP-01
-    issuance with a single account key, replacing the certbot `acme` + `josepy`
-    libraries with stdlib urllib + cryptography. Deliberately narrow: HTTP-01 only,
-    no revocation, no key rollover. Requests are RS256-signed JWS; the replay nonce
-    is tracked from each response's Replay-Nonce header. The directory is fetched
-    lazily, so constructing a client touches no network (and stays unit-testable)."""
-
-    def __init__(self, directory_url, account_key):
-        self._url   = directory_url
-        self._key   = account_key   # a cryptography RSA private key
-        self._nonce = None
-        self._kid   = None          # account URL; until set, requests carry the JWK
-        self._dir   = None
-
-    def _directory(self):
-        if self._dir is None:
-            self._dir = self._request(self._url).json()
-        return self._dir
-
-    # HTTP + nonce
-    def _request(self, url, data=None, method=None):
-        headers = {"User-Agent": "servette"}
-        if data is not None:
-            headers["Content-Type"] = "application/jose+json"
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            r    = urllib.request.urlopen(req, timeout=30)
-            resp = _Resp(r.status, r.headers, r.read())
-        except urllib.error.HTTPError as e:
-            resp = _Resp(e.code, e.headers, e.read())
-        if resp.headers.get("Replay-Nonce"):
-            self._nonce = resp.headers["Replay-Nonce"]
-        return resp
-
-    # JWS
-    def _jwk(self):
-        nums = self._key.public_key().public_numbers()
-        return {"e": _b64url_int(nums.e), "kty": "RSA", "n": _b64url_int(nums.n)}
-
-    def thumbprint(self):
-        canon = json.dumps(self._jwk(), sort_keys=True, separators=(",", ":")).encode()
-        return _b64url(hashlib.sha256(canon).digest())
-
-    def key_authorization(self, token):
-        return f"{token}.{self.thumbprint()}"
-
-    def _sign(self, url, payload):
-        from cryptography.hazmat.primitives import hashes as _hashes
-        from cryptography.hazmat.primitives.asymmetric import padding as _padding
-        protected = {"alg": "RS256", "nonce": self._nonce, "url": url}
-        protected["kid" if self._kid else "jwk"] = self._kid or self._jwk()
-        p = _b64url(json.dumps(protected, separators=(",", ":")).encode())
-        # payload=None is ACME "POST-as-GET" (empty string); {} is a real empty object.
-        y = "" if payload is None else _b64url(json.dumps(payload, separators=(",", ":")).encode())
-        sig = self._key.sign(f"{p}.{y}".encode(), _padding.PKCS1v15(), _hashes.SHA256())
-        return json.dumps({"protected": p, "payload": y, "signature": _b64url(sig)}).encode()
-
-    def _post(self, url, payload):
-        # Two attempts: a badNonce is the one error worth retrying, because the failing
-        # response hands back a fresh nonce. Any other error fails immediately.
-        for attempt in range(2):
-            if self._nonce is None:
-                self._request(self._directory()["newNonce"], method="HEAD")
-            resp = self._request(url, data=self._sign(url, payload))
-            if resp.status < 400:
-                return resp
-            problem = {}
-            try:
-                problem = resp.json()
-            except Exception:
-                pass
-            if attempt == 0 and problem.get("type", "").endswith("badNonce"):
-                continue
-            raise _ACMEError(problem.get("detail") or f"ACME error {resp.status} at {url}")
-        raise _ACMEError("ACME request failed after a nonce retry")
-
-    def _post_as_get(self, url):
-        return self._post(url, None)
-
-    # protocol steps
-    def new_account(self, email):
-        payload = {"termsOfServiceAgreed": True}
-        if email:
-            payload["contact"] = [f"mailto:{email}"]
-        resp = self._post(self._directory()["newAccount"], payload)
-        self._kid = resp.headers.get("Location")
-        if not self._kid:
-            raise _ACMEError("ACME did not return an account URL")
-
-    def _poll(self, url, tries=20, delay=2):
-        """POST-as-GET a resource until it settles (valid/invalid) or we give up."""
-        for _ in range(tries):
-            obj = self._post_as_get(url).json()
-            if obj.get("status") in ("valid", "invalid"):
-                return obj
-            time.sleep(delay)
-        return obj
-
-    def issue(self, names, csr_der, challenge_dir):
-        """Run one HTTP-01 issuance for `names`, writing challenge files under
-        challenge_dir and returning the PEM certificate chain. Raises _ACMEError on
-        failure, with `.failed` set to the names whose validation was rejected."""
-        resp      = self._post(self._directory()["newOrder"],
-                               {"identifiers": [{"type": "dns", "value": n} for n in names]})
-        order     = resp.json()
-        order_url = resp.headers.get("Location")
-
-        written = []
-        try:
-            for authz_url in order["authorizations"]:
-                authz = self._post_as_get(authz_url).json()
-                chall = next(c for c in authz["challenges"] if c["type"] == "http-01")
-                path  = os.path.join(challenge_dir, chall["token"])
-                with open(path, "w") as f:
-                    f.write(self.key_authorization(chall["token"]))
-                written.append(path)
-                self._post(chall["url"], {})   # tell the server the file is in place
-
-            failed = set()
-            for authz_url in order["authorizations"]:
-                authz = self._poll(authz_url)
-                if authz.get("status") != "valid":
-                    failed.add(authz["identifier"]["value"])
-            if failed:
-                raise _ACMEError("domain validation failed", failed=failed)
-
-            self._post(order["finalize"], {"csr": _b64url(csr_der)})
-            final = self._poll(order_url)
-            if final.get("status") != "valid":
-                raise _ACMEError(f"order did not complete (status: {final.get('status')})")
-            return self._post_as_get(final["certificate"]).text
-        finally:
-            for p in written:
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-
-
-# Issuance
-def _obtain_trusted_cert(domain, site):
-    """Get a trusted certificate from Let's Encrypt over HTTP-01, using Servette's own
-    minimal ACME client (_ACMEClient) on stdlib urllib + cryptography, and store it
-    on `site`.
-
-    Returns None on success, else the failure's class for the watchdog's
-    backoff: "refused" (the CA answered no — retrying soon just burns its
-    rate limits) or "transient" (the network ate a request — retry freely)."""
-    from cryptography import x509 as _x509
-    from cryptography.x509.oid import NameOID as _NameOID
-    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
-    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _serialization
-
-    ACME_URL         = "https://acme-v02.api.letsencrypt.org/directory"
-    ACCOUNT_KEY_FILE = os.path.join(BASE_DIR, ".acme-account.pem")
-    CERTS_DIR        = os.path.join(BASE_DIR, "certs", domain)
-    challenge_dir    = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
-
-    print(f"\nGetting a trusted SSL certificate for {domain}...")
-    print("Make sure your domain points to this server's IP first.\n")
-
-    os.makedirs(challenge_dir, exist_ok=True)
-    os.makedirs(CERTS_DIR, exist_ok=True)
-    _chown_servette(ACME_WEBROOT)
-    _chown_servette(CERTS_DIR)
-
-    # Load or create the ACME account key — a standard RSA PEM (any existing
-    # .acme-account.pem from the old josepy path loads unchanged).
-    if os.path.exists(ACCOUNT_KEY_FILE):
-        with open(ACCOUNT_KEY_FILE, "rb") as f:
-            account_key = _serialization.load_pem_private_key(f.read(), password=None)
-    else:
-        account_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        _write_private_key(ACCOUNT_KEY_FILE, account_key.private_bytes(
-            _serialization.Encoding.PEM,
-            _serialization.PrivateFormat.TraditionalOpenSSL,
-            _serialization.NoEncryption()
-        ))
-        _chown_servette(ACCOUNT_KEY_FILE)
-
-    # start a temporary port-80 listener if the main server isn't running
-    tmp_server = None
-    if not _server_running():
-        try:
-            tmp_server = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
-            threading.Thread(target=tmp_server.serve_forever, daemon=True).start()
-        except OSError as e:
-            log.warning("Could not start temporary port-80 listener: %s", e)
-
-    www_domain  = f"www.{domain}"
-    last_error  = None
-    include_www = True
-    issued      = None   # (fullchain, key_pem) once Let's Encrypt has signed
-
-    # The retry loop retries exactly one thing: the ACME exchange. Local work
-    # — writing files, saving config, reloading — used to sit inside it, and a
-    # local failure (the sandboxed service cannot write the data directory)
-    # was then retried as if Let's Encrypt had refused: each "retry" a full
-    # fresh issuance, three duplicate certificates burned per pass against the
-    # 5-per-week duplicate limit, and the reload never reached — the renewed
-    # certificate sat on disk while the server served the old one to expiry.
-    # Persistence now happens once, after the loop, and its failures are its
-    # own, not the protocol's.
-    while True:
-        names               = [domain, www_domain] if include_www else [domain]
-        www_dns_only_failure = False
-
-        for attempt in range(1, ACME_RETRIES + 1):
-            label = (f"Requesting certificate for {domain}..." if attempt == 1
-                     else f"Retry {attempt - 1} of {ACME_RETRIES - 1}...")
-            try:
-                with _spinner(label):
-                    domain_key     = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
-                    domain_key_pem = domain_key.private_bytes(
-                        _serialization.Encoding.PEM,
-                        _serialization.PrivateFormat.TraditionalOpenSSL,
-                        _serialization.NoEncryption()
-                    )
-                    csr_der = (
-                        _x509.CertificateSigningRequestBuilder()
-                        .subject_name(_x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, domain)]))
-                        .add_extension(_x509.SubjectAlternativeName([
-                            _x509.DNSName(n) for n in names
-                        ]), critical=False)
-                        .sign(domain_key, _hashes.SHA256())
-                        .public_bytes(_serialization.Encoding.DER)
-                    )
-
-                    client = _ACMEClient(ACME_URL, account_key)
-                    client.new_account(config.email if config.email else None)
-                    fullchain = client.issue(names, csr_der, challenge_dir)
-
-                issued     = (fullchain, domain_key_pem)
-                last_error = None
-                break
-
-            except Exception as e:
-                last_error = e
-                if isinstance(e, _ACMEError) and include_www and e.failed == {www_domain}:
-                    www_dns_only_failure = True
-                    break  # don't retry; fall back to bare domain
-                if isinstance(e, _ACMEError):
-                    # Let's Encrypt ANSWERED, and the answer was no — a failed
-                    # authorization, a refused order. Asking the same question
-                    # again ten seconds later gets the same no, and each retry
-                    # burns a fresh order and a validation attempt against
-                    # LE's own rate limits (~5 failed validations per hostname
-                    # per hour) while the underlying cause — usually DNS not
-                    # yet pointed here — hasn't changed. Retries are for the
-                    # network eating a request, not for the CA declining it.
-                    break
-                if attempt < ACME_RETRIES:
-                    delay = 5 * attempt
-                    log.warning("ACME attempt %d/%d failed for %s: %s — retrying in %ds", attempt, ACME_RETRIES, domain, e, delay)
-                    time.sleep(delay)
-
-        if last_error is None:
-            break  # success
-
-        if www_dns_only_failure:
-            include_www = False
-            print(f"\n  Note: {www_domain} has no DNS record — certificate issued for {domain} only.")
-            print(f"  To add www support later, point {www_domain} to this server and run 'config cert'.\n")
-            continue
-
-        break  # real failure
-
-    if tmp_server is not None:
-        tmp_server.shutdown()
-        tmp_server.server_close()
-
-    if last_error:
-        print(f"  Error getting certificate: {last_error}")
-        log.error("ACME failed for %s: %s", domain, last_error)
-        # The failure's class, for the watchdog's backoff: "refused" is the CA
-        # answering no (not retried above either — same reasoning), "transient"
-        # is the network eating a request (retried above, hourly hereafter).
-        return "refused" if isinstance(last_error, _ACMEError) else "transient"
-
-    _persist_issued_cert(domain, site, CERTS_DIR, issued[0], issued[1],
-                         f"{domain} and {www_domain}" if include_www else domain)
-    return None
-
-
-def _persist_issued_cert(domain, site, certs_dir, fullchain, key_pem, issued_names):
-    """Store an issued certificate and put it into service: write the pair,
-    point the site at it, persist the config where possible, reload.
-
-    Written through temp files and two os.replace calls, so a crash leaves
-    either the old pair or the new pair on disk in all but the instant
-    between the renames — the old code wrote both files in place, and a kill
-    landing between (or during) the writes left a fullchain that did not
-    match its privkey, which fails load_cert_chain at the next start and
-    restart-loops the whole box over one site's half-written renewal. Two
-    files can't be replaced in one atomic step, so a two-rename window
-    remains; it is two syscalls wide, down from a network exchange.
-
-    The config save is a no-op skip on renewal (the site already points at
-    these exact paths) and best-effort otherwise: the sandboxed service may
-    not write the data directory, and a certificate that IS on disk and
-    about to be served must not be reported as a failure over a bookkeeping
-    write the next root command will repeat anyway."""
-    cert_path = os.path.join(certs_dir, "fullchain.pem")
-    key_path  = os.path.join(certs_dir, "privkey.pem")
-
-    with open(cert_path + ".tmp", "w") as f:
-        f.write(fullchain)
-    _write_private_key(key_path + ".tmp", key_pem)
-    os.replace(key_path + ".tmp", key_path)
-    os.replace(cert_path + ".tmp", cert_path)
-    _chown_servette(certs_dir)
-
-    changed = (site.cert_file, site.key_file, site.domain) != (cert_path, key_path, domain)
-    site.cert_file = cert_path
-    site.key_file  = key_path
-    site.domain    = domain
-    if changed:
-        try:
-            config.save()
-        except OSError as e:
-            log.error("Certificate stored but config not saved (%s) — "
-                      "run 'config cert' as root to persist it", e)
-
-    print(f"  Certificate issued for {issued_names}.")
-    log.info("ACME certificate issued for %s", issued_names)
-
-    if _server_running() or _service_is_active():
-        print("  Reloading server...")
-        _reload_server()
-
-
-# Loading a certificate
-def _load_cert(cert_path):
-    """Return a cryptography X.509 certificate object, or None on failure."""
-    try:
-        from cryptography import x509 as _x509
-        with open(cert_path, "rb") as f:
-            return _x509.load_pem_x509_certificate(f.read())
-    except Exception:
-        return None
-
-
-# The domain a certificate names
-def _is_real_domain(s):
-    if s in ("localhost", "servette"):
-        return False
-    try:
-        ipaddress.ip_address(s)
-        return False  # it's an IP, not a domain
-    except ValueError:
-        return bool(s)
-
-
-def _domain_from_cert(cert_path):
-    if not cert_path:
-        return None
-    cert = _load_cert(cert_path)
-    if cert is None:
-        return None
-    try:
-        from cryptography import x509 as _x509
-        san = cert.extensions.get_extension_for_class(_x509.SubjectAlternativeName)
-        for name in san.value.get_values_for_type(_x509.DNSName):
-            if _is_real_domain(name):
-                return name
-    except Exception:
-        pass
-    try:
-        from cryptography.x509.oid import NameOID as _NameOID
-        cn = cert.subject.get_attributes_for_oid(_NameOID.COMMON_NAME)
-        if cn and _is_real_domain(cn[0].value):
-            return cn[0].value
-    except Exception:
-        pass
-    return None
-
-
-# Days to expiry
-def _cert_days_remaining(cert_path):
-    cert = _load_cert(cert_path)
-    if cert is None:
-        return None
-    try:
-        expiry = cert.not_valid_after_utc
-    except AttributeError:
-        expiry = cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
-    return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
 
 
 # Menu metrics
@@ -5207,6 +5207,39 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       border-color: rgba(90,132,102,0.7);
       background: rgba(90,132,102,0.08);
     }
+
+    .dropstrip {
+      margin-top: 0.75rem;
+      padding: 0.8rem;
+      border: 1px dashed var(--border);
+      border-radius: 4px;
+      text-align: center;
+      font-size: 0.72rem;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+    }
+    #drop-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
+
+    .cfg-field { margin-top: 0.7rem; }
+    .cfg-field label {
+      display: block;
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.25rem;
+    }
+    .cfg-field input, select.cfg-site {
+      font-family: inherit;
+      font-size: 0.75rem;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.5rem 0.7rem;
+      width: 100%;
+    }
+    select.cfg-site { width: auto; }
   </style>
 </head>
 <body>
@@ -5237,6 +5270,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <nav class="tabs" role="tablist">
     <button class="tab active" id="tab-status" type="button" role="tab">Status</button>
     <button class="tab" id="tab-publish" type="button" role="tab">Publish</button>
+    <button class="tab" id="tab-config" type="button" role="tab">Config</button>
   </nav>
 
   <!-- ══ Status — the inside view ══ -->
@@ -5287,9 +5321,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           <button class="action" id="btn-dir" type="button">Choose your site's folder</button>
           <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
         </div>
-        <p class="hint" id="dir-summary">Pick the folder whose contents should
-        become the site — or drag it from your file manager and drop it
-        anywhere on this card. It's the folder that holds your
+        <div class="dropstrip">⤓&nbsp; or drop your site's folder anywhere on this card</div>
+        <p class="hint" id="dir-summary">It's the folder that holds your
         <b>index.html</b>. Files are read here in the browser and travel only
         through your SSH tunnel to your own server.</p>
         <p class="error hidden" id="dir-error"></p>
@@ -5310,6 +5343,44 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           <pre class="shell">restore-site     <span class="c"># in the terminal: one step back, if you want the previous content</span></pre>
         </div>
         <p class="error hidden" id="pub-error"></p>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══ Config — forms over the same validators `set` runs ══ -->
+  <div id="panel-config" role="tabpanel" class="hidden">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Site settings</span>
+        <span class="badge badge-dim" id="cfg-site-badge">loading…</span>
+      </div>
+      <div class="card-body">
+        <select class="cfg-site" id="cfg-site-select"></select>
+        <div id="cfg-site-fields"></div>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action primary" id="btn-save-site" type="button">Save site settings</button>
+        </div>
+        <p class="hint">Password and domain stay in the terminal on purpose:
+        a password is a secret with a guided prompt (<b>config &gt;
+        password</b>), and a domain is bound up with certificate issuance
+        (<b>config &gt; cert</b>).</p>
+        <p class="error hidden" id="cfg-site-error"></p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Host settings</span>
+        <span class="badge badge-dim" id="cfg-host-badge">loading…</span>
+      </div>
+      <div class="card-body">
+        <div id="cfg-host-fields"></div>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action primary" id="btn-save-host" type="button">Save host settings</button>
+        </div>
+        <p class="error hidden" id="cfg-host-error"></p>
       </div>
     </div>
 
@@ -5337,7 +5408,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
-  const PANELS = { status: 'panel-status', publish: 'panel-publish' };
+  const PANELS = { status: 'panel-status', publish: 'panel-publish', config: 'panel-config' };
 
   function showTab(name) {
     if (!PANELS[name]) name = 'status';
@@ -5346,12 +5417,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       $('tab-' + key).classList.toggle('active', key === name);
     }
     if (name === 'status') loadStatus();
+    if (name === 'config') loadConfig();
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
 
   $('tab-status').addEventListener('click', () => showTab('status'));
   $('tab-publish').addEventListener('click', () => showTab('publish'));
+  $('tab-config').addEventListener('click', () => showTab('config'));
 
   /* ══ Status — the inside view, rendered from GET /status. ══ */
 
@@ -5420,6 +5493,95 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   }
 
   $('btn-refresh').addEventListener('click', loadStatus);
+
+  /* ══ Config — forms over the same validators the `set` command runs, so a
+     value the terminal refuses the page refuses with the same sentence. ══ */
+
+  const HOST_FIELDS = [
+    ['port',            'HTTPS port'],
+    ['email',           'Email (ACME registration)'],
+    ['rate_limit',      'Rate limit (requests / minute / visitor)'],
+    ['auth_rate_limit', 'Auth rate limit (failed logins / minute)'],
+    ['cache_size_mb',   'File cache size (MB)'],
+    ['trusted_proxy',   'Trusted proxy IP (blank = none)'],
+  ];
+  const SITE_FIELDS = [
+    ['dir',         'Folder to serve'],
+    ['username',    'Login username (blank = no password gate)'],
+    ['publish_url', 'Publish channel URL (blank = none)'],
+    ['publish_key', 'Publish channel key (64 hex)'],
+  ];
+
+  let cfgData = null;
+
+  const field = (key, label, value) =>
+    `<div class="cfg-field"><label for="cfg-${key}">${label}</label>` +
+    `<input id="cfg-${key}" value="${escapeHtml(String(value == null ? '' : value))}"></div>`;
+
+  function renderConfig() {
+    const siteIdx = parseInt($('cfg-site-select').value || '0', 10) || 0;
+    const site = (cfgData.sites || [])[siteIdx] || {};
+    $('cfg-site-fields').innerHTML =
+      SITE_FIELDS.map(([k, l]) => field(k, l, site[k])).join('');
+    $('cfg-host-fields').innerHTML =
+      HOST_FIELDS.map(([k, l]) => field(k, l, (cfgData.host || {})[k])).join('');
+    setBadge($('cfg-site-badge'), 'badge-dim',
+             site.domain ? site.domain : 'site ' + siteIdx);
+    setBadge($('cfg-host-badge'), 'badge-dim', 'host-wide');
+  }
+
+  async function loadConfig() {
+    clearError($('cfg-site-error'));
+    clearError($('cfg-host-error'));
+    try {
+      const r = await fetch('/config?t=' + encodeURIComponent(CODE));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      cfgData = await r.json();
+      const sel = $('cfg-site-select');
+      const keep = sel.value;
+      sel.innerHTML = (cfgData.sites || []).map((s) =>
+        `<option value="${s.index}">site ${s.index}` +
+        `${s.domain ? ' — ' + escapeHtml(s.domain) : ''}</option>`).join('');
+      if (keep) sel.value = keep;
+      renderConfig();
+    } catch (e) {
+      setBadge($('cfg-site-badge'), 'badge-red', '✕ unreachable');
+      setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
+      showError($('cfg-site-error'), 'Could not read settings: ' + e.message);
+    }
+  }
+
+  $('cfg-site-select').addEventListener('change', renderConfig);
+
+  async function saveSettings(fields, siteIdx, badge, errEl) {
+    clearError(errEl);
+    const values = {};
+    for (const [k] of fields) values[k] = $('cfg-' + k).value.trim();
+    setBadge(badge, 'badge-dim', 'saving…');
+    try {
+      const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
+        method: 'POST',
+        body: JSON.stringify({ site: siteIdx, values }),
+      });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (r.ok && data.result === 'saved') {
+        setBadge(badge, 'badge-green', '✓ saved');
+        loadConfig();
+      } else {
+        throw new Error(data.error || 'HTTP ' + r.status);
+      }
+    } catch (e) {
+      setBadge(badge, 'badge-red', '✕ not saved');
+      showError(errEl, e.message + ' — nothing was changed.');
+    }
+  }
+
+  $('btn-save-site').addEventListener('click', () => saveSettings(
+    SITE_FIELDS, parseInt($('cfg-site-select').value || '0', 10) || 0,
+    $('cfg-site-badge'), $('cfg-site-error')));
+  $('btn-save-host').addEventListener('click', () => saveSettings(
+    HOST_FIELDS, 0, $('cfg-host-badge'), $('cfg-host-error')));
 
   /* ══ Publish — the pub tool's bundle builder with the signing removed.
      The server's contract (_extract_bundle / _land_bundle): a tar.gz of
@@ -5712,7 +5874,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path not in ("/", "/status"):
+        if path not in ("/", "/status", "/config"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -5723,12 +5885,25 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             if auth != "ok":
                 return self._respond(403, "Not paired.")
             return self._respond(200, json.dumps(_status_data()), "application/json")
+        if path == "/config":
+            # The Config tab's read half: exactly the vocabulary `set`
+            # accepts, plus current values to fill the forms.
+            if auth != "ok":
+                return self._respond(403, "Not paired.")
+            return self._respond(200, json.dumps({
+                "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
+                "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
+                           "username": s.username, "publish_url": s.publish_url,
+                           "publish_key": s.publish_key}
+                          for i, s in enumerate(config.sites)],
+            }), "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)
         return self._respond(200, _UI_PAIR_PAGE)
 
     def do_POST(self):
-        if urlsplit(self.path).path != "/upload":
+        path = urlsplit(self.path).path
+        if path not in ("/upload", "/config"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
             return self._respond(403, "Not paired.")
@@ -5738,6 +5913,36 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             length = 0
         if length <= 0:
             return self._respond(400, "Empty upload.")
+
+        if path == "/config":
+            # The Config tab's write half: the same validate-then-apply path
+            # `set` runs, so a value the terminal refuses the page refuses
+            # with the same sentence.
+            if length > 65536:
+                return self._respond(413, "Settings body too large.")
+            try:
+                body = json.loads(self.rfile.read(length))
+                idx  = int(body.get("site") or 0)
+                pairs = [(str(k).strip().lower(), str(v))
+                         for k, v in dict(body.get("values") or {}).items()]
+            except (ValueError, TypeError):
+                return self._respond(400, "Malformed settings body.")
+            if not pairs:
+                return self._respond(400, "No settings given.")
+            if not (0 <= idx < len(config.sites)):
+                return self._respond(422, json.dumps({"error": f"no site {idx}"}),
+                                     "application/json")
+            try:
+                err = _apply_settings(config.sites[idx], pairs)
+            except PermissionError:
+                return self._respond(500, json.dumps(
+                    {"error": "writing the config needs root — re-run 'admin' elevated"}),
+                    "application/json")
+            return self._respond(200 if not err else 422,
+                                 json.dumps({"result": "saved"} if not err
+                                            else {"error": err}),
+                                 "application/json")
+
         if length > _MAX_BUNDLE_BYTES:
             return self._respond(413, "Bundle too large.")
         result = _land_bundle(self.server.site, self.rfile.read(length), "browser upload")
@@ -6127,13 +6332,20 @@ def _set_site_value(target, key, value):
     a scratch Site during the validation pass). Returns an error string,
     empty on success."""
     if key == "dir":
+        # The same inline-barrier discipline as _resolve_request_path, for
+        # the same reason: this value can arrive over HTTP (the admin page's
+        # Config tab — loopback and paired, but HTTP all the same), so the
+        # containment check is written out where an analyzer can see it
+        # dominate every probe below — a guard folded into a helper is, to
+        # it and strictly speaking, not a guard. Containment first, the
+        # filesystem probe last.
         resolved = os.path.realpath(_resolve(value))
-        if not os.path.isdir(resolved):
-            return f"directory not found: {resolved}"
-        if not _is_within_base_dir(resolved):
+        if not resolved.startswith(os.path.realpath(BASE_DIR) + os.sep):
             return f"dir must live under {BASE_DIR} (the publish swap and the service sandbox depend on it)"
         if _serve_dir_exposes_secrets(resolved):
             return "dir would serve Servette's own config and keys — refused"
+        if not os.path.isdir(resolved):
+            return f"directory not found: {resolved}"
         target.serve_dir = value
     elif key == "username":
         target.username = value
@@ -6162,6 +6374,33 @@ def _set_usage():
 
 
 # set
+def _apply_settings(site, pairs):
+    """Validate `pairs` ([(key, value)]) against scratch objects, then apply
+    them to config/`site` and save — the one settings write path, shared by
+    `set` and the admin page's Config tab so the two surfaces cannot drift.
+    Returns an error string, empty on success; every pair is checked before
+    any is applied, so a bad pair never leaves the config half-written.
+    PermissionError from the save propagates — each caller words its own
+    hint."""
+    class _ScratchHost:
+        pass
+    scratch_host, scratch_site = _ScratchHost(), Site()
+    for key, value in pairs:
+        if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
+            return f"unknown setting: {key}"
+        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
+               else _set_site_value(scratch_site, key, value))
+        if err:
+            return f"{key}: {err}"
+    for key, value in pairs:
+        if key in _SET_HOST_KEYS:
+            _set_host_value(config, key, value)
+        else:
+            _set_site_value(site, key, value)
+    config.save()
+    return ""
+
+
 def cmd_set(args):
     """`set [n] key=value ...` — non-interactive configuration for tooling.
     The optional leading index picks the site for site keys (default 0).
@@ -6187,24 +6426,13 @@ def cmd_set(args):
     if not pairs:
         _set_usage()
         return
-    class _ScratchHost:
-        pass
-    scratch_host, scratch_site = _ScratchHost(), Site()
-    for key, value in pairs:
-        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
-               else _set_site_value(scratch_site, key, value))
-        if err:
-            print(f"  {key}: {err}")
-            return
-    for key, value in pairs:
-        if key in _SET_HOST_KEYS:
-            _set_host_value(config, key, value)
-        else:
-            _set_site_value(site, key, value)
     try:
-        config.save()
+        err = _apply_settings(site, pairs)
     except PermissionError:
         print("  Error: writing the config needs root, and sudo is unavailable — re-run as root.")
+        return
+    if err:
+        print(f"  {err}")
         return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
 

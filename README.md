@@ -57,7 +57,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 | Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 | Automatic recovery | A dead server process is restarted by systemd within seconds; a watchdog timer recovers a dropped network route |
-| A browser admin page | `servette admin` serves a status-and-publish page to your browser over your own SSH tunnel — it never exists on the public internet, and being there is the login |
+| A browser admin page | `servette admin` serves a status, publish, and settings page to your browser over your own SSH tunnel — it never exists on the public internet, and being there is the login |
 | An error page that diagnoses | A missing path returns `404` with a page that reports the live connection — the certificate, the headers, and whether your site root is published at all — instead of a bare `Not found.` Drop in your own `404.html` and it takes over |
 
 **Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette), and that is by design, not a limitation to work around; see [Scope & non-goals](DESIGN.md#scope--non-goals) for what is out of scope and why.
@@ -136,7 +136,7 @@ Re-run `servette` any time for the interactive shell — or run any command belo
 | `log [n]` | Show recent activity |
 | `sites [--json]` | List configured sites |
 | `set [n] k=v ...` | Change settings non-interactively (`servette set 0 publish_url=…`) |
-| `admin` | Open the browser admin page (status, publish) over your SSH tunnel |
+| `admin` | Open the browser admin page (status, publish, config) over your SSH tunnel |
 | `publish` | One guided flow for site content: pull, roll back, channel settings |
 | `pull [n]` | Pull new site content from a site's publish channel |
 | `restore-site [n]` | Roll back a site's content to before its last pull |

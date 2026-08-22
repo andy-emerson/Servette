@@ -5202,6 +5202,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .note b { color: var(--text); font-weight: 500; }
 
     .hidden { display: none !important; }
+
+    #drop-card.drag {
+      border-color: rgba(90,132,102,0.7);
+      background: rgba(90,132,102,0.08);
+    }
   </style>
 </head>
 <body>
@@ -5247,7 +5252,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <p class="error hidden" id="st-error"></p>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-refresh" type="button">Refresh</button>
+          <button class="action" id="btn-outside" type="button" disabled
+                  title="Loads once the status shows a domain">Run the outside check</button>
         </div>
+        <p class="hint">The outside check opens a missing path on your site in
+        a new tab: the connection report that answers is served from the
+        public internet's side of the wire — the vantage this page, living on
+        your SSH tunnel, cannot have.</p>
       </div>
     </div>
 
@@ -5266,7 +5277,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <!-- ══ Publish — pick a folder, send it through the tunnel ══ -->
   <div id="panel-publish" role="tabpanel" class="hidden">
 
-    <div class="card">
+    <div class="card" id="drop-card">
       <div class="card-head">
         <span class="card-title">1 · Site folder</span>
         <span class="badge badge-dim" id="dir-badge">no folder chosen</span>
@@ -5277,9 +5288,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
         </div>
         <p class="hint" id="dir-summary">Pick the folder whose contents should
-        become the site — the folder that holds your <b>index.html</b>. Files
-        are read here in the browser and travel only through your SSH tunnel
-        to your own server.</p>
+        become the site — or drag it from your file manager and drop it
+        anywhere on this card. It's the folder that holds your
+        <b>index.html</b>. Files are read here in the browser and travel only
+        through your SSH tunnel to your own server.</p>
         <p class="error hidden" id="dir-error"></p>
       </div>
     </div>
@@ -5346,6 +5358,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const row = (k, v, cls) =>
     `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
 
+  // The outside check: opens a missing path on the site itself, so the
+  // connection report answers from the public internet's vantage — the one
+  // view a page living on the tunnel cannot compute (cross-origin responses
+  // are opaque to it, by the browser's own rules).
+  let outsideDomain = '';
+  $('btn-outside').addEventListener('click', () => {
+    if (!outsideDomain) return;
+    const probe = 'servette-check-' + Math.random().toString(36).slice(2, 8);
+    window.open('https://' + outsideDomain + '/' + probe, '_blank');
+  });
+
   async function loadStatus() {
     setBadge($('st-badge'), 'badge-dim', 'loading…');
     clearError($('st-error'));
@@ -5372,6 +5395,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         h += row('Channel', s.publish ? 'configured' : 'none (this page publishes directly)');
       }
       $('st-rows').innerHTML = h;
+
+      outsideDomain = ((d.sites || [])[0] || {}).domain || '';
+      $('btn-outside').disabled = !outsideDomain;
+      $('btn-outside').title = outsideDomain
+        ? 'Opens https://' + outsideDomain + '/<a-missing-path> in a new tab'
+        : 'Needs a domain — a LAN or self-signed site has no public vantage to check from';
 
       const problems = [...(d.issues || []), ...(d.warnings || [])];
       if (problems.length) {
@@ -5499,17 +5528,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const isHiddenPath = (path) =>
     path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
 
-  $('btn-dir').addEventListener('click', () => $('dir-input').click());
-  $('dir-input').addEventListener('change', () => {
-    clearError($('dir-error'));
-    const all = [...$('dir-input').files];
-    if (!all.length) return;
-
-    // webkitRelativePath is '<picked folder>/rest…' — the folder name is
-    // stripped so index.html sits at the bundle root, where serve_dir wants it.
-    const items = all.map((f) => ({
-      path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
-    })).filter((e) => e.path);
+  // One intake for both doors — the picker and the drop — so they cannot
+  // drift on the hidden-path rule or the summary.
+  function useFolder(items, folderName) {
     const kept = items.filter((e) => !isHiddenPath(e.path));
     const hidden = items.length - kept.length;
 
@@ -5519,7 +5540,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       return;
     }
     state.files  = kept;
-    state.folder = all[0].webkitRelativePath.split('/')[0];
+    state.folder = folderName;
 
     const total = kept.reduce((n, e) => n + e.file.size, 0);
     const hasIndex = kept.some((e) => e.path === 'index.html');
@@ -5532,6 +5553,70 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                        `the site root would show a directory miss</span>`);
     setBadge($('dir-badge'), 'badge-green', '✓ folder read');
     refreshReady();
+  }
+
+  $('btn-dir').addEventListener('click', () => $('dir-input').click());
+  $('dir-input').addEventListener('change', () => {
+    clearError($('dir-error'));
+    const all = [...$('dir-input').files];
+    if (!all.length) return;
+    // webkitRelativePath is '<picked folder>/rest…' — the folder name is
+    // stripped so index.html sits at the bundle root, where serve_dir wants it.
+    useFolder(all.map((f) => ({
+      path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
+    })).filter((e) => e.path), all[0].webkitRelativePath.split('/')[0]);
+  });
+
+  // The drop door: a dropped folder walks the same intake. A single dropped
+  // directory is the site folder (its name stripped, exactly like the
+  // picker); several dropped items land as the site root's own entries.
+  async function readDropped(entry, prefix, out) {
+    if (entry.isFile) {
+      const file = await new Promise((res, rej) => entry.file(res, rej));
+      out.push({ path: prefix + entry.name, file });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const e of batch) await readDropped(e, prefix + entry.name + '/', out);
+      }
+    }
+  }
+
+  const dropCard = $('drop-card');
+  dropCard.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropCard.classList.add('drag');
+  });
+  dropCard.addEventListener('dragleave', () => dropCard.classList.remove('drag'));
+  dropCard.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dropCard.classList.remove('drag');
+    clearError($('dir-error'));
+    const entries = [...e.dataTransfer.items]
+      .map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry())
+      .filter(Boolean);
+    if (!entries.length) return;
+    try {
+      const items = [];
+      let folderName;
+      if (entries.length === 1 && entries[0].isDirectory) {
+        folderName = entries[0].name;
+        const reader = entries[0].createReader();
+        for (;;) {
+          const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+          if (!batch.length) break;
+          for (const child of batch) await readDropped(child, '', items);
+        }
+      } else {
+        folderName = 'dropped files';
+        for (const entry of entries) await readDropped(entry, '', items);
+      }
+      useFolder(items, folderName);
+    } catch (err) {
+      showError($('dir-error'), 'Could not read the dropped folder: ' + err.message);
+    }
   });
 
   $('btn-publish').addEventListener('click', async () => {

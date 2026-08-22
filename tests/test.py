@@ -1030,6 +1030,12 @@ def run_dispatch_tests(s):
     check("...and carries no key ceremony — SSH is the authentication",
           "Ed25519" not in s._UI_ADMIN_PAGE
           and "indexedDB" not in s._UI_ADMIN_PAGE)
+    check("...offers the drop door beside the picker, sharing one intake",
+          "webkitGetAsEntry" in s._UI_ADMIN_PAGE
+          and "dragover" in s._UI_ADMIN_PAGE
+          and "useFolder" in s._UI_ADMIN_PAGE)
+    check("...and the outside check the tunnel vantage cannot compute itself",
+          "btn-outside" in s._UI_ADMIN_PAGE)
 
     section("Loopback page server")
 

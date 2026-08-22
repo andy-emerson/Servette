@@ -1968,7 +1968,7 @@ def _startup_refresh():
 
 ```
 
-Servette needs root for a handful of things — the systemd unit, the service user, the config the service reads, the site folders it serves. It asks for that itself rather than requiring `sudo` in front of every invocation: prefixing the command forces the console script onto `sudo`'s `secure_path`, which forces an install to put it there, which is two of the three steps an install used to need.
+Servette needs root for a handful of things — the systemd unit, the service user, the config the service reads, the site folders it serves. It asks for that itself rather than requiring `sudo` in front of every invocation: prefixing the command forces the console script onto `sudo`'s `secure_path`, which forces an install to put it there — two extra install steps serving nothing.
 
 ```python
 # Elevating to root

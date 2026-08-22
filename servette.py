@@ -2571,12 +2571,12 @@ def _obtain_trusted_cert(domain, site):
     issued      = None   # (fullchain, key_pem) once Let's Encrypt has signed
 
     # The retry loop retries exactly one thing: the ACME exchange. Local work
-    # — writing files, saving config, reloading — used to sit inside it, and a
+    # — writing files, saving config, reloading — stays outside it, because a
     # local failure (the sandboxed service cannot write the data directory)
-    # was then retried as if Let's Encrypt had refused: each "retry" a full
-    # fresh issuance, three duplicate certificates burned per pass against the
-    # 5-per-week duplicate limit, and the reload never reached — the renewed
-    # certificate sat on disk while the server served the old one to expiry.
+    # retried as an exchange failure is a fresh issuance per "retry": three
+    # duplicate certificates burned per pass against the 5-per-week duplicate
+    # limit, the reload never reached, and the renewed certificate sits on
+    # disk while the server serves the old one to expiry.
     # Persistence now happens once, after the loop, and its failures are its
     # own, not the protocol's.
     while True:
@@ -3774,10 +3774,10 @@ def _write_unit_files():
 
     # Root, checked before anything is touched. Everything below mutates the
     # host — the runtime swap included — and an unprivileged caller (the
-    # startup refresh in a checkout the operator owns) used to get exactly as
-    # far as its permissions allowed: on such a host that meant swapping the
-    # runtime copy, then failing at the unit write — a version-skewed,
-    # operator-owned runtime behind a unit that still described the old one.
+    # startup refresh in a checkout the operator owns) would otherwise get
+    # exactly as far as its permissions allow: swapping the runtime copy,
+    # then failing at the unit write — a version-skewed, operator-owned
+    # runtime behind a unit that still describes the old one.
     # macOS is exempt: there is no systemd to write for, and the
     # FileNotFoundError from the tools below is the message that says so.
     if not _IS_MACOS and os.geteuid() != 0:

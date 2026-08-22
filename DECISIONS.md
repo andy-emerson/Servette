@@ -6,6 +6,23 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The structural pass adopted the marks, not the moves
+
+**Ruled (Human):** of the external feedback's six principles (#108), what
+changes is what re-earned changing: SYSTEM reads runtime-first with the
+install-time boundary marked ruthlessly (probes answer `status`; the writers
+run once, as root, at setup/enable/disable; nothing below the line runs on a
+request); DESIGN's residual how-it-got-here narrative is compressed to
+present-tense constraints; the auth-timing property gets its pinning test.
+What deliberately does not change, examined rather than skipped: SERVER
+already reads request-path-pure — nine sections, no operator machinery,
+nothing to move; and every item on the supporting-complexity roster
+(privilege model, runtime copy, unit freshness, ownership plans, netwatch,
+swap sizing) carries a ruling, a measurement, or a production drill — all
+re-earn their load. SHELL's reshaping is deferred to the pull-channel
+removal, which deletes a slice of it; restructuring twice is the waste.
+*(#108, 2026-08-22)*
+
 ## The publish swap is a symlink flip; the window is gone
 
 **Ruled (Human):** a site's content lives in one of two sibling slots

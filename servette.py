@@ -5357,15 +5357,15 @@ _UI_LOGIN_PAGE = """<!doctype html>
 </style></head>
 <body>
 <div class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-<div class="tagline">Server administration</div>
+<div class="tagline">Server login</div>
 <div class="card">
   <form method="get" action="/">
     <label for="t">Passcode</label>
     <input id="t" name="t" autofocus autocomplete="off">
     <button>Log in</button>
   </form>
-  <p class="hint">The passcode is printed in your terminal by
-  'servette admin', fresh for each run.</p>
+  <p class="hint">Run 'servette admin' in your SSH console to generate a
+  one-time passcode.</p>
 </div>
 </body></html>
 """
@@ -5650,16 +5650,60 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       width: 100%;
     }
     select.cfg-site { width: auto; margin-bottom: 1rem; }
-    .tab-dot {
+    /* How many rows need review, worn on the Settings tab itself — the
+       at-a-glance signal that survived the Status merge. */
+    .tab-pill {
       display: inline-block;
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--amber);
+      min-width: 1.15rem;
+      padding: 0.05rem 0.3rem;
       margin-left: 0.45rem;
-      vertical-align: middle;
+      border-radius: 99px;
+      background: rgba(251,191,36,0.12);
+      border: 1px solid rgba(251,191,36,0.4);
+      color: var(--amber);
+      font-size: 0.65rem;
+      text-align: center;
+      text-transform: none;
+      letter-spacing: 0;
     }
     .split { border-top: 1px solid var(--border); margin: 1rem 0; }
+
+    /* The public/private switch — a literal toggle: the knob's position and
+       a green tint say private (on). */
+    .switch-row { display: flex; align-items: center; gap: 0.6rem; }
+    .switch-row label { font-size: 0.75rem; color: var(--text); cursor: pointer; }
+    input.switch {
+      appearance: none;
+      -webkit-appearance: none;
+      margin: 0;
+      position: relative;
+      flex-shrink: 0;
+      width: 38px;
+      height: 20px;
+      border-radius: 99px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    input.switch::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--muted);
+      transform: translateY(-50%);
+      transition: left 0.15s, right 0.15s, background 0.15s;
+    }
+    input.switch:checked {
+      background: rgba(90,132,102,0.3);
+      border-color: rgba(90,132,102,0.6);
+    }
+    input.switch:checked::after { left: auto; right: 2px; background: #5A8466; }
+    input.switch:focus-visible { outline: 1px solid rgba(90,132,102,0.8); outline-offset: 1px; }
     /* The browser's default focus halo clashes with the theme; replaced —
        never just removed — so keyboard focus stays visible. */
     .cfg-field input:focus, select.cfg-site:focus {
@@ -5709,7 +5753,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <nav class="tabs" role="tablist">
     <button class="tab active" id="tab-publish" type="button" role="tab">Publish</button>
     <button class="tab" id="tab-settings" type="button" role="tab">Settings<span
-      class="tab-dot hidden" id="settings-dot" title="Something needs review"></span></button>
+      class="tab-pill hidden" id="settings-dot" title="Rows that need review"></span></button>
   </nav>
 
   <!-- ══ Publish — one card per site: drop or choose its folder, publish.
@@ -5748,8 +5792,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         reporting from the public internet's side of the wire — the vantage
         this page, living on your SSH tunnel, cannot have.</p>
         <div class="split"></div>
-        <div class="btn-row">
-          <button class="action" id="btn-auth-toggle" type="button">…</button>
+        <div class="switch-row">
+          <input class="switch" type="checkbox" id="auth-switch">
+          <label for="auth-switch">Private site — visitors sign in to view it</label>
         </div>
         <div id="cfg-site-fields"></div>
         <div class="btn-row" style="margin-top:0.9rem">
@@ -5934,9 +5979,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const siteChecks = checks.filter((c) => c.site === siteIdx);
     const hostChecks = checks.filter((c) => c.site === null);
 
-    // The one-glance health signal survives the tab merge as the dot on
-    // the Settings tab itself.
-    $('settings-dot').classList.toggle('hidden', !checks.some((c) => !c.ok));
+    // The one-glance health signal survives the tab merge as a count worn
+    // by the Settings tab itself.
+    const attention = checks.filter((c) => !c.ok).length;
+    $('settings-dot').textContent = attention;
+    $('settings-dot').classList.toggle('hidden', !attention);
 
     // ── This site: identity, its health rows, then the auth form. ──
     let sh = row('Domain', site.domain
@@ -5964,17 +6011,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     // Public or private is a property of the site, not a security verdict:
     // public sites are most sites. Private means a login; the fields exist
-    // only while the site is (or is becoming) private.
+    // only while the switch is on.
     const on = authOn(site);
-    const off = !on;
-    $('btn-auth-toggle').textContent =
-      on ? 'Make this site public' : 'Make this site private';
-    $('cfg-site-fields').innerHTML =
+    $('auth-switch').checked = on;
+    $('cfg-site-fields').innerHTML = !on ? '' :
       field('username', 'Username', site.username,
-            { off, hint: 'What visitors type to open the site.' }) +
+            { hint: 'What visitors type to open the site.' }) +
       field('password',
             site.has_password ? 'New password (blank = keep the current one)' : 'Password',
-            '', { off, type: 'password',
+            '', { type: 'password',
                   hint: 'Stored only as a hash on your server. Spaces count; nothing is trimmed.' });
     $('auth-hint').textContent = on
       ? (site.has_password
@@ -6007,8 +6052,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     renderSettings();
   });
 
-  $('btn-auth-toggle').addEventListener('click', () => {
-    authDesired = !authOn(currentSite()[0]);
+  $('auth-switch').addEventListener('change', () => {
+    authDesired = $('auth-switch').checked;
     renderSettings();
   });
 
@@ -6299,16 +6344,23 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<div class="btn-row" style="margin-top:0.75rem">` +
            `<button class="action primary pub" type="button" disabled>Publish</button>` +
          `</div>` +
-         (siteData.domain ? '' :
-           `<div class="split"></div>` +
-           `<div class="cfg-field"><label>Domain</label>` +
-           `<input class="dom-input" type="text" placeholder="example.com">` +
-           `<div class="cfg-hint">Point the domain's DNS at this server first ` +
-           `(an A record to this box's IP). Setting it requests the certificate — ` +
-           `issuing one is what binds a name to a site.</div></div>` +
-           `<div class="btn-row" style="margin-top:0.75rem">` +
-           `<button class="action dom" type="button">Set domain — get its certificate</button>` +
-           `</div>`) +
+         `<div class="split"></div>` +
+         `<div class="cfg-field"><label>Domain</label>` +
+         `<input class="dom-input" type="text" placeholder="example.com"` +
+         ` value="${escapeHtml(siteData.domain || '')}">` +
+         `<div class="cfg-hint">` +
+         (siteData.domain
+           ? `Changing it requests a certificate for the new name — point ` +
+             `that domain's DNS at this server first. Re-submitting the ` +
+             `current name re-runs its certificate request.`
+           : `Point the domain's DNS at this server first (an A record to ` +
+             `this box's IP). Setting it requests the certificate — issuing ` +
+             `one is what binds a name to a site.`) +
+         `</div></div>` +
+         `<div class="btn-row" style="margin-top:0.75rem">` +
+         `<button class="action dom" type="button">` +
+         `${siteData.domain ? 'Change domain — get its certificate' : 'Set domain — get its certificate'}` +
+         `</button></div>` +
          `<div class="done hidden">` +
            `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
            `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
@@ -6659,9 +6711,12 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                         err = f"no site {idx}"
                     elif not domain:
                         err = "a domain is needed"
-                    elif _domain_in_use(domain):
+                    elif _domain_in_use(domain, excluding=config.sites[idx]):
                         err = f"{domain} is already used by another site on this box"
                     else:
+                        # A site's own current domain is deliberately not
+                        # refused: re-submitting it re-runs issuance — the
+                        # repair path when a certificate attempt failed.
                         target = config.sites[idx]
                         _obtain_trusted_cert(domain, target)
                         # site.domain is assigned only on the success path

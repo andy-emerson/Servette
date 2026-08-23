@@ -1352,15 +1352,15 @@ _UI_LOGIN_PAGE = """<!doctype html>
 </style></head>
 <body>
 <div class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-<div class="tagline">Server administration</div>
+<div class="tagline">Server login</div>
 <div class="card">
   <form method="get" action="/">
     <label for="t">Passcode</label>
     <input id="t" name="t" autofocus autocomplete="off">
     <button>Log in</button>
   </form>
-  <p class="hint">The passcode is printed in your terminal by
-  'servette admin', fresh for each run.</p>
+  <p class="hint">Run 'servette admin' in your SSH console to generate a
+  one-time passcode.</p>
 </div>
 </body></html>
 """
@@ -1502,9 +1502,12 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                         err = f"no site {idx}"
                     elif not domain:
                         err = "a domain is needed"
-                    elif _domain_in_use(domain):
+                    elif _domain_in_use(domain, excluding=config.sites[idx]):
                         err = f"{domain} is already used by another site on this box"
                     else:
+                        # A site's own current domain is deliberately not
+                        # refused: re-submitting it re-runs issuance — the
+                        # repair path when a certificate attempt failed.
                         target = config.sites[idx]
                         _obtain_trusted_cert(domain, target)
                         # site.domain is assigned only on the success path

@@ -1061,8 +1061,8 @@ def run_dispatch_tests(s):
           "do-delete" in s._UI_ADMIN_PAGE and "do-deactivate" in s._UI_ADMIN_PAGE
           and "do-reactivate" in s._UI_ADMIN_PAGE and "do-cancel" in s._UI_ADMIN_PAGE
           and "confirm(" not in s._UI_ADMIN_PAGE)
-    check("...as a protection toggle plus host basics — the advanced knobs stay in the terminal",
-          "btn-auth-toggle" in s._UI_ADMIN_PAGE
+    check("...as a public/private switch plus host basics — the advanced knobs stay in the terminal",
+          "auth-switch" in s._UI_ADMIN_PAGE
           and "has_password" in s._UI_ADMIN_PAGE
           and "cfg-port" not in s._UI_ADMIN_PAGE
           and "cfg-dir" not in s._UI_ADMIN_PAGE
@@ -1109,7 +1109,8 @@ def run_dispatch_tests(s):
         st, body = ui_req("GET", "/")
         check("The bare URL answers the login page, never content",
               st == 200 and b"Passcode" in body
-              and b"Server administration" in body
+              and b"Server login" in body
+              and b"one-time passcode" in body
               and b"publish page" not in body)
         check("...and the login page does not leak the passcode",
               ui_code.encode() not in body)
@@ -1298,6 +1299,11 @@ def run_dispatch_tests(s):
                                                "domain": "card.example"}).encode())
             check("...refuses a domain another site already holds",
                   st == 422 and b"already used" in body)
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "domain", "site": n0,
+                                            "domain": "card.example"}).encode())
+            check("...but a site's own domain re-runs issuance (the repair path)",
+                  st == 200 and s.config.sites[n0].domain == "card.example")
             s._obtain_trusted_cert = lambda domain, site_obj: None
             st, body = ui_req("POST", f"/sites?t={ui_code}",
                               body=json.dumps({"op": "domain", "site": n0,

@@ -49,6 +49,7 @@ _COMMANDS = [
     ("sites [--json]",   "list configured sites"),
     ("set [n] k=v ...",  "change settings non-interactively"),
     ("log [n]",          "show the last n log entries"),
+    ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
     ("publish",          "one guided flow for site content: pull, roll back, channel"),
     ("pull [n]",         "check a site's publish channel and pull new content now"),
@@ -909,6 +910,83 @@ def cmd_log(n=20):
 
 ```
 
+Traffic is the journal re-read as counts: the server already logs every response, so the summary is pure reading — no collection, nothing new written, and no visitor identity in the result (IPs stay in the raw log for `log`; a dashboard has no business casually displaying them).
+
+```python
+# Traffic
+def _traffic_lines(days=7):
+    """The journal's lines for the window, timestamped (short-iso), oldest
+    first; [] where no journal answers (macOS session mode, or a journal
+    that needs privileges this shell doesn't hold)."""
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "servette", "-o", "short-iso",
+             "--since", f"-{days}d", "--no-pager"],
+            capture_output=True, text=True)
+        return result.stdout.splitlines()
+    except FileNotFoundError:
+        return []
+
+
+def _parse_traffic(lines, days=7):
+    """Tally journal lines into the traffic summary: requests per day,
+    status counts, top paths. Pure, so the suite can feed it synthetic
+    days. Only response lines count — every served response logs as
+    '<status> <path> … to <ip>' (or 'from' on refusals), so a message
+    whose first token is a three-digit status is a request; everything
+    else in the journal is server narration, not traffic. Paths are
+    tallied from content responses (200/206/304). IPs are never carried
+    into the result."""
+    per_day, statuses, paths = {}, {}, {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3 or len(parts[0]) < 10 or parts[0][4:5] != "-":
+            continue
+        day = parts[0][:10]
+        # the message starts after the 'unit[pid]:' token
+        msg_at = next((i for i, p in enumerate(parts)
+                       if p.endswith(":") and "[" in p), None)
+        if msg_at is None:
+            continue
+        msg = parts[msg_at + 1:]
+        if not msg or len(msg[0]) != 3 or not msg[0].isdigit():
+            continue
+        statuses[msg[0]] = statuses.get(msg[0], 0) + 1
+        per_day[day] = per_day.get(day, 0) + 1
+        if msg[0] in ("200", "206", "304"):
+            path = next((p for p in msg[1:] if p.startswith("/")), None)
+            if path:
+                paths[path] = paths.get(path, 0) + 1
+    top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
+            "top_paths": top, "window_days": days}
+
+
+def _traffic_summary(days=7):
+    return _parse_traffic(_traffic_lines(days), days)
+
+
+def cmd_traffic():
+    """`traffic` — requests, statuses, and top paths from the last 7 days,
+    read from the journal. The page's Traffic tab renders this same
+    summary; the raw log (IPs included) stays with `log`."""
+    t = _traffic_summary()
+    if not t["days"]:
+        print("  No traffic in the window — or no readable journal on this host.")
+        return
+    _section("Traffic — last 7 days")
+    print(f"  Requests: {sum(n for _, n in t['days'])}")
+    for day, n in t["days"]:
+        print(f"    {day}  {n}")
+    print("  Statuses: " + ", ".join(f"{s} x{n}" for s, n in t["statuses"].items()))
+    print("  Top paths:")
+    for path, n in t["top_paths"]:
+        print(f"    {n:>6}  {path}")
+    print()
+
+
+```
+
 ## Site content publishing
 
 > The update channel for a site's *content*: a signed tar.gz bundle, pulled
@@ -1418,7 +1496,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path not in ("/", "/status", "/config"):
+        if path not in ("/", "/status", "/config", "/traffic"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -1445,6 +1523,13 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                            "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
+        if path == "/traffic":
+            # The Traffic tab's feed: the journal re-read as counts, and
+            # never carrying a visitor's IP.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            return self._respond(200, json.dumps(_traffic_summary()),
+                                 "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)
         return self._respond(200, _UI_LOGIN_PAGE)
@@ -2434,6 +2519,8 @@ def run_command(cmd, args):
             cmd_log(int(args[0]) if args else 20)
         except ValueError:
             print("Usage: log [number]")
+    elif cmd == "traffic":
+        cmd_traffic()
     elif cmd == "admin":
         cmd_admin()
     elif cmd == "publish":

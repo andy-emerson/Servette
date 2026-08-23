@@ -285,22 +285,10 @@
       width: 100%;
     }
     select.cfg-site { width: auto; margin-bottom: 1rem; }
-    /* How many rows need review, worn on the Settings tab itself — the
-       at-a-glance signal that survived the Status merge. */
-    .tab-pill {
-      display: inline-block;
-      min-width: 1.15rem;
-      padding: 0.05rem 0.3rem;
-      margin-left: 0.45rem;
-      border-radius: 99px;
-      background: rgba(251,191,36,0.12);
-      border: 1px solid rgba(251,191,36,0.4);
-      color: var(--amber);
-      font-size: 0.65rem;
-      text-align: center;
-      text-transform: none;
-      letter-spacing: 0;
-    }
+    /* The at-a-glance signal that survived the Status merge, made as quiet
+       as it can be: no glyph — the word Settings itself turns amber while
+       any row needs review. */
+    button.tab.attention { color: var(--amber); }
     .split { border-top: 1px solid var(--border); margin: 1rem 0; }
 
     /* The public/private switch — a literal toggle: the knob's position and
@@ -385,8 +373,9 @@
 
   <nav class="tabs" role="tablist">
     <button class="tab active" id="tab-publish" type="button" role="tab">Publish</button>
-    <button class="tab" id="tab-settings" type="button" role="tab">Settings<span
-      class="tab-pill hidden" id="settings-dot" title="Rows that need review"></span></button>
+    <button class="tab" id="tab-traffic" type="button" role="tab">Traffic</button>
+    <button class="tab" id="tab-settings" type="button" role="tab"
+            title="Amber means something needs review">Settings</button>
   </nav>
 
   <!-- ══ Publish — one card per site: drop or choose its folder, publish.
@@ -399,6 +388,29 @@
       <button class="action" id="btn-add-site" type="button">+ Add a site</button>
     </div>
     <p class="error hidden" id="sites-error"></p>
+  </div>
+
+  <!-- ══ Traffic — the journal re-read as counts. Nothing is collected for
+       this: the server already logs every response, and the summary never
+       carries a visitor's IP. ══ -->
+  <div id="panel-traffic" role="tabpanel" class="hidden">
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Traffic — last 7 days</span>
+        <span class="badge badge-dim" id="traffic-badge">loading…</span>
+      </div>
+      <div class="card-body">
+        <div class="rows" id="traffic-rows"></div>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action" id="btn-traffic-refresh" type="button">Refresh</button>
+        </div>
+        <p class="hint">Counts read from the server's own log: requests per
+        day, response statuses, and the most-requested paths. Visitor IP
+        addresses stay in the raw log (the terminal's <b>log</b>), never
+        here.</p>
+        <p class="error hidden" id="traffic-error"></p>
+      </div>
+    </div>
   </div>
 
   <!-- ══ Settings — the selected site's truth and knobs, then the box's.
@@ -419,6 +431,7 @@
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-outside" type="button" disabled
                   title="Loads once this site has a domain">Run the connection check</button>
+          <button class="action hidden" id="btn-renew" type="button">Renew certificate</button>
         </div>
         <p class="hint">Opens this site's check page in a new tab — the view
         from the public internet, which this page cannot have.</p>
@@ -486,7 +499,8 @@
 
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
-  const PANELS = { publish: 'panel-publish', settings: 'panel-settings' };
+  const PANELS = { publish: 'panel-publish', traffic: 'panel-traffic',
+                   settings: 'panel-settings' };
 
   function showTab(name) {
     if (name === 'status' || name === 'config') name = 'settings';  // old bookmarks
@@ -495,12 +509,14 @@
       $(PANELS[key]).classList.toggle('hidden', key !== name);
       $('tab-' + key).classList.toggle('active', key === name);
     }
-    refresh();  // both tabs render from the same /status + /config truth
+    refresh();  // every tab renders from the same /status + /config truth
+    if (name === 'traffic') loadTraffic();
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
 
   $('tab-publish').addEventListener('click', () => showTab('publish'));
+  $('tab-traffic').addEventListener('click', () => showTab('traffic'));
   $('tab-settings').addEventListener('click', () => showTab('settings'));
 
   /* ══ The page's truth: /status and /config fetched together, rendered
@@ -565,6 +581,55 @@
 
   $('btn-refresh').addEventListener('click', refresh);
 
+  /* ══ Traffic — the journal re-read as counts, fetched on entry. ══ */
+
+  async function loadTraffic() {
+    setBadge($('traffic-badge'), 'badge-dim', 'loading…');
+    clearError($('traffic-error'));
+    try {
+      const r = await fetch('/traffic?t=' + encodeURIComponent(CODE));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const t = await r.json();
+      const total = (t.days || []).reduce((n, d) => n + d[1], 0);
+      let h;
+      if (!total) {
+        h = row('Requests', 'none in the window — or no readable journal on this host');
+      } else {
+        h = row('Requests', String(total));
+        for (const [day, n] of t.days) h += row(day, String(n));
+        h += row('Statuses', Object.entries(t.statuses || {})
+          .map(([code, n]) => code + ' × ' + n).join(' · '), 'gap');
+        h += row('Top paths', (t.top_paths || [])
+          .map(([p, n]) => n + ' × ' + escapeHtml(p)).join('<br>'), 'gap');
+      }
+      $('traffic-rows').innerHTML = h;
+      setBadge($('traffic-badge'), total ? 'badge-green' : 'badge-dim',
+               total ? total + ' requests' : 'quiet');
+    } catch (e) {
+      setBadge($('traffic-badge'), 'badge-red', '✕ unreachable');
+      showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
+        : 'Could not read traffic: ' + e.message);
+    }
+  }
+
+  $('btn-traffic-refresh').addEventListener('click', loadTraffic);
+
+  // Renewal is automatic (the watchdog renews before expiry), so the button
+  // exists only while the Certificate row needs attention — it re-runs
+  // issuance for the site's current domain, the repair path.
+  $('btn-renew').addEventListener('click', async () => {
+    const [site, idx] = currentSite();
+    if (!site.domain) return;
+    const b = $('btn-renew');
+    b.disabled = true;
+    const old = b.textContent;
+    b.textContent = 'requesting certificate…';
+    await siteOp({ op: 'domain', site: idx, domain: site.domain },
+                 $('cfg-site-error'));
+    b.disabled = false;
+    b.textContent = old;
+  });
+
   /* ══ Settings forms — over the same validators the `set` command runs, so
      a value the terminal refuses the page refuses with the same sentence.
      Deliberately absent from these forms (the terminal keeps them): the
@@ -610,11 +675,10 @@
     const siteChecks = checks.filter((c) => c.site === siteIdx);
     const hostChecks = checks.filter((c) => c.site === null);
 
-    // The one-glance health signal survives the tab merge as a count worn
-    // by the Settings tab itself.
-    const attention = checks.filter((c) => !c.ok).length;
-    $('settings-dot').textContent = attention;
-    $('settings-dot').classList.toggle('hidden', !attention);
+    // The one-glance signal: the word Settings turns amber while anything
+    // needs review — no glyph, just temperature.
+    $('tab-settings').classList.toggle('attention',
+      checks.some((c) => !c.ok));
 
     // ── This site: facts first — Domain from config, the rest the health
     // rows worn plainly (the 'Site n ·' prefix dropped: the card already
@@ -647,6 +711,9 @@
     $('btn-outside').title = outsideDomain
       ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
       : 'Needs a domain — a site without one has no public name to check';
+    const certRow = siteChecks.find((c) => c.key === 'cert');
+    $('btn-renew').classList.toggle('hidden',
+      !(site.domain && certRow && !certRow.ok));
 
     // Public or private is a property of the site, not a security verdict:
     // public sites are most sites. Private means a login; the fields exist
@@ -990,8 +1057,7 @@
          `<div class="cfg-hint">` +
          (siteData.domain
            ? `Changing it requests a certificate for the new name — point ` +
-             `that domain's DNS at this server first. Re-submitting the ` +
-             `current name re-runs its certificate request.`
+             `that domain's DNS at this server first.`
            : `Point the domain's DNS at this server first (an A record to ` +
              `this box's IP). Setting it requests the certificate — issuing ` +
              `one is what binds a name to a site.`) +

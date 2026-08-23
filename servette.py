@@ -4231,6 +4231,7 @@ _COMMANDS = [
     ("sites [--json]",   "list configured sites"),
     ("set [n] k=v ...",  "change settings non-interactively"),
     ("log [n]",          "show the last n log entries"),
+    ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
     ("publish",          "one guided flow for site content: pull, roll back, channel"),
     ("pull [n]",         "check a site's publish channel and pull new content now"),
@@ -4980,6 +4981,78 @@ def cmd_log(n=20):
             print("journalctl not found. Is this a systemd system?")
 
 
+# Traffic
+def _traffic_lines(days=7):
+    """The journal's lines for the window, timestamped (short-iso), oldest
+    first; [] where no journal answers (macOS session mode, or a journal
+    that needs privileges this shell doesn't hold)."""
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "servette", "-o", "short-iso",
+             "--since", f"-{days}d", "--no-pager"],
+            capture_output=True, text=True)
+        return result.stdout.splitlines()
+    except FileNotFoundError:
+        return []
+
+
+def _parse_traffic(lines, days=7):
+    """Tally journal lines into the traffic summary: requests per day,
+    status counts, top paths. Pure, so the suite can feed it synthetic
+    days. Only response lines count — every served response logs as
+    '<status> <path> … to <ip>' (or 'from' on refusals), so a message
+    whose first token is a three-digit status is a request; everything
+    else in the journal is server narration, not traffic. Paths are
+    tallied from content responses (200/206/304). IPs are never carried
+    into the result."""
+    per_day, statuses, paths = {}, {}, {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3 or len(parts[0]) < 10 or parts[0][4:5] != "-":
+            continue
+        day = parts[0][:10]
+        # the message starts after the 'unit[pid]:' token
+        msg_at = next((i for i, p in enumerate(parts)
+                       if p.endswith(":") and "[" in p), None)
+        if msg_at is None:
+            continue
+        msg = parts[msg_at + 1:]
+        if not msg or len(msg[0]) != 3 or not msg[0].isdigit():
+            continue
+        statuses[msg[0]] = statuses.get(msg[0], 0) + 1
+        per_day[day] = per_day.get(day, 0) + 1
+        if msg[0] in ("200", "206", "304"):
+            path = next((p for p in msg[1:] if p.startswith("/")), None)
+            if path:
+                paths[path] = paths.get(path, 0) + 1
+    top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
+            "top_paths": top, "window_days": days}
+
+
+def _traffic_summary(days=7):
+    return _parse_traffic(_traffic_lines(days), days)
+
+
+def cmd_traffic():
+    """`traffic` — requests, statuses, and top paths from the last 7 days,
+    read from the journal. The page's Traffic tab renders this same
+    summary; the raw log (IPs included) stays with `log`."""
+    t = _traffic_summary()
+    if not t["days"]:
+        print("  No traffic in the window — or no readable journal on this host.")
+        return
+    _section("Traffic — last 7 days")
+    print(f"  Requests: {sum(n for _, n in t['days'])}")
+    for day, n in t["days"]:
+        print(f"    {day}  {n}")
+    print("  Statuses: " + ", ".join(f"{s} x{n}" for s, n in t["statuses"].items()))
+    print("  Top paths:")
+    for path, n in t["top_paths"]:
+        print(f"    {n:>6}  {path}")
+    print()
+
+
 # The update channel for a site's *content*: a signed tar.gz bundle, pulled
 # from publish_url, verified against publish_key, and swapped into serve_dir
 # with a single-shot .bak — 'restore-site' rolls back to it, and a successful
@@ -5664,22 +5737,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       width: 100%;
     }
     select.cfg-site { width: auto; margin-bottom: 1rem; }
-    /* How many rows need review, worn on the Settings tab itself — the
-       at-a-glance signal that survived the Status merge. */
-    .tab-pill {
-      display: inline-block;
-      min-width: 1.15rem;
-      padding: 0.05rem 0.3rem;
-      margin-left: 0.45rem;
-      border-radius: 99px;
-      background: rgba(251,191,36,0.12);
-      border: 1px solid rgba(251,191,36,0.4);
-      color: var(--amber);
-      font-size: 0.65rem;
-      text-align: center;
-      text-transform: none;
-      letter-spacing: 0;
-    }
+    /* The at-a-glance signal that survived the Status merge, made as quiet
+       as it can be: no glyph — the word Settings itself turns amber while
+       any row needs review. */
+    button.tab.attention { color: var(--amber); }
     .split { border-top: 1px solid var(--border); margin: 1rem 0; }
 
     /* The public/private switch — a literal toggle: the knob's position and
@@ -5764,8 +5825,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   <nav class="tabs" role="tablist">
     <button class="tab active" id="tab-publish" type="button" role="tab">Publish</button>
-    <button class="tab" id="tab-settings" type="button" role="tab">Settings<span
-      class="tab-pill hidden" id="settings-dot" title="Rows that need review"></span></button>
+    <button class="tab" id="tab-traffic" type="button" role="tab">Traffic</button>
+    <button class="tab" id="tab-settings" type="button" role="tab"
+            title="Amber means something needs review">Settings</button>
   </nav>
 
   <!-- ══ Publish — one card per site: drop or choose its folder, publish.
@@ -5778,6 +5840,29 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       <button class="action" id="btn-add-site" type="button">+ Add a site</button>
     </div>
     <p class="error hidden" id="sites-error"></p>
+  </div>
+
+  <!-- ══ Traffic — the journal re-read as counts. Nothing is collected for
+       this: the server already logs every response, and the summary never
+       carries a visitor's IP. ══ -->
+  <div id="panel-traffic" role="tabpanel" class="hidden">
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Traffic — last 7 days</span>
+        <span class="badge badge-dim" id="traffic-badge">loading…</span>
+      </div>
+      <div class="card-body">
+        <div class="rows" id="traffic-rows"></div>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action" id="btn-traffic-refresh" type="button">Refresh</button>
+        </div>
+        <p class="hint">Counts read from the server's own log: requests per
+        day, response statuses, and the most-requested paths. Visitor IP
+        addresses stay in the raw log (the terminal's <b>log</b>), never
+        here.</p>
+        <p class="error hidden" id="traffic-error"></p>
+      </div>
+    </div>
   </div>
 
   <!-- ══ Settings — the selected site's truth and knobs, then the box's.
@@ -5798,6 +5883,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-outside" type="button" disabled
                   title="Loads once this site has a domain">Run the connection check</button>
+          <button class="action hidden" id="btn-renew" type="button">Renew certificate</button>
         </div>
         <p class="hint">Opens this site's check page in a new tab — the view
         from the public internet, which this page cannot have.</p>
@@ -5865,7 +5951,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
-  const PANELS = { publish: 'panel-publish', settings: 'panel-settings' };
+  const PANELS = { publish: 'panel-publish', traffic: 'panel-traffic',
+                   settings: 'panel-settings' };
 
   function showTab(name) {
     if (name === 'status' || name === 'config') name = 'settings';  // old bookmarks
@@ -5874,12 +5961,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       $(PANELS[key]).classList.toggle('hidden', key !== name);
       $('tab-' + key).classList.toggle('active', key === name);
     }
-    refresh();  // both tabs render from the same /status + /config truth
+    refresh();  // every tab renders from the same /status + /config truth
+    if (name === 'traffic') loadTraffic();
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
 
   $('tab-publish').addEventListener('click', () => showTab('publish'));
+  $('tab-traffic').addEventListener('click', () => showTab('traffic'));
   $('tab-settings').addEventListener('click', () => showTab('settings'));
 
   /* ══ The page's truth: /status and /config fetched together, rendered
@@ -5944,6 +6033,55 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   $('btn-refresh').addEventListener('click', refresh);
 
+  /* ══ Traffic — the journal re-read as counts, fetched on entry. ══ */
+
+  async function loadTraffic() {
+    setBadge($('traffic-badge'), 'badge-dim', 'loading…');
+    clearError($('traffic-error'));
+    try {
+      const r = await fetch('/traffic?t=' + encodeURIComponent(CODE));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const t = await r.json();
+      const total = (t.days || []).reduce((n, d) => n + d[1], 0);
+      let h;
+      if (!total) {
+        h = row('Requests', 'none in the window — or no readable journal on this host');
+      } else {
+        h = row('Requests', String(total));
+        for (const [day, n] of t.days) h += row(day, String(n));
+        h += row('Statuses', Object.entries(t.statuses || {})
+          .map(([code, n]) => code + ' × ' + n).join(' · '), 'gap');
+        h += row('Top paths', (t.top_paths || [])
+          .map(([p, n]) => n + ' × ' + escapeHtml(p)).join('<br>'), 'gap');
+      }
+      $('traffic-rows').innerHTML = h;
+      setBadge($('traffic-badge'), total ? 'badge-green' : 'badge-dim',
+               total ? total + ' requests' : 'quiet');
+    } catch (e) {
+      setBadge($('traffic-badge'), 'badge-red', '✕ unreachable');
+      showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
+        : 'Could not read traffic: ' + e.message);
+    }
+  }
+
+  $('btn-traffic-refresh').addEventListener('click', loadTraffic);
+
+  // Renewal is automatic (the watchdog renews before expiry), so the button
+  // exists only while the Certificate row needs attention — it re-runs
+  // issuance for the site's current domain, the repair path.
+  $('btn-renew').addEventListener('click', async () => {
+    const [site, idx] = currentSite();
+    if (!site.domain) return;
+    const b = $('btn-renew');
+    b.disabled = true;
+    const old = b.textContent;
+    b.textContent = 'requesting certificate…';
+    await siteOp({ op: 'domain', site: idx, domain: site.domain },
+                 $('cfg-site-error'));
+    b.disabled = false;
+    b.textContent = old;
+  });
+
   /* ══ Settings forms — over the same validators the `set` command runs, so
      a value the terminal refuses the page refuses with the same sentence.
      Deliberately absent from these forms (the terminal keeps them): the
@@ -5989,11 +6127,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const siteChecks = checks.filter((c) => c.site === siteIdx);
     const hostChecks = checks.filter((c) => c.site === null);
 
-    // The one-glance health signal survives the tab merge as a count worn
-    // by the Settings tab itself.
-    const attention = checks.filter((c) => !c.ok).length;
-    $('settings-dot').textContent = attention;
-    $('settings-dot').classList.toggle('hidden', !attention);
+    // The one-glance signal: the word Settings turns amber while anything
+    // needs review — no glyph, just temperature.
+    $('tab-settings').classList.toggle('attention',
+      checks.some((c) => !c.ok));
 
     // ── This site: facts first — Domain from config, the rest the health
     // rows worn plainly (the 'Site n ·' prefix dropped: the card already
@@ -6026,6 +6163,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     $('btn-outside').title = outsideDomain
       ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
       : 'Needs a domain — a site without one has no public name to check';
+    const certRow = siteChecks.find((c) => c.key === 'cert');
+    $('btn-renew').classList.toggle('hidden',
+      !(site.domain && certRow && !certRow.ok));
 
     // Public or private is a property of the site, not a security verdict:
     // public sites are most sites. Private means a login; the fields exist
@@ -6369,8 +6509,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<div class="cfg-hint">` +
          (siteData.domain
            ? `Changing it requests a certificate for the new name — point ` +
-             `that domain's DNS at this server first. Re-submitting the ` +
-             `current name re-runs its certificate request.`
+             `that domain's DNS at this server first.`
            : `Point the domain's DNS at this server first (an A record to ` +
              `this box's IP). Setting it requests the certificate — issuing ` +
              `one is what binds a name to a site.`) +
@@ -6643,7 +6782,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path not in ("/", "/status", "/config"):
+        if path not in ("/", "/status", "/config", "/traffic"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -6670,6 +6809,13 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                            "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
+        if path == "/traffic":
+            # The Traffic tab's feed: the journal re-read as counts, and
+            # never carrying a visitor's IP.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            return self._respond(200, json.dumps(_traffic_summary()),
+                                 "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)
         return self._respond(200, _UI_LOGIN_PAGE)
@@ -7572,6 +7718,8 @@ def run_command(cmd, args):
             cmd_log(int(args[0]) if args else 20)
         except ValueError:
             print("Usage: log [number]")
+    elif cmd == "traffic":
+        cmd_traffic()
     elif cmd == "admin":
         cmd_admin()
     elif cmd == "publish":

@@ -1050,8 +1050,35 @@ def run_dispatch_tests(s):
           "panel-settings" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
     check("...with the health rows split site/server and the masked password field",
           "site-rows" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
-          and "settings-dot" in s._UI_ADMIN_PAGE
+          and "attention" in s._UI_ADMIN_PAGE
           and "cfg-password" in s._UI_ADMIN_PAGE)
+    check("...and the Traffic tab reading the journal summary, renew beside the cert row",
+          "tab-traffic" in s._UI_ADMIN_PAGE and "/traffic?t=" in s._UI_ADMIN_PAGE
+          and "btn-renew" in s._UI_ADMIN_PAGE)
+
+    # Traffic: the journal re-read as counts — a pure parse, synthetic days.
+    tlines = [
+        "2026-08-20T10:00:00+0000 box servette[1]: 200 /index.html to 1.2.3.4",
+        "2026-08-20T10:00:01+0000 box servette[1]: 304 Not Modified /style.css to 1.2.3.4",
+        "2026-08-21T09:00:00+0000 box servette[1]: 404 /nope from 5.6.7.8",
+        "2026-08-21T09:00:02+0000 box servette[1]: 200 /index.html to 5.6.7.8",
+        "2026-08-21T09:00:03+0000 box servette[1]: Config reloaded from disk",
+        "2026-08-21T09:00:04+0000 box servette[1]: Rate limited 9.9.9.9",
+    ]
+    tt = s._parse_traffic(tlines)
+    check("Traffic tallies days, statuses, and top paths from response lines only",
+          tt["days"] == [("2026-08-20", 2), ("2026-08-21", 2)]
+          and tt["statuses"] == {"200": 2, "304": 1, "404": 1}
+          and tt["top_paths"][0] == ("/index.html", 2))
+    check("...and never carries a visitor's IP",
+          "1.2.3.4" not in json.dumps(tt) and "5.6.7.8" not in json.dumps(tt))
+    saved_tl = s._traffic_lines
+    s._traffic_lines = lambda days=7: tlines
+    with contextlib.redirect_stdout(io.StringIO()) as tbuf:
+        s.cmd_traffic()
+    s._traffic_lines = saved_tl
+    check("The traffic command prints the same summary",
+          "Requests: 4" in tbuf.getvalue() and "/index.html" in tbuf.getvalue())
     check("...and the Publish tab as site cards, add/move/remove/domain wired to /sites",
           "site-cards" in s._UI_ADMIN_PAGE and "btn-add-site" in s._UI_ADMIN_PAGE
           and "/sites?t=" in s._UI_ADMIN_PAGE
@@ -1152,6 +1179,12 @@ def run_dispatch_tests(s):
               and b'"has_password"' in body and b'"active"' in body)
         st, _ = ui_req("GET", "/config")
         check("GET /config without the code is refused", st == 403)
+
+        st, body = ui_req("GET", f"/traffic?t={ui_code}")
+        check("GET /traffic answers the summary shape",
+              st == 200 and b"window_days" in body and b"top_paths" in body)
+        st, _ = ui_req("GET", "/traffic")
+        check("GET /traffic without the code is refused", st == 403)
 
         saved_cfg_user = s.config.sites[0].username
         st, _ = ui_req("POST", f"/config?t={ui_code}",

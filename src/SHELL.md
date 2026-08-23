@@ -928,27 +928,32 @@ def _traffic_lines(days=7):
         return []
 
 
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
 def _parse_traffic(lines, days=7):
     """Tally journal lines into the traffic summary: requests per day,
-    status counts, top paths. Pure, so the suite can feed it synthetic
-    days. Only response lines count — every served response logs as
-    '<status> <path> … to <ip>' (or 'from' on refusals), so a message
-    whose first token is a three-digit status is a request; everything
-    else in the journal is server narration, not traffic. Paths are
-    tallied from content responses (200/206/304). IPs are never carried
-    into the result."""
+    status counts, top paths. Pure, so the suite can feed it real log
+    lines. Each line carries two prefixes — the journal's own
+    ('<iso> <host> servette[pid]:') and then setup_logging's format
+    ('<date> <time>  LEVEL  <message>') — so the level name is the anchor
+    the message begins after. Anchoring on the unit token instead was the
+    bug that made this count nothing at all: the Python timestamp sat
+    where the status was expected. Only response lines count — every
+    served response logs as '<status> <path> … to <ip>' (or 'from' on
+    refusals) — and systemd's own lines, carrying no level, are skipped.
+    Paths are tallied from content responses (200/206/304). IPs are never
+    carried into the result."""
     per_day, statuses, paths = {}, {}, {}
     for line in lines:
         parts = line.split()
-        if len(parts) < 3 or len(parts[0]) < 10 or parts[0][4:5] != "-":
+        if len(parts) < 4 or len(parts[0]) < 10 or parts[0][4:5] != "-":
             continue
         day = parts[0][:10]
-        # the message starts after the 'unit[pid]:' token
-        msg_at = next((i for i, p in enumerate(parts)
-                       if p.endswith(":") and "[" in p), None)
-        if msg_at is None:
+        lvl = next((i for i, p in enumerate(parts) if p in _LOG_LEVELS), None)
+        if lvl is None:
             continue
-        msg = parts[msg_at + 1:]
+        msg = parts[lvl + 1:]
         if not msg or len(msg[0]) != 3 or not msg[0].isdigit():
             continue
         statuses[msg[0]] = statuses.get(msg[0], 0) + 1
@@ -2034,7 +2039,8 @@ def _load_snapshot():
     renders. An average, not a live meter: cumulative CPU time over the
     time the server has been up, so a spike that has passed is diluted by
     every quiet second since. None for any figure that cannot be read."""
-    out = {"cpu_percent": None, "memory_mb": None, "uptime_s": None}
+    out = {"cpu_percent": None, "memory_mb": None, "uptime_s": None,
+           "started_at": None, "cpu_ns": None, "sampled_at": time.time()}
     if _service_is_active():
         try:
             result = subprocess.run(
@@ -2049,8 +2055,13 @@ def _load_snapshot():
                     elapsed = float(f.read().split()[0]) - int(mono) / 1_000_000
                 if elapsed > 0:
                     out["uptime_s"] = elapsed
+                    out["started_at"] = out["sampled_at"] - elapsed
                     cpu = props.get("CPUUsageNSec", "")
                     if cpu.isdigit():
+                        # The raw counter travels too: successive readings
+                        # are what let the page draw a live meter without
+                        # anything being sampled or stored server-side.
+                        out["cpu_ns"] = int(cpu)
                         out["cpu_percent"] = (int(cpu) / 1_000_000_000) / elapsed * 100
             mem = props.get("MemoryCurrent", "")
             if mem.isdigit() and int(mem) > 0:
@@ -2064,6 +2075,8 @@ def _load_snapshot():
         if elapsed > 0:
             times = os.times()
             out["uptime_s"] = elapsed
+            out["started_at"] = out["sampled_at"] - elapsed
+            out["cpu_ns"] = int((times[0] + times[1]) * 1_000_000_000)
             out["cpu_percent"] = (times[0] + times[1]) / elapsed * 100
     return out
 

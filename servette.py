@@ -4996,27 +4996,32 @@ def _traffic_lines(days=7):
         return []
 
 
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
 def _parse_traffic(lines, days=7):
     """Tally journal lines into the traffic summary: requests per day,
-    status counts, top paths. Pure, so the suite can feed it synthetic
-    days. Only response lines count — every served response logs as
-    '<status> <path> … to <ip>' (or 'from' on refusals), so a message
-    whose first token is a three-digit status is a request; everything
-    else in the journal is server narration, not traffic. Paths are
-    tallied from content responses (200/206/304). IPs are never carried
-    into the result."""
+    status counts, top paths. Pure, so the suite can feed it real log
+    lines. Each line carries two prefixes — the journal's own
+    ('<iso> <host> servette[pid]:') and then setup_logging's format
+    ('<date> <time>  LEVEL  <message>') — so the level name is the anchor
+    the message begins after. Anchoring on the unit token instead was the
+    bug that made this count nothing at all: the Python timestamp sat
+    where the status was expected. Only response lines count — every
+    served response logs as '<status> <path> … to <ip>' (or 'from' on
+    refusals) — and systemd's own lines, carrying no level, are skipped.
+    Paths are tallied from content responses (200/206/304). IPs are never
+    carried into the result."""
     per_day, statuses, paths = {}, {}, {}
     for line in lines:
         parts = line.split()
-        if len(parts) < 3 or len(parts[0]) < 10 or parts[0][4:5] != "-":
+        if len(parts) < 4 or len(parts[0]) < 10 or parts[0][4:5] != "-":
             continue
         day = parts[0][:10]
-        # the message starts after the 'unit[pid]:' token
-        msg_at = next((i for i, p in enumerate(parts)
-                       if p.endswith(":") and "[" in p), None)
-        if msg_at is None:
+        lvl = next((i for i, p in enumerate(parts) if p in _LOG_LEVELS), None)
+        if lvl is None:
             continue
-        msg = parts[msg_at + 1:]
+        msg = parts[lvl + 1:]
         if not msg or len(msg[0]) != 3 or not msg[0].isdigit():
             continue
         statuses[msg[0]] = statuses.get(msg[0], 0) + 1
@@ -5515,9 +5520,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .container {
       position: relative;
       z-index: 1;
-      /* Wider than the public pages (480px): those are read, this one is
-         worked in — forms, health rows, and publish summaries need room. */
-      max-width: 760px;
+      /* Back to the reading width the public pages use: once the rows
+         became facts and the forms sat beside their labels, 760px was
+         empty space rather than room. */
+      max-width: 560px;
       width: 100%;
     }
 
@@ -5774,6 +5780,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
     .switch-act { display: flex; align-items: center; gap: 0.5rem; }
     .switch-act label { color: var(--muted); cursor: pointer; }
+    button.action.tiny { padding: 0.2rem 0.55rem; font-size: 0.68rem; }
+
+    /* Charts: inline SVG, no library — the page loads no third-party code. */
+    .chart { width: 100%; height: 60px; display: block; margin-top: 0.6rem; }
+    .chart-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.62rem;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
     @media (max-width: 560px) {
       .switch-row { grid-template-columns: 1fr auto; }
     }
@@ -5860,7 +5877,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   <nav class="tabs" role="tablist">
     <button class="tab active" id="tab-publish" type="button" role="tab">Publish</button>
-    <button class="tab" id="tab-traffic" type="button" role="tab">Traffic</button>
+    <button class="tab" id="tab-analytics" type="button" role="tab">Analytics</button>
     <button class="tab" id="tab-settings" type="button" role="tab">Settings</button>
   </nav>
 
@@ -5879,7 +5896,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <!-- ══ Traffic — the journal re-read as counts. Nothing is collected for
        this: the server already logs every response, and the summary never
        carries a visitor's IP. ══ -->
-  <div id="panel-traffic" role="tabpanel" class="hidden">
+  <div id="panel-analytics" role="tabpanel" class="hidden">
     <div class="card">
       <div class="card-head">
         <span class="card-title">Traffic — last 7 days</span>
@@ -5904,10 +5921,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       </div>
       <div class="card-body">
         <div class="rows" id="load-rows"></div>
-        <p class="hint">An average, not a live meter: the CPU time the
-        server has used over the whole time it has been up. On a static
-        server a high average means something is working it — a hammering
-        bot, not popularity.</p>
+        <div id="load-chart"></div>
+        <p class="hint">The figures are averages over the whole time the
+        server has been up; the line is live, drawn from readings taken
+        while this tab is open and kept nowhere. On a static server a high
+        average means something is working it — a hammering bot, not
+        popularity.</p>
       </div>
     </div>
   </div>
@@ -5927,8 +5946,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       </div>
       <div class="card-body">
         <div class="rows" id="site-rows"></div>
-        <!-- Access reads like the rows above it — label, then value — and
-             carries the switch that changes it. -->
+        <!-- Certificate and Access each read like the rows above them —
+             label, then value — and each carries the control that acts on
+             it: renewal is its own act, distinct from naming a site. -->
+        <div class="switch-row hidden" id="cert-row">
+          <span class="k">Certificate</span>
+          <span class="switch-value"><span id="cert-state"></span>
+            <span class="switch-act">
+            <button class="action tiny hidden" id="btn-renew" type="button">Renew</button></span>
+          </span>
+        </div>
         <div class="switch-row">
           <label for="auth-switch" class="k">Access</label>
           <span class="switch-value"><span id="auth-state"></span>
@@ -5946,7 +5973,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <div class="btn-row">
           <button class="action" id="btn-outside" type="button" disabled
                   title="Loads once this site has a domain">Check connection</button>
-          <button class="action hidden" id="btn-renew" type="button">Renew certificate</button>
         </div>
       </div>
     </div>
@@ -6001,24 +6027,25 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
-  const PANELS = { publish: 'panel-publish', traffic: 'panel-traffic',
+  const PANELS = { publish: 'panel-publish', analytics: 'panel-analytics',
                    settings: 'panel-settings' };
 
   function showTab(name) {
     if (name === 'status' || name === 'config') name = 'settings';  // old bookmarks
+    if (name === 'traffic') name = 'analytics';
     if (!PANELS[name]) name = 'publish';
     for (const key of Object.keys(PANELS)) {
       $(PANELS[key]).classList.toggle('hidden', key !== name);
       $('tab-' + key).classList.toggle('active', key === name);
     }
     refresh();  // every tab renders from the same /status + /config truth
-    if (name === 'traffic') loadTraffic();
+    if (name === 'analytics') { loadTraffic(); startMeter(); } else stopMeter();
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
 
   $('tab-publish').addEventListener('click', () => showTab('publish'));
-  $('tab-traffic').addEventListener('click', () => showTab('traffic'));
+  $('tab-analytics').addEventListener('click', () => showTab('analytics'));
   $('tab-settings').addEventListener('click', () => showTab('settings'));
 
   /* ══ The page's truth: /status and /config fetched together, rendered
@@ -6097,10 +6124,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const total = (t.days || []).reduce((n, d) => n + d[1], 0);
       let h;
       if (!total) {
-        h = row('Requests', 'none in the window — or no readable journal on this host');
+        h = row('Requests', 'none in the last 7 days — or no readable journal on this host');
       } else {
-        h = row('Requests', String(total));
-        for (const [day, n] of t.days) h += row(day, String(n));
+        h = row('Requests', String(total)) +
+            barsSVG(t.days) +
+            `<div class="chart-labels"><span>${escapeHtml(t.days[0][0])}</span>` +
+            `<span>${escapeHtml(t.days[t.days.length - 1][0])}</span></div>`;
         h += row('Statuses', Object.entries(t.statuses || {})
           .map(([code, n]) => code + ' × ' + n).join(' · '), 'gap');
         h += row('Top paths', (t.top_paths || [])
@@ -6108,7 +6137,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       }
       $('traffic-rows').innerHTML = h;
       setBadge($('traffic-badge'), total ? 'badge-green' : 'badge-dim',
-               total ? total + ' requests' : 'quiet');
+               total ? total + ' requests' : 'no requests');
     } catch (e) {
       setBadge($('traffic-badge'), 'badge-red', '✕ unreachable');
       showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
@@ -6210,13 +6239,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             : 'becoming public when saved' });
       return r;
     });
-    // The access row is not printed here — it is the switch row below,
-    // which reads like these rows and carries the control that changes it.
+    // Certificate and access are not printed here — they are the rows
+    // below, which read the same but carry their own controls.
     $('site-rows').innerHTML =
       row('Domain', site.domain
         ? `<b>${escapeHtml('https://' + site.domain)}</b>`
         : '(none — answers requests no other site matches; name it on its Publish card)') +
-      scoped.filter((c) => c.key !== 'password').map(factRow).join('');
+      scoped.filter((c) => c.key !== 'password' && c.key !== 'cert')
+            .map(factRow).join('');
+    const cert = scoped.find((c) => c.key === 'cert');
+    $('cert-row').classList.toggle('hidden', !cert);
+    if (cert)
+      $('cert-state').innerHTML = cert.ok ? escapeHtml(cert.detail)
+        : `<span class="warn">! ${escapeHtml(cert.detail)}</span>`;
     // One word while all is well — the sentence-length detail belongs to
     // the amber cases, where it says what to do about it.
     const access = scoped.find((c) => c.key === 'password');
@@ -6279,14 +6314,85 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     renderLoad();
   }
 
-  // Utilization lives with the other counts, on the Traffic tab.
+  // Utilization lives with the other counts, on the Analytics tab: the two
+  // figures, then the live meter that builds while the page is open.
+  const when = (epoch) => new Date(epoch * 1000).toLocaleString(undefined,
+    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
   function renderLoad() {
     const l = ((statusData || {}).load) || {};
     $('load-rows').innerHTML =
       row('CPU', l.cpu_percent == null ? '(not available on this host)'
-                 : l.cpu_percent.toFixed(1) + '% average since the server started') +
+                 : l.cpu_percent.toFixed(1) + '% average' +
+                   (l.started_at ? ' since ' + escapeHtml(when(l.started_at)) : '')) +
       row('Memory', l.memory_mb == null ? '(not available on this host)'
                     : l.memory_mb.toFixed(1) + ' MB');
+    $('load-chart').innerHTML = cpuSeries.length < 2
+      ? '<p class="hint">Live CPU — the line starts when you open this tab.</p>'
+      : lineSVG(cpuSeries) +
+        `<div class="chart-labels"><span>${cpuSeries.length * METER_SECONDS}s ago</span>` +
+        `<span>${cpuSeries[cpuSeries.length - 1].toFixed(1)}% now</span></div>`;
+  }
+
+  /* ══ Charts — inline SVG, sized by viewBox, no library. ══ */
+
+  function lineSVG(values) {
+    const w = 300, h = 60, max = Math.max(1, ...values);
+    const pts = values.map((v, i) =>
+      `${(i / (values.length - 1) * w).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`);
+    return `<svg viewBox="0 0 ${w} ${h}" class="chart" preserveAspectRatio="none">` +
+      `<polyline points="${pts.join(' ')}" fill="none" stroke="#5A8466" ` +
+      `stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline></svg>`;
+  }
+
+  function barsSVG(pairs) {
+    const w = 300, h = 60, gap = 4;
+    const max = Math.max(1, ...pairs.map((p) => p[1]));
+    const bw = (w - gap * (pairs.length - 1)) / pairs.length;
+    return `<svg viewBox="0 0 ${w} ${h}" class="chart" preserveAspectRatio="none">` +
+      pairs.map((p, i) => {
+        const bh = Math.max(1, (p[1] / max) * h);
+        return `<rect x="${(i * (bw + gap)).toFixed(1)}" y="${(h - bh).toFixed(1)}" ` +
+               `width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="#5A8466"></rect>`;
+      }).join('') + '</svg>';
+  }
+
+  /* ══ The live meter: successive readings of the server's own cumulative
+     CPU counter, differenced here. Nothing is sampled or stored on the
+     server — the line exists only while this tab is open. ══ */
+
+  const METER_SECONDS = 3;
+  let meterTimer = null, lastSample = null, cpuSeries = [];
+
+  async function sampleLoad() {
+    try {
+      const r = await fetch('/status?t=' + encodeURIComponent(CODE));
+      if (!r.ok) return;
+      const d = await r.json();
+      const l = d.load || {};
+      if (l.cpu_ns != null && lastSample) {
+        const dt = l.sampled_at - lastSample.at;
+        if (dt > 0) {
+          cpuSeries.push(Math.max(0,
+            (l.cpu_ns - lastSample.ns) / 1_000_000_000 / dt * 100));
+          if (cpuSeries.length > 60) cpuSeries.shift();
+        }
+      }
+      if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
+      statusData = d;
+      renderLoad();
+    } catch (e) { /* a dropped tunnel simply stops the meter */ }
+  }
+
+  function startMeter() {
+    if (meterTimer) return;
+    meterTimer = setInterval(sampleLoad, METER_SECONDS * 1000);
+    sampleLoad();
+  }
+
+  function stopMeter() {
+    clearInterval(meterTimer);
+    meterTimer = null;
   }
 
   $('cfg-site-select').addEventListener('change', () => {
@@ -6602,7 +6708,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `</div></div>` +
          `<div class="btn-row" style="margin-top:0.75rem">` +
          `<button class="action dom" type="button">` +
-         `${siteData.domain ? 'Change domain' : 'Set domain'}` +
+         `Set domain` +
          `</button></div>` +
          `<div class="done hidden">` +
            `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
@@ -7382,7 +7488,8 @@ def _load_snapshot():
     renders. An average, not a live meter: cumulative CPU time over the
     time the server has been up, so a spike that has passed is diluted by
     every quiet second since. None for any figure that cannot be read."""
-    out = {"cpu_percent": None, "memory_mb": None, "uptime_s": None}
+    out = {"cpu_percent": None, "memory_mb": None, "uptime_s": None,
+           "started_at": None, "cpu_ns": None, "sampled_at": time.time()}
     if _service_is_active():
         try:
             result = subprocess.run(
@@ -7397,8 +7504,13 @@ def _load_snapshot():
                     elapsed = float(f.read().split()[0]) - int(mono) / 1_000_000
                 if elapsed > 0:
                     out["uptime_s"] = elapsed
+                    out["started_at"] = out["sampled_at"] - elapsed
                     cpu = props.get("CPUUsageNSec", "")
                     if cpu.isdigit():
+                        # The raw counter travels too: successive readings
+                        # are what let the page draw a live meter without
+                        # anything being sampled or stored server-side.
+                        out["cpu_ns"] = int(cpu)
                         out["cpu_percent"] = (int(cpu) / 1_000_000_000) / elapsed * 100
             mem = props.get("MemoryCurrent", "")
             if mem.isdigit() and int(mem) > 0:
@@ -7412,6 +7524,8 @@ def _load_snapshot():
         if elapsed > 0:
             times = os.times()
             out["uptime_s"] = elapsed
+            out["started_at"] = out["sampled_at"] - elapsed
+            out["cpu_ns"] = int((times[0] + times[1]) * 1_000_000_000)
             out["cpu_percent"] = (times[0] + times[1]) / elapsed * 100
     return out
 

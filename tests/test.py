@@ -1053,18 +1053,40 @@ def run_dispatch_tests(s):
           and "attention" in s._UI_ADMIN_PAGE
           and "cfg-password" in s._UI_ADMIN_PAGE)
     check("...and the Traffic tab reading the journal summary, renew beside the cert row",
-          "tab-traffic" in s._UI_ADMIN_PAGE and "/traffic?t=" in s._UI_ADMIN_PAGE
-          and "btn-renew" in s._UI_ADMIN_PAGE)
+          "tab-analytics" in s._UI_ADMIN_PAGE and "/traffic?t=" in s._UI_ADMIN_PAGE
+          and "btn-renew" in s._UI_ADMIN_PAGE
+          and "barsSVG" in s._UI_ADMIN_PAGE and "lineSVG" in s._UI_ADMIN_PAGE)
 
-    # Traffic: the journal re-read as counts — a pure parse, synthetic days.
+    # Traffic: the journal re-read as counts. The lines are built through
+    # the program's OWN log formatter and then wrapped in journalctl's
+    # prefix, because hand-written lines were the bug: they matched the
+    # parser's assumption rather than what Servette actually writes (the
+    # formatter's timestamp and level sit between the two), so the parse
+    # counted nothing on a real box while the suite stayed green.
+    def _journal_line(day, message):
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(logging.getLogger().handlers[0].formatter)
+        handler.setLevel(logging.INFO)
+        s.log.addHandler(handler)
+        try:
+            s.log.info("%s", message)
+        finally:
+            s.log.removeHandler(handler)
+        return f"{day}T09:00:00+0000 box servette[1]: " + buf.getvalue().strip()
+
     tlines = [
-        "2026-08-20T10:00:00+0000 box servette[1]: 200 /index.html to 1.2.3.4",
-        "2026-08-20T10:00:01+0000 box servette[1]: 304 Not Modified /style.css to 1.2.3.4",
-        "2026-08-21T09:00:00+0000 box servette[1]: 404 /nope from 5.6.7.8",
-        "2026-08-21T09:00:02+0000 box servette[1]: 200 /index.html to 5.6.7.8",
-        "2026-08-21T09:00:03+0000 box servette[1]: Config reloaded from disk",
-        "2026-08-21T09:00:04+0000 box servette[1]: Rate limited 9.9.9.9",
+        _journal_line("2026-08-20", "200 /index.html to 1.2.3.4"),
+        _journal_line("2026-08-20", "304 Not Modified /style.css to 1.2.3.4"),
+        _journal_line("2026-08-21", "404 /nope from 5.6.7.8"),
+        _journal_line("2026-08-21", "200 /index.html to 5.6.7.8"),
+        _journal_line("2026-08-21", "Config reloaded from disk"),
+        _journal_line("2026-08-21", "Rate limited 9.9.9.9"),
+        # systemd's own line: no level, and never traffic.
+        "2026-08-21T09:00:05+0000 box systemd[1]: Started servette.service.",
     ]
+    check("A real log line carries the formatter's timestamp and level",
+          "INFO" in tlines[0] and tlines[0].endswith("200 /index.html to 1.2.3.4"))
     tt = s._parse_traffic(tlines)
     check("Traffic tallies days, statuses, and top paths from response lines only",
           tt["days"] == [("2026-08-20", 2), ("2026-08-21", 2)]
@@ -1084,9 +1106,9 @@ def run_dispatch_tests(s):
           and "/sites?t=" in s._UI_ADMIN_PAGE
           and "attachCardDrag" in s._UI_ADMIN_PAGE
           and "dom-input" in s._UI_ADMIN_PAGE)
-    check("...naming and renewing stay two acts, two buttons",
-          "Change domain" in s._UI_ADMIN_PAGE and "Set domain" in s._UI_ADMIN_PAGE
-          and "Renew certificate" in s._UI_ADMIN_PAGE
+    check("...naming and renewing stay two acts, two controls",
+          "Set domain" in s._UI_ADMIN_PAGE and "btn-renew" in s._UI_ADMIN_PAGE
+          and "cert-row" in s._UI_ADMIN_PAGE
           and "get its certificate" not in s._UI_ADMIN_PAGE)
     check("...whose remove panel offers delete, deactivate, cancel — no browser popup",
           "do-delete" in s._UI_ADMIN_PAGE and "do-deactivate" in s._UI_ADMIN_PAGE
@@ -1173,8 +1195,10 @@ def run_dispatch_tests(s):
         s.config.sites[0].serve_dir = saved_dir
 
         load = s._status_data()["load"]
-        check("The status snapshot carries the utilization figures",
-              set(load) == {"cpu_percent", "memory_mb", "uptime_s"})
+        check("The status snapshot carries the utilization figures, raw counter included",
+              set(load) == {"cpu_percent", "memory_mb", "uptime_s",
+                            "started_at", "cpu_ns", "sampled_at"}
+              and load["sampled_at"] > 0)
 
         # The pull channel reports only when it exists or is half-built:
         # its absence is the normal case, not news.

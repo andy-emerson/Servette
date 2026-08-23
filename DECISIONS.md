@@ -6,6 +6,25 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## Remove deletes the server's copies; deactivate is the pause
+
+**Ruled (Human):** a site card's ✕ opens an in-card panel — never the
+browser's own popup — offering the honest three-way: **Delete** (red)
+removes the site's server copies with its config, the published tree,
+slots, and backup, because those are derived from the operator's
+originals in local storage and keeping them silently was disk nobody
+could reclaim within Servette's two surfaces; **Deactivate** (amber)
+keeps everything and stops serving — a real per-site setting
+(`active`), honored by routing on every path, spelled `set n active=no`
+in the terminal; **Cancel** (neutral). One explanatory bullet per
+action. Delete spares certificate files (tiny; re-adding the same
+domain skips re-issuance) and folders another site still points at.
+This supersedes the files-on-disk-untouched clause of the site-cards
+ruling below.
+**Rejected:** "remove, keep the files" as a third option — silent
+compounding, and a re-add collision waiting to happen; a green Cancel
+(green invites clicking — neutral is the honest no-op). *(2026-08-23)*
+
 ## The domain is granted from the Publish card
 
 **Ruled (Human):** naming a site is a Publish-card act. A domainless

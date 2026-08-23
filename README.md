@@ -148,7 +148,7 @@ Re-run `servette` any time for the interactive shell — or run any command belo
 
 ### Host several sites
 
-One machine can serve several sites, each with its own certificate and optional password — and the admin page's Publish tab is the site list: one card per site to publish, plus add, reorder (drag a card's header, or its arrows), and remove. From the shell, `config` → `add-site` adds one, `sites` lists what you have, `remove-site <n>` drops one, and `move-site <n> <to>` reorders — order matters only for sites without a domain: the first of those answers requests that match no site.
+One machine can serve several sites, each with its own certificate and optional password — and the admin page's Publish tab is the site list: one card per site to publish, plus add, reorder (drag a card's header, or its arrows), and remove. From the shell, `config` → `add-site` adds one, `sites` lists what you have, `remove-site <n>` deletes one (its copies on the server — your originals are untouched), `set <n> active=no` deactivates one without deleting anything, and `move-site <n> <to>` reorders — order matters only for sites without a domain: the first of those answers requests that match no site.
 
 Every site has an index, shown by `sites` and starting at `0` — the one `setup` created. Commands that act on a single site take that index and default to `0`: `dir [n]`, `cert [n]`, `publish [n]`, and `username [n]` / `password [n]` under `config`, plus `pull [n]` and `restore-site [n]` from the main shell. So `cert 1` requests a certificate for the second site, and `pull 2` updates the third site's content from its channel.
 

@@ -501,10 +501,11 @@
 
   /* ══ Settings forms — over the same validators the `set` command runs, so
      a value the terminal refuses the page refuses with the same sentence.
-     Deliberately absent from the page (the terminal keeps them all): domain
-     (bound up with certificate issuance), the serve folder (publishing
-     manages it), port and trusted proxy (behind-a-balancer deployments),
-     the pull channel's URL/key pair, and every lifecycle verb. ══ */
+     Deliberately absent from these forms (the terminal keeps them): the
+     serve folder (publishing manages it), port and trusted proxy
+     (behind-a-balancer deployments), the pull channel's URL/key pair, and
+     every lifecycle verb. The domain is not a form either — naming a site
+     runs its certificate issuance, on the Publish card. ══ */
 
   const HOST_FIELDS = [
     ['email', 'Email (ACME registration)',

@@ -6,6 +6,26 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The domain is granted from the Publish card
+
+**Ruled (Human):** naming a site is a Publish-card act. A domainless
+card carries a Domain field and one button that runs the same
+certificate issuance the terminal runs (`_obtain_trusted_cert`) — DNS
+pointed at the box first, the button waiting out the issuance, failure
+reporting the DNS question and leaving the self-signed fallback in
+place. Encryption stays a Settings fact: the certificate health row
+lives there, and Settings' domain row is read-only, pointing at the
+card. This supersedes the "domain stays terminal-only" clauses of the
+Config-tab and site-cards rulings below; what stays off the page now is
+only what Servette itself cannot do — registering a domain and pointing
+its DNS.
+**Why:** the cards made and published sites but could not name them —
+the one remaining door that opened from the terminal side only.
+**Rejected:** the domain field on Settings (naming belongs where sites
+are born and published); offering a rename on a card that already has a
+domain (rare, certificate-entangled — the terminal keeps it).
+*(2026-08-23)*
+
 ## The page is two tabs: Publish lands, Settings scopes
 
 **Ruled (Human):** the admin page is Publish and Settings. Publish is

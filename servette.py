@@ -5564,6 +5564,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       width: 100%;
     }
     select.cfg-site { width: auto; }
+    /* The browser's default focus halo clashes with the theme; replaced —
+       never just removed — so keyboard focus stays visible. */
+    .cfg-field input:focus, select.cfg-site:focus {
+      outline: none;
+      border-color: rgba(90,132,102,0.8);
+      box-shadow: 0 0 0 2px rgba(90,132,102,0.25);
+    }
+    button:focus-visible {
+      outline: 1px solid rgba(90,132,102,0.8);
+      outline-offset: 1px;
+    }
     .cfg-field input:disabled { opacity: 0.4; cursor: not-allowed; }
     .cfg-field label.off { opacity: 0.4; }
     .cfg-hint {

@@ -1562,10 +1562,14 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._respond(400, "Empty upload.")
 
         if path == "/service":
-            # The page may move the service toward serving and no further:
-            # start a stopped unit, never stop or disable one. A button that
-            # can darken a site with one misclick is a footgun; a button
-            # that can only bring it back is a repair tool.
+            # The page runs the service's lifecycle but never its
+            # installation: start, restart, stop. Stopping was withheld while
+            # the fear was that a misclick could darken a box with no way
+            # back — it cannot, because this page is served by the admin
+            # command's own process, not the server's, so Start survives a
+            # stopped server. `disable` stays terminal-only: removing the
+            # unit is installation, and it would take this page's own way
+            # back with it.
             if length > 512:
                 return self._respond(413, "Body too large.")
             try:
@@ -1576,7 +1580,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(422, json.dumps(
                     {"error": "no system service installed — run 'enable' in the terminal"}),
                     "application/json")
-            verb = "restart" if str(body_op) == "restart" else "start"
+            verb = str(body_op) if str(body_op) in ("start", "restart", "stop") else "start"
             try:
                 subprocess.run(["systemctl", verb, "servette"],
                                check=True, capture_output=True)
@@ -2032,13 +2036,13 @@ def _health_checks():
                             os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
         have = (ours_mb or 0) + foreign_mb
         want = (rec // (1024 * 1024)) if rec else None
-        rows.append({"key": "swap", "site": None, "ok": offer is None, "label": "Swap",
-                     "detail": ((f"{have} MB active"
-                                 + (f" (recommended: {want} MB)" if want else "")
-                                 if have else "not needed at this host's memory")
-                                if offer is None else
-                                (f"{have} MB active, below the {offer} MB recommendation — 'enable' offers a resize"
-                                 if have else f"none — 'enable' offers a {offer} MB swapfile"))})
+        rows.append({"key": "swap", "site": None, "ok": offer is None, "label": "Swap file",
+                     "detail": ((f"{have} MB active, meeting the {want} MB recommendation"
+                                 if want else f"{have} MB active")
+                                if offer is None and have
+                                else "not needed at this host's memory" if offer is None
+                                else (f"{have} MB active, below the {offer} MB recommendation — 'enable' offers a resize"
+                                      if have else f"none — 'enable' offers a {offer} MB swapfile"))})
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""

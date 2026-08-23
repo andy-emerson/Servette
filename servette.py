@@ -6017,6 +6017,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <div class="btn-row" style="margin-top:0.6rem">
           <button class="action" id="btn-start" type="button">Start</button>
           <button class="action" id="btn-restart" type="button">Restart</button>
+          <button class="action danger" id="btn-stop" type="button">Stop</button>
+        </div>
+        <div class="confirm hidden" id="stop-confirm">
+          <div class="split"></div>
+          <p class="hint">Stopping takes <b>every site on this server</b>
+          offline until it is started again. This page keeps working — it is
+          served by the terminal command, not by the server.</p>
+          <div class="btn-row" style="margin-top:0.75rem">
+            <button class="action danger" id="btn-stop-yes" type="button">Stop the server</button>
+            <button class="action" id="btn-stop-no" type="button">Cancel</button>
+          </div>
         </div>
       </div>
     </div>
@@ -6185,6 +6196,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   $('btn-start').addEventListener('click', () => serviceOp($('btn-start'), 'start'));
   $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
+  // Every site on the box goes dark, so this one asks first — in the page's
+  // own voice, the way a site card asks before deleting.
+  $('btn-stop').addEventListener('click', () =>
+    $('stop-confirm').classList.toggle('hidden'));
+  $('btn-stop-no').addEventListener('click', () =>
+    $('stop-confirm').classList.add('hidden'));
+  $('btn-stop-yes').addEventListener('click', async () => {
+    $('stop-confirm').classList.add('hidden');
+    await serviceOp($('btn-stop'), 'stop');
+  });
 
   $('btn-traffic-refresh').addEventListener('click', loadTraffic);
   $('traffic-window').addEventListener('change', loadTraffic);
@@ -6247,6 +6268,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     $('btn-start').disabled = !!d.running;
     $('btn-start').title = d.running ? 'The server is already running'
                                      : 'Start the installed system service';
+    $('btn-stop').disabled = !d.running;
+    $('btn-stop').title = d.running
+      ? 'Take every site on this server offline until it is started again'
+      : 'Already stopped';
     $('btn-restart').disabled = !d.running;
     $('btn-restart').title = d.running
       ? 'Stop and start the service — applies a port change, or clears a wedged process'
@@ -6312,7 +6337,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   async function sampleLoad() {
     try {
       const r = await fetch('/status?t=' + encodeURIComponent(CODE));
-      if (!r.ok) return;
+      if (!r.ok) { stopMeter(); return; }
       const d = await r.json();
       const l = d.load || {};
       if (l.cpu_ns != null && lastSample) {
@@ -6326,7 +6351,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
       statusData = d;
       renderLoad();
-    } catch (e) { /* a dropped tunnel simply stops the meter */ }
+    } catch (e) {
+      // Nothing is listening any more — the admin command ended, or the
+      // tunnel closed. Keep polling and every attempt prints another
+      // 'channel N: open failed' in the operator's terminal.
+      stopMeter();
+      showError($('traffic-error'), TUNNEL_DOWN);
+    }
   }
 
   function startMeter() {
@@ -7073,10 +7104,14 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._respond(400, "Empty upload.")
 
         if path == "/service":
-            # The page may move the service toward serving and no further:
-            # start a stopped unit, never stop or disable one. A button that
-            # can darken a site with one misclick is a footgun; a button
-            # that can only bring it back is a repair tool.
+            # The page runs the service's lifecycle but never its
+            # installation: start, restart, stop. Stopping was withheld while
+            # the fear was that a misclick could darken a box with no way
+            # back — it cannot, because this page is served by the admin
+            # command's own process, not the server's, so Start survives a
+            # stopped server. `disable` stays terminal-only: removing the
+            # unit is installation, and it would take this page's own way
+            # back with it.
             if length > 512:
                 return self._respond(413, "Body too large.")
             try:
@@ -7087,7 +7122,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(422, json.dumps(
                     {"error": "no system service installed — run 'enable' in the terminal"}),
                     "application/json")
-            verb = "restart" if str(body_op) == "restart" else "start"
+            verb = str(body_op) if str(body_op) in ("start", "restart", "stop") else "start"
             try:
                 subprocess.run(["systemctl", verb, "servette"],
                                check=True, capture_output=True)
@@ -7506,13 +7541,13 @@ def _health_checks():
                             os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
         have = (ours_mb or 0) + foreign_mb
         want = (rec // (1024 * 1024)) if rec else None
-        rows.append({"key": "swap", "site": None, "ok": offer is None, "label": "Swap",
-                     "detail": ((f"{have} MB active"
-                                 + (f" (recommended: {want} MB)" if want else "")
-                                 if have else "not needed at this host's memory")
-                                if offer is None else
-                                (f"{have} MB active, below the {offer} MB recommendation — 'enable' offers a resize"
-                                 if have else f"none — 'enable' offers a {offer} MB swapfile"))})
+        rows.append({"key": "swap", "site": None, "ok": offer is None, "label": "Swap file",
+                     "detail": ((f"{have} MB active, meeting the {want} MB recommendation"
+                                 if want else f"{have} MB active")
+                                if offer is None and have
+                                else "not needed at this host's memory" if offer is None
+                                else (f"{have} MB active, below the {offer} MB recommendation — 'enable' offers a resize"
+                                      if have else f"none — 'enable' offers a {offer} MB swapfile"))})
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""

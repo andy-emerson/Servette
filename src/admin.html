@@ -541,6 +541,17 @@
         <div class="btn-row" style="margin-top:0.6rem">
           <button class="action" id="btn-start" type="button">Start</button>
           <button class="action" id="btn-restart" type="button">Restart</button>
+          <button class="action danger" id="btn-stop" type="button">Stop</button>
+        </div>
+        <div class="confirm hidden" id="stop-confirm">
+          <div class="split"></div>
+          <p class="hint">Stopping takes <b>every site on this server</b>
+          offline until it is started again. This page keeps working — it is
+          served by the terminal command, not by the server.</p>
+          <div class="btn-row" style="margin-top:0.75rem">
+            <button class="action danger" id="btn-stop-yes" type="button">Stop the server</button>
+            <button class="action" id="btn-stop-no" type="button">Cancel</button>
+          </div>
         </div>
       </div>
     </div>
@@ -709,6 +720,16 @@
 
   $('btn-start').addEventListener('click', () => serviceOp($('btn-start'), 'start'));
   $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
+  // Every site on the box goes dark, so this one asks first — in the page's
+  // own voice, the way a site card asks before deleting.
+  $('btn-stop').addEventListener('click', () =>
+    $('stop-confirm').classList.toggle('hidden'));
+  $('btn-stop-no').addEventListener('click', () =>
+    $('stop-confirm').classList.add('hidden'));
+  $('btn-stop-yes').addEventListener('click', async () => {
+    $('stop-confirm').classList.add('hidden');
+    await serviceOp($('btn-stop'), 'stop');
+  });
 
   $('btn-traffic-refresh').addEventListener('click', loadTraffic);
   $('traffic-window').addEventListener('change', loadTraffic);
@@ -771,6 +792,10 @@
     $('btn-start').disabled = !!d.running;
     $('btn-start').title = d.running ? 'The server is already running'
                                      : 'Start the installed system service';
+    $('btn-stop').disabled = !d.running;
+    $('btn-stop').title = d.running
+      ? 'Take every site on this server offline until it is started again'
+      : 'Already stopped';
     $('btn-restart').disabled = !d.running;
     $('btn-restart').title = d.running
       ? 'Stop and start the service — applies a port change, or clears a wedged process'
@@ -836,7 +861,7 @@
   async function sampleLoad() {
     try {
       const r = await fetch('/status?t=' + encodeURIComponent(CODE));
-      if (!r.ok) return;
+      if (!r.ok) { stopMeter(); return; }
       const d = await r.json();
       const l = d.load || {};
       if (l.cpu_ns != null && lastSample) {
@@ -850,7 +875,13 @@
       if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
       statusData = d;
       renderLoad();
-    } catch (e) { /* a dropped tunnel simply stops the meter */ }
+    } catch (e) {
+      // Nothing is listening any more — the admin command ended, or the
+      // tunnel closed. Keep polling and every attempt prints another
+      // 'channel N: open failed' in the operator's terminal.
+      stopMeter();
+      showError($('traffic-error'), TUNNEL_DOWN);
+    }
   }
 
   function startMeter() {

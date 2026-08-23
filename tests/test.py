@@ -1259,10 +1259,10 @@ def run_dispatch_tests(s):
               st == 422 and b"enable" in body)
         s._service_file_exists = saved_unit
         handler_src = inspect.getsource(s._UIHandler)
-        check("...and can only move it toward serving — no stop, no disable",
+        check("...running the lifecycle but never the installation",
               '"systemctl", verb' in handler_src
-              and '"restart" if' in handler_src and 'else "start"' in handler_src
-              and '"stop"' not in handler_src and '"disable"' not in handler_src)
+              and '("start", "restart", "stop")' in handler_src
+              and '"disable"' not in handler_src and '"enable"' not in handler_src)
 
         saved_cfg_user = s.config.sites[0].username
         st, _ = ui_req("POST", f"/config?t={ui_code}",

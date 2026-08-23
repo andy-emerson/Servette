@@ -292,9 +292,25 @@
     .split { border-top: 1px solid var(--border); margin: 1rem 0; }
 
     /* The public/private switch — a literal toggle: the knob's position and
-       a green tint say private (on). */
-    .switch-row { display: flex; align-items: center; gap: 0.6rem; }
-    .switch-row label { font-size: 0.75rem; color: var(--text); cursor: pointer; }
+       a green tint say private (on). Laid out like the fields below it:
+       label left, control right, ending at the same right edge. */
+    .switch-row {
+      display: grid;
+      grid-template-columns: 9rem 1fr;
+      column-gap: 0.75rem;
+      align-items: center;
+    }
+    .switch-row label {
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .switch-row input.switch { justify-self: end; }
+    @media (max-width: 560px) {
+      .switch-row { grid-template-columns: 1fr auto; }
+    }
     input.switch {
       appearance: none;
       -webkit-appearance: none;
@@ -437,11 +453,11 @@
         from the public internet, which this page cannot have.</p>
         <div class="split"></div>
         <div class="switch-row">
-          <input class="switch" type="checkbox" id="auth-switch">
           <label for="auth-switch">Private site</label>
+          <input class="switch" type="checkbox" id="auth-switch">
         </div>
         <div id="cfg-site-fields"></div>
-        <div class="btn-row" style="margin-top:0.9rem">
+        <div class="btn-row hidden" id="site-save-row" style="margin-top:0.9rem">
           <button class="action primary" id="btn-save-site" type="button">Save</button>
         </div>
         <p class="hint" id="auth-hint"></p>
@@ -727,6 +743,9 @@
             site.has_password ? 'New password (blank = keep the current one)' : 'Password',
             '', { type: 'password',
                   hint: 'Stored only as a hash on your server. Spaces count; nothing is trimmed.' });
+    // Nothing to save on a public site that is staying public — but turning
+    // one public IS a change, so the button survives that pending state.
+    $('site-save-row').classList.toggle('hidden', !(on || pendingAuth));
     $('auth-hint').textContent = on
       ? (site.has_password
           ? 'The site is private — visitors sign in with this login.'

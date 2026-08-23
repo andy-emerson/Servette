@@ -26,8 +26,9 @@ punchy and failing — the Human's words). *(2026-08-23)*
 ## Sites are public or private, not password-less or protected
 
 **Ruled (Human):** access is a property of the site, phrased that way
-on every surface: the Settings toggle reads "Make this site
-private/public," the Access health row answers "public — anyone can
+on every surface: Settings carries a literal switch — Private site,
+on or off, the login fields existing only while it is on — the Access
+health row answers "public — anyone can
 view it" as a green fact, `sites` prints public/private, and the
 production-issues list stops counting a public site against readiness.
 The login fields exist only for a site that is private or becoming
@@ -72,10 +73,12 @@ only what Servette itself cannot do — registering a domain and pointing
 its DNS.
 **Why:** the cards made and published sites but could not name them —
 the one remaining door that opened from the terminal side only.
+**Amended same day:** the field lives on every card, prefilled — a
+domain is changeable anytime, not only at birth; re-submitting the
+current name deliberately re-runs issuance (the repair path), and only
+names other sites hold are refused.
 **Rejected:** the domain field on Settings (naming belongs where sites
-are born and published); offering a rename on a card that already has a
-domain (rare, certificate-entangled — the terminal keeps it).
-*(2026-08-23)*
+are born and published). *(2026-08-23)*
 
 ## The page is two tabs: Publish lands, Settings scopes
 
@@ -91,8 +94,8 @@ Both render from one paired `/status` + `/config` fetch.
 already scoped per site — the same facts rendered twice, one of them
 unboundedly.
 **Accepted trade:** the at-a-glance health check moves one click from
-page-open; softened by an amber dot on the Settings tab whenever any
-row needs review.
+page-open; softened by an amber count pill on the Settings tab saying
+how many rows need review.
 **Rejected:** scoping host facts under the site dropdown (a site
 selector cannot scope the box); a third Status tab kept for the glance
 alone (two renderings of the same rows, drifting). *(2026-08-22)*

@@ -550,7 +550,7 @@
     // ── This site: identity, its health rows, then the auth form. ──
     let sh = row('Domain', site.domain
       ? `<b>${escapeHtml('https://' + site.domain)}</b>`
-      : '(none — answers requests no other site matches; granted in the terminal: <b>config</b>)');
+      : '(none — answers requests no other site matches; name it on its Publish card)');
     sh += row('Folder', escapeHtml(site.dir || '(not set)'));
     sh += siteChecks.map((c, i) => healthRow(c, i === 0)).join('');
     $('site-rows').innerHTML = sh;
@@ -764,8 +764,9 @@
   // One op door for add, remove, and move: the server runs the same cores
   // the terminal's add-site / remove-site / move-site run, then the cards
   // re-render from fresh /config truth.
-  async function siteOp(body) {
+  async function siteOp(body, errEl) {
     clearError($('sites-error'));
+    if (errEl) clearError(errEl);
     try {
       const r = await fetch('/sites?t=' + encodeURIComponent(CODE), {
         method: 'POST', body: JSON.stringify(body),
@@ -775,9 +776,13 @@
       if (!r.ok || data.result !== 'ok')
         throw new Error(data.error || 'HTTP ' + r.status);
       await refresh();
+      return true;
     } catch (e) {
-      showError($('sites-error'), (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
-      renderSiteCards();  // snap the cards back to the last loaded truth
+      showError(errEl || $('sites-error'),
+                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+      if (body.op === 'move')
+        renderSiteCards();  // snap the dragged DOM back to the loaded truth
+      return false;
     }
   }
 
@@ -875,12 +880,21 @@
         `<p class="hint summary">` +
           (siteData.domain
             ? `Publishes to <b>${escapeHtml('https://' + siteData.domain)}</b>.`
-            : `No domain yet — this site answers requests no other site matches. ` +
-              `A domain and its certificate are set in the terminal (<b>config</b>).`) +
+            : `No domain yet — this site answers requests no other site matches.`) +
           ` The folder to drop is the one holding the site's <b>index.html</b>.</p>` +
         `<div class="btn-row" style="margin-top:0.75rem">` +
           `<button class="action primary pub" type="button" disabled>Publish</button>` +
         `</div>` +
+        (siteData.domain ? '' :
+          `<div class="split"></div>` +
+          `<div class="cfg-field"><label>Domain</label>` +
+          `<input class="dom-input" type="text" placeholder="example.com">` +
+          `<div class="cfg-hint">Point the domain's DNS at this server first ` +
+          `(an A record to this box's IP). Setting it requests the certificate — ` +
+          `issuing one is what binds a name to a site.</div></div>` +
+          `<div class="btn-row" style="margin-top:0.75rem">` +
+          `<button class="action dom" type="button">Set domain — get its certificate</button>` +
+          `</div>`) +
         `<div class="done hidden">` +
           `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
           `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
@@ -1028,7 +1042,24 @@
       }
       if (!confirm('Remove ' + label + ' from this server? Its config is discarded; ' +
                    'its files on disk are not touched.')) return;
-      siteOp({ op: 'remove', site: cardIndex(card) });
+      siteOp({ op: 'remove', site: cardIndex(card) }, errEl);
+    });
+
+    // Naming the site: the act runs the certificate issuance, so the button
+    // waits it out honestly instead of pretending it was instant.
+    const domBtn = q('.dom');
+    if (domBtn) domBtn.addEventListener('click', async () => {
+      const domain = q('.dom-input').value.trim().toLowerCase();
+      clearError(errEl);
+      if (!domain) return showError(errEl, 'Type the domain first.');
+      domBtn.disabled = true;
+      const oldText = domBtn.textContent;
+      domBtn.textContent = 'requesting certificate…';
+      const ok = await siteOp({ op: 'domain', site: cardIndex(card), domain }, errEl);
+      if (!ok) {  // on success refresh() replaced this card entirely
+        domBtn.disabled = false;
+        domBtn.textContent = oldText;
+      }
     });
     attachCardDrag(q('.card-head'), card);
     return card;

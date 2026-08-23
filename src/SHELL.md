@@ -1425,6 +1425,32 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                                int(body.get("to"))))
                     except (TypeError, ValueError):
                         err = "site indexes must be whole numbers"
+                elif op == "domain":
+                    # Naming is granting: a domain is assigned by issuing its
+                    # certificate — the same _obtain_trusted_cert the terminal
+                    # runs, which persists and reloads on success. DNS must
+                    # already point here; the page waits out the issuance
+                    # (seconds), and the terminal narrates the detail.
+                    try:
+                        idx = int(body.get("site"))
+                    except (TypeError, ValueError):
+                        idx = -1
+                    domain = str(body.get("domain") or "").strip().lower()
+                    if not (0 <= idx < len(config.sites)):
+                        err = f"no site {idx}"
+                    elif not domain:
+                        err = "a domain is needed"
+                    elif _domain_in_use(domain):
+                        err = f"{domain} is already used by another site on this box"
+                    else:
+                        target = config.sites[idx]
+                        _obtain_trusted_cert(domain, target)
+                        # site.domain is assigned only on the success path
+                        # inside the issuance, so this is the honest verdict.
+                        err = ("" if target.domain == domain else
+                               "certificate issuance failed — is the domain's "
+                               "DNS pointing at this server? The terminal has "
+                               "the detail")
                 else:
                     err = "unknown op"
             except PermissionError:

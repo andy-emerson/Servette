@@ -1051,10 +1051,11 @@ def run_dispatch_tests(s):
           "site-rows" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
           and "settings-dot" in s._UI_ADMIN_PAGE
           and "cfg-password" in s._UI_ADMIN_PAGE)
-    check("...and the Publish tab as site cards, add/move/remove wired to /sites",
+    check("...and the Publish tab as site cards, add/move/remove/domain wired to /sites",
           "site-cards" in s._UI_ADMIN_PAGE and "btn-add-site" in s._UI_ADMIN_PAGE
           and "/sites?t=" in s._UI_ADMIN_PAGE
-          and "attachCardDrag" in s._UI_ADMIN_PAGE)
+          and "attachCardDrag" in s._UI_ADMIN_PAGE
+          and "dom-input" in s._UI_ADMIN_PAGE)
     check("...as a protection toggle plus host basics — the advanced knobs stay in the terminal",
           "btn-auth-toggle" in s._UI_ADMIN_PAGE
           and "has_password" in s._UI_ADMIN_PAGE
@@ -1245,6 +1246,32 @@ def run_dispatch_tests(s):
             st, _ = ui_req("POST", f"/upload?t={ui_code}&site=99",
                            body=_ui_tar([("x.html", "x")]))
             check("An upload naming a site off the list is rejected", st == 422)
+
+            # op=domain runs the terminal's issuance core; stubbed here, since
+            # only a real box can talk to a certificate authority. The core
+            # assigns site.domain only on its success path, which is exactly
+            # what the handler judges by.
+            saved_obtain = s._obtain_trusted_cert
+            s._obtain_trusted_cert = (
+                lambda domain, site_obj: setattr(site_obj, "domain", domain))
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "domain", "site": n0,
+                                            "domain": "card.example"}).encode())
+            check("op=domain grants a name through the issuance core",
+                  st == 200 and s.config.sites[n0].domain == "card.example")
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "domain", "site": 0,
+                                               "domain": "card.example"}).encode())
+            check("...refuses a domain another site already holds",
+                  st == 422 and b"already used" in body)
+            s._obtain_trusted_cert = lambda domain, site_obj: None
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "domain", "site": n0,
+                                               "domain": "fails.example"}).encode())
+            check("...and reports a failed issuance instead of pretending",
+                  st == 422 and b"DNS" in body
+                  and s.config.sites[n0].domain == "card.example")
+            s._obtain_trusted_cert = saved_obtain
 
             saved_sites_list = s.config.sites
             s.config.sites = [s.config.sites[0]]

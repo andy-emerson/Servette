@@ -1084,6 +1084,10 @@ def run_dispatch_tests(s):
           and "/sites?t=" in s._UI_ADMIN_PAGE
           and "attachCardDrag" in s._UI_ADMIN_PAGE
           and "dom-input" in s._UI_ADMIN_PAGE)
+    check("...naming and renewing stay two acts, two buttons",
+          "Change domain" in s._UI_ADMIN_PAGE and "Set domain" in s._UI_ADMIN_PAGE
+          and "Renew certificate" in s._UI_ADMIN_PAGE
+          and "get its certificate" not in s._UI_ADMIN_PAGE)
     check("...whose remove panel offers delete, deactivate, cancel — no browser popup",
           "do-delete" in s._UI_ADMIN_PAGE and "do-deactivate" in s._UI_ADMIN_PAGE
           and "do-reactivate" in s._UI_ADMIN_PAGE and "do-cancel" in s._UI_ADMIN_PAGE

@@ -5608,6 +5608,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
     .badge-dim   { background: rgba(255,255,255,0.04); color: var(--muted); border: 1px solid var(--border); }
+    .badge-warn  { background: rgba(251,191,36,0.12); color: var(--amber); border: 1px solid rgba(251,191,36,0.4); }
+    .badge.needs { cursor: pointer; }
 
     button.action {
       font-family: inherit;
@@ -6059,9 +6061,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       authDesired = null;  // fresh truth from the server resets the toggle
       const sel = $('cfg-site-select');
       const keep = parseInt(sel.value || '0', 10) || 0;
+      // Sites by name, in the order the Publish cards show them — the index
+      // is Servette's bookkeeping, not something to make the operator read.
       sel.innerHTML = (cfgData.sites || []).map((s) =>
-        `<option value="${s.index}">site ${s.index}` +
-        `${s.domain ? ' — ' + escapeHtml(s.domain) : ''}</option>`).join('');
+        `<option value="${s.index}">` +
+        `${s.domain ? escapeHtml(s.domain) : '(no domain)'}</option>`).join('');
       if (keep < (cfgData.sites || []).length) sel.value = String(keep);
       // A one-site server needs no site picker — it appears with a second site.
       sel.classList.toggle('hidden', (cfgData.sites || []).length < 2);
@@ -6177,25 +6181,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     // The one-glance signal, in words: what needs review, on which site,
     // and a link that opens the place it is fixed.
-    const needs = checks.filter((c) => !c.ok);
+    // A site's trouble is worn by its own card on the Publish tab, where
+    // the card names the site already. What has no card — the box itself —
+    // says its piece here.
+    const needs = checks.filter((c) => !c.ok && c.site === null);
     $('attention').classList.toggle('hidden', !needs.length);
-    $('attention').innerHTML = needs.map((c) => {
-      const where = c.site === null ? 'This server'
-        : (((cfgData.sites || [])[c.site] || {}).domain || 'site ' + c.site);
-      const cut = c.label.indexOf(' · ');
-      const what = cut < 0 ? c.label : c.label.slice(cut + 3);
-      return `! <b>${escapeHtml(where)}</b> · ${escapeHtml(what)} — ` +
-             `${escapeHtml(c.detail)} ` +
-             `<a href="#settings" data-site="${c.site === null ? '' : c.site}">` +
-             `open Settings →</a>`;
-    }).join('<br>');
+    $('attention').innerHTML = needs.map((c) =>
+      `! <b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
+      `<a href="#settings">open Settings →</a>`).join('<br>');
     for (const a of $('attention').querySelectorAll('a'))
-      a.addEventListener('click', (e) => {
-        e.preventDefault();
-        if (a.dataset.site !== '') $('cfg-site-select').value = a.dataset.site;
-        authDesired = null;
-        showTab('settings');
-      });
+      a.addEventListener('click', (e) => { e.preventDefault(); showTab('settings'); });
 
     // ── This site: facts first — Domain from config, the rest the health
     // rows worn plainly (the 'Site n ·' prefix dropped: the card already
@@ -6237,9 +6232,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     $('btn-outside').title = outsideDomain
       ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
       : 'Needs a domain — a site without one has no public name to check';
-    const certRow = siteChecks.find((c) => c.key === 'cert');
-    $('btn-renew').classList.toggle('hidden',
-      !(site.domain && certRow && !certRow.ok));
+    // Renewal is its own act, separate from naming: it re-runs issuance for
+    // the name the site already has. Visible whenever there is a name to
+    // renew — a button that appears only in trouble is a button nobody can
+    // find when they want it.
+    $('btn-renew').classList.toggle('hidden', !site.domain);
 
     // Public or private is a property of the site, not a security verdict:
     // public sites are most sites. Private means a login; the fields exist
@@ -6553,6 +6550,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   function buildSiteCard(siteData, idx, total) {
     const label = siteData.domain || 'site ' + idx;
     const inactive = siteData.active === false;
+    const siteNeeds = (((statusData || {}).checks) || [])
+      .filter((c) => c.site === idx && !c.ok);
     const card = document.createElement('div');
     card.className = 'card site-card' + (inactive ? ' inactive' : '');
 
@@ -6603,7 +6602,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `</div></div>` +
          `<div class="btn-row" style="margin-top:0.75rem">` +
          `<button class="action dom" type="button">` +
-         `${siteData.domain ? 'Change domain — get its certificate' : 'Set domain — get its certificate'}` +
+         `${siteData.domain ? 'Change domain' : 'Set domain'}` +
          `</button></div>` +
          `<div class="done hidden">` +
            `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
@@ -6619,6 +6618,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           `<button class="ca up" type="button" title="Move up">↑</button>` +
           `<button class="ca down" type="button" title="Move down">↓</button>` +
           `<button class="ca del" type="button" title="Remove or deactivate">✕</button>` +
+          (siteNeeds.length
+            ? `<span class="badge badge-warn needs" title="${escapeHtml(
+                 siteNeeds.map((c) => c.detail).join(' · '))}">! ${
+                 siteNeeds.length === 1 ? escapeHtml(siteNeeds[0].label.split(' · ').pop())
+                                        : siteNeeds.length + ' to review'}</span>`
+            : '') +
           `<span class="badge badge-dim">${inactive ? 'deactivated' : 'no folder chosen'}</span>` +
         `</span>` +
       `</div>` +
@@ -6650,6 +6655,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
       }
     }
+
+    const needsTag = q('.needs');
+    if (needsTag) needsTag.addEventListener('click', () => {
+      $('cfg-site-select').value = String(cardIndex(card));
+      authDesired = null;
+      showTab('settings');
+    });
 
     q('.del').addEventListener('click', () => {
       clearError(errEl);

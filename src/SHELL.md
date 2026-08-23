@@ -2066,17 +2066,22 @@ def _health_checks():
         rec = _swap_recommendation(mem_kb, committed_kb,
                                    _cache_headroom_mb(config.cache_size_mb))
         ours_mb, foreign_mb = _swap_sizes()
-        offer = _swap_offer(rec // (1024 * 1024) if rec else None,
-                            os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
-        have = (ours_mb or 0) + foreign_mb
-        want = (rec // (1024 * 1024)) if rec else None
-        rows.append({"key": "swap", "site": None, "ok": offer is None, "label": "Swap file",
-                     "detail": ((f"{have} MB active, meeting the {want} MB recommendation"
-                                 if want else f"{have} MB active")
-                                if offer is None and have
-                                else "not needed at this host's memory" if offer is None
-                                else (f"{have} MB active, below the {offer} MB recommendation — 'enable' offers a resize"
-                                      if have else f"none — 'enable' offers a {offer} MB swapfile"))})
+        rec_mb = (rec // (1024 * 1024)) if rec else None
+        offer  = _swap_offer(rec_mb, os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
+        have   = (ours_mb or 0) + foreign_mb
+        # The recommendation is named by the field that sets it, so this row
+        # states the size and speaks up only when it falls short. `offer` is
+        # a (description, hint) pair for the terminal's prompt — never a
+        # number, which is what it used to be interpolated as here.
+        if offer is None:
+            detail = f"{have} MB active" if have else "not needed at this host's memory"
+        elif have:
+            detail = (f"{have} MB active, below the {rec_mb} MB recommendation"
+                      if rec_mb else f"{have} MB active")
+        else:
+            detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
+        rows.append({"key": "swap", "site": None, "ok": offer is None,
+                     "label": "Swap file", "detail": detail})
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""

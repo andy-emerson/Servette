@@ -6028,12 +6028,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <span class="card-title">Server status</span>
       </div>
       <div class="card-body">
-        <div class="rows" id="host-rows"></div>
-        <div class="btn-row" style="margin-top:0.6rem">
-          <button class="action" id="btn-start" type="button">Start</button>
-          <button class="action" id="btn-restart" type="button">Restart</button>
-          <button class="action danger" id="btn-stop" type="button">Stop</button>
+        <div class="switch-row">
+          <span class="k">Status</span>
+          <span class="switch-value"><span id="status-state"></span>
+            <span class="switch-act">
+            <button class="action tiny" id="btn-restart" type="button">Restart</button>
+            <button class="action tiny" id="btn-power" type="button">Stop</button>
+            </span>
+          </span>
         </div>
+        <div class="rows" id="host-rows"></div>
         <div class="confirm hidden" id="stop-confirm">
           <div class="split"></div>
           <p class="hint">Stopping takes <b>every site on this server</b>
@@ -6054,14 +6058,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       </div>
       <div class="card-body">
         <div id="cfg-host-fields"></div>
-        <div class="switch-row" id="swap-row" style="margin-top:0.9rem">
-          <span class="k">Swap file (MB)</span>
-          <span class="switch-value"><input type="text" id="swap-mb">
-            <span class="switch-act">
-            <button class="action tiny" id="btn-swap" type="button">Resize</button></span>
-          </span>
-        </div>
-        <div class="cfg-hint" id="swap-hint"></div>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-save-host" type="button">Save</button>
         </div>
@@ -6229,41 +6225,20 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     b.disabled = false;
   }
 
-  $('btn-swap').addEventListener('click', async () => {
-    const b = $('btn-swap');
-    const mb = parseInt($('swap-mb').value.trim(), 10);
-    clearError($('cfg-host-error'));
-    if (!(mb > 0)) return showError($('cfg-host-error'), 'Type a size in MB.');
-    b.disabled = true;
-    const old = b.textContent;
-    b.textContent = 'resizing…';
-    try {
-      const r = await fetch('/swap?t=' + encodeURIComponent(CODE),
-                            { method: 'POST', body: JSON.stringify({ mb }) });
-      let data = {};
-      try { data = await r.json(); } catch { data = {}; }
-      if (!r.ok || data.result !== 'ok')
-        throw new Error(data.error || 'HTTP ' + r.status);
-      await refresh();
-    } catch (e) {
-      showError($('cfg-host-error'),
-                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
-    }
-    b.disabled = false;
-    b.textContent = old;
-  });
-
-  $('btn-start').addEventListener('click', () => serviceOp($('btn-start'), 'start'));
   $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
+  // One control for the two states: starting needs no ceremony, stopping
+  // takes every site offline and asks first.
+  $('btn-power').addEventListener('click', () => {
+    if ((statusData || {}).running) $('stop-confirm').classList.toggle('hidden');
+    else serviceOp($('btn-power'), 'start');
+  });
   // Every site on the box goes dark, so this one asks first — in the page's
   // own voice, the way a site card asks before deleting.
-  $('btn-stop').addEventListener('click', () =>
-    $('stop-confirm').classList.toggle('hidden'));
   $('btn-stop-no').addEventListener('click', () =>
     $('stop-confirm').classList.add('hidden'));
   $('btn-stop-yes').addEventListener('click', async () => {
     $('stop-confirm').classList.add('hidden');
-    await serviceOp($('btn-stop'), 'stop');
+    await serviceOp($('btn-power'), 'stop');
   });
 
   $('btn-traffic-refresh').addEventListener('click', loadTraffic);
@@ -6315,10 +6290,22 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     for (const a of $('attention').querySelectorAll('a'))
       a.addEventListener('click', (e) => { e.preventDefault(); showTab('server'); });
 
+    $('status-state').innerHTML = d.running
+      ? '<span class="dot"></span>running'
+      : '<span class="warn">stopped</span>';
+    // Two controls, not three: restart is meaningless on a stopped server,
+    // and the third is whichever of stop/start the state calls for.
+    $('btn-restart').disabled = !d.running;
+    $('btn-restart').title = d.running
+      ? 'Stop and start the service — applies a port change, or clears a wedged process'
+      : 'Nothing to restart — the server is stopped';
+    $('btn-power').textContent = d.running ? 'Stop' : 'Start';
+    $('btn-power').classList.toggle('danger', !!d.running);
+    $('btn-power').title = d.running
+      ? 'Take every site on this server offline until it is started again'
+      : 'Start the installed system service';
+
     $('host-rows').innerHTML =
-      row('Status', d.running
-        ? '<span class="dot"></span>running'
-        : '<span class="warn">stopped</span>') +
       row('Version', 'v' + (d.version || '?') +
         (latestVersion
           ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
@@ -6328,31 +6315,24 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     // Present always, dim when there is nothing to start — the same rule
     // every other button follows.
-    $('btn-start').disabled = !!d.running;
-    $('btn-start').title = d.running ? 'The server is already running'
-                                     : 'Start the installed system service';
-    $('btn-stop').disabled = !d.running;
-    $('btn-stop').title = d.running
-      ? 'Take every site on this server offline until it is started again'
-      : 'Already stopped';
-    $('btn-restart').disabled = !d.running;
-    $('btn-restart').title = d.running
-      ? 'Stop and start the service — applies a port change, or clears a wedged process'
-      : 'Nothing to restart — the server is stopped';
-
-    $('cfg-host-fields').innerHTML =
-      HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
-
     // Swap is a size the operator types — the terminal has always asked for
-    // it that way, and the page asks the same question.
+    // it that way — so it is a field among fields, saved by the same button.
     const sw = d.swap || {};
-    $('swap-row').classList.toggle('hidden', sw.recommended_mb == null && sw.active_mb == null);
-    if (document.activeElement !== $('swap-mb'))
-      $('swap-mb').value = sw.active_mb != null ? String(sw.active_mb) : '';
-    $('swap-hint').textContent =
-      'Disk that absorbs a memory spike, so a burst past free RAM cannot take ' +
-      'the host down' +
-      (sw.recommended_mb ? '. Recommended here: ' + sw.recommended_mb + ' MB.' : '.');
+    const swapField = (sw.active_mb == null && sw.recommended_mb == null) ? '' :
+      field('swap_mb', 'Swap file (MB)',
+            sw.active_mb != null ? sw.active_mb : '',
+            { hint: 'Disk that absorbs a memory spike, so a burst past free RAM ' +
+                    'cannot take the host down.' +
+                    (sw.recommended_mb
+                      ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
+                      : '') });
+    const typingInSwap = document.activeElement
+      && document.activeElement.id === 'cfg-swap_mb';
+    if (!typingInSwap)
+      $('cfg-host-fields').innerHTML =
+        HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('')
+        + swapField;
+
     renderLoad();
   }
 
@@ -6478,10 +6458,48 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
   }
 
-  $('btn-save-host').addEventListener('click', () => {
+  $('btn-save-host').addEventListener('click', async () => {
     const values = {};
     for (const [k] of HOST_FIELDS) values[k] = $('cfg-' + k).value.trim();
-    saveSettings(values, 0, $('cfg-host-badge'), $('cfg-host-error'));
+    const badge = $('cfg-host-badge'), errEl = $('cfg-host-error');
+    clearError(errEl);
+
+    // The swapfile is the one setting whose save does filesystem work, so it
+    // runs only when its number actually changed — pressing Save on an
+    // untouched field must never swapoff anything.
+    const field = $('cfg-swap_mb');
+    const want = field ? parseInt(field.value.trim(), 10) : NaN;
+    const active = ((statusData || {}).swap || {}).active_mb;
+    const resize = field && want > 0 && want !== active;
+    if (field && field.value.trim() && !(want > 0))
+      return showError(errEl, 'Swap file size must be a number of megabytes.');
+
+    setBadge(badge, 'badge-dim', 'saving…');
+    try {
+      const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
+        method: 'POST', body: JSON.stringify({ site: 0, values }),
+      });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'saved')
+        throw new Error(data.error || 'HTTP ' + r.status);
+
+      if (resize) {
+        setBadge(badge, 'badge-dim', 'resizing the swapfile…');
+        const rs = await fetch('/swap?t=' + encodeURIComponent(CODE), {
+          method: 'POST', body: JSON.stringify({ mb: want }),
+        });
+        let sd = {};
+        try { sd = await rs.json(); } catch { sd = {}; }
+        if (!rs.ok || sd.result !== 'ok')
+          throw new Error(sd.error || 'HTTP ' + rs.status);
+      }
+      setBadge(badge, 'badge-green', '✓ saved');
+      refresh();
+    } catch (e) {
+      setBadge(badge, 'badge-red', '✕ not saved');
+      showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+    }
   });
 
   /* ══ Publish — the pub tool's bundle builder with the signing removed.
@@ -6626,6 +6644,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const wrap = $('site-cards');
     wrap.innerHTML = '';
     const sites = (cfgData && cfgData.sites) || [];
+    // One site is a site; the plural is earned.
+    $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
     sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx, sites.length)));
   }
 
@@ -7657,17 +7677,22 @@ def _health_checks():
         rec = _swap_recommendation(mem_kb, committed_kb,
                                    _cache_headroom_mb(config.cache_size_mb))
         ours_mb, foreign_mb = _swap_sizes()
-        offer = _swap_offer(rec // (1024 * 1024) if rec else None,
-                            os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
-        have = (ours_mb or 0) + foreign_mb
-        want = (rec // (1024 * 1024)) if rec else None
-        rows.append({"key": "swap", "site": None, "ok": offer is None, "label": "Swap file",
-                     "detail": ((f"{have} MB active, meeting the {want} MB recommendation"
-                                 if want else f"{have} MB active")
-                                if offer is None and have
-                                else "not needed at this host's memory" if offer is None
-                                else (f"{have} MB active, below the {offer} MB recommendation — 'enable' offers a resize"
-                                      if have else f"none — 'enable' offers a {offer} MB swapfile"))})
+        rec_mb = (rec // (1024 * 1024)) if rec else None
+        offer  = _swap_offer(rec_mb, os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
+        have   = (ours_mb or 0) + foreign_mb
+        # The recommendation is named by the field that sets it, so this row
+        # states the size and speaks up only when it falls short. `offer` is
+        # a (description, hint) pair for the terminal's prompt — never a
+        # number, which is what it used to be interpolated as here.
+        if offer is None:
+            detail = f"{have} MB active" if have else "not needed at this host's memory"
+        elif have:
+            detail = (f"{have} MB active, below the {rec_mb} MB recommendation"
+                      if rec_mb else f"{have} MB active")
+        else:
+            detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
+        rows.append({"key": "swap", "site": None, "ok": offer is None,
+                     "label": "Swap file", "detail": detail})
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""

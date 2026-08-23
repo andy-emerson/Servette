@@ -12,6 +12,7 @@ import contextlib
 import gzip
 import http.client
 import http.server
+import inspect
 import io
 import json
 import logging
@@ -1242,6 +1243,20 @@ def run_dispatch_tests(s):
               st == 200 and b"window_days" in body and b"top_paths" in body)
         st, _ = ui_req("GET", "/traffic")
         check("GET /traffic without the code is refused", st == 403)
+
+        # The page may move the service toward serving and no further.
+        st, _ = ui_req("POST", "/service", body=b"{}")
+        check("The service endpoint is code-gated like every other", st == 403)
+        saved_unit = s._service_file_exists
+        s._service_file_exists = lambda: False
+        st, body = ui_req("POST", f"/service?t={ui_code}", body=b"{}")
+        check("...and refuses to start a service that was never installed",
+              st == 422 and b"enable" in body)
+        s._service_file_exists = saved_unit
+        handler_src = inspect.getsource(s._UIHandler)
+        check("...and can only move it toward serving — no stop, no disable",
+              '"systemctl", "start"' in handler_src
+              and '"stop"' not in handler_src and '"disable"' not in handler_src)
 
         saved_cfg_user = s.config.sites[0].username
         st, _ = ui_req("POST", f"/config?t={ui_code}",

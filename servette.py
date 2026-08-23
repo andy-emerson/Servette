@@ -5616,21 +5616,26 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .badge-warn  { background: rgba(251,191,36,0.12); color: var(--amber); border: 1px solid rgba(251,191,36,0.4); }
     .badge.needs { cursor: pointer; }
 
+    /* Every button reads the same way: available is Servette green, hover
+       brightens it, unavailable is dim and says so by being unclickable. */
     button.action {
       font-family: inherit;
       font-size: 0.75rem;
       color: var(--text);
-      background: rgba(255,255,255,0.05);
-      border: 1px solid var(--border);
+      border: 1px solid rgba(90,132,102,0.6);
+      background: rgba(90,132,102,0.15);
       border-radius: 4px;
       padding: 0.5rem 0.9rem;
       cursor: pointer;
       letter-spacing: 0.03em;
     }
-    button.action:hover:not(:disabled) { border-color: #3a3a3a; background: rgba(255,255,255,0.08); }
-    button.action:disabled { color: var(--muted); cursor: not-allowed; }
-    button.action.primary { border-color: rgba(90,132,102,0.6); background: rgba(90,132,102,0.15); }
-    button.action.primary:hover:not(:disabled) { background: rgba(90,132,102,0.25); }
+    button.action:hover:not(:disabled) { background: rgba(90,132,102,0.28); }
+    button.action:disabled {
+      color: var(--muted);
+      border-color: var(--border);
+      background: rgba(255,255,255,0.03);
+      cursor: not-allowed;
+    }
 
     .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 
@@ -5694,7 +5699,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       line-height: 1;
     }
     button.ca:hover { color: var(--text); background: rgba(255,255,255,0.07); }
-    button.ca.del:hover { color: var(--red); }
+    button.ca.del:hover { color: var(--red); background: rgba(248,113,113,0.12); }
+    button.ca svg { display: block; }
     .add-zone { display: flex; justify-content: center; margin-bottom: 1.5rem; }
 
     /* The remove panel's warning ladder: red deletes, amber pauses,
@@ -5921,7 +5927,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <div id="panel-analytics" role="tabpanel" class="hidden">
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Traffic</span>
+        <span class="card-title">Traffic — all sites</span>
         <select class="cfg-site" id="traffic-window" style="margin:0">
           <option value="1">last 24 hours</option>
           <option value="7" selected>last 7 days</option>
@@ -5933,9 +5939,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-traffic-refresh" type="button">Refresh</button>
         </div>
-        <p class="hint">Counts read from the server's own log. Visitor IP
-        addresses stay in the raw log (the terminal's <b>log</b>), never
-        here.</p>
+        <p class="hint">Counts read from the server's own log, for every
+        site this server answers for — the log records the path, not which
+        site it belonged to. Visitor IP addresses stay in the raw log (the
+        terminal's <b>log</b>), never here.</p>
         <p class="error hidden" id="traffic-error"></p>
       </div>
     </div>
@@ -5962,11 +5969,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
        health rows, then the forms. ══ -->
   <div id="panel-settings" role="tabpanel" class="hidden">
 
-    <select class="cfg-site hidden" id="cfg-site-select"></select>
-
     <div class="card">
       <div class="card-head">
-        <span class="card-title">This site</span>
+        <span class="head-left"><span class="card-title">This site</span>
+        <select class="cfg-site hidden" id="cfg-site-select" style="margin:0"></select></span>
         <span class="badge badge-dim" id="cfg-site-badge">loading…</span>
       </div>
       <div class="card-body">
@@ -5978,7 +5984,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           <span class="k">Certificate</span>
           <span class="switch-value"><span id="cert-state"></span>
             <span class="switch-act">
-            <button class="action tiny hidden" id="btn-renew" type="button">Renew</button></span>
+            <button class="action tiny" id="btn-renew" type="button">Renew</button></span>
           </span>
         </div>
         <div class="switch-row">
@@ -6009,11 +6015,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       </div>
       <div class="card-body">
         <div class="rows" id="host-rows"></div>
+        <div class="btn-row hidden" id="start-row" style="margin-top:0.6rem">
+          <button class="action" id="btn-start" type="button">Start the server</button>
+        </div>
         <div class="split"></div>
         <div id="cfg-host-fields"></div>
         <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action primary" id="btn-save-host" type="button">Save host settings</button>
-          <button class="action" id="btn-refresh" type="button">Refresh</button>
+          <button class="action primary" id="btn-save-host" type="button">Save</button>
         </div>
         <p class="error hidden" id="cfg-host-error"></p>
       </div>
@@ -6080,7 +6088,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // value, plainly — and only a row that needs attention wears a mark.
   const factRow = (c) => row(escapeHtml(c.label),
     c.ok ? escapeHtml(c.detail)
-         : `<span class="warn">! ${escapeHtml(c.detail)}</span>`);
+         : `<span class="warn">${escapeHtml(c.detail)}</span>`);
 
   // The connection check: opens the selected site's own check page — a
   // reserved path no content shadows — so the report answers from the
@@ -6132,7 +6140,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
   }
 
-  $('btn-refresh').addEventListener('click', refresh);
 
   /* ══ Traffic — the journal re-read as counts, fetched on entry. ══ */
 
@@ -6166,6 +6173,25 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         : 'Could not read traffic: ' + e.message);
     }
   }
+
+  $('btn-start').addEventListener('click', async () => {
+    const b = $('btn-start');
+    b.disabled = true;
+    clearError($('cfg-host-error'));
+    try {
+      const r = await fetch('/service?t=' + encodeURIComponent(CODE),
+                            { method: 'POST', body: '{}' });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'ok')
+        throw new Error(data.error || 'HTTP ' + r.status);
+      await refresh();
+    } catch (e) {
+      showError($('cfg-host-error'),
+                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+    }
+    b.disabled = false;
+  });
 
   $('btn-traffic-refresh').addEventListener('click', loadTraffic);
   $('traffic-window').addEventListener('change', loadTraffic);
@@ -6239,7 +6265,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const needs = checks.filter((c) => !c.ok && c.site === null);
     $('attention').classList.toggle('hidden', !needs.length);
     $('attention').innerHTML = needs.map((c) =>
-      `! <b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
+      `<b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
       `<a href="#settings">open Settings →</a>`).join('<br>');
     for (const a of $('attention').querySelectorAll('a'))
       a.addEventListener('click', (e) => { e.preventDefault(); showTab('settings'); });
@@ -6274,7 +6300,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     $('cert-row').classList.toggle('hidden', !cert);
     if (cert)
       $('cert-state').innerHTML = cert.ok ? escapeHtml(cert.detail)
-        : `<span class="warn">! ${escapeHtml(cert.detail)}</span>`;
+        : `<span class="warn">${escapeHtml(cert.detail)}</span>`;
     // Amber once the certificate is inside the window the watchdog itself
     // renews in (under 30 days) — the point where pressing it does
     // something the server was about to do anyway.
@@ -6285,7 +6311,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const access = scoped.find((c) => c.key === 'password');
     $('auth-state').innerHTML = (!access || access.ok)
       ? (on ? 'private' : 'public')
-      : `<span class="warn">! ${escapeHtml(access.detail)}</span>`;
+      : `<span class="warn">${escapeHtml(access.detail)}</span>`;
     const siteAttention = scoped.filter((c) => !c.ok).length;
     setBadge($('cfg-site-badge'), siteAttention ? 'badge-red' : 'badge-green',
              siteAttention ? siteAttention + ' to review' : '✓ healthy');
@@ -6296,10 +6322,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
       : 'Needs a domain — a site without one has no public name to check';
     // Renewal is its own act, separate from naming: it re-runs issuance for
-    // the name the site already has. Visible whenever there is a name to
-    // renew — a button that appears only in trouble is a button nobody can
-    // find when they want it.
-    $('btn-renew').classList.toggle('hidden', !site.domain);
+    // the name the site already has. Always present, so it can be found;
+    // dim when there is no name to renew.
+    $('btn-renew').disabled = !site.domain;
+    $('btn-renew').title = site.domain
+      ? 'Request a fresh certificate for ' + site.domain
+      : 'Set a domain first — a self-signed certificate has nothing to renew';
 
     // Public or private is a property of the site, not a security verdict:
     // public sites are most sites. Private means a login; the fields exist
@@ -6338,6 +6366,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
              hostAttention ? hostAttention + ' to review'
                            : (d.running ? '● running' : '○ stopped'));
 
+    $('start-row').classList.toggle('hidden', !!d.running);
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
     renderLoad();
@@ -6583,6 +6612,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const isHiddenPath = (path) =>
     path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
 
+  // What a site's unhealthy row is called on its card — the fault named,
+  // rather than an exclamation mark standing in for the name.
+  const NEEDS_WORD = {
+    cert:     'Needs certificate',
+    password: 'Needs password',
+    dir:      'Folder missing',
+    channel:  'Channel unfinished',
+  };
+
   const cardIndex = (el) =>
     [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
 
@@ -6715,7 +6753,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `and visitors get the plain not-found answer until it is reactivated.</p>` +
          `<div class="btn-row" style="margin-top:0.75rem">` +
          `<button class="action do-reactivate" type="button">Reactivate</button></div>`)
-      : (`<div class="dropstrip">⤓&nbsp; drop this site's folder here, or <a href="#">choose it</a></div>` +
+      : (`<div class="dropstrip">drop this site's folder here, or <a href="#">choose it</a></div>` +
          `<input type="file" webkitdirectory multiple class="hidden">` +
          `<p class="hint summary">` +
            (siteData.domain
@@ -6752,15 +6790,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         `<span class="head-left"><span class="handle" title="Drag to reorder">⠿</span>` +
         `<span class="card-title">${escapeHtml(label)}</span></span>` +
         `<span class="head-right">` +
-          `<button class="ca del" type="button" title="Remove or deactivate">✕</button>` +
           (siteNeeds.length
             ? `<span class="badge badge-warn needs" title="${escapeHtml(
-                 siteNeeds.map((c) => c.detail).join(' · '))}">! ${
-                 siteNeeds.length === 1 ? escapeHtml(siteNeeds[0].label.split(' · ').pop())
-                                        : siteNeeds.length + ' to review'}</span>`
+                 siteNeeds.map((c) => c.detail).join(' · '))}">${
+                 siteNeeds.length === 1
+                   ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
+                   : siteNeeds.length + ' to review'}</span>`
             : '') +
           `<span class="badge badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
+          `<button class="ca del" type="button" title="Remove or deactivate">` +
+            `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" ` +
+            `stroke="currentColor" stroke-width="1.3"><path d="M3 4h10M6.5 4V2.5h3V4` +
+            `M5 4l0.6 9.5h4.8L11 4"></path></svg></button>` +
         `</span>` +
       `</div>` +
       `<div class="card-body">` + bodyHtml + confirmHtml +
@@ -7055,7 +7097,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path not in ("/upload", "/config", "/sites"):
+        if path not in ("/upload", "/config", "/sites", "/service"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
             return self._respond(403, "Not logged in.")
@@ -7065,6 +7107,26 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             length = 0
         if length <= 0:
             return self._respond(400, "Empty upload.")
+
+        if path == "/service":
+            # The page may move the service toward serving and no further:
+            # start a stopped unit, never stop or disable one. A button that
+            # can darken a site with one misclick is a footgun; a button
+            # that can only bring it back is a repair tool.
+            if length > 512:
+                return self._respond(413, "Body too large.")
+            self.rfile.read(length)
+            if not _service_file_exists():
+                return self._respond(422, json.dumps(
+                    {"error": "no system service installed — run 'enable' in the terminal"}),
+                    "application/json")
+            try:
+                subprocess.run(["systemctl", "start", "servette"],
+                               check=True, capture_output=True)
+            except (OSError, subprocess.CalledProcessError) as e:
+                return self._respond(500, json.dumps(
+                    {"error": f"could not start the service ({e})"}), "application/json")
+            return self._respond(200, json.dumps({"result": "ok"}), "application/json")
 
         if path == "/sites":
             # The page's card row: add, remove, move — the same cores the
@@ -7456,7 +7518,7 @@ def _health_checks():
     if not _IS_MACOS:
         armed = os.path.exists(NETWATCH_PATH + ".timer")
         rows.append({"key": "netwatch", "site": None, "ok": armed, "label": "Network watchdog",
-                     "detail": "armed (checks every minute)" if armed
+                     "detail": "armed (checks once per minute)" if armed
                      else "not installed — 'enable' provisions it"})
         mem_kb, _avail_kb, committed_kb = _meminfo()
         rec = _swap_recommendation(mem_kb, committed_kb,
@@ -7487,7 +7549,7 @@ def _health_checks():
                      "days": days,
                      "detail": (f"{days} days remaining (auto-renew enabled)" if cert_ok
                                 else "expired" if (days is not None and days <= 0)
-                                else "self-signed — a domain earns a trusted one" if days is not None
+                                else "self-signed" if days is not None
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored

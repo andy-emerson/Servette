@@ -1548,7 +1548,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path not in ("/upload", "/config", "/sites"):
+        if path not in ("/upload", "/config", "/sites", "/service"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
             return self._respond(403, "Not logged in.")
@@ -1558,6 +1558,26 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             length = 0
         if length <= 0:
             return self._respond(400, "Empty upload.")
+
+        if path == "/service":
+            # The page may move the service toward serving and no further:
+            # start a stopped unit, never stop or disable one. A button that
+            # can darken a site with one misclick is a footgun; a button
+            # that can only bring it back is a repair tool.
+            if length > 512:
+                return self._respond(413, "Body too large.")
+            self.rfile.read(length)
+            if not _service_file_exists():
+                return self._respond(422, json.dumps(
+                    {"error": "no system service installed — run 'enable' in the terminal"}),
+                    "application/json")
+            try:
+                subprocess.run(["systemctl", "start", "servette"],
+                               check=True, capture_output=True)
+            except (OSError, subprocess.CalledProcessError) as e:
+                return self._respond(500, json.dumps(
+                    {"error": f"could not start the service ({e})"}), "application/json")
+            return self._respond(200, json.dumps({"result": "ok"}), "application/json")
 
         if path == "/sites":
             # The page's card row: add, remove, move — the same cores the
@@ -1986,7 +2006,7 @@ def _health_checks():
     if not _IS_MACOS:
         armed = os.path.exists(NETWATCH_PATH + ".timer")
         rows.append({"key": "netwatch", "site": None, "ok": armed, "label": "Network watchdog",
-                     "detail": "armed (checks every minute)" if armed
+                     "detail": "armed (checks once per minute)" if armed
                      else "not installed — 'enable' provisions it"})
         mem_kb, _avail_kb, committed_kb = _meminfo()
         rec = _swap_recommendation(mem_kb, committed_kb,
@@ -2017,7 +2037,7 @@ def _health_checks():
                      "days": days,
                      "detail": (f"{days} days remaining (auto-renew enabled)" if cert_ok
                                 else "expired" if (days is not None and days <= 0)
-                                else "self-signed — a domain earns a trusted one" if days is not None
+                                else "self-signed" if days is not None
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored

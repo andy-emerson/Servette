@@ -5564,8 +5564,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
     .hint b { color: var(--text); font-weight: 500; }
     .warn  { color: var(--amber); }
-    .good  { color: var(--green); }
-    .bad   { color: var(--red); }
     .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
 
     .note {
@@ -5635,14 +5633,25 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     button.action.pause:hover:not(:disabled) { background: rgba(251,191,36,0.18); }
     .site-card.inactive .card-title { opacity: 0.55; }
 
-    .cfg-field { margin-top: 0.7rem; }
+    /* Wide page, side-by-side forms: label left, field right, the hint
+       under the field. Narrow screens stack them again. */
+    .cfg-field {
+      margin-top: 0.7rem;
+      display: grid;
+      grid-template-columns: 9rem 1fr;
+      column-gap: 0.75rem;
+      align-items: center;
+    }
     .cfg-field label {
-      display: block;
       font-size: 0.7rem;
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--muted);
-      margin-bottom: 0.25rem;
+    }
+    .cfg-field .cfg-hint { grid-column: 2; }
+    @media (max-width: 560px) {
+      .cfg-field { grid-template-columns: 1fr; row-gap: 0.25rem; }
+      .cfg-field .cfg-hint { grid-column: 1; }
     }
     .cfg-field input, select.cfg-site {
       font-family: inherit;
@@ -5790,10 +5799,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           <button class="action" id="btn-outside" type="button" disabled
                   title="Loads once this site has a domain">Run the connection check</button>
         </div>
-        <p class="hint">The rows are what the machine knows about itself; the
-        connection check opens this site's own check page in a new tab,
-        reporting from the public internet's side of the wire — the vantage
-        this page, living on your SSH tunnel, cannot have.</p>
+        <p class="hint">Opens this site's check page in a new tab — the view
+        from the public internet, which this page cannot have.</p>
         <div class="split"></div>
         <div class="switch-row">
           <input class="switch" type="checkbox" id="auth-switch">
@@ -5881,11 +5888,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const row = (k, v, cls) =>
     `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
 
-  const healthRow = (c, gap) =>
-    `<div class="${gap ? 'gap' : ''}">` +
-    (c.ok ? '<span class="good">✓</span>' : '<span class="warn">!</span>') +
-    ` <b>${escapeHtml(c.label)}</b> — ` +
-    `<span class="${c.ok ? '' : 'warn'}">${escapeHtml(c.detail)}</span></div>`;
+  // A fact is not a victory: rows read like the shell's status — label and
+  // value, plainly — and only a row that needs attention wears a mark.
+  const factRow = (c) => row(escapeHtml(c.label),
+    c.ok ? escapeHtml(c.detail)
+         : `<span class="warn">! ${escapeHtml(c.detail)}</span>`);
 
   // The connection check: opens the selected site's own check page — a
   // reserved path no content shadows — so the report answers from the
@@ -5988,29 +5995,29 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     $('settings-dot').textContent = attention;
     $('settings-dot').classList.toggle('hidden', !attention);
 
-    // ── This site: identity, its health rows, then the auth form. ──
-    let sh = row('Domain', site.domain
-      ? `<b>${escapeHtml('https://' + site.domain)}</b>`
-      : '(none — answers requests no other site matches; name it on its Publish card)');
-    sh += row('Folder', escapeHtml(site.dir || '(not set)'));
-    // The card already scopes to one site, so the rows drop the 'Site n ·'
-    // prefix the flat status feed carries for multi-site tellability. And
-    // while the private switch holds an unsaved intent, the Access row says
-    // so instead of asserting the old truth as if nothing were happening.
+    // ── This site: facts first — Domain from config, the rest the health
+    // rows worn plainly (the 'Site n ·' prefix dropped: the card already
+    // scopes) — then the access form. While the private switch holds an
+    // unsaved intent, the Access row says so instead of asserting the old
+    // truth, and the badge counts what the rows actually show.
     const pendingAuth = authDesired !== null && authDesired !== !!site.username;
-    sh += siteChecks.map((c, i) => {
+    const scoped = siteChecks.map((c) => {
       const cut = c.label.indexOf(' · ');
-      let scoped = cut < 0 ? c
+      let r = cut < 0 ? c
         : Object.assign({}, c, { label: c.label.slice(cut + 3) });
       if (pendingAuth && c.key === 'password')
-        scoped = Object.assign({}, scoped, { ok: false,
+        r = Object.assign({}, r, { ok: false,
           detail: authDesired
             ? 'becoming private — save a username and password below'
             : 'becoming public when saved' });
-      return healthRow(scoped, i === 0);
-    }).join('');
-    $('site-rows').innerHTML = sh;
-    const siteAttention = siteChecks.filter((c) => !c.ok).length;
+      return r;
+    });
+    $('site-rows').innerHTML =
+      row('Domain', site.domain
+        ? `<b>${escapeHtml('https://' + site.domain)}</b>`
+        : '(none — answers requests no other site matches; name it on its Publish card)') +
+      scoped.map(factRow).join('');
+    const siteAttention = scoped.filter((c) => !c.ok).length;
     setBadge($('cfg-site-badge'), siteAttention ? 'badge-red' : 'badge-green',
              siteAttention ? siteAttention + ' to review' : '✓ healthy');
 
@@ -6046,7 +6053,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       ? 'system service (survives reboots)'
       : d.mode === 'session' ? 'session only' : 'stopped');
     hh += row('Version', 'v' + (d.version || '?'));
-    hh += hostChecks.map((c, i) => healthRow(c, i === 0)).join('');
+    hh += hostChecks.map(factRow).join('');
     $('host-rows').innerHTML = hh;
     const hostAttention = hostChecks.filter((c) => !c.ok).length;
     setBadge($('cfg-host-badge'),

@@ -5652,8 +5652,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     button.action:hover:not(:disabled) { background: rgba(90,132,102,0.28); }
     button.action:disabled {
       color: var(--muted);
-      border-color: var(--border);
-      background: rgba(255,255,255,0.03);
+      border-color: rgba(90,132,102,0.25);
+      background: rgba(90,132,102,0.05);
       cursor: not-allowed;
     }
 
@@ -5665,6 +5665,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
     .rows .gap { margin-top: 0.55rem; }
     .rows b { color: var(--text); font-weight: 500; }
+    .rows .ok { color: #5A8466; }
+    .rows .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #5A8466;
+      margin-right: 0.45rem;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+    }
 
     .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
     .hint b { color: var(--text); font-weight: 500; }
@@ -5957,13 +5969,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         </select>
       </div>
       <div class="card-body">
+        <div id="traffic-chart"></div>
+        <p class="hint">Every request this server answered, split by what
+        happened to it. Counted across every site the server answers for,
+        not one site alone; visitor IP addresses stay in the server log,
+        readable in the terminal.</p>
         <div class="rows" id="traffic-rows"></div>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-traffic-refresh" type="button">Refresh</button>
         </div>
-        <p class="hint">Counted across every site this server answers for,
-        not one site alone. Visitor IP addresses stay in the server log,
-        readable in the terminal.</p>
         <p class="error hidden" id="traffic-error"></p>
       </div>
     </div>
@@ -5992,7 +6006,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       <div class="card-head">
         <span class="head-left"><span class="card-title">This site</span>
         <select class="cfg-site hidden" id="cfg-site-select" style="margin:0"></select></span>
-        <span class="badge badge-dim" id="cfg-site-badge">loading…</span>
+        <span class="badge badge-dim hidden" id="cfg-site-badge"></span>
       </div>
       <div class="card-body">
         <div class="rows" id="site-rows"></div>
@@ -6030,7 +6044,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     <div class="card">
       <div class="card-head">
         <span class="card-title">This server</span>
-        <span class="badge badge-dim" id="cfg-host-badge">loading…</span>
+        <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
       </div>
       <div class="card-body">
         <div class="rows" id="host-rows"></div>
@@ -6172,21 +6186,26 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const total = t.total || 0;
       // Status codes are the server's vocabulary, not the reader's: each
       // count is named for what actually happened.
-      const NAMED = [['Served', ['200', '206']], ['Cached', ['304']],
-                     ['Not found', ['404']], ['Refused', ['403', '405']],
-                     ['Sign-in needed', ['401']], ['Rate limited', ['429']]];
+      const NAMED = [['Files sent', ['200', '206']],
+                     ['Already cached', ['304']],
+                     ['Nothing there', ['404']],
+                     ['Refused', ['403', '405']],
+                     ['Sign-in needed', ['401']],
+                     ['Rate limited', ['429']]];
       const named = NAMED
         .map(([name, codes]) => [name, codes.reduce(
           (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
         .filter(([, n]) => n > 0);
+      $('traffic-chart').innerHTML = total
+        ? chart(lineSVG(t.days.map((d) => d[1])),
+                t.days.length ? t.days[0][0] : '',
+                t.days.length ? t.days[t.days.length - 1][0] : '',
+                Math.max(...t.days.map((d) => d[1])))
+        : '';
       $('traffic-rows').innerHTML = !total
         ? row('Requests', 'none in this window — or no readable journal on this host')
         : row('Requests', String(total)) +
-          named.map(([name, n]) => row(name, String(n))).join('') +
-          chart(lineSVG(t.days.map((d) => d[1])),
-                t.days.length ? t.days[0][0] : '',
-                t.days.length ? t.days[t.days.length - 1][0] : '',
-                Math.max(...t.days.map((d) => d[1])));
+          named.map(([name, n]) => row(name, String(n))).join('');
     } catch (e) {
       showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
         : 'Could not read traffic: ' + e.message);
@@ -6303,13 +6322,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       if (pendingAuth && c.key === 'password')
         r = Object.assign({}, r, { ok: false,
           detail: authDesired
-            ? 'becoming private — save a username and password below'
+            ? 'username and password required'
             : 'becoming public when saved' });
       return r;
     });
     // Certificate and access are not printed here — they are the rows
     // below, which read the same but carry their own controls.
+    const siteTrouble = scoped.filter((c) => !c.ok).length;
     $('site-rows').innerHTML =
+      row('Status', siteTrouble
+        ? `<span class="warn">${siteTrouble} to review</span>`
+        : '<span class="ok">✓</span> healthy') +
       row('Domain', site.domain
         ? `<b>${escapeHtml('https://' + site.domain)}</b>`
         : '(none — answers requests no other site matches; name it on its Publish card)') +
@@ -6332,8 +6355,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       ? (on ? 'private' : 'public')
       : `<span class="warn">${escapeHtml(access.detail)}</span>`;
     const siteAttention = scoped.filter((c) => !c.ok).length;
-    setBadge($('cfg-site-badge'), siteAttention ? 'badge-red' : 'badge-green',
-             siteAttention ? siteAttention + ' to review' : '✓ healthy');
 
     outsideDomain = site.domain || '';
     $('btn-outside').disabled = !outsideDomain;
@@ -6355,19 +6376,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     $('auth-action').textContent = on ? 'Make public' : 'Make private';
     $('cfg-site-fields').innerHTML = !on ? '' :
       field('username', 'Username', site.username,
-            { hint: 'What visitors type to open the site.' }) +
+            { hint: 'Case-sensitive. Any characters except a colon.' }) +
       field('password',
             site.has_password ? 'New password (blank = keep the current one)' : 'Password',
             '', { type: 'password',
-                  hint: 'Stored only as a hash on your server. Spaces count; nothing is trimmed.' });
+                  hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
     // Nothing to save on a public site that is staying public — but turning
     // one public IS a change, so the button survives that pending state.
     $('site-save-row').classList.toggle('hidden', !(on || pendingAuth));
     // Only the states that ask something of the reader speak; the settled
     // ones are already said by the Access row itself.
     $('auth-hint').textContent = on
-      ? (site.has_password ? ''
-         : 'Choose a username and a password, then save — the site becomes private.')
+      ? ''
       : (site.username
          ? 'Saving makes the site public: the login is removed and the stored password deleted.'
          : '');
@@ -6376,14 +6396,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // No Mode row here: the service health row below is labeled Mode and
     // says the same three things, with the amber when it is stopped.
     const d = statusData || {};
-    let hh = row('Version', 'v' + (d.version || '?'));
+    let hh = row('Status', d.running
+      ? '<span class="dot"></span>running'
+      : '<span class="warn">stopped</span>') +
+      row('Version', 'v' + (d.version || '?'));
     hh += hostChecks.map(factRow).join('');
     $('host-rows').innerHTML = hh;
-    const hostAttention = hostChecks.filter((c) => !c.ok).length;
-    setBadge($('cfg-host-badge'),
-             hostAttention ? 'badge-red' : (d.running ? 'badge-green' : 'badge-red'),
-             hostAttention ? hostAttention + ' to review'
-                           : (d.running ? '● running' : '○ stopped'));
+
 
     // Present always, dim when there is nothing to start — the same rule
     // every other button follows.
@@ -6616,7 +6635,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  function setBadge(el, cls, text) { el.className = 'badge ' + cls; el.textContent = text; }
+  function setBadge(el, cls, text) {
+    el.className = 'badge ' + cls;
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
   function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
   function clearError(el) { el.classList.add('hidden'); }
 
@@ -6792,11 +6815,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          ` value="${escapeHtml(siteData.domain || '')}">` +
          `<div class="cfg-hint">` +
          (siteData.domain
-           ? `Changing it requests a certificate for the new name — point ` +
-             `that domain's DNS at this server first.`
+           ? `Setting a domain requests its certificate.`
            : `Point the domain's DNS at this server first (an A record to ` +
-             `this box's IP). Setting it requests the certificate — issuing ` +
-             `one is what binds a name to a site.`) +
+             `this box's IP). Setting it requests the certificate.`) +
          `</div></div>` +
          `<div class="btn-row" style="margin-top:0.75rem">` +
          `<button class="action dom" type="button">` +
@@ -6835,8 +6856,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const q = (sel) => card.querySelector(sel);
     const badge = q('.badge'), errEl = q('.error');
     let files = null, folderName = '';
-    const mark = (cls, text) => { setBadge(badge, cls, text);
-                                  badge.classList.remove('hidden'); };
+    const mark = (cls, text) => setBadge(badge, cls, text);
 
     // Deactivation rides the same settings write as everything else — it is
     // a setting ('set n active=no' is the terminal spelling).

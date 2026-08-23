@@ -6,6 +6,38 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The front door is a login: link and passcode, printed apart
+
+**Ruled (Human):** the terminal prints the stable link and this run's
+passcode as two labeled lines; the bare bookmarkable URL answers a
+login page in the admin tool's own dress — dark, the logo, the
+tagline — whose one Passcode field submits the same `t` every request
+carries. A bookmark is the expected door: it holds the link, never the
+secret. With the flow itself teaching that the page rides the SSH
+tunnel, the admin tagline drops the mechanism and states only the
+identity: **Server administration**.
+**Rejected:** the code-bearing `?t=` URL as the *printed* door (two
+artifacts behaving differently — a magic link and a bare bookmark —
+where one flow teaches itself); the unstyled pairing form (browser-
+default white was the one off-brand surface in the family); "Admin —
+your server, through your SSH tunnel" as the tagline (trying to be
+punchy and failing — the Human's words). *(2026-08-23)*
+
+## Sites are public or private, not password-less or protected
+
+**Ruled (Human):** access is a property of the site, phrased that way
+on every surface: the Settings toggle reads "Make this site
+private/public," the Access health row answers "public — anyone can
+view it" as a green fact, `sites` prints public/private, and the
+production-issues list stops counting a public site against readiness.
+The login fields exist only for a site that is private or becoming
+private. What every surface flags instead is the genuine defect: a
+username with nothing stored to check against, which locks every
+visitor out — caught by the page and the terminal with one judgment.
+**Why:** most sites are public on purpose; phrasing the absence of a
+password as a warning taught operators their healthy site was broken.
+*(2026-08-23)*
+
 ## Remove deletes the server's copies; deactivate is the pause
 
 **Ruled (Human):** a site card's ✕ opens an in-card panel — never the

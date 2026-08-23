@@ -50,7 +50,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 | Feature | What it does |
 |---|---|
 | HTTPS by default | Your site is encrypted, browsers show the padlock, and plain-HTTP requests are redirected up to HTTPS |
-| Basic Auth | Optional username and password to restrict access |
+| Public or private sites | A site is public by default; make it private with a username and password, and visitors sign in to view it |
 | Rate limiting | Stops bots from hammering the server; makes password guessing impractical |
 | Instant content updates | New content is served the moment it lands — files are read fresh from disk on every request, so a `pull` needs no restart and drops no connections |
 | Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |

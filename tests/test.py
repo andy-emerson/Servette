@@ -1035,9 +1035,15 @@ def run_dispatch_tests(s):
     check("...carries the Sites, Server, and Statistics tabs, reading the status feed",
           "tab-sites" in s._UI_ADMIN_PAGE and "tab-server" in s._UI_ADMIN_PAGE
           and "tab-stats" in s._UI_ADMIN_PAGE
-          and "/status?t=" in s._UI_ADMIN_PAGE)
+          and "getJSON('/status')" in s._UI_ADMIN_PAGE)
     check("...posts to the upload endpoint with the run's code",
-          "/upload?t=" in s._UI_ADMIN_PAGE)
+          "api('/upload'" in s._UI_ADMIN_PAGE)
+    # The passcode is attached in one place rather than at each call site,
+    # so no request can be written that forgets it.
+    check("...with every request's passcode attached by one helper",
+          "const api = (path, params)" in s._UI_ADMIN_PAGE
+          and "{ t: CODE }" in s._UI_ADMIN_PAGE
+          and "?t=" not in s._UI_ADMIN_PAGE)
     check("...and carries no key ceremony — SSH is the authentication",
           "Ed25519" not in s._UI_ADMIN_PAGE
           and "indexedDB" not in s._UI_ADMIN_PAGE)
@@ -1055,17 +1061,32 @@ def run_dispatch_tests(s):
           and "q('.dropstrip').addEventListener" in s._UI_ADMIN_PAGE)
     check("...and the footer saying where more is written down",
           "servette.org" in s._UI_ADMIN_PAGE)
+    # A card can wear two badges at once: the fault it has, and what
+    # publishing is doing. They are separate elements because writing the
+    # second over the first would erase a standing fault the moment a
+    # folder was read.
+    check("...with a card's fault badge and its publish badge kept apart",
+          "badge state badge-dim" in s._UI_ADMIN_PAGE
+          and "q('.badge.state')" in s._UI_ADMIN_PAGE
+          and "BADGE_VARIANTS" in s._UI_ADMIN_PAGE)
+    # role="tab" without aria-selected announces a tab strip and then never
+    # says which tab is current.
+    check("...and the tab strip saying which tab is current",
+          'aria-selected="true"' in s._UI_ADMIN_PAGE
+          and "setAttribute('aria-selected'" in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
           "outside" in s._UI_ADMIN_PAGE
           and "servette-check" in s._UI_ADMIN_PAGE)
     check("...and the Server panel wired to the set vocabulary",
-          "panel-server" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
+          "panel-server" in s._UI_ADMIN_PAGE
+          and "getJSON('/config')" in s._UI_ADMIN_PAGE
+          and "post('/config'" in s._UI_ADMIN_PAGE)
     check("...with every site's facts on its own card and the server's on the server tab",
           "auth-switch" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
           and "attention" in s._UI_ADMIN_PAGE
           and "cfg-site-select" not in s._UI_ADMIN_PAGE)
     check("...and the server tab reading the journal summary, charted with a scale",
-          "/traffic?t=" in s._UI_ADMIN_PAGE
+          "getJSON('/traffic'" in s._UI_ADMIN_PAGE
           and "lineSVG" in s._UI_ADMIN_PAGE and "chart-y" in s._UI_ADMIN_PAGE)
 
     # Traffic: the journal re-read as counts. The lines are built through
@@ -1119,7 +1140,7 @@ def run_dispatch_tests(s):
           "Requests: 4" in tbuf.getvalue() and "/index.html" in tbuf.getvalue())
     check("...and the Publish tab as site cards, add/move/remove/domain wired to /sites",
           "site-cards" in s._UI_ADMIN_PAGE and "btn-add-site" in s._UI_ADMIN_PAGE
-          and "/sites?t=" in s._UI_ADMIN_PAGE
+          and "post('/sites'" in s._UI_ADMIN_PAGE
           and "attachCardDrag" in s._UI_ADMIN_PAGE
           and "dom-input" in s._UI_ADMIN_PAGE)
     check("...naming and certifying stay two acts, two ops",

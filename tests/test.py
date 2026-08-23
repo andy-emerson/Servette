@@ -1021,8 +1021,9 @@ def run_dispatch_tests(s):
           and "passcode: abc123" in adm_out)
     check("...sets the terminal narration hook",
           callable(getattr(fake_ui, "on_publish", None)))
-    check("...and closes the page on the way out",
-          adm_calls == [("stop", fake_ui)] and "Page closed." in adm_out)
+    check("...and closes the page on the way out, tab included",
+          adm_calls == [("stop", fake_ui)] and "Page closed" in adm_out
+          and "close the browser tab" in adm_out)
     check("A busy port is one sentence, and no page to close",
           "Could not open the page" in busy_buf.getvalue()
           and len(adm_calls) == 1)

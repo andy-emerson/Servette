@@ -1831,7 +1831,12 @@ def cmd_admin():
                 break
     finally:
         _stop_ui(httpd)
-        print("  Page closed.")
+        # An abandoned tab keeps asking for a port nothing answers on any
+        # more, and the operator's own terminal is where SSH prints the
+        # refusals ('channel N: open failed'). Cheaper to say than to
+        # diagnose later.
+        print("  Page closed — close the browser tab too, or your terminal")
+        print("  will collect 'channel N: open failed' notices from it.")
 
 
 ```

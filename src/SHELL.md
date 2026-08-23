@@ -1826,14 +1826,20 @@ def _health_checks():
                                 else "expired" if (days is not None and days <= 0)
                                 else "self-signed — a domain earns a trusted one" if days is not None
                                 else "not configured")})
-        rows.append({"key": "password", "site": i, "ok": bool(site.username),
+        # A public site is a choice, not a defect: no password is healthy.
+        # What IS broken is the half-state — a username with nothing stored
+        # to check against, which locks every visitor out.
+        half_auth = bool(site.username) and not site.password_hash
+        rows.append({"key": "password", "site": i, "ok": not half_auth,
                      "label": tag + "Password",
-                     "detail": "enabled" if site.username
-                     else "none — optional; the Config tab sets one"})
+                     "detail": ("enabled" if site.username and site.password_hash
+                                else "a username with no stored password — set one below, or turn protection off"
+                                if half_auth
+                                else "none — the site is public; the password form below adds a login")})
         half = bool(site.publish_url) != bool(site.publish_key)
         rows.append({"key": "channel", "site": i, "ok": not half,
                      "label": tag + "Publish channel",
-                     "detail": ("partially configured — finish or clear it on the Config tab" if half
+                     "detail": ("partially configured — finish or clear it in the terminal: config publish" if half
                                 else ("configured — 'pull' fetches from it" if site.publish_url
                                       else "none — the admin page publishes directly"))})
     return rows

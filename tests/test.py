@@ -1120,6 +1120,19 @@ def run_dispatch_tests(s):
         check("The health rows cover the roster, green included",
               {"service", "dir", "cert", "password", "channel"} <= health_keys
               and (s._IS_MACOS or {"netwatch", "swap"} <= health_keys))
+
+        saved_hc = (s.config.sites[0].username, s.config.sites[0].password_hash)
+        s.config.sites[0].username, s.config.sites[0].password_hash = "", ""
+        pw = [r for r in s._health_checks()
+              if r["key"] == "password" and r["site"] == 0][0]
+        check("No password is healthy — public is a choice, not a defect",
+              pw["ok"] and "public" in pw["detail"])
+        s.config.sites[0].username, s.config.sites[0].password_hash = "u", ""
+        pw = [r for r in s._health_checks()
+              if r["key"] == "password" and r["site"] == 0][0]
+        check("...but a username with nothing stored to check is flagged",
+              not pw["ok"])
+        (s.config.sites[0].username, s.config.sites[0].password_hash) = saved_hc
         st, _ = ui_req("GET", "/status")
         check("GET /status without the code is refused", st == 403)
 

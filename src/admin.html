@@ -553,7 +553,14 @@
       ? `<b>${escapeHtml('https://' + site.domain)}</b>`
       : '(none — answers requests no other site matches; name it on its Publish card)');
     sh += row('Folder', escapeHtml(site.dir || '(not set)'));
-    sh += siteChecks.map((c, i) => healthRow(c, i === 0)).join('');
+    // The card already scopes to one site, so the rows drop the 'Site n ·'
+    // prefix the flat status feed carries for multi-site tellability.
+    sh += siteChecks.map((c, i) => {
+      const cut = c.label.indexOf(' · ');
+      const scoped = cut < 0 ? c
+        : Object.assign({}, c, { label: c.label.slice(cut + 3) });
+      return healthRow(scoped, i === 0);
+    }).join('');
     $('site-rows').innerHTML = sh;
     const siteAttention = siteChecks.filter((c) => !c.ok).length;
     setBadge($('cfg-site-badge'), siteAttention ? 'badge-red' : 'badge-green',

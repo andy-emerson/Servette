@@ -6,21 +6,19 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
-## The footer says where more is written down; the wordmark stays inert
+## The footer says where more is written down
 
 **Ruled (Human):** the admin page's footer ends with "More information is
-available at **servette.org**", linked, opening in its own tab. The
-`Servette_` wordmark is not a link.
-**Why:** a tool needs somewhere to point a reader who wants the manual,
-and the footer — already the place the page explains its own transport —
-is where a reader looks for it. A wordmark that navigates is a small
-trap: the operator is mid-task on this page, and a stray click on the
-page's own name would abandon it. Its own tab, for the same reason.
-**Rejected:** linking the wordmark (a logo that leaves the tool). The
-public pages keep pointing at the GitHub repository rather than
-servette.org: that is where a visitor who lands on someone's error page
-can read the source, and it is reachable whether or not any particular
-site is up. *(2026-08-23)*
+available at **servette.org**", linked. Chosen over the alternative put
+alongside it — linking the `Servette_` wordmark — so the wordmark stays
+inert.
+**Why (Agent, not part of the ruling):** the link opens in its own tab,
+because the operator is mid-task on this page and a stray click on the
+page's own name would abandon it.
+**Open, not decided here:** where the *public* pages' "Servette" link
+should point. Both still point at the GitHub repository, unchanged from
+before this ruling; whether they should follow the admin page to
+servette.org has not been put to the Human. *(2026-08-23)*
 
 ## The page is three tabs: a site is one card, the server is its own page
 

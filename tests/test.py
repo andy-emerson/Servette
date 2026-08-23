@@ -1152,8 +1152,25 @@ def run_dispatch_tests(s):
 
         health_keys = {r["key"] for r in s._health_checks()}
         check("The health rows cover the roster, green included",
-              {"service", "dir", "cert", "password"} <= health_keys
+              {"service", "cert", "password"} <= health_keys
               and (s._IS_MACOS or {"netwatch", "swap"} <= health_keys))
+        check("...with the mode row labeled for what it describes",
+              any(r["key"] == "service" and r["label"] == "Mode"
+                  for r in s._health_checks()))
+
+        # The folder reports only when it is gone: where content lives is
+        # not the operator's question (the folder-retirement ruling).
+        check("A present folder is not a row",
+              not any(r["key"] == "dir" for r in s._health_checks()))
+        saved_dir = s.config.sites[0].serve_dir
+        s.config.sites[0].serve_dir = "no-such-folder-xyz"
+        check("...a missing one is a row that needs review",
+              any(r["key"] == "dir" and not r["ok"] for r in s._health_checks()))
+        s.config.sites[0].serve_dir = saved_dir
+
+        load = s._status_data()["load"]
+        check("The status snapshot carries the utilization figures",
+              set(load) == {"cpu_percent", "memory_mb", "uptime_s"})
 
         # The pull channel reports only when it exists or is half-built:
         # its absence is the normal case, not news.

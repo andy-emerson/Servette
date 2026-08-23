@@ -1965,7 +1965,9 @@ def _health_checks():
     rows = []
     service_active = _service_is_active()
     running        = service_active or _server_running()
-    rows.append({"key": "service", "site": None, "ok": running, "label": "Service",
+    # Labeled Mode, because that is what its three answers describe — and
+    # the page prints no second Mode row beside it.
+    rows.append({"key": "service", "site": None, "ok": running, "label": "Mode",
                  "detail": "running as a system service — survives reboots" if service_active
                  else ("running in this session only — 'enable' outlives the terminal" if running
                        else "stopped — 'start' brings it up")})
@@ -1989,9 +1991,14 @@ def _health_checks():
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""
+        # The folder reports only when it is missing. Where content lives is
+        # Servette's business, not the operator's (the folder-retirement
+        # ruling) — but a serve directory that has vanished is a defect the
+        # operator must hear about.
         dir_ok = bool(site.serve_dir) and os.path.exists(_resolve(site.serve_dir))
-        rows.append({"key": "dir", "site": i, "ok": dir_ok, "label": tag + "Folder",
-                     "detail": site.serve_dir if dir_ok else "not configured"})
+        if not dir_ok:
+            rows.append({"key": "dir", "site": i, "ok": False, "label": tag + "Folder",
+                         "detail": "missing — publish to recreate it"})
         days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
         cert_ok = days is not None and days > 0 and bool(site.domain)
         rows.append({"key": "cert", "site": i, "ok": cert_ok, "label": tag + "Certificate",
@@ -2021,10 +2028,51 @@ def _health_checks():
     return rows
 
 
+def _load_snapshot():
+    """Average CPU for this run and current memory, as numbers — the same
+    facts _status_rows prints for the terminal, in the form the page
+    renders. An average, not a live meter: cumulative CPU time over the
+    time the server has been up, so a spike that has passed is diluted by
+    every quiet second since. None for any figure that cannot be read."""
+    out = {"cpu_percent": None, "memory_mb": None, "uptime_s": None}
+    if _service_is_active():
+        try:
+            result = subprocess.run(
+                ["systemctl", "show", "servette",
+                 "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,CPUUsageNSec"],
+                capture_output=True, text=True)
+            props = dict(line.split("=", 1) for line in result.stdout.strip().splitlines()
+                         if "=" in line)
+            mono = props.get("ActiveEnterTimestampMonotonic", "")
+            if mono.isdigit() and mono != "0":
+                with open("/proc/uptime") as f:
+                    elapsed = float(f.read().split()[0]) - int(mono) / 1_000_000
+                if elapsed > 0:
+                    out["uptime_s"] = elapsed
+                    cpu = props.get("CPUUsageNSec", "")
+                    if cpu.isdigit():
+                        out["cpu_percent"] = (int(cpu) / 1_000_000_000) / elapsed * 100
+            mem = props.get("MemoryCurrent", "")
+            if mem.isdigit() and int(mem) > 0:
+                out["memory_mb"] = int(mem) / (1024 * 1024)
+        except Exception:
+            pass
+    elif _server_running() and _server_start_time is not None:
+        # Session mode: the server IS this process, so its own CPU clock
+        # answers — no systemd to ask.
+        elapsed = time.monotonic() - _server_start_time
+        if elapsed > 0:
+            times = os.times()
+            out["uptime_s"] = elapsed
+            out["cpu_percent"] = (times[0] + times[1]) / elapsed * 100
+    return out
+
+
 def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
     external tooling. cert_days is None when no certificate is readable;
-    `checks` is the health-row form of the same facts."""
+    `checks` is the health-row form of the same facts, and `load` the
+    utilization figures the page's Traffic tab renders."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
     return {
@@ -2035,6 +2083,7 @@ def _status_data():
         "issues":   _production_issues(),
         "warnings": _cache_warnings(),
         "checks":   _health_checks(),
+        "load":     _load_snapshot(),
     }
 
 

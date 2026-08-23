@@ -261,7 +261,7 @@
 
   <div class="checks">
     <div class="checks-head">
-      <span class="checks-title">Connection check — live from your browser</span>
+      <span class="checks-title">Connection check</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>
@@ -288,8 +288,8 @@
   if (isHttps) {
     $('badge').textContent = '✓ Verified encrypted';
     $('badge').className    = 'badge badge-green';
-    // Just the verdict: the report card below already names the vantage
-    // ("live from your browser").
+    // Just the verdict. The vantage needs no announcing: the reader is
+    // holding the browser this page ran its checks from.
     $('tagline-text').textContent = 'THE SERVER IS RUNNING';
   } else {
     $('badge').textContent = '⚠ Not encrypted';

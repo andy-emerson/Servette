@@ -1450,7 +1450,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
   <div class="checks">
     <div class="checks-head">
-      <span class="checks-title">Connection check — live from your browser</span>
+      <span class="checks-title">Connection check</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>
@@ -1477,8 +1477,8 @@ _CHECK_PAGE = """<!DOCTYPE html>
   if (isHttps) {
     $('badge').textContent = '✓ Verified encrypted';
     $('badge').className    = 'badge badge-green';
-    // Just the verdict: the report card below already names the vantage
-    // ("live from your browser").
+    // Just the verdict. The vantage needs no announcing: the reader is
+    // holding the browser this page ran its checks from.
     $('tagline-text').textContent = 'THE SERVER IS RUNNING';
   } else {
     $('badge').textContent = '⚠ Not encrypted';
@@ -5711,8 +5711,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .cfg-field {
       margin-top: 0.7rem;
       display: grid;
-      grid-template-columns: 9rem 1fr;
-      column-gap: 0.75rem;
+      grid-template-columns: 8rem 1fr;
       align-items: center;
     }
     .cfg-field label {
@@ -5737,36 +5736,42 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       width: 100%;
     }
     select.cfg-site { width: auto; margin-bottom: 1rem; }
-    /* The at-a-glance signal that survived the Status merge, made as quiet
-       as it can be: no glyph — the word Settings itself turns amber while
-       any row needs review. */
-    button.tab.attention { color: var(--amber); }
+    .attention {
+      border: 1px solid rgba(251,191,36,0.35);
+      background: rgba(251,191,36,0.07);
+      border-radius: 8px;
+      padding: 0.7rem 1rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.72rem;
+      line-height: 1.8;
+      color: var(--amber);
+    }
+    .attention b { color: var(--text); font-weight: 500; }
+    .attention a { color: var(--amber); text-decoration: underline; }
     .split { border-top: 1px solid var(--border); margin: 1rem 0; }
 
     /* The public/private switch — a literal toggle: the knob's position and
        a green tint say private (on). Laid out like the fields below it:
        label left, control right, ending at the same right edge. */
+    /* The same 8rem key column the fact rows use, so the access value lines
+       up with Domain and Certificate above it. */
     .switch-row {
       display: grid;
-      grid-template-columns: 9rem 1fr;
-      column-gap: 0.75rem;
+      grid-template-columns: 8rem 1fr;
       align-items: center;
+      font-size: 0.72rem;
+      line-height: 1.9;
     }
-    .switch-row label {
-      font-size: 0.7rem;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--muted);
-      cursor: pointer;
-    }
+    .switch-row label.k { color: var(--muted); cursor: pointer; }
     .switch-row .switch-value {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 0.75rem;
-      font-size: 0.72rem;
       color: var(--text);
     }
+    .switch-act { display: flex; align-items: center; gap: 0.5rem; }
+    .switch-act label { color: var(--muted); cursor: pointer; }
     @media (max-width: 560px) {
       .switch-row { grid-template-columns: 1fr auto; }
     }
@@ -5846,11 +5851,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   <div id="app" class="hidden">
 
+  <!-- What needs review, said in words and pointed at its fix — a marker
+       that only signals something is wrong, without saying what or where,
+       is a puzzle rather than a notice. -->
+  <div class="attention hidden" id="attention"></div>
+
   <nav class="tabs" role="tablist">
     <button class="tab active" id="tab-publish" type="button" role="tab">Publish</button>
     <button class="tab" id="tab-traffic" type="button" role="tab">Traffic</button>
-    <button class="tab" id="tab-settings" type="button" role="tab"
-            title="Amber means something needs review">Settings</button>
+    <button class="tab" id="tab-settings" type="button" role="tab">Settings</button>
   </nav>
 
   <!-- ══ Publish — one card per site: drop or choose its folder, publish.
@@ -5886,6 +5895,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <p class="error hidden" id="traffic-error"></p>
       </div>
     </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Server load</span>
+      </div>
+      <div class="card-body">
+        <div class="rows" id="load-rows"></div>
+        <p class="hint">An average, not a live meter: the CPU time the
+        server has used over the whole time it has been up. On a static
+        server a high average means something is working it — a hammering
+        bot, not popularity.</p>
+      </div>
+    </div>
   </div>
 
   <!-- ══ Settings — the selected site's truth and knobs, then the box's.
@@ -5906,9 +5928,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <!-- Access reads like the rows above it — label, then value — and
              carries the switch that changes it. -->
         <div class="switch-row">
-          <label for="auth-switch">Access</label>
+          <label for="auth-switch" class="k">Access</label>
           <span class="switch-value"><span id="auth-state"></span>
-          <input class="switch" type="checkbox" id="auth-switch"></span>
+            <span class="switch-act"><label for="auth-switch" id="auth-action"></label>
+            <input class="switch" type="checkbox" id="auth-switch"></span>
+          </span>
         </div>
         <div id="cfg-site-fields"></div>
         <div class="btn-row hidden" id="site-save-row" style="margin-top:0.9rem">
@@ -6151,10 +6175,27 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const siteChecks = checks.filter((c) => c.site === siteIdx);
     const hostChecks = checks.filter((c) => c.site === null);
 
-    // The one-glance signal: the word Settings turns amber while anything
-    // needs review — no glyph, just temperature.
-    $('tab-settings').classList.toggle('attention',
-      checks.some((c) => !c.ok));
+    // The one-glance signal, in words: what needs review, on which site,
+    // and a link that opens the place it is fixed.
+    const needs = checks.filter((c) => !c.ok);
+    $('attention').classList.toggle('hidden', !needs.length);
+    $('attention').innerHTML = needs.map((c) => {
+      const where = c.site === null ? 'This server'
+        : (((cfgData.sites || [])[c.site] || {}).domain || 'site ' + c.site);
+      const cut = c.label.indexOf(' · ');
+      const what = cut < 0 ? c.label : c.label.slice(cut + 3);
+      return `! <b>${escapeHtml(where)}</b> · ${escapeHtml(what)} — ` +
+             `${escapeHtml(c.detail)} ` +
+             `<a href="#settings" data-site="${c.site === null ? '' : c.site}">` +
+             `open Settings →</a>`;
+    }).join('<br>');
+    for (const a of $('attention').querySelectorAll('a'))
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (a.dataset.site !== '') $('cfg-site-select').value = a.dataset.site;
+        authDesired = null;
+        showTab('settings');
+      });
 
     // ── This site: facts first — Domain from config, the rest the health
     // rows worn plainly (the 'Site n ·' prefix dropped: the card already
@@ -6204,6 +6245,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // public sites are most sites. Private means a login; the fields exist
     // only while the switch is on.
     $('auth-switch').checked = on;
+    $('auth-action').textContent = on ? 'Make public' : 'Make private';
     $('cfg-site-fields').innerHTML = !on ? '' :
       field('username', 'Username', site.username,
             { hint: 'What visitors type to open the site.' }) +
@@ -6223,11 +6265,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           : 'The site is public — anyone can view it.');
 
     // ── This server: the box's identity and health, then the host knobs. ──
+    // No Mode row here: the service health row below is labeled Mode and
+    // says the same three things, with the amber when it is stopped.
     const d = statusData || {};
-    let hh = row('Mode', d.mode === 'service'
-      ? 'system service (survives reboots)'
-      : d.mode === 'session' ? 'session only' : 'stopped');
-    hh += row('Version', 'v' + (d.version || '?'));
+    let hh = row('Version', 'v' + (d.version || '?'));
     hh += hostChecks.map(factRow).join('');
     $('host-rows').innerHTML = hh;
     const hostAttention = hostChecks.filter((c) => !c.ok).length;
@@ -6238,6 +6279,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
+    renderLoad();
+  }
+
+  // Utilization lives with the other counts, on the Traffic tab.
+  function renderLoad() {
+    const l = ((statusData || {}).load) || {};
+    $('load-rows').innerHTML =
+      row('CPU', l.cpu_percent == null ? '(not available on this host)'
+                 : l.cpu_percent.toFixed(1) + '% average since the server started') +
+      row('Memory', l.memory_mb == null ? '(not available on this host)'
+                    : l.memory_mb.toFixed(1) + ' MB');
   }
 
   $('cfg-site-select').addEventListener('change', () => {
@@ -7249,7 +7301,9 @@ def _health_checks():
     rows = []
     service_active = _service_is_active()
     running        = service_active or _server_running()
-    rows.append({"key": "service", "site": None, "ok": running, "label": "Service",
+    # Labeled Mode, because that is what its three answers describe — and
+    # the page prints no second Mode row beside it.
+    rows.append({"key": "service", "site": None, "ok": running, "label": "Mode",
                  "detail": "running as a system service — survives reboots" if service_active
                  else ("running in this session only — 'enable' outlives the terminal" if running
                        else "stopped — 'start' brings it up")})
@@ -7273,9 +7327,14 @@ def _health_checks():
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""
+        # The folder reports only when it is missing. Where content lives is
+        # Servette's business, not the operator's (the folder-retirement
+        # ruling) — but a serve directory that has vanished is a defect the
+        # operator must hear about.
         dir_ok = bool(site.serve_dir) and os.path.exists(_resolve(site.serve_dir))
-        rows.append({"key": "dir", "site": i, "ok": dir_ok, "label": tag + "Folder",
-                     "detail": site.serve_dir if dir_ok else "not configured"})
+        if not dir_ok:
+            rows.append({"key": "dir", "site": i, "ok": False, "label": tag + "Folder",
+                         "detail": "missing — publish to recreate it"})
         days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
         cert_ok = days is not None and days > 0 and bool(site.domain)
         rows.append({"key": "cert", "site": i, "ok": cert_ok, "label": tag + "Certificate",
@@ -7305,10 +7364,51 @@ def _health_checks():
     return rows
 
 
+def _load_snapshot():
+    """Average CPU for this run and current memory, as numbers — the same
+    facts _status_rows prints for the terminal, in the form the page
+    renders. An average, not a live meter: cumulative CPU time over the
+    time the server has been up, so a spike that has passed is diluted by
+    every quiet second since. None for any figure that cannot be read."""
+    out = {"cpu_percent": None, "memory_mb": None, "uptime_s": None}
+    if _service_is_active():
+        try:
+            result = subprocess.run(
+                ["systemctl", "show", "servette",
+                 "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,CPUUsageNSec"],
+                capture_output=True, text=True)
+            props = dict(line.split("=", 1) for line in result.stdout.strip().splitlines()
+                         if "=" in line)
+            mono = props.get("ActiveEnterTimestampMonotonic", "")
+            if mono.isdigit() and mono != "0":
+                with open("/proc/uptime") as f:
+                    elapsed = float(f.read().split()[0]) - int(mono) / 1_000_000
+                if elapsed > 0:
+                    out["uptime_s"] = elapsed
+                    cpu = props.get("CPUUsageNSec", "")
+                    if cpu.isdigit():
+                        out["cpu_percent"] = (int(cpu) / 1_000_000_000) / elapsed * 100
+            mem = props.get("MemoryCurrent", "")
+            if mem.isdigit() and int(mem) > 0:
+                out["memory_mb"] = int(mem) / (1024 * 1024)
+        except Exception:
+            pass
+    elif _server_running() and _server_start_time is not None:
+        # Session mode: the server IS this process, so its own CPU clock
+        # answers — no systemd to ask.
+        elapsed = time.monotonic() - _server_start_time
+        if elapsed > 0:
+            times = os.times()
+            out["uptime_s"] = elapsed
+            out["cpu_percent"] = (times[0] + times[1]) / elapsed * 100
+    return out
+
+
 def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
     external tooling. cert_days is None when no certificate is readable;
-    `checks` is the health-row form of the same facts."""
+    `checks` is the health-row form of the same facts, and `load` the
+    utilization figures the page's Traffic tab renders."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
     return {
@@ -7319,6 +7419,7 @@ def _status_data():
         "issues":   _production_issues(),
         "warnings": _cache_warnings(),
         "checks":   _health_checks(),
+        "load":     _load_snapshot(),
     }
 
 

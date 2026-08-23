@@ -1876,7 +1876,8 @@ def _runtime_stats(service_active):
         try:
             result = subprocess.run(
                 ["systemctl", "show", "servette",
-                 "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,MainPID"],
+                 "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,"
+                 "CPUUsageNSec,MainPID"],
                 capture_output=True, text=True
             )
             props = dict(
@@ -1884,6 +1885,7 @@ def _runtime_stats(service_active):
             )
         except Exception:
             return rows
+        elapsed = None
         mono = props.get("ActiveEnterTimestampMonotonic", "")
         if mono and mono != "0":
             try:
@@ -1892,11 +1894,23 @@ def _runtime_stats(service_active):
                 elapsed = boot_elapsed - int(mono) / 1_000_000
                 if elapsed >= 0:
                     rows.append(("Uptime", _format_uptime(elapsed)))
+                else:
+                    elapsed = None
             except Exception:
-                pass
+                elapsed = None
         mem = props.get("MemoryCurrent", "")
         if mem and mem.isdigit() and int(mem) > 0:
             rows.append(("Memory", f"{int(mem) / (1024 * 1024):.1f} MB"))
+        # Average CPU for this run: systemd's cumulative CPU time over the
+        # uptime just computed. Free — the same systemctl call already
+        # answers it — and the honest reading on a static server, where
+        # sustained CPU means something is wrong rather than popular. It is
+        # an average, not a live meter: a spike that has passed is diluted
+        # by every quiet second since.
+        cpu = props.get("CPUUsageNSec", "")
+        if elapsed and cpu.isdigit() and elapsed > 0:
+            pct = (int(cpu) / 1_000_000_000) / elapsed * 100
+            rows.append(("CPU", f"{pct:.1f}% average this run"))
         pid = props.get("MainPID", "")
         if pid and pid != "0":
             rows.append(("PID", pid))
@@ -1995,12 +2009,15 @@ def _health_checks():
                                 else "a username with no stored password — set one below, or make the site public"
                                 if half_auth
                                 else "public — anyone can view it (the form below makes it private)")})
+        # The pull channel reports only when it exists or is half-built. Its
+        # absence is the normal case — the admin page publishes directly —
+        # and a row saying so on every site is noise, not news.
         half = bool(site.publish_url) != bool(site.publish_key)
-        rows.append({"key": "channel", "site": i, "ok": not half,
-                     "label": tag + "Publish channel",
-                     "detail": ("partially configured — finish or clear it in the terminal: config publish" if half
-                                else ("configured — 'pull' fetches from it" if site.publish_url
-                                      else "none — the admin page publishes directly"))})
+        if half or site.publish_url:
+            rows.append({"key": "channel", "site": i, "ok": not half,
+                         "label": tag + "Publish channel",
+                         "detail": ("partially configured — finish or clear it in the terminal: config publish"
+                                    if half else "configured — 'pull' fetches from it")})
     return rows
 
 

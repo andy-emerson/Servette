@@ -5759,7 +5759,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       color: var(--muted);
       cursor: pointer;
     }
-    .switch-row input.switch { justify-self: end; }
+    .switch-row .switch-value {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      font-size: 0.72rem;
+      color: var(--text);
+    }
     @media (max-width: 560px) {
       .switch-row { grid-template-columns: 1fr auto; }
     }
@@ -5896,17 +5903,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       </div>
       <div class="card-body">
         <div class="rows" id="site-rows"></div>
-        <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once this site has a domain">Run the connection check</button>
-          <button class="action hidden" id="btn-renew" type="button">Renew certificate</button>
-        </div>
-        <p class="hint">Opens this site's check page in a new tab — the view
-        from the public internet, which this page cannot have.</p>
-        <div class="split"></div>
+        <!-- Access reads like the rows above it — label, then value — and
+             carries the switch that changes it. -->
         <div class="switch-row">
-          <label for="auth-switch">Private site</label>
-          <input class="switch" type="checkbox" id="auth-switch">
+          <label for="auth-switch">Access</label>
+          <span class="switch-value"><span id="auth-state"></span>
+          <input class="switch" type="checkbox" id="auth-switch"></span>
         </div>
         <div id="cfg-site-fields"></div>
         <div class="btn-row hidden" id="site-save-row" style="margin-top:0.9rem">
@@ -5914,6 +5916,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         </div>
         <p class="hint" id="auth-hint"></p>
         <p class="error hidden" id="cfg-site-error"></p>
+        <div class="split"></div>
+        <div class="btn-row">
+          <button class="action" id="btn-outside" type="button" disabled
+                  title="Loads once this site has a domain">Check connection</button>
+          <button class="action hidden" id="btn-renew" type="button">Renew certificate</button>
+        </div>
       </div>
     </div>
 
@@ -6153,6 +6161,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // scopes) — then the access form. While the private switch holds an
     // unsaved intent, the Access row says so instead of asserting the old
     // truth, and the badge counts what the rows actually show.
+    const on = authOn(site);
     const pendingAuth = authDesired !== null && authDesired !== !!site.username;
     const scoped = siteChecks.map((c) => {
       const cut = c.label.indexOf(' · ');
@@ -6165,11 +6174,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             : 'becoming public when saved' });
       return r;
     });
+    // The access row is not printed here — it is the switch row below,
+    // which reads like these rows and carries the control that changes it.
     $('site-rows').innerHTML =
       row('Domain', site.domain
         ? `<b>${escapeHtml('https://' + site.domain)}</b>`
         : '(none — answers requests no other site matches; name it on its Publish card)') +
-      scoped.map(factRow).join('');
+      scoped.filter((c) => c.key !== 'password').map(factRow).join('');
+    // One word while all is well — the sentence-length detail belongs to
+    // the amber cases, where it says what to do about it.
+    const access = scoped.find((c) => c.key === 'password');
+    $('auth-state').innerHTML = (!access || access.ok)
+      ? (on ? 'private' : 'public')
+      : `<span class="warn">! ${escapeHtml(access.detail)}</span>`;
     const siteAttention = scoped.filter((c) => !c.ok).length;
     setBadge($('cfg-site-badge'), siteAttention ? 'badge-red' : 'badge-green',
              siteAttention ? siteAttention + ' to review' : '✓ healthy');
@@ -6186,7 +6203,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // Public or private is a property of the site, not a security verdict:
     // public sites are most sites. Private means a login; the fields exist
     // only while the switch is on.
-    const on = authOn(site);
     $('auth-switch').checked = on;
     $('cfg-site-fields').innerHTML = !on ? '' :
       field('username', 'Username', site.username,
@@ -7149,7 +7165,8 @@ def _runtime_stats(service_active):
         try:
             result = subprocess.run(
                 ["systemctl", "show", "servette",
-                 "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,MainPID"],
+                 "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,"
+                 "CPUUsageNSec,MainPID"],
                 capture_output=True, text=True
             )
             props = dict(
@@ -7157,6 +7174,7 @@ def _runtime_stats(service_active):
             )
         except Exception:
             return rows
+        elapsed = None
         mono = props.get("ActiveEnterTimestampMonotonic", "")
         if mono and mono != "0":
             try:
@@ -7165,11 +7183,23 @@ def _runtime_stats(service_active):
                 elapsed = boot_elapsed - int(mono) / 1_000_000
                 if elapsed >= 0:
                     rows.append(("Uptime", _format_uptime(elapsed)))
+                else:
+                    elapsed = None
             except Exception:
-                pass
+                elapsed = None
         mem = props.get("MemoryCurrent", "")
         if mem and mem.isdigit() and int(mem) > 0:
             rows.append(("Memory", f"{int(mem) / (1024 * 1024):.1f} MB"))
+        # Average CPU for this run: systemd's cumulative CPU time over the
+        # uptime just computed. Free — the same systemctl call already
+        # answers it — and the honest reading on a static server, where
+        # sustained CPU means something is wrong rather than popular. It is
+        # an average, not a live meter: a spike that has passed is diluted
+        # by every quiet second since.
+        cpu = props.get("CPUUsageNSec", "")
+        if elapsed and cpu.isdigit() and elapsed > 0:
+            pct = (int(cpu) / 1_000_000_000) / elapsed * 100
+            rows.append(("CPU", f"{pct:.1f}% average this run"))
         pid = props.get("MainPID", "")
         if pid and pid != "0":
             rows.append(("PID", pid))
@@ -7263,12 +7293,15 @@ def _health_checks():
                                 else "a username with no stored password — set one below, or make the site public"
                                 if half_auth
                                 else "public — anyone can view it (the form below makes it private)")})
+        # The pull channel reports only when it exists or is half-built. Its
+        # absence is the normal case — the admin page publishes directly —
+        # and a row saying so on every site is noise, not news.
         half = bool(site.publish_url) != bool(site.publish_key)
-        rows.append({"key": "channel", "site": i, "ok": not half,
-                     "label": tag + "Publish channel",
-                     "detail": ("partially configured — finish or clear it in the terminal: config publish" if half
-                                else ("configured — 'pull' fetches from it" if site.publish_url
-                                      else "none — the admin page publishes directly"))})
+        if half or site.publish_url:
+            rows.append({"key": "channel", "site": i, "ok": not half,
+                         "label": tag + "Publish channel",
+                         "detail": ("partially configured — finish or clear it in the terminal: config publish"
+                                    if half else "configured — 'pull' fetches from it")})
     return rows
 
 

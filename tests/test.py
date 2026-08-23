@@ -1152,8 +1152,20 @@ def run_dispatch_tests(s):
 
         health_keys = {r["key"] for r in s._health_checks()}
         check("The health rows cover the roster, green included",
-              {"service", "dir", "cert", "password", "channel"} <= health_keys
+              {"service", "dir", "cert", "password"} <= health_keys
               and (s._IS_MACOS or {"netwatch", "swap"} <= health_keys))
+
+        # The pull channel reports only when it exists or is half-built:
+        # its absence is the normal case, not news.
+        saved_chan = (s.config.sites[0].publish_url, s.config.sites[0].publish_key)
+        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
+        check("An absent publish channel is not a row",
+              not any(r["key"] == "channel" for r in s._health_checks()))
+        s.config.sites[0].publish_url = "https://example.com/b.tar.gz"
+        rows_half = [r for r in s._health_checks() if r["key"] == "channel"]
+        check("...a half-built one is a row that needs review",
+              len(rows_half) == 1 and not rows_half[0]["ok"])
+        (s.config.sites[0].publish_url, s.config.sites[0].publish_key) = saved_chan
 
         saved_hc = (s.config.sites[0].username, s.config.sites[0].password_hash)
         s.config.sites[0].username, s.config.sites[0].password_hash = "", ""

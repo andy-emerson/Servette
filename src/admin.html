@@ -307,7 +307,14 @@
       color: var(--muted);
       cursor: pointer;
     }
-    .switch-row input.switch { justify-self: end; }
+    .switch-row .switch-value {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      font-size: 0.72rem;
+      color: var(--text);
+    }
     @media (max-width: 560px) {
       .switch-row { grid-template-columns: 1fr auto; }
     }
@@ -444,17 +451,12 @@
       </div>
       <div class="card-body">
         <div class="rows" id="site-rows"></div>
-        <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once this site has a domain">Run the connection check</button>
-          <button class="action hidden" id="btn-renew" type="button">Renew certificate</button>
-        </div>
-        <p class="hint">Opens this site's check page in a new tab — the view
-        from the public internet, which this page cannot have.</p>
-        <div class="split"></div>
+        <!-- Access reads like the rows above it — label, then value — and
+             carries the switch that changes it. -->
         <div class="switch-row">
-          <label for="auth-switch">Private site</label>
-          <input class="switch" type="checkbox" id="auth-switch">
+          <label for="auth-switch">Access</label>
+          <span class="switch-value"><span id="auth-state"></span>
+          <input class="switch" type="checkbox" id="auth-switch"></span>
         </div>
         <div id="cfg-site-fields"></div>
         <div class="btn-row hidden" id="site-save-row" style="margin-top:0.9rem">
@@ -462,6 +464,12 @@
         </div>
         <p class="hint" id="auth-hint"></p>
         <p class="error hidden" id="cfg-site-error"></p>
+        <div class="split"></div>
+        <div class="btn-row">
+          <button class="action" id="btn-outside" type="button" disabled
+                  title="Loads once this site has a domain">Check connection</button>
+          <button class="action hidden" id="btn-renew" type="button">Renew certificate</button>
+        </div>
       </div>
     </div>
 
@@ -701,6 +709,7 @@
     // scopes) — then the access form. While the private switch holds an
     // unsaved intent, the Access row says so instead of asserting the old
     // truth, and the badge counts what the rows actually show.
+    const on = authOn(site);
     const pendingAuth = authDesired !== null && authDesired !== !!site.username;
     const scoped = siteChecks.map((c) => {
       const cut = c.label.indexOf(' · ');
@@ -713,11 +722,19 @@
             : 'becoming public when saved' });
       return r;
     });
+    // The access row is not printed here — it is the switch row below,
+    // which reads like these rows and carries the control that changes it.
     $('site-rows').innerHTML =
       row('Domain', site.domain
         ? `<b>${escapeHtml('https://' + site.domain)}</b>`
         : '(none — answers requests no other site matches; name it on its Publish card)') +
-      scoped.map(factRow).join('');
+      scoped.filter((c) => c.key !== 'password').map(factRow).join('');
+    // One word while all is well — the sentence-length detail belongs to
+    // the amber cases, where it says what to do about it.
+    const access = scoped.find((c) => c.key === 'password');
+    $('auth-state').innerHTML = (!access || access.ok)
+      ? (on ? 'private' : 'public')
+      : `<span class="warn">! ${escapeHtml(access.detail)}</span>`;
     const siteAttention = scoped.filter((c) => !c.ok).length;
     setBadge($('cfg-site-badge'), siteAttention ? 'badge-red' : 'badge-green',
              siteAttention ? siteAttention + ' to review' : '✓ healthy');
@@ -734,7 +751,6 @@
     // Public or private is a property of the site, not a security verdict:
     // public sites are most sites. Private means a login; the fields exist
     // only while the switch is on.
-    const on = authOn(site);
     $('auth-switch').checked = on;
     $('cfg-site-fields').innerHTML = !on ? '' :
       field('username', 'Username', site.username,

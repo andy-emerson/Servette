@@ -1031,8 +1031,8 @@ def run_dispatch_tests(s):
     check("The admin page is inlined whole, marker consumed",
           s._UI_ADMIN_PAGE.startswith("<!DOCTYPE html>")
           and "@@ADMIN_HTML@@" not in s._UI_ADMIN_PAGE)
-    check("...carries the Publish and Settings tabs, reading the status feed",
-          "tab-publish" in s._UI_ADMIN_PAGE and "tab-settings" in s._UI_ADMIN_PAGE
+    check("...carries the Sites and Server tabs, reading the status feed",
+          "tab-sites" in s._UI_ADMIN_PAGE and "tab-server" in s._UI_ADMIN_PAGE
           and "/status?t=" in s._UI_ADMIN_PAGE)
     check("...posts to the upload endpoint with the run's code",
           "/upload?t=" in s._UI_ADMIN_PAGE)
@@ -1046,16 +1046,16 @@ def run_dispatch_tests(s):
     check("...with a drop strip visible before anything is dragged",
           "dropstrip" in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
-          "btn-outside" in s._UI_ADMIN_PAGE)
-    check("...and the Settings panel wired to the set vocabulary",
-          "panel-settings" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
-    check("...with the health rows split site/server and the masked password field",
-          "site-rows" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
+          "outside" in s._UI_ADMIN_PAGE
+          and "servette-check" in s._UI_ADMIN_PAGE)
+    check("...and the Server panel wired to the set vocabulary",
+          "panel-server" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
+    check("...with every site's facts on its own card and the server's on the server tab",
+          "auth-switch" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
           and "attention" in s._UI_ADMIN_PAGE
-          and "cfg-password" in s._UI_ADMIN_PAGE)
-    check("...and the Traffic tab reading the journal summary, renew beside the cert row",
-          "tab-analytics" in s._UI_ADMIN_PAGE and "/traffic?t=" in s._UI_ADMIN_PAGE
-          and "btn-renew" in s._UI_ADMIN_PAGE
+          and "cfg-site-select" not in s._UI_ADMIN_PAGE)
+    check("...and the server tab reading the journal summary, charted with a scale",
+          "/traffic?t=" in s._UI_ADMIN_PAGE
           and "lineSVG" in s._UI_ADMIN_PAGE and "chart-y" in s._UI_ADMIN_PAGE)
 
     # Traffic: the journal re-read as counts. The lines are built through
@@ -1112,10 +1112,10 @@ def run_dispatch_tests(s):
           and "/sites?t=" in s._UI_ADMIN_PAGE
           and "attachCardDrag" in s._UI_ADMIN_PAGE
           and "dom-input" in s._UI_ADMIN_PAGE)
-    check("...naming and renewing stay two acts, two controls",
-          "Set domain" in s._UI_ADMIN_PAGE and "btn-renew" in s._UI_ADMIN_PAGE
-          and "cert-row" in s._UI_ADMIN_PAGE
-          and "get its certificate" not in s._UI_ADMIN_PAGE)
+    check("...naming and certifying stay two acts, two ops",
+          "op: 'name'" in s._UI_ADMIN_PAGE
+          and "op: 'certificate'" in s._UI_ADMIN_PAGE
+          and "Get certificate" in s._UI_ADMIN_PAGE)
     check("...whose remove panel offers delete, deactivate, cancel — no browser popup",
           "do-delete" in s._UI_ADMIN_PAGE and "do-deactivate" in s._UI_ADMIN_PAGE
           and "do-reactivate" in s._UI_ADMIN_PAGE and "do-cancel" in s._UI_ADMIN_PAGE
@@ -1124,7 +1124,6 @@ def run_dispatch_tests(s):
           "auth-switch" in s._UI_ADMIN_PAGE
           and "has_password" in s._UI_ADMIN_PAGE
           and "cfg-port" not in s._UI_ADMIN_PAGE
-          and "cfg-dir" not in s._UI_ADMIN_PAGE
           and "trusted_proxy" not in s._UI_ADMIN_PAGE
           and "publish_url" not in s._UI_ADMIN_PAGE)
 
@@ -1396,31 +1395,42 @@ def run_dispatch_tests(s):
             # only a real box can talk to a certificate authority. The core
             # assigns site.domain only on its success path, which is exactly
             # what the handler judges by.
-            saved_obtain = s._obtain_trusted_cert
-            s._obtain_trusted_cert = (
-                lambda domain, site_obj: setattr(site_obj, "domain", domain))
             st, _ = ui_req("POST", f"/sites?t={ui_code}",
-                           body=json.dumps({"op": "domain", "site": n0,
+                           body=json.dumps({"op": "name", "site": n0,
                                             "domain": "card.example"}).encode())
-            check("op=domain grants a name through the issuance core",
+            check("op=name is a config write, no authority involved",
                   st == 200 and s.config.sites[n0].domain == "card.example")
             st, body = ui_req("POST", f"/sites?t={ui_code}",
-                              body=json.dumps({"op": "domain", "site": 0,
+                              body=json.dumps({"op": "name", "site": 0,
                                                "domain": "card.example"}).encode())
-            check("...refuses a domain another site already holds",
+            check("...refusing a domain another site already holds",
                   st == 422 and b"already used" in body)
-            st, _ = ui_req("POST", f"/sites?t={ui_code}",
-                           body=json.dumps({"op": "domain", "site": n0,
-                                            "domain": "card.example"}).encode())
-            check("...but a site's own domain re-runs issuance (the repair path)",
-                  st == 200 and s.config.sites[n0].domain == "card.example")
+
+            # op=certificate is the slow act, reported by the issuance's own
+            # verdict — the domain is set before it runs, so comparing the
+            # domain afterwards would always look like success.
+            saved_obtain = s._obtain_trusted_cert
             s._obtain_trusted_cert = lambda domain, site_obj: None
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "certificate", "site": n0}).encode())
+            check("op=certificate reports the issuance's own success",
+                  st == 200)
+            s._obtain_trusted_cert = lambda domain, site_obj: "refused"
             st, body = ui_req("POST", f"/sites?t={ui_code}",
-                              body=json.dumps({"op": "domain", "site": n0,
-                                               "domain": "fails.example"}).encode())
-            check("...and reports a failed issuance instead of pretending",
-                  st == 422 and b"DNS" in body
-                  and s.config.sites[n0].domain == "card.example")
+                              body=json.dumps({"op": "certificate", "site": n0}).encode())
+            check("...and its refusal, with the DNS question that usually explains it",
+                  st == 422 and b"DNS" in body)
+            s._obtain_trusted_cert = lambda domain, site_obj: "transient"
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "certificate", "site": n0}).encode())
+            check("...telling a transient failure apart from a refusal",
+                  st == 422 and b"try again" in body)
+            s.config.sites[n0].domain = ""
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "certificate", "site": n0}).encode())
+            check("...and refusing to ask for a certificate with no name to put on it",
+                  st == 422 and b"set a domain first" in body)
+            s.config.sites[n0].domain = "card.example"
             s._obtain_trusted_cert = saved_obtain
 
             saved_sites_list = s.config.sites

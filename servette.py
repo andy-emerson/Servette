@@ -5634,7 +5634,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
     .badge-dim   { background: rgba(255,255,255,0.04); color: var(--muted); border: 1px solid var(--border); }
     .badge-warn  { background: rgba(251,191,36,0.12); color: var(--amber); border: 1px solid rgba(251,191,36,0.4); }
-    .badge.needs { cursor: pointer; }
+    
 
     /* Every button reads the same way: available is Servette green, hover
        brightens it, unavailable is dim and says so by being unclickable. */
@@ -5942,16 +5942,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <div class="attention hidden" id="attention"></div>
 
   <nav class="tabs" role="tablist">
-    <button class="tab active" id="tab-publish" type="button" role="tab">Publish</button>
-    <button class="tab" id="tab-analytics" type="button" role="tab">Analytics</button>
-    <button class="tab" id="tab-settings" type="button" role="tab">Settings</button>
+    <button class="tab active" id="tab-sites" type="button" role="tab">Sites</button>
+    <button class="tab" id="tab-server" type="button" role="tab">Server</button>
   </nav>
 
   <!-- ══ Publish — one card per site: drop or choose its folder, publish.
        Cards can be added, removed, and reordered (drag the header, or the
        arrows), because the cards ARE the site list: order is config —
        the first domainless site answers unmatched Hosts. ══ -->
-  <div id="panel-publish" role="tabpanel" class="hidden">
+  <div id="panel-sites" role="tabpanel" class="hidden">
     <div id="site-cards"></div>
     <div class="add-zone">
       <button class="action" id="btn-add-site" type="button">+ Add a site</button>
@@ -5959,10 +5958,20 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     <p class="error hidden" id="sites-error"></p>
   </div>
 
-  <!-- ══ Traffic — the journal re-read as counts. Nothing is collected for
-       this: the server already logs every response, and the summary never
-       carries a visitor's IP. ══ -->
-  <div id="panel-analytics" role="tabpanel" class="hidden">
+  <div id="panel-server" role="tabpanel" class="hidden">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Server status</span>
+      </div>
+      <div class="card-body">
+        <div class="rows" id="host-rows"></div>
+        <div class="btn-row" style="margin-top:0.6rem">
+          <button class="action" id="btn-start" type="button">Start the server</button>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-head">
         <span class="card-title">Site traffic</span>
@@ -6000,67 +6009,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         server usually means a bot, not popularity.</p>
       </div>
     </div>
-  </div>
-
-  <!-- ══ Settings — the selected site's truth and knobs, then the box's.
-       The dropdown under the tabs scopes the site card; the server card is
-       never scoped. Status lives here compressed: identity rows, then the
-       health rows, then the forms. ══ -->
-  <div id="panel-settings" role="tabpanel" class="hidden">
-
     <div class="card">
       <div class="card-head">
-        <span class="head-left"><span class="card-title">This site</span>
-        <select class="cfg-site hidden" id="cfg-site-select" style="margin:0"></select></span>
-        <span class="badge badge-dim hidden" id="cfg-site-badge"></span>
-      </div>
-      <div class="card-body">
-        <div class="rows" id="site-rows"></div>
-        <!-- Certificate and Access each read like the rows above them —
-             label, then value — and each carries the control that acts on
-             it: renewal is its own act, distinct from naming a site. -->
-        <div class="switch-row hidden" id="cert-row">
-          <span class="k">Certificate</span>
-          <span class="switch-value"><span id="cert-state"></span>
-            <span class="switch-act">
-            <button class="action tiny" id="btn-renew" type="button">Renew</button></span>
-          </span>
-        </div>
-        <div class="switch-row">
-          <label for="auth-switch" class="k">Access</label>
-          <span class="switch-value"><span id="auth-state"></span>
-            <span class="switch-act"><label for="auth-switch" id="auth-action"></label>
-            <input class="switch" type="checkbox" id="auth-switch"></span>
-          </span>
-        </div>
-        <div id="cfg-site-fields"></div>
-        <div class="btn-row hidden" id="site-save-row" style="margin-top:0.9rem">
-          <button class="action primary" id="btn-save-site" type="button">Save</button>
-        </div>
-        <p class="hint" id="auth-hint"></p>
-        <p class="error hidden" id="cfg-site-error"></p>
-        <div class="split"></div>
-        <div class="btn-row">
-          <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once this site has a domain">Test connection</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">This server</span>
+        <span class="card-title">Server settings</span>
         <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
       </div>
       <div class="card-body">
-        <div class="rows" id="host-rows"></div>
-        <div class="btn-row" style="margin-top:0.6rem">
-          <button class="action" id="btn-start" type="button">Start the server</button>
-        </div>
-        <div class="split"></div>
         <div id="cfg-host-fields"></div>
         <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action primary" id="btn-save-host" type="button">Save</button>
+          <button class="action" id="btn-save-host" type="button">Save</button>
         </div>
         <p class="error hidden" id="cfg-host-error"></p>
       </div>
@@ -6096,26 +6053,26 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
-  const PANELS = { publish: 'panel-publish', analytics: 'panel-analytics',
-                   settings: 'panel-settings' };
+  const PANELS = { sites: 'panel-sites', server: 'panel-server' };
 
   function showTab(name) {
-    if (name === 'status' || name === 'config') name = 'settings';  // old bookmarks
-    if (name === 'traffic') name = 'analytics';
-    if (!PANELS[name]) name = 'publish';
+    // Old bookmarks still land somewhere sensible.
+    if (['status', 'config', 'settings', 'analytics', 'traffic'].includes(name))
+      name = 'server';
+    if (name === 'publish') name = 'sites';
+    if (!PANELS[name]) name = 'sites';
     for (const key of Object.keys(PANELS)) {
       $(PANELS[key]).classList.toggle('hidden', key !== name);
       $('tab-' + key).classList.toggle('active', key === name);
     }
     refresh();  // every tab renders from the same /status + /config truth
-    if (name === 'analytics') { loadTraffic(); startMeter(); } else stopMeter();
+    if (name === 'server') { loadTraffic(); startMeter(); } else stopMeter();
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
 
-  $('tab-publish').addEventListener('click', () => showTab('publish'));
-  $('tab-analytics').addEventListener('click', () => showTab('analytics'));
-  $('tab-settings').addEventListener('click', () => showTab('settings'));
+  $('tab-sites').addEventListener('click', () => showTab('sites'));
+  $('tab-server').addEventListener('click', () => showTab('server'));
 
   /* ══ The page's truth: /status and /config fetched together, rendered
      into both tabs at once. ══ */
@@ -6129,21 +6086,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     c.ok ? escapeHtml(c.detail)
          : `<span class="warn">${escapeHtml(c.detail)}</span>`);
 
-  // The connection test: opens the selected site's own check page — a
-  // reserved path no content shadows — so the report answers from the
-  // public internet's vantage, the one view a page living on the tunnel
-  // cannot compute (cross-origin responses are opaque to it, by the
-  // browser's own rules).
-  let outsideDomain = '';
-  $('btn-outside').addEventListener('click', () => {
-    if (!outsideDomain) return;
-    window.open('https://' + outsideDomain + '/.well-known/servette-check', '_blank');
-  });
-
   let statusData = null;
 
   async function refresh() {
-    clearError($('cfg-site-error'));
     clearError($('cfg-host-error'));
     try {
       const [rs, rc] = await Promise.all([
@@ -6154,27 +6099,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       if (!rc.ok) throw new Error('HTTP ' + rc.status);
       statusData = await rs.json();
       cfgData = await rc.json();
-      authDesired = null;  // fresh truth from the server resets the toggle
-      const sel = $('cfg-site-select');
-      const keep = parseInt(sel.value || '0', 10) || 0;
-      // Sites by name, in the order the Publish cards show them — the index
-      // is Servette's bookkeeping, not something to make the operator read.
-      sel.innerHTML = (cfgData.sites || []).map((s) =>
-        `<option value="${s.index}">` +
-        `${s.domain ? escapeHtml(s.domain) : '(no domain)'}</option>`).join('');
-      if (keep < (cfgData.sites || []).length) sel.value = String(keep);
-      // A one-site server needs no site picker — it appears with a second site.
-      sel.classList.toggle('hidden', (cfgData.sites || []).length < 2);
-      renderSettings();
+      renderServer();
       renderSiteCards();
       clearError($('sites-error'));
     } catch (e) {
-      setBadge($('cfg-site-badge'), 'badge-red', '✕ unreachable');
       setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
       const msg = (e instanceof TypeError) ? TUNNEL_DOWN
         : 'Could not read the server: ' + e.message +
           ' — if the terminal command was closed, re-run it and open the fresh link.';
-      showError($('cfg-site-error'), msg);
+      showError($('cfg-host-error'), msg);
       showError($('sites-error'), msg);
     }
   }
@@ -6240,22 +6173,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   $('btn-traffic-refresh').addEventListener('click', loadTraffic);
   $('traffic-window').addEventListener('change', loadTraffic);
 
-  // Renewal is automatic (the watchdog renews before expiry), so the button
-  // exists only while the Certificate row needs attention — it re-runs
-  // issuance for the site's current domain, the repair path.
-  $('btn-renew').addEventListener('click', async () => {
-    const [site, idx] = currentSite();
-    if (!site.domain) return;
-    const b = $('btn-renew');
-    b.disabled = true;
-    const old = b.textContent;
-    b.textContent = 'requesting certificate…';
-    await siteOp({ op: 'domain', site: idx, domain: site.domain },
-                 $('cfg-site-error'));
-    b.disabled = false;
-    b.textContent = old;
-  });
-
   /* ══ Settings forms — over the same validators the `set` command runs, so
      a value the terminal refuses the page refuses with the same sentence.
      Deliberately absent from these forms (the terminal keeps them): the
@@ -6276,8 +6193,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   ];
 
   let cfgData = null;
-  let authDesired = null;  // null = follow the server; true/false = the toggle's unsaved intent
-
   const field = (key, label, value, opts) => {
     const o = opts || {};
     return `<div class="cfg-field">` +
@@ -6288,133 +6203,34 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       `</div>`;
   };
 
-  function currentSite() {
-    const siteIdx = parseInt($('cfg-site-select').value || '0', 10) || 0;
-    return [(cfgData.sites || [])[siteIdx] || {}, siteIdx];
-  }
-
-  const authOn = (site) => (authDesired === null) ? !!site.username : authDesired;
-
-  function renderSettings() {
-    const [site, siteIdx] = currentSite();
+  function renderServer() {
     const checks = (statusData && statusData.checks) || [];
-    const siteChecks = checks.filter((c) => c.site === siteIdx);
     const hostChecks = checks.filter((c) => c.site === null);
+    const d = statusData || {};
 
-    // The one-glance signal, in words: what needs review, on which site,
-    // and a link that opens the place it is fixed.
-    // A site's trouble is worn by its own card on the Publish tab, where
-    // the card names the site already. What has no card — the box itself —
-    // says its piece here.
-    const needs = checks.filter((c) => !c.ok && c.site === null);
+    // What has no card of its own says its piece here; a site's trouble is
+    // worn by that site's card on the Sites tab.
+    const needs = hostChecks.filter((c) => !c.ok);
     $('attention').classList.toggle('hidden', !needs.length);
     $('attention').innerHTML = needs.map((c) =>
       `<b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
-      `<a href="#settings">open Settings →</a>`).join('<br>');
+      `<a href="#server">open Server →</a>`).join('<br>');
     for (const a of $('attention').querySelectorAll('a'))
-      a.addEventListener('click', (e) => { e.preventDefault(); showTab('settings'); });
+      a.addEventListener('click', (e) => { e.preventDefault(); showTab('server'); });
 
-    // ── This site: facts first — Domain from config, the rest the health
-    // rows worn plainly (the 'Site n ·' prefix dropped: the card already
-    // scopes) — then the access form. While the private switch holds an
-    // unsaved intent, the Access row says so instead of asserting the old
-    // truth, and the badge counts what the rows actually show.
-    const on = authOn(site);
-    const pendingAuth = authDesired !== null && authDesired !== !!site.username;
-    const scoped = siteChecks.map((c) => {
-      const cut = c.label.indexOf(' · ');
-      let r = cut < 0 ? c
-        : Object.assign({}, c, { label: c.label.slice(cut + 3) });
-      if (pendingAuth && c.key === 'password')
-        r = Object.assign({}, r, { ok: false,
-          detail: authDesired
-            ? 'username and password required'
-            : 'becoming public when saved' });
-      return r;
-    });
-    // Certificate and access are not printed here — they are the rows
-    // below, which read the same but carry their own controls.
-    const siteTrouble = scoped.filter((c) => !c.ok).length;
-    $('site-rows').innerHTML =
-      row('Status', siteTrouble
-        ? `<span class="warn">${siteTrouble} to review</span>`
-        : '<span class="ok">✓</span> healthy') +
-      row('Domain', site.domain
-        ? `<b>${escapeHtml('https://' + site.domain)}</b>`
-        : '(none — answers requests no other site matches; name it on its Publish card)') +
-      scoped.filter((c) => c.key !== 'password' && c.key !== 'cert')
-            .map(factRow).join('');
-    const cert = scoped.find((c) => c.key === 'cert');
-    $('cert-row').classList.toggle('hidden', !cert);
-    if (cert)
-      $('cert-state').innerHTML = cert.ok ? escapeHtml(cert.detail)
-        : `<span class="warn">${escapeHtml(cert.detail)}</span>`;
-    // Amber once the certificate is inside the window the watchdog itself
-    // renews in (under 30 days) — the point where pressing it does
-    // something the server was about to do anyway.
-    $('btn-renew').classList.toggle('due',
-      !!cert && (!cert.ok || (cert.days != null && cert.days < 30)));
-    // One word while all is well — the sentence-length detail belongs to
-    // the amber cases, where it says what to do about it.
-    const access = scoped.find((c) => c.key === 'password');
-    $('auth-state').innerHTML = (!access || access.ok)
-      ? (on ? 'private' : 'public')
-      : `<span class="warn">${escapeHtml(access.detail)}</span>`;
-    const siteAttention = scoped.filter((c) => !c.ok).length;
-
-    outsideDomain = site.domain || '';
-    $('btn-outside').disabled = !outsideDomain;
-    $('btn-outside').title = outsideDomain
-      ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
-      : 'Needs a domain — a site without one has no public name to check';
-    // Renewal is its own act, separate from naming: it re-runs issuance for
-    // the name the site already has. Always present, so it can be found;
-    // dim when there is no name to renew.
-    $('btn-renew').disabled = !site.domain;
-    $('btn-renew').title = site.domain
-      ? 'Request a fresh certificate for ' + site.domain
-      : 'Set a domain first — a self-signed certificate has nothing to renew';
-
-    // Public or private is a property of the site, not a security verdict:
-    // public sites are most sites. Private means a login; the fields exist
-    // only while the switch is on.
-    $('auth-switch').checked = on;
-    $('auth-action').textContent = on ? 'Make public' : 'Make private';
-    $('cfg-site-fields').innerHTML = !on ? '' :
-      field('username', 'Username', site.username,
-            { hint: 'Case-sensitive. Any characters except a colon.' }) +
-      field('password',
-            site.has_password ? 'New password (blank = keep the current one)' : 'Password',
-            '', { type: 'password',
-                  hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
-    // Nothing to save on a public site that is staying public — but turning
-    // one public IS a change, so the button survives that pending state.
-    $('site-save-row').classList.toggle('hidden', !(on || pendingAuth));
-    // Only the states that ask something of the reader speak; the settled
-    // ones are already said by the Access row itself.
-    $('auth-hint').textContent = on
-      ? ''
-      : (site.username
-         ? 'Saving makes the site public: the login is removed and the stored password deleted.'
-         : '');
-
-    // ── This server: the box's identity and health, then the host knobs. ──
-    // No Mode row here: the service health row below is labeled Mode and
-    // says the same three things, with the amber when it is stopped.
-    const d = statusData || {};
-    let hh = row('Status', d.running
-      ? '<span class="dot"></span>running'
-      : '<span class="warn">stopped</span>') +
-      row('Version', 'v' + (d.version || '?'));
-    hh += hostChecks.map(factRow).join('');
-    $('host-rows').innerHTML = hh;
-
+    $('host-rows').innerHTML =
+      row('Status', d.running
+        ? '<span class="dot"></span>running'
+        : '<span class="warn">stopped</span>') +
+      row('Version', 'v' + (d.version || '?')) +
+      hostChecks.map(factRow).join('');
 
     // Present always, dim when there is nothing to start — the same rule
     // every other button follows.
     $('btn-start').disabled = !!d.running;
     $('btn-start').title = d.running ? 'The server is already running'
                                      : 'Start the installed system service';
+
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
     renderLoad();
@@ -6503,20 +6319,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     meterTimer = null;
   }
 
-  $('cfg-site-select').addEventListener('change', () => {
-    authDesired = null;  // the toggle's unsaved intent belongs to one site
-    renderSettings();
-  });
-
-  $('auth-switch').addEventListener('change', () => {
-    authDesired = $('auth-switch').checked;
-    renderSettings();
-  });
-
-  async function saveSettings(fields, siteIdx, badge, errEl, extra) {
+  async function saveSettings(values, siteIdx, badge, errEl) {
     clearError(errEl);
-    const values = Object.assign({}, extra || {});
-    for (const [k] of fields) values[k] = $('cfg-' + k).value.trim();
     setBadge(badge, 'badge-dim', 'saving…');
     try {
       const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
@@ -6539,31 +6343,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
   }
 
-  $('btn-save-site').addEventListener('click', () => {
-    const [site, siteIdx] = currentSite();
-    clearError($('cfg-site-error'));
-    if (!authOn(site)) {
-      // Off is one switch on the server too: a cleared username deletes the
-      // stored password with it. Saving off-over-off is a harmless no-op.
-      saveSettings([], siteIdx, $('cfg-site-badge'), $('cfg-site-error'),
-                   { username: '' });
-      return;
-    }
-    // The password is never trimmed — spaces are password characters — and
-    // only travels when non-blank: blank means unchanged, never cleared.
-    const username = $('cfg-username').value.trim();
-    const pw = $('cfg-password').value;
-    if (!username)
-      return showError($('cfg-site-error'),
-        'A username is needed — or make the site public.');
-    if (!site.has_password && !pw)
-      return showError($('cfg-site-error'),
-        'A password is needed the first time a site turns private.');
-    saveSettings([], siteIdx, $('cfg-site-badge'), $('cfg-site-error'),
-                 Object.assign({ username }, pw ? { password: pw } : {}));
+  $('btn-save-host').addEventListener('click', () => {
+    const values = {};
+    for (const [k] of HOST_FIELDS) values[k] = $('cfg-' + k).value.trim();
+    saveSettings(values, 0, $('cfg-host-badge'), $('cfg-host-error'));
   });
-  $('btn-save-host').addEventListener('click', () => saveSettings(
-    HOST_FIELDS, 0, $('cfg-host-badge'), $('cfg-host-error')));
 
   /* ══ Publish — the pub tool's bundle builder with the signing removed.
      The server's contract (_extract_bundle / _land_bundle): a tar.gz of
@@ -6807,33 +6591,50 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<button class="action do-reactivate" type="button">Reactivate</button></div>`)
       : (`<div class="dropstrip">drop this site's folder here, or <a href="#">choose it</a></div>` +
          `<input type="file" webkitdirectory multiple class="hidden">` +
-         `<p class="hint summary">` +
-           (siteData.domain
-             ? `Publishes to <b>${escapeHtml('https://' + siteData.domain)}</b>.`
-             : `No domain yet — reachable only at this server's IP address until you set one.`) +
-           ` The folder to drop is the one holding the site's <b>index.html</b>.</p>` +
+         `<p class="hint summary">The folder to drop is the one holding the ` +
+         `site's <b>index.html</b>.</p>` +
          `<div class="btn-row" style="margin-top:0.75rem">` +
-           `<button class="action primary pub" type="button" disabled>Publish</button>` +
+           `<button class="action pub" type="button" disabled>Publish</button>` +
          `</div>` +
-         `<div class="split"></div>` +
-         `<div class="cfg-field"><label>Domain</label>` +
-         `<input class="dom-input" type="text" placeholder="example.com"` +
-         ` value="${escapeHtml(siteData.domain || '')}">` +
-         `<div class="cfg-hint">` +
-         (siteData.domain
-           ? `Setting a domain requests its certificate.`
-           : `Point the domain's DNS at this server first (an A record to ` +
-             `this box's IP). Setting it requests the certificate.`) +
-         `</div></div>` +
-         `<div class="btn-row" style="margin-top:0.75rem">` +
-         `<button class="action dom" type="button">` +
-         `Set domain` +
-         `</button></div>` +
          `<div class="done hidden">` +
            `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
            `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
            `in the terminal is the one step back.</p>` +
-         `</div>`);
+         `</div>` +
+
+         // ── Everything else this site is: its facts, and the controls
+         // that change them. One card per site, so no selector is needed
+         // to say which site any of it belongs to.
+         `<div class="split"></div>` +
+         `<div class="rows info"></div>` +
+
+         `<div class="switch-row"><span class="k">Domain</span>` +
+         `<span class="switch-value"><input class="dom-input" type="text" ` +
+         `placeholder="example.com" value="${escapeHtml(siteData.domain || '')}">` +
+         `<span class="switch-act"><button class="action tiny dom" type="button">` +
+         `Set</button></span></span></div>` +
+         `<div class="cfg-hint dom-hint">Point the domain's DNS at this server ` +
+         `first (an A record to this box's IP).</div>` +
+
+         `<div class="switch-row"><span class="k">Certificate</span>` +
+         `<span class="switch-value"><span class="cert-state"></span>` +
+         `<span class="switch-act"><button class="action tiny cert" type="button">` +
+         `Get certificate</button></span></span></div>` +
+
+         `<div class="switch-row">` +
+         `<label class="k auth-label">Access</label>` +
+         `<span class="switch-value"><span class="auth-state"></span>` +
+         `<span class="switch-act"><label class="auth-action"></label>` +
+         `<input class="switch auth-switch" type="checkbox"></span></span></div>` +
+         `<div class="auth-fields"></div>` +
+         `<div class="btn-row auth-save hidden" style="margin-top:0.9rem">` +
+         `<button class="action save-site" type="button">Save</button></div>` +
+         `<p class="hint auth-hint"></p>` +
+
+         `<div class="split"></div>` +
+         `<div class="btn-row">` +
+         `<button class="action outside" type="button" disabled>Test connection</button>` +
+         `</div>`)
 
     card.innerHTML =
       `<div class="card-head">` +
@@ -6883,13 +6684,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
       }
     }
-
-    const needsTag = q('.needs');
-    if (needsTag) needsTag.addEventListener('click', () => {
-      $('cfg-site-select').value = String(cardIndex(card));
-      authDesired = null;
-      showTab('settings');
-    });
 
     q('.del').addEventListener('click', () => {
       clearError(errEl);
@@ -7034,22 +6828,121 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       pubBtn.disabled = !files;
     });
 
-    // Naming the site: the act runs the certificate issuance, so the button
-    // waits it out honestly instead of pretending it was instant.
-    const domBtn = q('.dom');
-    if (domBtn) domBtn.addEventListener('click', async () => {
-      const domain = q('.dom-input').value.trim().toLowerCase();
-      clearError(errEl);
-      if (!domain) return showError(errEl, 'Type the domain first.');
-      domBtn.disabled = true;
-      const oldText = domBtn.textContent;
-      domBtn.textContent = 'requesting certificate…';
-      const ok = await siteOp({ op: 'domain', site: cardIndex(card), domain }, errEl);
-      if (!ok) {  // on success refresh() replaced this card entirely
-        domBtn.disabled = false;
-        domBtn.textContent = oldText;
-      }
-    });
+    // ── The site's own facts and controls, all card-local: each card owns
+    // its state, so nothing needs to say which site it means. ──
+    const info = q('.info');
+    if (info) {
+      const checksFor = (((statusData || {}).checks) || []).filter((c) => c.site === idx);
+      const certRow = checksFor.find((c) => c.key === 'cert');
+      const authRow = checksFor.find((c) => c.key === 'password');
+      const others  = checksFor.filter((c) => c.key !== 'cert' && c.key !== 'password');
+      let authDesired = null;   // null = follow the server
+      const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
+
+      const renderInfo = () => {
+        const on = authOn();
+        const pending = authDesired !== null && authDesired !== !!siteData.username;
+        info.innerHTML =
+          row('Status', siteNeeds.length
+            ? `<span class="warn">${siteNeeds.length} to review</span>`
+            : '<span class="ok">✓</span> healthy') +
+          row('Serving', siteData.domain
+            ? `<b>${escapeHtml('https://' + siteData.domain)}</b>`
+            : "this server's IP address (no domain set)") +
+          others.map((c) => {
+            const cut = c.label.indexOf(' · ');
+            return factRow(cut < 0 ? c
+              : Object.assign({}, c, { label: c.label.slice(cut + 3) }));
+          }).join('');
+
+        q('.cert-state').innerHTML = !certRow ? ''
+          : certRow.ok ? escapeHtml(certRow.detail)
+          : `<span class="warn">${escapeHtml(certRow.detail)}</span>`;
+        // Naming and certifying are two acts on one card: the name saves
+        // instantly, the certificate is asked for when you ask for it —
+        // and the button says so while the site has no trusted one.
+        const certBtn = q('.cert');
+        certBtn.disabled = !siteData.domain;
+        certBtn.classList.toggle('due', !!siteData.domain && !!certRow && !certRow.ok);
+        certBtn.textContent = (certRow && certRow.ok) ? 'Renew' : 'Get certificate';
+        certBtn.title = siteData.domain
+          ? 'Request a certificate for ' + siteData.domain
+          : 'Set a domain first — a certificate is issued for a name';
+
+        q('.auth-switch').checked = on;
+        q('.auth-action').textContent = on ? 'Make public' : 'Make private';
+        q('.auth-state').innerHTML = pending
+          ? `<span class="warn">${on ? 'username and password required'
+                                     : 'becoming public when saved'}</span>`
+          : (authRow && !authRow.ok)
+            ? `<span class="warn">${escapeHtml(authRow.detail)}</span>`
+            : (on ? 'private' : 'public');
+        q('.auth-fields').innerHTML = !on ? '' :
+          field('username-' + idx, 'Username', siteData.username,
+                { hint: 'Case-sensitive. Any characters except a colon.' }) +
+          field('password-' + idx,
+                siteData.has_password ? 'New password (blank = keep the current one)' : 'Password',
+                '', { type: 'password',
+                      hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
+        q('.auth-save').classList.toggle('hidden', !(on || pending));
+        q('.auth-hint').textContent = on ? ''
+          : (siteData.username
+             ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+             : '');
+
+        const outside = q('.outside');
+        outside.disabled = !siteData.domain;
+        outside.title = siteData.domain
+          ? 'Opens the connection test on ' + siteData.domain
+          : 'Needs a domain — a site without one has no public name to test';
+      };
+      renderInfo();
+
+      q('.auth-switch').addEventListener('change', (e) => {
+        authDesired = e.target.checked;
+        renderInfo();
+      });
+
+      q('.outside').addEventListener('click', () => {
+        if (siteData.domain)
+          window.open('https://' + siteData.domain + '/.well-known/servette-check', '_blank');
+      });
+
+      // Setting the name is a config write and nothing more — instant, and
+      // it cannot fail on someone else's DNS.
+      q('.dom').addEventListener('click', async () => {
+        const domain = q('.dom-input').value.trim().toLowerCase();
+        clearError(errEl);
+        if (!domain) return showError(errEl, 'Type the domain first.');
+        await siteOp({ op: 'name', site: cardIndex(card), domain }, errEl);
+      });
+
+      // Asking for the certificate is the slow, network-dependent act, so
+      // it waits itself out and reports its own failure.
+      q('.cert').addEventListener('click', async () => {
+        const b = q('.cert');
+        const old = b.textContent;
+        b.disabled = true;
+        b.textContent = 'requesting…';
+        const ok = await siteOp({ op: 'certificate', site: cardIndex(card) }, errEl);
+        if (!ok) { b.disabled = false; b.textContent = old; }
+      });
+
+      q('.save-site').addEventListener('click', () => {
+        clearError(errEl);
+        if (!authOn())
+          return saveSettings({ username: '' }, cardIndex(card), badge, errEl);
+        const username = q('#cfg-username-' + idx).value.trim();
+        const pw = q('#cfg-password-' + idx).value;
+        if (!username)
+          return showError(errEl, 'A username is needed — or make the site public.');
+        if (!siteData.has_password && !pw)
+          return showError(errEl, 'A password is needed the first time a site turns private.');
+        saveSettings(Object.assign({ username }, pw ? { password: pw } : {}),
+                     cardIndex(card), badge, errEl);
+      });
+    }
+
     return card;
   }
 
@@ -7204,35 +7097,45 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                                int(body.get("to"))))
                     except (TypeError, ValueError):
                         err = "site indexes must be whole numbers"
-                elif op == "domain":
-                    # Naming is granting: a domain is assigned by issuing its
-                    # certificate — the same _obtain_trusted_cert the terminal
-                    # runs, which persists and reloads on success. DNS must
-                    # already point here; the page waits out the issuance
-                    # (seconds), and the terminal narrates the detail.
+                elif op in ("name", "certificate"):
+                    # Naming and certifying are two acts, and the page shows
+                    # them as two. `name` is a config write: instant, and it
+                    # cannot fail on someone else's DNS. `certificate` is the
+                    # slow, network-dependent one — the same
+                    # _obtain_trusted_cert the terminal runs, which persists
+                    # and reloads on success. Between them a site can sit
+                    # named but self-signed; that state is honest and loud on
+                    # the card rather than hidden inside one button.
                     try:
                         idx = int(body.get("site"))
                     except (TypeError, ValueError):
                         idx = -1
-                    domain = str(body.get("domain") or "").strip().lower()
                     if not (0 <= idx < len(config.sites)):
                         err = f"no site {idx}"
-                    elif not domain:
-                        err = "a domain is needed"
-                    elif _domain_in_use(domain, excluding=config.sites[idx]):
-                        err = f"{domain} is already used by another site on this box"
+                    elif op == "name":
+                        domain = str(body.get("domain") or "").strip().lower()
+                        if not domain:
+                            err = "a domain is needed"
+                        elif _domain_in_use(domain, excluding=config.sites[idx]):
+                            err = f"{domain} is already used by another site on this box"
+                        else:
+                            config.sites[idx].domain = domain
+                            config.save()
+                            err = ""
+                            if _server_running() or _service_is_active():
+                                _reload_server()
                     else:
-                        # A site's own current domain is deliberately not
-                        # refused: re-submitting it re-runs issuance — the
-                        # repair path when a certificate attempt failed.
                         target = config.sites[idx]
-                        _obtain_trusted_cert(domain, target)
-                        # site.domain is assigned only on the success path
-                        # inside the issuance, so this is the honest verdict.
-                        err = ("" if target.domain == domain else
-                               "certificate issuance failed — is the domain's "
-                               "DNS pointing at this server? The terminal has "
-                               "the detail")
+                        if not target.domain:
+                            err = "set a domain first — a certificate is issued for a name"
+                        else:
+                            outcome = _obtain_trusted_cert(target.domain, target)
+                            err = ("" if outcome is None else
+                                   "the authority refused — is the domain's DNS "
+                                   "pointing at this server? The terminal has the "
+                                   "detail" if outcome == "refused" else
+                                   "could not reach the certificate authority — "
+                                   "try again in a moment")
                 else:
                     err = "unknown op"
             except PermissionError:
@@ -7593,10 +7496,13 @@ def _health_checks():
             rows.append({"key": "dir", "site": i, "ok": False, "label": tag + "Folder",
                          "detail": "missing — publish to recreate it"})
         days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
-        cert_ok = days is not None and days > 0 and bool(site.domain)
+        covers = _domain_from_cert(_resolve(site.cert_file)) if site.cert_file else None
+        mismatched = bool(site.domain) and bool(covers) and covers != site.domain
+        cert_ok = days is not None and days > 0 and bool(site.domain) and not mismatched
         rows.append({"key": "cert", "site": i, "ok": cert_ok, "label": tag + "Certificate",
                      "days": days,
                      "detail": (f"{days} days remaining (auto-renew enabled)" if cert_ok
+                                else f"issued for {covers} — get one for this name" if mismatched
                                 else "expired" if (days is not None and days <= 0)
                                 else "self-signed" if days is not None
                                 else "not configured")})

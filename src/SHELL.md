@@ -1608,35 +1608,45 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                                int(body.get("to"))))
                     except (TypeError, ValueError):
                         err = "site indexes must be whole numbers"
-                elif op == "domain":
-                    # Naming is granting: a domain is assigned by issuing its
-                    # certificate — the same _obtain_trusted_cert the terminal
-                    # runs, which persists and reloads on success. DNS must
-                    # already point here; the page waits out the issuance
-                    # (seconds), and the terminal narrates the detail.
+                elif op in ("name", "certificate"):
+                    # Naming and certifying are two acts, and the page shows
+                    # them as two. `name` is a config write: instant, and it
+                    # cannot fail on someone else's DNS. `certificate` is the
+                    # slow, network-dependent one — the same
+                    # _obtain_trusted_cert the terminal runs, which persists
+                    # and reloads on success. Between them a site can sit
+                    # named but self-signed; that state is honest and loud on
+                    # the card rather than hidden inside one button.
                     try:
                         idx = int(body.get("site"))
                     except (TypeError, ValueError):
                         idx = -1
-                    domain = str(body.get("domain") or "").strip().lower()
                     if not (0 <= idx < len(config.sites)):
                         err = f"no site {idx}"
-                    elif not domain:
-                        err = "a domain is needed"
-                    elif _domain_in_use(domain, excluding=config.sites[idx]):
-                        err = f"{domain} is already used by another site on this box"
+                    elif op == "name":
+                        domain = str(body.get("domain") or "").strip().lower()
+                        if not domain:
+                            err = "a domain is needed"
+                        elif _domain_in_use(domain, excluding=config.sites[idx]):
+                            err = f"{domain} is already used by another site on this box"
+                        else:
+                            config.sites[idx].domain = domain
+                            config.save()
+                            err = ""
+                            if _server_running() or _service_is_active():
+                                _reload_server()
                     else:
-                        # A site's own current domain is deliberately not
-                        # refused: re-submitting it re-runs issuance — the
-                        # repair path when a certificate attempt failed.
                         target = config.sites[idx]
-                        _obtain_trusted_cert(domain, target)
-                        # site.domain is assigned only on the success path
-                        # inside the issuance, so this is the honest verdict.
-                        err = ("" if target.domain == domain else
-                               "certificate issuance failed — is the domain's "
-                               "DNS pointing at this server? The terminal has "
-                               "the detail")
+                        if not target.domain:
+                            err = "set a domain first — a certificate is issued for a name"
+                        else:
+                            outcome = _obtain_trusted_cert(target.domain, target)
+                            err = ("" if outcome is None else
+                                   "the authority refused — is the domain's DNS "
+                                   "pointing at this server? The terminal has the "
+                                   "detail" if outcome == "refused" else
+                                   "could not reach the certificate authority — "
+                                   "try again in a moment")
                 else:
                     err = "unknown op"
             except PermissionError:
@@ -2034,10 +2044,13 @@ def _health_checks():
             rows.append({"key": "dir", "site": i, "ok": False, "label": tag + "Folder",
                          "detail": "missing — publish to recreate it"})
         days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
-        cert_ok = days is not None and days > 0 and bool(site.domain)
+        covers = _domain_from_cert(_resolve(site.cert_file)) if site.cert_file else None
+        mismatched = bool(site.domain) and bool(covers) and covers != site.domain
+        cert_ok = days is not None and days > 0 and bool(site.domain) and not mismatched
         rows.append({"key": "cert", "site": i, "ok": cert_ok, "label": tag + "Certificate",
                      "days": days,
                      "detail": (f"{days} days remaining (auto-renew enabled)" if cert_ok
+                                else f"issued for {covers} — get one for this name" if mismatched
                                 else "expired" if (days is not None and days <= 0)
                                 else "self-signed" if days is not None
                                 else "not configured")})

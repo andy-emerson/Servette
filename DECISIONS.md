@@ -6,6 +6,26 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The page is two tabs: Publish lands, Settings scopes
+
+**Ruled (Human):** the admin page is Publish and Settings. Publish is
+the landing tab — the site cards, the thing the operator came to do.
+Settings is a site dropdown under the tabs scoping a **This site** card
+(domain read-only with where it is granted, folder, that site's health
+rows, its connection-check button — now checking the *selected* site,
+not always site 0 — and the password form) above an unscoped **This
+server** card (mode, version, the host health rows, the host settings).
+Both render from one paired `/status` + `/config` fetch.
+**Why:** the Status tab's rows grew linearly with sites while Config
+already scoped per site — the same facts rendered twice, one of them
+unboundedly.
+**Accepted trade:** the at-a-glance health check moves one click from
+page-open; softened by an amber dot on the Settings tab whenever any
+row needs review.
+**Rejected:** scoping host facts under the site dropdown (a site
+selector cannot scope the box); a third Status tab kept for the glance
+alone (two renderings of the same rows, drifting). *(2026-08-22)*
+
 ## The folder is not a setting: serve_dir is retiring from the vocabulary
 
 **Ruled (Human):** where a site's content lives is Servette's business,

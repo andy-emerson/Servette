@@ -1760,9 +1760,9 @@ def _health_checks():
     """Every health fact as a row, green included — the admin page's Health
     checks card. The same ground _production_issues walks, saying what passes
     as plainly as what needs attention: ok True is healthy, False needs it.
-    `key` is stable for consumers (the page routes password and channel rows
-    to its Config tab); `site` carries the index where the row is
-    site-scoped, None where it is host-wide."""
+    `key` is stable for consumers; `site` carries the index where the row is
+    site-scoped, None where it is host-wide — the admin page splits its
+    Settings cards (This site / This server) on exactly that."""
     rows = []
     service_active = _service_is_active()
     running        = service_active or _server_running()

@@ -143,6 +143,9 @@ class Site:
     def __init__(self, data=None):
         data = data or {}
         self.domain         = data.get("domain",         "")
+        # Deactivated sites keep their config and files but are invisible to
+        # request routing — the pause between serving and deleting.
+        self.active         = bool(data.get("active",    True))
         self.serve_dir      = data.get("serve_dir",      "site")
         self.cert_file      = data.get("cert_file",      "cert.pem")
         self.key_file       = data.get("key_file",       "key.pem")
@@ -381,6 +384,9 @@ class Config:
 [[site]]
 # Leave domain blank for a self-signed certificate (browsers will warn visitors)
 domain = {s(site.domain)}
+# Set active to false to keep the site configured and its files kept, but
+# stop serving it
+active = {'true' if site.active else 'false'}
 serve_dir = {s(site.serve_dir)}
 cert_file = {s(site.cert_file)}
 key_file = {s(site.key_file)}
@@ -837,6 +843,7 @@ def _security_headers(site):
 
 # Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
+_CHECK_PATH              = "/.well-known/servette-check"
 
 # The default 404 body (DECISIONS.md: "The error page is server-delivered,
 # client-executed"): authored as src/404.html and inlined by build.py, so it is
@@ -850,20 +857,16 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
      client-executed"). Served for any miss where the site publishes no
      404.html of its own.
 
-     Every server needs an error page, and a bare "Not found." spends a whole
-     response saying only that the reader was wrong. This one also reports that
-     the server is up, which host answered, what it is sending, and whether the
-     site has anything published at all — the diagnosis is free, since the
-     request was already made.
+     Every server needs an error page, and a bare "Not found." spends a
+     whole response saying only that the reader was wrong. This one leads
+     with the path and says the true thing: the server is up and answered —
+     only the path is missing. The full diagnosis lives on its own page at
+     the reserved path /.well-known/servette-check, linked below; splitting
+     the two keeps this page a real 404 and keeps the check reachable even
+     after an operator's own 404.html takes this role over.
 
-     Same-origin by construction, so it can read what a cross-origin probe
-     never could: it checks the connection it was itself loaded over. It never
-     enumerates the filesystem — no "did you mean" suggestions — because that
-     would turn an error page into a file-discovery oracle for strangers. The
-     version-discovery row needs the operator's session (the endpoint is
-     auth-gated) and shows for a logged-in reader only. Because this file ships
-     with the server, its checks can never drift from the features they
-     check. -->
+     The requested path is attacker-controlled text: written with
+     textContent, never innerHTML. -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -956,7 +959,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
     .dot.red { background: var(--red); animation: none; }
 
-    /* ── Not-found banner (404 role only) ── */
     .notfound {
       border: 1px solid var(--border);
       border-left: 3px solid var(--muted);
@@ -1010,15 +1012,20 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       font-size: 0.72rem;
     }
 
-    .notfound-home {
-      display: inline-block;
+    .notfound-links {
       margin-top: 0.85rem;
+      display: flex;
+      gap: 1.25rem;
+      flex-wrap: wrap;
+    }
+
+    .notfound-links a {
       font-size: 0.75rem;
       color: #5A8466;
       text-decoration: none;
     }
 
-    .notfound-home:hover { text-decoration: underline; }
+    .notfound-links a:hover { text-decoration: underline; }
 
     /* ── Connection card ── */
     .verified {
@@ -1060,7 +1067,278 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
 
-    /* ── Diagnosis ── */
+    .verified-links {
+      padding: 0.75rem 1.25rem;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .verified-links a {
+      font-size: 0.75rem;
+      color: #5A8466;
+      text-decoration: none;
+    }
+
+    .verified-links a:hover { text-decoration: underline; }
+
+    .note {
+      font-size: 0.7rem;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .note a { color: #60a5fa; text-decoration: none; }
+    .note a:hover { text-decoration: underline; }
+    .note a.brand { color: #5A8466; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; opacity: 1 !important; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="header">
+    <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
+    <div class="tagline" id="tagline">
+      <span class="dot" id="dot"></span><span id="tagline-text">THE SERVER IS RUNNING — THIS PATH IS NOT</span>
+    </div>
+  </div>
+
+  <!-- The server is up and answered — the path is what is missing — so this
+       leads with the path rather than with blame. -->
+  <div class="notfound">
+    <div class="notfound-head">
+      <span class="notfound-code">404</span>
+      <span class="notfound-msg">Nothing published here</span>
+    </div>
+    <div class="notfound-path" id="notfound-path">—</div>
+    <p class="notfound-why" id="notfound-why">
+      The server is running and answered this request, so the connection is
+      fine — only the path is missing. You are seeing this page because the
+      site publishes no <code>404.html</code> of its own.
+    </p>
+    <div class="notfound-links">
+      <a href="/">← the site's home page</a>
+    </div>
+  </div>
+
+  <div class="verified">
+    <div class="verified-header">
+      <div>
+        <div class="verified-label">Connection</div>
+        <div class="verified-value" id="url">—</div>
+      </div>
+      <div class="badge" id="badge">—</div>
+    </div>
+    <div class="verified-links">
+      <a href="/.well-known/servette-check">run the connection test →</a>
+    </div>
+  </div>
+
+  <div class="note">
+    This page ships inside Servette itself. Served by
+    <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
+    The Simple, Secure, Static-Site Server.
+  </div>
+
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  // ── The address the reader asked for ──────────────────────────────
+  // The complete URL, not the bare path: a miss at the site root would
+  // otherwise display as a lone "/", which reads as a typo rather than an
+  // address. textContent, never innerHTML — the path half is whatever the
+  // client asked for. decodeURI so an escaped path reads as the reader
+  // typed it, with the raw value kept when malformed enough to throw.
+  let shown = location.href.split('#')[0];
+  try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
+  $('notfound-path').textContent = shown;
+
+  // The one live judgment this page keeps: whether the connection carrying
+  // it is encrypted. Everything deeper belongs to the connection test,
+  // linked on the card below.
+  $('url').textContent = location.protocol + '//' + location.host;
+  if (location.protocol === 'https:') {
+    $('badge').textContent = '✓ Verified encrypted';
+    $('badge').className   = 'badge badge-green';
+  } else {
+    $('badge').textContent = '⚠ Not encrypted';
+    $('badge').className   = 'badge badge-red';
+    $('dot').className     = 'dot red';
+    $('tagline-text').textContent = 'Connection is not secure';
+  }
+</script>
+
+</body>
+</html>
+""".encode()
+_NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
+
+# The connection test (src/check.html), served at _CHECK_PATH on every site —
+# a reserved path under /.well-known/, the one namespace the hidden-path rule
+# already sets apart, so an operator's content never shadows the outside
+# vantage the way a custom 404.html takes over the miss body.
+_CHECK_PAGE = """<!DOCTYPE html>
+<!-- src/check.html — the connection test, inlined into the module by
+     build.py and served at the reserved path /.well-known/servette-check
+     (DECISIONS.md, "The connection test has its own reserved page").
+     Linked from the default 404 body and from the admin page's Status tab.
+
+     Same-origin by construction, so it can read what a cross-origin probe
+     never could: it checks the connection it was itself loaded over. It
+     never enumerates the filesystem — no "did you mean" suggestions —
+     because that would turn a public page into a file-discovery oracle for
+     strangers. The version-discovery row needs the operator's session (the
+     endpoint is auth-gated) and shows for a logged-in reader only. Because
+     this file ships with the server, its checks can never drift from the
+     features they check — and because its path is reserved, an operator's
+     own content never takes it over, so the outside vantage survives a
+     custom 404.html.
+
+     No triple double-quote and no backslash anywhere in this file: it lands
+     inside a triple-quoted Python literal, and the build refuses both. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connection test</title>
+  <style>
+    :root {
+      --bg:      #0e0e0e;
+      --surface: #161616;
+      --border:  #2a2a2a;
+      --text:    #e8e8e8;
+      --muted:   #555;
+      --green:   #4ade80;
+      --red:     #f87171;
+      /* No web fonts: a page that demonstrates a self-hosted server has no
+         business fetching anything from a third party. */
+      --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+              'Liberation Mono', 'Courier New', monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      opacity: 0.4;
+      z-index: 0;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 480px;
+      width: 100%;
+    }
+
+    .header {
+      margin-bottom: 3rem;
+    }
+
+    .servette-logo {
+      font-family: var(--mono);
+      font-weight: 500;
+      font-size: 3rem;
+      letter-spacing: 0;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .servette-logo .ette   { color: #5A8466; }
+    .servette-logo .cursor { color: inherit; animation: servette-blink 1.1s steps(1) infinite; }
+
+    @keyframes servette-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+    .tagline {
+      margin-top: 0.5rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      margin-right: 0.5rem;
+      animation: pulse 2s ease infinite;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+    }
+
+    .dot.red { background: var(--red); animation: none; }
+
+    /* ── Connection card ── */
+    .verified {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 1.5rem;
+    }
+
+    .verified-header {
+      background: var(--surface);
+      padding: 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .verified-label {
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.25rem;
+    }
+
+    .verified-value { font-size: 0.9rem; color: var(--text); }
+
+    .badge {
+      font-size: 0.7rem;
+      font-weight: 500;
+      padding: 0.3rem 0.7rem;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
+    .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
+
+    /* ── The report ── */
     .checks {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1107,6 +1385,10 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       line-height: 1.45;
     }
 
+    /* Rows render all at once in the pending state and resolve in place —
+       dim, then verdict — so the report never appears to assemble itself. */
+    .t-row.pending .t-req, .t-row.pending .t-obs, .t-row.pending .t-ev { opacity: 0.45; }
+
     .t-st       { flex: 0 0 2.6em; font-weight: 500; }
     .t-pass     { color: var(--green); }
     .t-fail     { color: var(--red); }
@@ -1116,6 +1398,10 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     .t-body { flex: 1; min-width: 0; }
     .t-req  { color: var(--text); }
     .t-obs  { color: var(--muted); }
+    /* The evidence that earned the finding, kept where it belongs: under
+       the finding, in the smaller voice of a footnote. */
+    .t-ev   { color: #3d3d3d; font-size: 0.66rem; margin-top: 0.15rem;
+              overflow-wrap: anywhere; }
 
     .t-summary {
       padding: 0.75rem 1.25rem;
@@ -1124,7 +1410,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       color: var(--muted);
     }
     .t-summary b { color: var(--text); font-weight: 500; }
-
 
     /* ── Footer ── */
     .note {
@@ -1157,23 +1442,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Shown only in the 404 role. The server is up and answered — the path is
-       what is missing — so this leads with the path rather than with blame. -->
-  <div class="notfound">
-    <div class="notfound-head">
-      <span class="notfound-code">404</span>
-      <span class="notfound-msg">Nothing published here</span>
-    </div>
-    <div class="notfound-path" id="notfound-path">—</div>
-    <p class="notfound-why" id="notfound-why">
-      The server is running and answered this request, so the connection is
-      fine — only the path is missing. You are seeing this page because the
-      site publishes no <code>404.html</code> of its own; the checks below
-      report what the server is actually sending.
-    </p>
-    <a class="notfound-home" id="notfound-home" href="/">← the site's home page</a>
-  </div>
-
   <div class="verified">
     <div class="verified-header">
       <div>
@@ -1186,7 +1454,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
   <div class="checks">
     <div class="checks-head">
-      <span class="checks-title">Connection report — live from your browser</span>
+      <span class="checks-title">Connection test</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>
@@ -1194,8 +1462,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
   </div>
 
   <div class="note">
-    This page ships inside Servette itself and runs on this site's own
-    domain — that is why it can read what it tests. Served by
+    Served by
     <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
@@ -1205,14 +1472,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 <script>
   const $ = (id) => document.getElementById(id);
 
-  // ── The path the reader asked for ─────────────────────────────────
-  // textContent, never innerHTML: the path is whatever the client asked for.
-  // decodeURI so an escaped path reads as the reader typed it, with the raw
-  // value kept when it is malformed enough to throw.
-  let shown = location.pathname + location.search;
-  try { shown = decodeURI(shown); } catch (e) { /* keep the raw form */ }
-  $('notfound-path').textContent = shown;
-
   // ── Connection card ───────────────────────────────────────────────
   const isHttps = location.protocol === 'https:';
   $('url').textContent = location.protocol + '//' + location.host;
@@ -1220,9 +1479,9 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
   if (isHttps) {
     $('badge').textContent = '✓ Verified encrypted';
     $('badge').className    = 'badge badge-green';
-    // Deliberately not "your server": this page serves on every Servette
-    // site, and most readers are visitors, not the operator.
-    $('tagline-text').textContent = 'THE SERVER IS RUNNING — THIS PATH IS NOT';
+    // Just the verdict. The vantage needs no announcing: the reader is
+    // holding the browser this page ran its checks from.
+    $('tagline-text').textContent = 'THE SERVER IS RUNNING';
   } else {
     $('badge').textContent = '⚠ Not encrypted';
     $('badge').className    = 'badge badge-red';
@@ -1240,160 +1499,156 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
   // choice, and reporting that choice as a defect would be a lie in the
   // other direction.
   const here = location.href.split('#')[0];
-
-  // Rows that probe `here` are labelled with the path actually requested,
-  // not a hard-coded "/". In the 404 role that path is whatever the reader
-  // typed, and a label naming a request the page never made is a small lie
-  // it can avoid. Truncated to keep the column from being pushed sideways by
-  // a long path.
-  const P = (() => {
-    let p = location.pathname || '/';
-    try { p = decodeURI(p); } catch (e) { /* keep the raw form */ }
-    return p.length > 24 ? p.slice(0, 23) + '…' : p;
-  })();
+  const P = '/.well-known/servette-check';
 
   let _hdrs = null;
   const H = async () => (_hdrs ||= (await fetch(here, { cache: 'no-store' })).headers);
   const seen = (v) => v || '(absent)';
 
-  // Diagnosis rows, in the 404 role only. They answer the two questions a
-  // bare "Not found." leaves open: is this response shaped like an error
-  // page at all, and is the *site* deployed or is nothing published anywhere?
-  // A visitor who mistyped one path sees a working home page; an operator
-  // whose deploy never landed sees that the root misses too. Both are read
-  // from same-origin requests a visitor could make by hand — the page adds
-  // no disclosure, and deliberately never lists directory contents or
-  // guesses near-miss filenames, which would make an error page into a
-  // file-discovery oracle.
-  const errorChecks = [
-    { req: 'GET ' + P, run: async () => {
+  // Each row is a finding in the reader's language, with the evidence that
+  // earned it underneath. The requests are the same ones as ever; what
+  // changed is that the report leads with what they mean, and several
+  // probes that answer one question now share one row.
+  const checks = [
+    { name: 'Encrypted', run: async () => {
         const r = await fetch(here, { cache: 'no-store' });
         const ct = r.headers.get('Content-Type') || '(absent)';
-        return { ok: r.status === 404 && ct.includes('text/html'),
-                 obs: '→ ' + r.status + ', ' + ct }; } },
+        return { ok: location.protocol === 'https:' && r.status === 200,
+                 obs: location.protocol === 'https:'
+                   ? 'HTTPS, and this browser accepted the certificate'
+                   : 'served over plain HTTP — visitors are unprotected',
+                 ev: 'GET ' + P + ' → ' + r.status + ', ' + ct }; } },
 
-    // Skipped when this page *is* the root: the row above already reported
-    // that exact request, and two identical GET / rows disagreeing on PASS
-    // and FAIL reads as a contradiction rather than a diagnosis.
-    ...(location.pathname === '/' ? [] : [
-    { req: 'GET /', run: async () => {
+    // Is anything published? A working home page and a passworded one both
+    // count as answers; anything else is the deploy-never-landed signal.
+    { name: 'Home page', run: async () => {
         const s = (await fetch('/', { cache: 'no-store' })).status;
         if (s === 200)
-          return { ok: true, obs: '→ 200 — the site has a home page' };
+          return { ok: true, obs: 'published and answering', ev: 'GET / → 200' };
         if (s === 401)
-          return { ok: null, obs: '→ 401 — home page needs a password' };
-        return { ok: false, obs: '→ ' + s + ' — nothing is published at the root' }; } },
-    ]),
-  ];
+          return { ok: true, obs: 'published, behind the site login',
+                   ev: 'GET / → 401' };
+        return { ok: false, obs: 'nothing is published at the site root',
+                 ev: 'GET / → ' + s }; } },
 
-  const checks = [
-    { req: 'GET ' + P, run: async () => {
-        const v = (await H()).get('X-Frame-Options');
-        return { ok: v === 'DENY', obs: 'X-Frame-Options: ' + seen(v) }; } },
-
-    { req: 'GET ' + P, run: async () => {
-        const v = (await H()).get('X-Content-Type-Options');
-        return { ok: v === 'nosniff', obs: 'X-Content-Type-Options: ' + seen(v) }; } },
-
-    { req: 'GET ' + P, run: async () => {
-        const v = (await H()).get('Referrer-Policy');
-        return { ok: !!v, obs: 'Referrer-Policy: ' + seen(v) }; } },
-
-    // Optional (config: csp). Absent means disabled, not broken.
-    { req: 'GET ' + P, run: async () => {
-        const v = (await H()).get('Content-Security-Policy');
-        return v
-          ? { ok: true, obs: 'Content-Security-Policy: present' }
-          : { ok: null, obs: 'CSP: disabled in config' }; } },
-
-    // Optional (config: permissions_policy). Absent means disabled.
-    { req: 'GET ' + P, run: async () => {
-        const v = (await H()).get('Permissions-Policy');
-        return v
-          ? { ok: true, obs: 'Permissions-Policy: present' }
-          : { ok: null, obs: 'Permissions-Policy: disabled in config' }; } },
-
-    { req: 'GET ' + P, run: async () => {
+    // Five headers, one question: is the browser being told how to behave?
+    // Two of the five are optional in config, so their absence is reported
+    // as a choice rather than a defect.
+    { name: 'Security headers', run: async () => {
         const h = await H();
-        return { ok: !!h.get('ETag') && !!h.get('Cache-Control'),
-                 obs: 'Cache-Control + ETag: ' + (h.get('ETag') || '(absent)') }; } },
-
-    { req: 'GET ' + P + '  (If-None-Match)', run: async () => {
-        const etag = (await H()).get('ETag');
-        if (!etag) return { ok: null, obs: 'no ETag to revalidate' };
-        const r = await fetch(here, { cache: 'no-store', headers: { 'If-None-Match': etag } });
-        return r.status === 304
-          ? { ok: true, obs: '→ 304 Not Modified' }
-          : { ok: null, obs: '→ ' + r.status + ' (browser cache varies)' }; } },
-
-    { req: 'POST ' + P, run: async () => {
-        const s = (await fetch(here, { method: 'POST' })).status;
-        return { ok: s === 405, obs: '→ ' + s + (s === 405 ? ' Method Not Allowed' : '') }; } },
-
-    { req: 'GET /<random>', run: async () => {
-        const s = (await fetch('/__servette_probe_' + Date.now())).status;
-        return { ok: s === 404, obs: '→ ' + s + (s === 404 ? ' Not Found' : '') }; } },
-
-    { req: 'GET /%2e%2e%2f…', run: async () => {
-        const s = (await fetch('/%2e%2e%2f%2e%2e%2fetc%2fpasswd')).status;
-        return { ok: s === 403, obs: '→ ' + s + (s === 403 ? ' Forbidden' : '') }; } },
+        const want = [['X-Frame-Options', 'DENY'], ['X-Content-Type-Options', 'nosniff'],
+                      ['Referrer-Policy', null]];
+        const missing = want.filter(([k, v]) => {
+          const got = h.get(k);
+          return v ? got !== v : !got;
+        }).map(([k]) => k);
+        const optional = [['Content-Security-Policy', 'CSP'],
+                          ['Permissions-Policy', 'Permissions-Policy']]
+          .filter(([k]) => !h.get(k)).map(([, name]) => name);
+        return { ok: !missing.length,
+                 obs: missing.length ? 'missing: ' + missing.join(', ')
+                      : optional.length ? 'sent (' + optional.join(' and ') +
+                                          ' switched off in config)'
+                      : 'all sent',
+                 ev: want.concat([['Content-Security-Policy'], ['Permissions-Policy']])
+                        .map(([k]) => k + ': ' + seen(h.get(k))).join(' · ') }; } },
 
     // HSTS is only sent for a site with a real domain certificate, so on a
     // self-signed or LAN server its absence is correct.
-    { req: 'GET ' + P, run: async () => {
+    { name: 'HTTPS enforced', run: async () => {
         const v = (await H()).get('Strict-Transport-Security');
         return v
-          ? { ok: true, obs: 'Strict-Transport-Security: present' }
-          : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
+          ? { ok: true, obs: 'browsers are told to refuse plain HTTP here',
+              ev: 'Strict-Transport-Security: ' + v }
+          : { ok: null, obs: 'needs a domain certificate (this one is self-signed)',
+              ev: 'Strict-Transport-Security: (absent)' }; } },
 
-    // Version discovery — same-origin, password-gated: the one check only
-    // this page can make (planned in #42). Servette serves it solely on a
-    // password-gated site, so the exact version reaches a party that already
-    // holds the password (this browser, once you logged in) and never an
-    // anonymous scanner. Absent is a choice or an older Servette, not a
-    // defect.
-    { req: 'GET /.well-known/servette', run: async () => {
+    { name: 'Caching', run: async () => {
+        const h = await H();
+        const etag = h.get('ETag');
+        if (!etag || !h.get('Cache-Control'))
+          return { ok: false, obs: 'no validator — every visit re-downloads',
+                   ev: 'Cache-Control: ' + seen(h.get('Cache-Control')) +
+                       ' · ETag: ' + seen(etag) };
+        const r = await fetch(here, { cache: 'no-store', headers: { 'If-None-Match': etag } });
+        return r.status === 304
+          ? { ok: true, obs: 'unchanged files are revalidated, not re-sent',
+              ev: 'If-None-Match ' + etag + ' → 304' }
+          : { ok: null, obs: 'validator sent; this browser re-downloaded anyway',
+              ev: 'If-None-Match ' + etag + ' → ' + r.status }; } },
+
+    // Three refusals, one question: does the server say no where it should?
+    { name: 'Refusals', run: async () => {
+        const post = (await fetch(here, { method: 'POST' })).status;
+        const miss = (await fetch('/__servette_probe_' + Date.now())).status;
+        const trav = (await fetch('/%2e%2e%2f%2e%2e%2fetc%2fpasswd')).status;
+        const bad = [];
+        if (post !== 405) bad.push('POST answered ' + post + ', not 405');
+        if (miss !== 404) bad.push('unknown path answered ' + miss + ', not 404');
+        if (trav !== 403) bad.push('path traversal answered ' + trav + ', not 403');
+        return { ok: !bad.length,
+                 obs: bad.length ? bad.join('; ')
+                      : 'uploads, unknown paths, and traversal all refused',
+                 ev: 'POST → ' + post + ' · unknown → ' + miss +
+                     ' · traversal → ' + trav }; } },
+
+    // Version discovery — same-origin, auth-gated: the one check only this
+    // page can make. Servette serves it solely on a private site, so the
+    // exact version reaches a party that already signed in (this browser)
+    // and never an anonymous scanner. A public site withholding it is the
+    // design working, which is a pass, not a skip.
+    { name: 'Version', run: async () => {
         const r = await fetch('/.well-known/servette', { cache: 'no-store' });
+        if (r.status === 404)
+          return { ok: true, obs: 'withheld — the site is public, so nobody is told',
+                   ev: 'GET /.well-known/servette → 404' };
         if (r.status !== 200)
-          return { ok: null, obs: 'hidden without a password (or an older Servette)' };
+          return { ok: null, obs: 'not answered (an older Servette, or not signed in)',
+                   ev: 'GET /.well-known/servette → ' + r.status };
         const v = await r.json();
-        return { ok: true, obs: 'running v' + v.running }; } },
+        return { ok: true, obs: 'running v' + v.running + ', readable only once signed in',
+                 ev: 'GET /.well-known/servette → 200' }; } },
   ];
 
   const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };
   const logEl = $('t-log');
 
-  function addRow(reqText) {
+  function addRow(name) {
     const st  = document.createElement('span'); st.className  = 't-st t-pending'; st.textContent = LABEL.pending;
-    const req = document.createElement('span'); req.className = 't-req';  req.textContent = reqText;
+    const req = document.createElement('span'); req.className = 't-req';  req.textContent = name;
     const obs = document.createElement('span'); obs.className = 't-obs';  obs.textContent = '';
+    const ev  = document.createElement('div');  ev.className  = 't-ev';   ev.textContent  = '';
     const body = document.createElement('span'); body.className = 't-body';
-    body.append(req, document.createTextNode('  '), obs);
-    const row = document.createElement('div'); row.className = 't-row';
+    body.append(req, document.createTextNode('  '), obs, ev);
+    const row = document.createElement('div'); row.className = 't-row pending';
     row.append(st, body);
     logEl.appendChild(row);
-    return { st, obs };
+    return { row, st, obs, ev };
   }
 
-  function paint(st, state) { st.textContent = LABEL[state]; st.className = 't-st t-' + state; }
+  function paint(row, st, state) {
+    st.textContent = LABEL[state];
+    st.className = 't-st t-' + state;
+    row.classList.remove('pending');
+  }
 
   async function runTests() {
     _hdrs = null;                 // force fresh requests on each run
     logEl.innerHTML = '';
     $('t-summary').textContent = 'running…';
     let pass = 0, fail = 0, skip = 0;
-    // The two diagnosis rows come first: what this response is, and whether
-    // the site is deployed at all. They frame the header checks that follow
-    // rather than being buried under them.
-    for (const c of errorChecks.concat(checks)) {
-      const { st, obs } = addRow(c.req);
+    // Every row exists before any check runs — the full report is visible
+    // immediately, dimmed, and each row resolves in place.
+    const rows = checks.map((c) => ({ c, el: addRow(c.name) }));
+    for (const { c, el } of rows) {
       let r;
       try { r = await c.run(); }
       catch (e) { r = { ok: null, obs: 'could not run' }; }
-      obs.textContent = r.obs;
-      if (r.ok === true)       { paint(st, 'pass'); pass++; }
-      else if (r.ok === false) { paint(st, 'fail'); fail++; }
-      else                     { paint(st, 'skip'); skip++; }
+      el.obs.textContent = r.obs;
+      el.ev.textContent = r.ev || '';
+      if (r.ok === true)       { paint(el.row, el.st, 'pass'); pass++; }
+      else if (r.ok === false) { paint(el.row, el.st, 'fail'); fail++; }
+      else                     { paint(el.row, el.st, 'skip'); skip++; }
     }
     // Green leads when nothing failed — the pitch and the test coincide on a
     // healthy site. A failure count is never hidden: suppressing it would
@@ -1411,7 +1666,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 </body>
 </html>
 """.encode()
-_NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
+_CHECK_ETAG = '"' + hashlib.sha256(_CHECK_PAGE).hexdigest()[:16] + '"'
 
 
 # Log escaping
@@ -1544,6 +1799,28 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
 
+    # The connection test, on its reserved path — code-first, so it answers
+    # whatever the site publishes: an operator's 404.html takes the miss body
+    # by existing, but it can never take the outside vantage with it. Behind
+    # the site's own auth like everything else, and carrying the same
+    # revalidate-always caching contract as the 404 body, for the same
+    # reason: the page's checks probe the URL it was served from.
+    if url_path.split("?", 1)[0] == _CHECK_PATH:
+        cache = _cache_control_header(site.username)
+        if "max-age" in cache:
+            cache = ("private" if site.username else "public") + ", no-cache"
+        if headers.get("If-None-Match", "") == _CHECK_ETAG:
+            log.info("304 Not Modified %s to %s", log_path, ip)
+            return resp(304, [(b"etag", _CHECK_ETAG.encode()),
+                              (b"cache-control", cache.encode())])
+        log.info("200 %s (connection test) to %s", log_path, ip)
+        return resp(200, [
+            (b"content-type",   b"text/html; charset=utf-8"),
+            (b"content-length", str(len(_CHECK_PAGE)).encode()),
+            (b"etag",           _CHECK_ETAG.encode()),
+            (b"cache-control",  cache.encode()),
+        ], _CHECK_PAGE)
+
     # Resolve request path to a file within the matched site's own serve_dir
     try:
         file_path, status = _resolve_request_path(url_path, site.serve_dir)
@@ -1560,19 +1837,17 @@ def _handle_request(method, url_path, headers, raw_ip):
     if status == 404 or file_path is None:
         # Every server needs an error page, and a bare "Not found." spends a
         # whole response telling the reader only that they were wrong. This one
-        # also says what the server is, that it is up, and what it is actually
-        # sending — the diagnosis is free, the request was already made. The
-        # operator's own 404.html wins by simply existing.
+        # leads with the path, says the server is up and answered, and links
+        # the connection test on its reserved path above — the split that
+        # keeps this a real 404 while the diagnosis survives an operator's
+        # own 404.html, which wins this role by simply existing.
         #
         # It also covers a site's own root while nothing is published there: no
         # index.html means the root is itself a miss, so the domain reports on
         # itself instead of answering with ten bytes of text.
         #
-        # The response mirrors the file path's caching contract (ETag,
-        # Cache-Control, 304) because the page's own checks probe the URL it
-        # was served from; without validators it would report a defect that is
-        # really this response's shape. The page checks, in the visitor's
-        # browser, the connection it arrived over, behind the site's own auth.
+        # The response keeps the caching contract (ETag, Cache-Control, 304),
+        # with any positive lifetime downgraded below.
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
         if not os.path.isfile(custom_404):
@@ -1672,8 +1947,11 @@ def _select_site(host):
     Host reaches a self-signed/LAN site with no domain configured). No
     domainless site and no domain match: None, the closed-system miss."""
     host = (host or "").split(":")[0].strip().lower()
+    # A deactivated site is invisible to routing everywhere below: its Host
+    # gets the closed-system miss (over a still-valid certificate), which is
+    # what "kept but not served" means on the wire.
     for site in config.sites:
-        if site.domain and site.domain.lower() == host:
+        if site.active and site.domain and site.domain.lower() == host:
             return site
     # www.<domain> reaches the site configured as <domain>. _obtain_trusted_cert
     # deliberately issues one certificate covering both names, so routing has to
@@ -1683,10 +1961,10 @@ def _select_site(host):
     if host.startswith("www."):
         bare = host[4:]
         for site in config.sites:
-            if site.domain and site.domain.lower() == bare:
+            if site.active and site.domain and site.domain.lower() == bare:
                 return site
     for site in config.sites:
-        if not site.domain:
+        if site.active and not site.domain:
             return site
     return None
 
@@ -3284,33 +3562,48 @@ def _ensure_swap():
         except ValueError:
             print("  Not a number — skipping swap setup.")
             return
+    err = _apply_swapfile(mb)
+    if err:
+        print(f"  {err}")
+    else:
+        print(f"  Swapfile active ({mb} MB), persistent across reboots.")
+
+
+def _apply_swapfile(mb):
+    """Create or resize Servette's swapfile to `mb` MB — the mechanical half
+    of the swap offer, shared by the terminal's prompt and the admin page's
+    field so the two cannot drift. Returns an error sentence, empty on
+    success (including the no-op where the size asked for is already
+    active). Never raises: every failure path ends in a sentence."""
+    if _IS_MACOS:
+        return "macOS manages its own swap"
+    ours              = os.path.exists(_SWAP_PATH)
+    ours_mb, _foreign = _swap_sizes()
+    active_mb         = ours_mb or 0
     if ours and abs(mb - active_mb) <= _SWAP_SLACK_MB:
-        return  # the size asked for is the size already active — nothing to do
+        return ""  # the size asked for is the size already active
     size = mb * 1024 * 1024
     try:
         st        = os.statvfs("/")
         reclaimed = os.path.getsize(_SWAP_PATH) if ours else 0
         if st.f_bavail * st.f_frsize + reclaimed < size + 1024 ** 3:  # keep 1 GB free
-            print(f"  Not enough free disk for a {mb} MB swapfile plus 1 GB margin — skipping.")
-            return
-    except OSError:
-        return
+            return f"Not enough free disk for a {mb} MB swapfile plus 1 GB margin."
+    except OSError as e:
+        return f"Could not read free disk space ({e})."
     if ours and active_mb > 0:
         r = subprocess.run(["swapoff", _SWAP_PATH], capture_output=True)
         if r.returncode != 0:
-            print("  Could not deactivate the current swapfile (heavily in use?) — try again later.")
-            return
+            return "Could not deactivate the current swapfile (heavily in use?) — try again later."
     try:
         _make_swapfile(size)
         with open("/etc/fstab") as f:
             fstab = f.read()
         if _SWAP_PATH not in fstab.split():
             with open("/etc/fstab", "a") as f:
-                f.write(f"{_SWAP_PATH} none swap sw 0 0\n")
-        print(f"  Swapfile active ({mb} MB), persistent across reboots.")
+                f.write(f"{_SWAP_PATH} none swap sw 0 0" + chr(10))
         log.info("Swapfile active: %d MB at %s", mb, _SWAP_PATH)
+        return ""
     except (OSError, subprocess.CalledProcessError) as e:
-        print(f"  Could not set up swapfile: {e}")
         # A failed RESIZE has already truncated the old file, so try to give
         # the host back the swap it walked in with — a memory-tight host that
         # accepted a grow offer must not end up worse than it started. Swap
@@ -3319,8 +3612,7 @@ def _ensure_swap():
         if ours and active_mb > 0:
             try:
                 _make_swapfile(active_mb * 1024 * 1024)
-                print(f"  Restored the previous {active_mb} MB swapfile.")
-                return
+                return f"Could not set up the swapfile ({e}) — restored the previous {active_mb} MB."
             except (OSError, subprocess.CalledProcessError):
                 pass
         # Nothing to restore (or the restore failed): remove the dead file AND
@@ -3340,6 +3632,7 @@ def _ensure_swap():
                     f.writelines(kept)
         except OSError:
             pass
+        return f"Could not set up the swapfile ({e})."
 
 
 # The service runtime
@@ -3969,6 +4262,7 @@ _COMMANDS = [
     ("sites [--json]",   "list configured sites"),
     ("set [n] k=v ...",  "change settings non-interactively"),
     ("log [n]",          "show the last n log entries"),
+    ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
     ("publish",          "one guided flow for site content: pull, roll back, channel"),
     ("pull [n]",         "check a site's publish channel and pull new content now"),
@@ -3983,6 +4277,7 @@ _CONFIG_COMMANDS = [
     ("sites",           "list configured sites"),
     ("add-site",        "add a new site (folder, domain, password, publish channel)"),
     ("remove-site <n>", "remove a site"),
+    ("move-site <n> <to>", "reorder sites (the first domainless one answers unmatched Hosts)"),
     ("dir [n]",         "directory to serve"),
     ("port",            "HTTPS port"),
     ("cert [n]",        "SSL certificate and key"),
@@ -4075,8 +4370,9 @@ def _config_show():
 def _config_sites():
     _section("Sites")
     for i, site in enumerate(config.sites):
-        auth = "password-protected" if site.username else "no password"
-        print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}")
+        auth = "private" if site.username else "public"
+        state = "" if site.active else ", DEACTIVATED (set active=yes to serve)"
+        print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}{state}")
     print()
     print("  Edit one with e.g. 'dir 1', 'cert 1', 'publish 1' (index defaults to 0).")
     print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
@@ -4111,6 +4407,43 @@ def _serve_dir_exposes_secrets(path):
 
 
 # add-site
+def _invent_site_dir():
+    """Create and own an empty folder for a page-added site. Servette names
+    it: the folder is where publishes land, not a question an operator
+    should have to answer (the add-card ruling — and the folder concept is
+    on its way out of the vocabulary entirely)."""
+    name = f"site-{os.urandom(3).hex()}"
+    os.makedirs(_resolve(name), exist_ok=True)
+    _chown_operator(_resolve(name))
+    return name
+
+
+def _append_site(serve_dir):
+    """Append a new site serving `serve_dir` (a path the caller has already
+    validated or created) and give it its own certificate identity. The one
+    site-creation core, shared by the terminal's add-site prompts and the
+    page's add-card. Returns the new site's index.
+
+    The self-signed pair is suffixed with randomness, not the site's list
+    position: a position-based name (cert-{idx}.pem) collides with a
+    surviving site's own files after a remove/add sequence shifts indices,
+    silently overwriting that site's live certificate. It is generated
+    unconditionally, before any domain enters the picture: if ACME issuance
+    later fails, cert_file/key_file must still point at real files on disk —
+    start_server()'s pre-flight existence check refuses to start the WHOLE
+    server, for every site, if any site's cert_file is missing."""
+    site = Site({"serve_dir": serve_dir})
+    config.sites.append(site)
+    suffix = os.urandom(4).hex()
+    site.cert_file = f"cert-{suffix}.pem"
+    site.key_file  = f"key-{suffix}.pem"
+    _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
+    _chown_servette(_resolve(site.cert_file))
+    _chown_servette(_resolve(site.key_file))
+    config.save()
+    return len(config.sites) - 1
+
+
 def _config_add_site():
     """Add a site — the same questions cmd_setup asks for the very first one
     (domain, password), plus the folder question the first site gets for free
@@ -4140,30 +4473,12 @@ def _config_add_site():
     if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
         print("  No index.html yet — the site will answer with Servette's error page until you publish one.")
 
-    site = Site({"serve_dir": folder})
-    config.sites.append(site)
-    idx = len(config.sites) - 1
-    # A unique self-signed cert/key pair, so a second self-signed site doesn't
-    # collide with the first's cert.pem/key.pem — overwritten if a domain is
-    # obtained below, which uses the domain-scoped certs/<domain>/ path instead.
-    # Suffixed with randomness, not the site's list position: a position-based
-    # name (cert-{idx}.pem) collides with a surviving site's own files after a
-    # remove-site/add-site sequence shifts indices, silently overwriting that
-    # site's live certificate.
-    suffix = os.urandom(4).hex()
-    site.cert_file = f"cert-{suffix}.pem"
-    site.key_file  = f"key-{suffix}.pem"
-    # Generated unconditionally, before the domain is even asked about: if a
-    # domain is given below and ACME issuance fails, cert_file/key_file must
-    # still point at real files on disk rather than a placeholder name that
-    # was config.save()'d but never written — start_server()'s pre-flight
-    # existence check refuses to start the WHOLE server, for every site, the
-    # next time anything restarts it, if a site's cert_file is missing.
+    # The self-signed pair keeps a second site from colliding with the
+    # first's cert.pem/key.pem — overwritten if a domain is obtained below,
+    # which uses the domain-scoped certs/<domain>/ path instead.
     print("  Generating self-signed certificate...")
-    _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
-    _chown_servette(_resolve(site.cert_file))
-    _chown_servette(_resolve(site.key_file))
-    config.save()
+    idx  = _append_site(folder)
+    site = config.sites[idx]
     print(f"  → site {idx} added.\n")
 
     domain = _input("  Domain name (leave blank for self-signed): ").strip()
@@ -4208,6 +4523,40 @@ def _config_add_site():
 
 
 # remove-site
+def _remove_site(idx):
+    """Drop site `idx` and delete its server copies — the content tree, the
+    publish slots, and the one-step backup. The operator's originals live in
+    their own local storage; everything here is a derived copy, which is what
+    makes deletion the honest meaning of 'remove' (deactivation is the
+    keep-everything alternative). The site's certificate files are kept, and
+    a folder another site still points at is left alone. Returns an error
+    sentence, empty on success. Shared by the terminal's remove-site and the
+    page's cards."""
+    if not (0 <= idx < len(config.sites)):
+        return f"no site {idx}"
+    if len(config.sites) == 1:
+        return "can't remove the only site — a box needs at least one"
+    victim = config.sites[idx]
+    base   = _resolve(victim.serve_dir)
+    del config.sites[idx]
+    config.save()
+    shared = any(os.path.realpath(_resolve(s.serve_dir)) == os.path.realpath(base)
+                 for s in config.sites)
+    if not shared and _is_within_base_dir(base):
+        for suffix in ("", ".a", ".b", ".bak", ".new"):
+            path = base + suffix
+            try:
+                if os.path.islink(path):
+                    os.unlink(path)
+                elif os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                pass  # a copy that resists deletion must not block the removal
+    if _server_running() or _service_is_active():
+        _reload_server()
+    return ""
+
+
 def _config_remove_site(args):
     if not args:
         print("  Usage: remove-site <site index>")
@@ -4226,15 +4575,38 @@ def _config_remove_site(args):
 
     site  = config.sites[idx]
     label = site.domain or site.serve_dir
-    if not _prompt(f"Remove site {idx} ({label})? Its config is discarded; its files on disk are not touched."):
+    if not _prompt(f"Remove site {idx} ({label})? Its server copies are deleted — "
+                   f"originals in your local storage are untouched "
+                   f"('set {idx} active=no' deactivates without deleting)."):
         print("  Cancelled.")
         return
 
-    del config.sites[idx]
-    config.save()
-    print(f"  → site {idx} removed.")
-    if _server_running() or _service_is_active():
-        _reload_server()
+    err = _remove_site(idx)
+    print(f"  {err}" if err else f"  → site {idx} removed.")
+
+
+# move-site
+def _move_site(frm, to):
+    """Reorder: lift site `frm` out and reinsert it at position `to`.
+    Returns an error sentence, empty on success. Shared by the terminal's
+    move-site and the page's card drag."""
+    n = len(config.sites)
+    if not (0 <= frm < n and 0 <= to < n):
+        return f"site indexes must be 0-{n - 1}"
+    if frm != to:
+        config.sites.insert(to, config.sites.pop(frm))
+        config.save()
+        if _server_running() or _service_is_active():
+            _reload_server()
+    return ""
+
+
+def _config_move_site(args):
+    if len(args) != 2 or not all(a.isdigit() for a in args):
+        print("  Usage: move-site <from> <to>")
+        return
+    err = _move_site(int(args[0]), int(args[1]))
+    print(f"  {err}" if err else "  → moved.")
 
 
 # dir
@@ -4526,6 +4898,8 @@ def cmd_config():
             _config_add_site()
         elif cmd == "remove-site":
             _config_remove_site(args)
+        elif cmd == "move-site":
+            _config_move_site(args)
         elif cmd in ("dir", "directory"):
             site = _config_site_arg(args)
             if site is not None:
@@ -4636,6 +5010,86 @@ def cmd_log(n=20):
             print("No journal on macOS — in session mode the log is this terminal's own output.")
         else:
             print("journalctl not found. Is this a systemd system?")
+
+
+# Traffic
+def _traffic_lines(days=7):
+    """The journal's lines for the window, timestamped (short-iso), oldest
+    first; [] where no journal answers (macOS session mode, or a journal
+    that needs privileges this shell doesn't hold)."""
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "servette", "-o", "short-iso",
+             "--since", f"-{days}d", "--no-pager"],
+            capture_output=True, text=True)
+        return result.stdout.splitlines()
+    except FileNotFoundError:
+        return []
+
+
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _parse_traffic(lines, days=7):
+    """Tally journal lines into the traffic summary: requests per day,
+    status counts, top paths. Pure, so the suite can feed it real log
+    lines. Each line carries two prefixes — the journal's own
+    ('<iso> <host> servette[pid]:') and then setup_logging's format
+    ('<date> <time>  LEVEL  <message>') — so the level name is the anchor
+    the message begins after. Anchoring on the unit token instead was the
+    bug that made this count nothing at all: the Python timestamp sat
+    where the status was expected. Only response lines count — every
+    served response logs as '<status> <path> … to <ip>' (or 'from' on
+    refusals) — and systemd's own lines, carrying no level, are skipped.
+    Paths are tallied from content responses (200/206/304). IPs are never
+    carried into the result."""
+    per_day, statuses, paths = {}, {}, {}
+    stamp = (lambda p: p[:13].replace("T", " ")) if days <= 2 else (lambda p: p[:10])
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 4 or len(parts[0]) < 10 or parts[0][4:5] != "-":
+            continue
+        day = stamp(parts[0])
+        lvl = next((i for i, p in enumerate(parts) if p in _LOG_LEVELS), None)
+        if lvl is None:
+            continue
+        msg = parts[lvl + 1:]
+        if not msg or len(msg[0]) != 3 or not msg[0].isdigit():
+            continue
+        statuses[msg[0]] = statuses.get(msg[0], 0) + 1
+        per_day[day] = per_day.get(day, 0) + 1
+        if msg[0] in ("200", "206", "304"):
+            path = next((p for p in msg[1:] if p.startswith("/")), None)
+            if path:
+                paths[path] = paths.get(path, 0) + 1
+    top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
+            "top_paths": top, "window_days": days,
+            "bucket": "hour" if days <= 2 else "day",
+            "total": sum(statuses.values())}
+
+
+def _traffic_summary(days=7):
+    return _parse_traffic(_traffic_lines(days), days)
+
+
+def cmd_traffic():
+    """`traffic` — requests, statuses, and top paths from the last 7 days,
+    read from the journal. The page's Traffic tab renders this same
+    summary; the raw log (IPs included) stays with `log`."""
+    t = _traffic_summary()
+    if not t["days"]:
+        print("  No traffic in the window — or no readable journal on this host.")
+        return
+    _section("Traffic — last 7 days")
+    print(f"  Requests: {sum(n for _, n in t['days'])}")
+    for day, n in t["days"]:
+        print(f"    {day}  {n}")
+    print("  Statuses: " + ", ".join(f"{s} x{n}" for s, n in t["statuses"].items()))
+    print("  Top paths:")
+    for path, n in t["top_paths"]:
+        print(f"    {n:>6}  {path}")
+    print()
 
 
 # The update channel for a site's *content*: a signed tar.gz bundle, pulled
@@ -4981,14 +5435,55 @@ _UI_MAX_BAD_CODES = 5     # then the run stops authenticating anyone: a six-char
                           # process free to try millions over loopback
 
 
-# The pairing page
-_UI_PAIR_PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Servette</title></head>
-<body style="font-family: system-ui, sans-serif; max-width: 26rem; margin: 4rem auto;">
-<h1>Servette</h1>
-<p>Enter the code printed in your terminal:</p>
-<form method="get" action="/"><input name="t" autofocus autocomplete="off">
-<button>Open</button></form>
+# The login page
+_UI_LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Servette — Log in</title>
+<style>
+  body { background: #0e0e0e; color: #e8e8e8; min-height: 100vh; margin: 0;
+         display: flex; flex-direction: column; align-items: center;
+         justify-content: center; padding: 2rem; box-sizing: border-box;
+         font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo,
+                      Consolas, 'Liberation Mono', 'Courier New', monospace; }
+  /* The cursor is absolute so it adds no width: the page centers on
+     "Servette", not "Servette_". */
+  .logo { font-size: 3rem; font-weight: 500; line-height: 1; position: relative; }
+  .logo .ette { color: #5A8466; }
+  .logo .cursor { position: absolute; animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+  .tagline { margin-top: 0.5rem; color: #555; font-size: 0.75rem;
+             letter-spacing: 0.08em; text-transform: uppercase; }
+  .card { margin-top: 3rem; width: 100%; max-width: 26rem; background: #161616;
+          border: 1px solid #2a2a2a; border-radius: 8px; padding: 1.25rem; }
+  label { display: block; color: #555; font-size: 0.7rem;
+          letter-spacing: 0.1em; text-transform: uppercase;
+          margin-bottom: 0.35rem; }
+  input { width: 100%; box-sizing: border-box; font-family: inherit;
+          font-size: 0.9rem; color: #e8e8e8; background: #0e0e0e;
+          border: 1px solid #2a2a2a; border-radius: 4px;
+          padding: 0.6rem 0.7rem; }
+  input:focus { outline: none; border-color: rgba(90,132,102,0.8);
+                box-shadow: 0 0 0 2px rgba(90,132,102,0.25); }
+  button { margin-top: 0.75rem; font-family: inherit; font-size: 0.75rem;
+           color: #e8e8e8; background: rgba(90,132,102,0.15);
+           border: 1px solid rgba(90,132,102,0.6); border-radius: 4px;
+           padding: 0.5rem 0.9rem; cursor: pointer; }
+  .hint { margin-top: 0.75rem; color: #555; font-size: 0.72rem;
+          line-height: 1.7; }
+</style></head>
+<body>
+<div class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
+<div class="tagline">Login</div>
+<div class="card">
+  <form method="get" action="/">
+    <label for="t">Passcode</label>
+    <input id="t" name="t" autofocus autocomplete="off">
+    <button>Log in</button>
+  </form>
+  <p class="hint">Run 'servette admin' in your SSH console to generate a
+  one-time passcode.</p>
+</div>
 </body></html>
 """
 
@@ -4998,8 +5493,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 <!-- src/admin — the operator's page, the browser half of the paired
      surfaces. Served only by the loopback page server (127.0.0.1, reached
      through the operator's SSH tunnel via `servette admin`), never by the
-     public site. One page, tabs per feature: Status (the inside view) and
-     Publish now; Config when it earns its forms.
+     public site. One page, three tabs: Sites (one card per site, carrying
+     everything about it — publish, domain, certificate, access), Server
+     (what the box is doing and how it is set), and Statistics (traffic
+     counted across every site, and the box's own load).
      Constraints, all load-bearing:
 
      - No signature, no key. Being here IS the authentication: only the
@@ -5058,6 +5555,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .container {
       position: relative;
       z-index: 1;
+      /* Back to the reading width the public pages use: once the rows
+         became facts and the forms sat beside their labels, 760px was
+         empty space rather than room. */
       max-width: 560px;
       width: 100%;
     }
@@ -5149,50 +5649,65 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
     .badge-dim   { background: rgba(255,255,255,0.04); color: var(--muted); border: 1px solid var(--border); }
+    .badge-warn  { background: rgba(251,191,36,0.12); color: var(--amber); border: 1px solid rgba(251,191,36,0.4); }
+    
 
+    /* Every button reads the same way: available is Servette green, hover
+       brightens it, unavailable is dim and says so by being unclickable. */
     button.action {
       font-family: inherit;
       font-size: 0.75rem;
       color: var(--text);
-      background: rgba(255,255,255,0.05);
-      border: 1px solid var(--border);
+      border: 1px solid rgba(90,132,102,0.6);
+      background: rgba(90,132,102,0.15);
       border-radius: 4px;
       padding: 0.5rem 0.9rem;
       cursor: pointer;
       letter-spacing: 0.03em;
     }
-    button.action:hover:not(:disabled) { border-color: #3a3a3a; background: rgba(255,255,255,0.08); }
-    button.action:disabled { color: var(--muted); cursor: not-allowed; }
-    button.action.primary { border-color: rgba(90,132,102,0.6); background: rgba(90,132,102,0.15); }
-    button.action.primary:hover:not(:disabled) { background: rgba(90,132,102,0.25); }
+    button.action:hover:not(:disabled) { background: rgba(90,132,102,0.28); }
+    button.action:disabled {
+      color: var(--muted);
+      border-color: rgba(90,132,102,0.25);
+      background: rgba(90,132,102,0.05);
+      cursor: not-allowed;
+    }
 
     .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 
     .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
+    .rows > div { padding: 0.18rem 0; }
+    .rows a.cfg-link { color: #5A8466; text-decoration: none; white-space: nowrap; }
+    .rows a.cfg-link:hover { text-decoration: underline; }
     .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
     .rows .gap { margin-top: 0.55rem; }
+    /* A ledger's total sits under a rule, at the foot of what it sums. */
+    .rows .ledger {
+      margin-top: 0.35rem;
+      padding-top: 0.35rem;
+      border-top: 1px solid var(--border);
+    }
     .rows b { color: var(--text); font-weight: 500; }
+    .rows .ok { color: #5A8466; }
+    .rows .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #5A8466;
+      margin-right: 0.45rem;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+      animation: pulse 2s ease infinite;
+    }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
     .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
     .hint b { color: var(--text); font-weight: 500; }
     .warn  { color: var(--amber); }
-    .good  { color: var(--green); }
-    .bad   { color: var(--red); }
     .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
-
-    pre.shell {
-      font-family: inherit;
-      font-size: 0.72rem;
-      color: var(--text);
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 0.7rem 0.9rem;
-      line-height: 1.7;
-      overflow-x: auto;
-      margin-top: 0.4rem;
-    }
-    pre.shell .c { color: var(--muted); }
 
     .note {
       font-size: 0.7rem;
@@ -5203,13 +5718,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     .hidden { display: none !important; }
 
-    #drop-card.drag {
+    .site-card.drag {
       border-color: rgba(90,132,102,0.7);
       background: rgba(90,132,102,0.08);
     }
 
     .dropstrip {
-      margin-top: 0.75rem;
       padding: 0.8rem;
       border: 1px dashed var(--border);
       border-radius: 4px;
@@ -5218,28 +5732,204 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       color: var(--muted);
       letter-spacing: 0.04em;
     }
-    #drop-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
+    .dropstrip a { color: #5A8466; text-decoration: none; }
+    .dropstrip a:hover { text-decoration: underline; }
+    .site-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
 
-    .cfg-field { margin-top: 0.7rem; }
+    /* Card reordering, the notebook's grammar: grab the header, a ghost
+       follows the cursor, the source dims to a dashed placeholder, and
+       neighbours swap in place as the ghost crosses them. */
+    .site-card .card-head { cursor: grab; user-select: none; }
+    .site-card.drag-placeholder { opacity: 0.35; border-style: dashed; }
+    .card-ghost { box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+    .head-left, .head-right { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+    .head-left .card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .handle { color: var(--muted); font-size: 0.8rem; }
+    button.ca {
+      font-family: inherit;
+      font-size: 0.8rem;
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      line-height: 1;
+    }
+    button.ca:hover { color: var(--text); background: rgba(255,255,255,0.07); }
+    button.ca.del:hover { color: var(--red); background: rgba(248,113,113,0.12); }
+    button.ca svg { display: block; }
+    .add-zone { display: flex; justify-content: center; margin-bottom: 1.5rem; }
+
+    /* The remove panel's warning ladder: red deletes, amber pauses,
+       neutral cancels. */
+    button.action.danger {
+      color: var(--red);
+      border-color: rgba(248,113,113,0.5);
+      background: rgba(248,113,113,0.08);
+    }
+    button.action.danger:hover:not(:disabled) { background: rgba(248,113,113,0.18); }
+    button.action.pause {
+      color: var(--amber);
+      border-color: rgba(251,191,36,0.5);
+      background: rgba(251,191,36,0.08);
+    }
+    button.action.pause:hover:not(:disabled) { background: rgba(251,191,36,0.18); }
+    .site-card.inactive .card-title { opacity: 0.55; }
+
+    /* Wide page, side-by-side forms: label left, field right, the hint
+       under the field. Narrow screens stack them again. */
+    .cfg-field {
+      margin-top: 0.9rem;
+      display: grid;
+      grid-template-columns: 8rem 1fr;
+      align-items: center;
+    }
     .cfg-field label {
-      display: block;
       font-size: 0.7rem;
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--muted);
-      margin-bottom: 0.25rem;
     }
-    .cfg-field input, select.cfg-site {
+    .cfg-field .cfg-hint { grid-column: 2; }
+    @media (max-width: 560px) {
+      .cfg-field { grid-template-columns: 1fr; row-gap: 0.25rem; }
+      .cfg-field .cfg-hint { grid-column: 1; }
+    }
+    input[type="text"], input[type="password"], select.cfg-site {
       font-family: inherit;
       font-size: 0.75rem;
       color: var(--text);
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 4px;
-      padding: 0.5rem 0.7rem;
+      padding: 0.4rem 0.7rem;
       width: 100%;
     }
-    select.cfg-site { width: auto; }
+    select.cfg-site { width: auto; margin-bottom: 1rem; }
+    .attention {
+      border: 1px solid rgba(251,191,36,0.35);
+      background: rgba(251,191,36,0.07);
+      border-radius: 8px;
+      padding: 0.7rem 1rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.72rem;
+      line-height: 1.8;
+      color: var(--amber);
+    }
+    .attention b { color: var(--text); font-weight: 500; }
+    .attention a { color: var(--amber); text-decoration: underline; }
+    .split { border-top: 1px solid var(--border); margin: 1rem 0; }
+
+    /* The public/private switch — a literal toggle: the knob's position and
+       a green tint say private (on). Laid out like the fields below it:
+       label left, control right, ending at the same right edge. */
+    /* The same 8rem key column the fact rows use, so the access value lines
+       up with Domain and Certificate above it. */
+    .switch-row {
+      display: grid;
+      grid-template-columns: 8rem 1fr;
+      align-items: center;
+      font-size: 0.72rem;
+      line-height: 1.9;
+      padding: 0.3rem 0;
+    }
+    .switch-row .k { color: var(--muted); }
+    .switch-row label.k { cursor: pointer; }
+    .switch-row .switch-value {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      color: var(--text);
+    }
+    .switch-act { display: flex; align-items: center; gap: 0.5rem; }
+    .switch-act label { color: var(--muted); cursor: pointer; }
+    button.action.tiny { padding: 0.2rem 0.55rem; font-size: 0.68rem; }
+    button.action.due {
+      color: var(--amber);
+      border-color: rgba(251,191,36,0.5);
+      background: rgba(251,191,36,0.08);
+    }
+    button.action.due:hover:not(:disabled) {
+      color: var(--text);
+      border-color: rgba(90,132,102,0.6);
+      background: rgba(90,132,102,0.15);
+    }
+
+    /* Charts: inline SVG, no library — the page loads no third-party code. */
+    .chart { width: 100%; height: 60px; display: block; }
+    .chart-wrap { display: flex; gap: 0.5rem; margin-top: 0.8rem; }
+    .chart-body { flex: 1; min-width: 0; }
+    .chart-y {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: flex-end;
+      height: 60px;
+      font-size: 0.62rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .chart-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.62rem;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
+    @media (max-width: 560px) {
+      .switch-row { grid-template-columns: 1fr auto; }
+    }
+    input.switch {
+      appearance: none;
+      -webkit-appearance: none;
+      margin: 0;
+      position: relative;
+      flex-shrink: 0;
+      width: 38px;
+      height: 20px;
+      border-radius: 99px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    input.switch::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--muted);
+      transform: translateY(-50%);
+      transition: left 0.15s, right 0.15s, background 0.15s;
+    }
+    input.switch:checked {
+      background: rgba(90,132,102,0.15);
+      border-color: rgba(90,132,102,0.6);
+    }
+    input.switch:checked::after { left: auto; right: 2px; background: #5A8466; }
+    input.switch:focus-visible { outline: 1px solid rgba(90,132,102,0.8); outline-offset: 1px; }
+    /* The browser's default focus halo clashes with the theme; replaced —
+       never just removed — so keyboard focus stays visible. */
+    input[type="text"]:focus, input[type="password"]:focus, select.cfg-site:focus {
+      outline: none;
+      border-color: rgba(90,132,102,0.8);
+      box-shadow: 0 0 0 2px rgba(90,132,102,0.25);
+    }
+    button:focus-visible {
+      outline: 1px solid rgba(90,132,102,0.8);
+      outline-offset: 1px;
+    }
+    .cfg-hint {
+      font-size: 0.68rem;
+      color: var(--muted);
+      line-height: 1.6;
+      margin-top: 0.3rem;
+    }
   </style>
 </head>
 <body>
@@ -5248,7 +5938,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline">Admin — your server, through your SSH tunnel</div>
+    <div class="tagline">Admin</div>
   </div>
 
   <!-- Shown instead of the app when the browser lacks the pipeline. -->
@@ -5267,118 +5957,109 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   <div id="app" class="hidden">
 
+  <!-- What needs review, said in words and pointed at its fix — a marker
+       that only signals something is wrong, without saying what or where,
+       is a puzzle rather than a notice. -->
+  <div class="attention hidden" id="attention"></div>
+
   <nav class="tabs" role="tablist">
-    <button class="tab active" id="tab-status" type="button" role="tab">Status</button>
-    <button class="tab" id="tab-publish" type="button" role="tab">Publish</button>
-    <button class="tab" id="tab-config" type="button" role="tab">Config</button>
+    <button class="tab active" id="tab-sites" type="button" role="tab">Sites</button>
+    <button class="tab" id="tab-server" type="button" role="tab">Server</button>
+    <button class="tab" id="tab-stats" type="button" role="tab">Statistics</button>
   </nav>
 
-  <!-- ══ Status — the inside view ══ -->
-  <div id="panel-status" role="tabpanel">
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Server</span>
-        <span class="badge badge-dim" id="st-badge">loading…</span>
-      </div>
-      <div class="card-body">
-        <div class="rows" id="st-rows"></div>
-        <p class="error hidden" id="st-error"></p>
-        <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action" id="btn-refresh" type="button">Refresh</button>
-          <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once the status shows a domain">Run the outside check</button>
-        </div>
-        <p class="hint">The outside check opens a missing path on your site in
-        a new tab: the connection report that answers is served from the
-        public internet's side of the wire — the vantage this page, living on
-        your SSH tunnel, cannot have.</p>
-      </div>
+  <!-- ══ Publish — one card per site: drop or choose its folder, publish.
+       Cards can be added, removed, and reordered (drag the header, or the
+       arrows), because the cards ARE the site list: order is config —
+       the first domainless site answers unmatched Hosts. ══ -->
+  <div id="panel-sites" role="tabpanel" class="hidden">
+    <div id="site-cards"></div>
+    <div class="add-zone">
+      <button class="action" id="btn-add-site" type="button">+ Add a site</button>
     </div>
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Needs attention</span>
-        <span class="badge badge-dim" id="issue-badge">…</span>
-      </div>
-      <div class="card-body">
-        <div class="rows" id="issue-list"></div>
-      </div>
-    </div>
-
+    <p class="error hidden" id="sites-error"></p>
   </div>
 
-  <!-- ══ Publish — pick a folder, send it through the tunnel ══ -->
-  <div id="panel-publish" role="tabpanel" class="hidden">
+  <div id="panel-stats" role="tabpanel" class="hidden">
 
-    <div class="card" id="drop-card">
+    <div class="card">
       <div class="card-head">
-        <span class="card-title">1 · Site folder</span>
-        <span class="badge badge-dim" id="dir-badge">no folder chosen</span>
+        <span class="card-title">Site traffic</span>
+        <select class="cfg-site" id="traffic-window" style="margin:0">
+          <option value="1">last 24 hours</option>
+          <option value="2">last 48 hours</option>
+          <option value="7" selected>last 7 days</option>
+          <option value="30">last 30 days</option>
+          <option value="90">last 90 days</option>
+        </select>
       </div>
       <div class="card-body">
-        <div class="btn-row">
-          <button class="action" id="btn-dir" type="button">Choose your site's folder</button>
-          <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
+        <div id="traffic-chart"></div>
+        <p class="hint">Every request this server answered, split by what
+        happened to it. Counted across every site the server answers for,
+        not one site alone; visitor IP addresses stay in the server log,
+        readable in the terminal.</p>
+        <div class="rows" id="traffic-rows" style="margin-top:1.1rem"></div>
+        <div class="btn-row" style="margin-top:1.1rem">
+          <button class="action" id="btn-traffic-refresh" type="button">Refresh</button>
         </div>
-        <div class="dropstrip">⤓&nbsp; or drop your site's folder anywhere on this card</div>
-        <p class="hint" id="dir-summary">It's the folder that holds your
-        <b>index.html</b>. Files are read here in the browser and travel only
-        through your SSH tunnel to your own server.</p>
-        <p class="error hidden" id="dir-error"></p>
+        <p class="error hidden" id="traffic-error"></p>
       </div>
     </div>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">2 · Publish</span>
-        <span class="badge badge-dim" id="pub-badge">waiting</span>
+        <span class="card-title">Server load</span>
       </div>
       <div class="card-body">
-        <div class="btn-row">
-          <button class="action primary" id="btn-publish" type="button" disabled>Publish to this server</button>
-        </div>
-        <div id="pub-done" class="hidden">
-          <p class="hint" id="pub-note" style="margin-top:0.75rem"></p>
-          <pre class="shell">restore-site     <span class="c"># in the terminal: one step back, if you want the previous content</span></pre>
-        </div>
-        <p class="error hidden" id="pub-error"></p>
+        <div class="rows" id="load-rows"></div>
+        <div id="load-chart"></div>
+        <p class="hint">Averages since the server started; the line is live
+        while this tab is open and is kept nowhere. High CPU on a static
+        server usually means a bot, not popularity.</p>
       </div>
     </div>
-
   </div>
 
-  <!-- ══ Config — forms over the same validators `set` runs ══ -->
-  <div id="panel-config" role="tabpanel" class="hidden">
+  <div id="panel-server" role="tabpanel" class="hidden">
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Site settings</span>
-        <span class="badge badge-dim" id="cfg-site-badge">loading…</span>
+        <span class="card-title">Server status</span>
       </div>
       <div class="card-body">
-        <select class="cfg-site" id="cfg-site-select"></select>
-        <div id="cfg-site-fields"></div>
-        <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action primary" id="btn-save-site" type="button">Save site settings</button>
+        <div class="switch-row">
+          <span class="k">Status</span>
+          <span class="switch-value"><span id="status-state"></span>
+            <span class="switch-act">
+            <button class="action tiny" id="btn-restart" type="button">Restart</button>
+            <button class="action tiny" id="btn-power" type="button">Stop</button>
+            </span>
+          </span>
         </div>
-        <p class="hint">Password and domain stay in the terminal on purpose:
-        a password is a secret with a guided prompt (<b>config &gt;
-        password</b>), and a domain is bound up with certificate issuance
-        (<b>config &gt; cert</b>).</p>
-        <p class="error hidden" id="cfg-site-error"></p>
+        <div class="rows" id="host-rows"></div>
+        <div class="confirm hidden" id="stop-confirm">
+          <div class="split"></div>
+          <p class="hint">Stopping takes <b>every site on this server</b>
+          offline until it is started again. This page keeps working — it is
+          served by the terminal command, not by the server.</p>
+          <div class="btn-row" style="margin-top:0.75rem">
+            <button class="action danger" id="btn-stop-yes" type="button">Stop the server</button>
+            <button class="action" id="btn-stop-no" type="button">Cancel</button>
+          </div>
+        </div>
       </div>
     </div>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Host settings</span>
-        <span class="badge badge-dim" id="cfg-host-badge">loading…</span>
+        <span class="card-title">Server settings</span>
+        <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
       </div>
       <div class="card-body">
         <div id="cfg-host-fields"></div>
         <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action primary" id="btn-save-host" type="button">Save host settings</button>
+          <button class="action" id="btn-save-host" type="button">Save</button>
         </div>
         <p class="error hidden" id="cfg-host-error"></p>
       </div>
@@ -5389,12 +6070,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   </div><!-- /app -->
 
   <div class="note">
-    This page is served by your own server on <b>127.0.0.1</b> and reached
-    only through your SSH tunnel — the address does not exist on the public
-    internet. No signature, no key: <b>being here is the authentication</b>,
-    because only your SSH key opens this pipe. Published content lands
-    through the same staging, checks, atomic swap, and backup as every
-    other publish.
+    This page is served on <b>127.0.0.1</b> through your SSH tunnel. It does
+    not exist on the public internet. No signature or password is required
+    because <b>only your SSH key can open the tunnel</b>.
   </div>
 
 </div>
@@ -5406,157 +6084,358 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const MAX_BUNDLE_BYTES = 500 * 1024 * 1024;  // mirrors _MAX_BUNDLE_BYTES server-side
   const CODE = new URLSearchParams(location.search).get('t') || '';
 
+  // A fetch that dies with no HTTP response at all surfaces as a TypeError
+  // ('Failed to fetch') — the wire itself is gone, not the server saying
+  // no. On this page the wire is the SSH tunnel, so say that instead of
+  // echoing the browser's bare message (learned the hard way: issue #114).
+  const TUNNEL_DOWN = 'Could not reach the server — the SSH tunnel is ' +
+    'probably down. Check the terminal: if the ssh session or the admin ' +
+    'command has ended, reconnect, run servette admin again, and open the ' +
+    'fresh link it prints.';
+
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
-  const PANELS = { status: 'panel-status', publish: 'panel-publish', config: 'panel-config' };
+  const PANELS = { sites: 'panel-sites', server: 'panel-server',
+                   stats: 'panel-stats' };
 
   function showTab(name) {
-    if (!PANELS[name]) name = 'status';
+    // Old bookmarks still land somewhere sensible.
+    if (['status', 'config', 'settings'].includes(name)) name = 'server';
+    if (['analytics', 'traffic'].includes(name)) name = 'stats';
+    if (name === 'publish') name = 'sites';
+    if (!PANELS[name]) name = 'sites';
     for (const key of Object.keys(PANELS)) {
       $(PANELS[key]).classList.toggle('hidden', key !== name);
       $('tab-' + key).classList.toggle('active', key === name);
     }
-    if (name === 'status') loadStatus();
-    if (name === 'config') loadConfig();
+    refresh();  // every tab renders from the same /status + /config truth
+    if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
 
-  $('tab-status').addEventListener('click', () => showTab('status'));
-  $('tab-publish').addEventListener('click', () => showTab('publish'));
-  $('tab-config').addEventListener('click', () => showTab('config'));
+  $('tab-sites').addEventListener('click', () => showTab('sites'));
+  $('tab-server').addEventListener('click', () => showTab('server'));
+  $('tab-stats').addEventListener('click', () => showTab('stats'));
 
-  /* ══ Status — the inside view, rendered from GET /status. ══ */
+  /* ══ The page's truth: /status and /config fetched together, rendered
+     into both tabs at once. ══ */
 
   const row = (k, v, cls) =>
     `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
 
-  // The outside check: opens a missing path on the site itself, so the
-  // connection report answers from the public internet's vantage — the one
-  // view a page living on the tunnel cannot compute (cross-origin responses
-  // are opaque to it, by the browser's own rules).
-  let outsideDomain = '';
-  $('btn-outside').addEventListener('click', () => {
-    if (!outsideDomain) return;
-    const probe = 'servette-check-' + Math.random().toString(36).slice(2, 8);
-    window.open('https://' + outsideDomain + '/' + probe, '_blank');
-  });
+  // A fact is not a victory: rows read like the shell's status — label and
+  // value, plainly — and only a row that needs attention wears a mark.
+  const factRow = (c) => row(escapeHtml(c.label),
+    c.ok ? escapeHtml(c.detail)
+         : `<span class="warn">${escapeHtml(c.detail)}</span>`);
 
-  async function loadStatus() {
-    setBadge($('st-badge'), 'badge-dim', 'loading…');
-    clearError($('st-error'));
+  let statusData = null;
+  let latestVersion = null;   // filled once per page, by asking
+
+  // Asked once when the page opens, and never on a timer: Servette does not
+  // phone home on its own schedule, and this is the operator asking.
+  async function checkUpgrade() {
     try {
-      const r = await fetch('/status?t=' + encodeURIComponent(CODE));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const d = await r.json();
+      const r = await fetch('/update?t=' + encodeURIComponent(CODE));
+      if (!r.ok) return;
+      latestVersion = (await r.json()).latest || null;
+      if (latestVersion) renderServer();
+    } catch (e) { /* offline, or PyPI unreachable — the row simply omits it */ }
+  }
 
-      setBadge($('st-badge'), d.running ? 'badge-green' : 'badge-red',
-               d.running ? '● running · v' + d.version : '○ stopped · v' + d.version);
-      let h = row('Mode', d.mode === 'service'
-        ? 'system service (survives reboots)'
-        : d.mode === 'session' ? 'session only' : 'stopped');
-      for (const s of d.sites || []) {
-        h += row('Site ' + s.index, s.domain
-          ? `<b>${escapeHtml('https://' + s.domain)}</b>` : '(no domain)', 'gap');
-        h += row('Folder', escapeHtml(s.serve_dir || '(not set)'));
-        h += row('Password', s.auth ? 'enabled' : 'off');
-        h += row('Certificate', s.cert_days == null
-          ? '<span class="warn">none readable</span>'
-          : s.cert_days <= 0 ? '<span class="bad">expired</span>'
-          : s.cert_days < 30 ? `<span class="warn">${s.cert_days} days remaining</span>`
-          : `<span class="good">${s.cert_days} days remaining</span>`);
-        h += row('Channel', s.publish ? 'configured' : 'none (this page publishes directly)');
-      }
-      $('st-rows').innerHTML = h;
-
-      outsideDomain = ((d.sites || [])[0] || {}).domain || '';
-      $('btn-outside').disabled = !outsideDomain;
-      $('btn-outside').title = outsideDomain
-        ? 'Opens https://' + outsideDomain + '/<a-missing-path> in a new tab'
-        : 'Needs a domain — a LAN or self-signed site has no public vantage to check from';
-
-      const problems = [...(d.issues || []), ...(d.warnings || [])];
-      if (problems.length) {
-        setBadge($('issue-badge'), 'badge-red', problems.length + ' to review');
-        $('issue-list').innerHTML = problems
-          .map((p) => `<div class="warn">· ${escapeHtml(p)}</div>`).join('');
-      } else {
-        setBadge($('issue-badge'), 'badge-green', '✓ all clear');
-        $('issue-list').innerHTML =
-          '<div class="good">Nothing needs attention.</div>';
-      }
+  async function refresh() {
+    clearError($('cfg-host-error'));
+    try {
+      const [rs, rc] = await Promise.all([
+        fetch('/status?t=' + encodeURIComponent(CODE)),
+        fetch('/config?t=' + encodeURIComponent(CODE)),
+      ]);
+      if (!rs.ok) throw new Error('HTTP ' + rs.status);
+      if (!rc.ok) throw new Error('HTTP ' + rc.status);
+      statusData = await rs.json();
+      cfgData = await rc.json();
+      renderServer();
+      renderSiteCards();
+      clearError($('sites-error'));
     } catch (e) {
-      setBadge($('st-badge'), 'badge-red', '✕ unreachable');
-      showError($('st-error'), 'Could not read status: ' + e.message +
-        ' — if the terminal command was closed, re-run it and open the fresh link.');
+      setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
+      const msg = (e instanceof TypeError) ? TUNNEL_DOWN
+        : 'Could not read the server: ' + e.message +
+          ' — if the terminal command was closed, re-run it and open the fresh link.';
+      showError($('cfg-host-error'), msg);
+      showError($('sites-error'), msg);
     }
   }
 
-  $('btn-refresh').addEventListener('click', loadStatus);
 
-  /* ══ Config — forms over the same validators the `set` command runs, so a
-     value the terminal refuses the page refuses with the same sentence. ══ */
+  /* ══ Traffic — the journal re-read as counts, fetched on entry. ══ */
+
+  async function loadTraffic() {
+    clearError($('traffic-error'));
+    try {
+      const r = await fetch('/traffic?t=' + encodeURIComponent(CODE) +
+                            '&days=' + encodeURIComponent($('traffic-window').value));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const t = await r.json();
+      const total = t.total || 0;
+      // Status codes are the server's vocabulary, not the reader's: each
+      // count is named for what actually happened.
+      const NAMED = [['Files sent', ['200', '206']],
+                     ['Already cached', ['304']],
+                     ['Nothing there', ['404']],
+                     ['Refused', ['403', '405']],
+                     ['Sign-in needed', ['401']],
+                     ['Rate limited', ['429']]];
+      const named = NAMED
+        .map(([name, codes]) => [name, codes.reduce(
+          (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
+        .filter(([, n]) => n > 0);
+      $('traffic-chart').innerHTML = total
+        ? chart(lineSVG(t.days.map((d) => d[1])),
+                t.days.length ? t.days[0][0] : '',
+                t.days.length ? t.days[t.days.length - 1][0] : '',
+                Math.max(...t.days.map((d) => d[1])))
+        : '';
+      $('traffic-rows').innerHTML = !total
+        ? row('Requests', 'none in this window — or no readable journal on this host')
+        : named.map(([name, n]) => row(name, String(n))).join('') +
+          row('Total requests', `<b>${total}</b>`, 'ledger');
+    } catch (e) {
+      showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
+        : 'Could not read traffic: ' + e.message);
+    }
+  }
+
+  async function serviceOp(b, op) {
+    b.disabled = true;
+    clearError($('cfg-host-error'));
+    try {
+      const r = await fetch('/service?t=' + encodeURIComponent(CODE),
+                            { method: 'POST', body: JSON.stringify({ op }) });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'ok')
+        throw new Error(data.error || 'HTTP ' + r.status);
+      await refresh();
+    } catch (e) {
+      showError($('cfg-host-error'),
+                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+    }
+    b.disabled = false;
+  }
+
+  $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
+  // One control for the two states: starting needs no ceremony, stopping
+  // takes every site offline and asks first.
+  $('btn-power').addEventListener('click', () => {
+    if ((statusData || {}).running) $('stop-confirm').classList.toggle('hidden');
+    else serviceOp($('btn-power'), 'start');
+  });
+  // Every site on the box goes dark, so this one asks first — in the page's
+  // own voice, the way a site card asks before deleting.
+  $('btn-stop-no').addEventListener('click', () =>
+    $('stop-confirm').classList.add('hidden'));
+  $('btn-stop-yes').addEventListener('click', async () => {
+    $('stop-confirm').classList.add('hidden');
+    await serviceOp($('btn-power'), 'stop');
+  });
+
+  $('btn-traffic-refresh').addEventListener('click', loadTraffic);
+  $('traffic-window').addEventListener('change', loadTraffic);
+
+  /* ══ Settings forms — over the same validators the `set` command runs, so
+     a value the terminal refuses the page refuses with the same sentence.
+     Deliberately absent from these forms (the terminal keeps them): the
+     serve folder (publishing manages it), port and trusted proxy
+     (behind-a-balancer deployments), the pull channel's URL/key pair, and
+     every lifecycle verb. The domain is not a form either — naming a site
+     runs its certificate issuance, on the Publish card. ══ */
 
   const HOST_FIELDS = [
-    ['port',            'HTTPS port'],
-    ['email',           'Email (ACME registration)'],
-    ['rate_limit',      'Rate limit (requests / minute / visitor)'],
-    ['auth_rate_limit', 'Auth rate limit (failed logins / minute)'],
-    ['cache_size_mb',   'File cache size (MB)'],
-    ['trusted_proxy',   'Trusted proxy IP (blank = none)'],
-  ];
-  const SITE_FIELDS = [
-    ['dir',         'Folder to serve'],
-    ['username',    'Login username (blank = no password gate)'],
-    ['publish_url', 'Publish channel URL (blank = none)'],
-    ['publish_key', 'Publish channel key (64 hex)'],
+    ['email', 'Email',
+     'Registers this server with the certificate authority — one account for ' +
+     'every site here, not one per domain. Where renewal and expiry notices go.'],
+    ['rate_limit', 'Rate limit',
+     'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
+    ['auth_rate_limit', 'Auth rate limit',
+     'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
+    ['cache_size_mb', 'File cache size (MB)',
+     'Memory set aside to serve frequently requested files without re-reading the disk.'],
   ];
 
   let cfgData = null;
+  const field = (key, label, value, opts) => {
+    const o = opts || {};
+    return `<div class="cfg-field">` +
+      `<label for="cfg-${key}">${label}</label>` +
+      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
+      ` value="${escapeHtml(String(value == null ? '' : value))}">` +
+      (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
+      `</div>`;
+  };
 
-  const field = (key, label, value) =>
-    `<div class="cfg-field"><label for="cfg-${key}">${label}</label>` +
-    `<input id="cfg-${key}" value="${escapeHtml(String(value == null ? '' : value))}"></div>`;
+  function renderServer() {
+    const checks = (statusData && statusData.checks) || [];
+    const hostChecks = checks.filter((c) => c.site === null);
+    const d = statusData || {};
 
-  function renderConfig() {
-    const siteIdx = parseInt($('cfg-site-select').value || '0', 10) || 0;
-    const site = (cfgData.sites || [])[siteIdx] || {};
-    $('cfg-site-fields').innerHTML =
-      SITE_FIELDS.map(([k, l]) => field(k, l, site[k])).join('');
-    $('cfg-host-fields').innerHTML =
-      HOST_FIELDS.map(([k, l]) => field(k, l, (cfgData.host || {})[k])).join('');
-    setBadge($('cfg-site-badge'), 'badge-dim',
-             site.domain ? site.domain : 'site ' + siteIdx);
-    setBadge($('cfg-host-badge'), 'badge-dim', 'host-wide');
+    // What has no card of its own says its piece here; a site's trouble is
+    // worn by that site's card on the Sites tab.
+    const needs = hostChecks.filter((c) => !c.ok);
+    $('attention').classList.toggle('hidden', !needs.length);
+    $('attention').innerHTML = needs.map((c) =>
+      `<b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
+      `<a href="#server">open Server →</a>`).join('<br>');
+    for (const a of $('attention').querySelectorAll('a'))
+      a.addEventListener('click', (e) => { e.preventDefault(); showTab('server'); });
+
+    $('status-state').innerHTML = d.running
+      ? '<span class="dot"></span>running'
+      : '<span class="warn">stopped</span>';
+    // Two controls, not three: restart is meaningless on a stopped server,
+    // and the third is whichever of stop/start the state calls for.
+    $('btn-restart').disabled = !d.running;
+    $('btn-restart').title = d.running
+      ? 'Stop and start the service — applies a port change, or clears a wedged process'
+      : 'Nothing to restart — the server is stopped';
+    $('btn-power').textContent = d.running ? 'Stop' : 'Start';
+    $('btn-power').classList.toggle('danger', !!d.running);
+    $('btn-power').title = d.running
+      ? 'Take every site on this server offline until it is started again'
+      : 'Start the installed system service';
+
+    $('host-rows').innerHTML =
+      row('Version', 'v' + (d.version || '?') +
+        (latestVersion
+          ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
+            ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
+          : '')) +
+      hostChecks.map(factRow).join('');
+
+    // Present always, dim when there is nothing to start — the same rule
+    // every other button follows.
+    // Swap is a size the operator types — the terminal has always asked for
+    // it that way — so it is a field among fields, saved by the same button.
+    const sw = d.swap || {};
+    const swapField = (sw.active_mb == null && sw.recommended_mb == null) ? '' :
+      field('swap_mb', 'Swap file (MB)',
+            sw.active_mb != null ? sw.active_mb : '',
+            { hint: 'Disk that absorbs a memory spike, so a burst past free RAM ' +
+                    'cannot take the host down.' +
+                    (sw.recommended_mb
+                      ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
+                      : '') });
+    const typingInSwap = document.activeElement
+      && document.activeElement.id === 'cfg-swap_mb';
+    if (!typingInSwap)
+      $('cfg-host-fields').innerHTML =
+        HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('')
+        + swapField;
+
+    renderLoad();
   }
 
-  async function loadConfig() {
-    clearError($('cfg-site-error'));
-    clearError($('cfg-host-error'));
+  // Utilization lives with the other counts, on the Analytics tab: the two
+  // figures, then the live meter that builds while the page is open.
+  const when = (epoch) => new Date(epoch * 1000).toLocaleString(undefined,
+    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+  function renderLoad() {
+    const l = ((statusData || {}).load) || {};
+    $('load-rows').innerHTML =
+      row('CPU', l.cpu_percent == null ? '(not available on this host)'
+                 : l.cpu_percent.toFixed(1) + '% average' +
+                   (l.started_at ? ' since ' + escapeHtml(when(l.started_at)) : '')) +
+      row('Memory', l.memory_mb == null ? '(not available on this host)'
+                    : l.memory_mb.toFixed(1) + ' MB');
+    $('load-chart').innerHTML = cpuSeries.length < 2
+      ? '<p class="hint">Live CPU — the line starts when you open this tab.</p>'
+      : chart(lineSVG(cpuSeries),
+              (cpuSeries.length - 1) * METER_SECONDS + 's ago',
+              cpuSeries[cpuSeries.length - 1].toFixed(1) + '% now',
+              Math.max(1, ...cpuSeries).toFixed(0), '%');
+  }
+
+  /* ══ Charts — inline SVG, sized by viewBox, no library. Every chart is
+     drawn with its scale: a line without a y-axis is a shape, not a
+     measurement. ══ */
+
+  function lineSVG(values) {
+    const w = 300, h = 60, max = Math.max(1, ...values);
+    const pts = values.length === 1
+      ? [`0,${(h - (values[0] / max) * h).toFixed(1)}`,
+         `${w},${(h - (values[0] / max) * h).toFixed(1)}`]
+      : values.map((v, i) =>
+          `${(i / (values.length - 1) * w).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`);
+    return `<svg viewBox="0 0 ${w} ${h}" class="chart" preserveAspectRatio="none">` +
+      `<polyline points="${pts.join(' ')}" fill="none" stroke="#5A8466" ` +
+      `stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline></svg>`;
+  }
+
+  // A chart, its y-axis (top of scale and zero), and its x labels.
+  const chart = (svg, xFrom, xTo, yMax, unit) =>
+    `<div class="chart-wrap"><div class="chart-y">` +
+    `<span>${escapeHtml(String(yMax))}${unit || ''}</span><span>0</span></div>` +
+    `<div class="chart-body">${svg}` +
+    `<div class="chart-labels"><span>${escapeHtml(xFrom)}</span>` +
+    `<span>${escapeHtml(xTo)}</span></div></div></div>`;
+
+  /* ══ The live meter: successive readings of the server's own cumulative
+     CPU counter, differenced here. Nothing is sampled or stored on the
+     server — the line exists only while this tab is open. ══ */
+
+  const METER_SECONDS = 3;
+  let meterTimer = null, lastSample = null, cpuSeries = [];
+
+  async function sampleLoad() {
     try {
-      const r = await fetch('/config?t=' + encodeURIComponent(CODE));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      cfgData = await r.json();
-      const sel = $('cfg-site-select');
-      const keep = sel.value;
-      sel.innerHTML = (cfgData.sites || []).map((s) =>
-        `<option value="${s.index}">site ${s.index}` +
-        `${s.domain ? ' — ' + escapeHtml(s.domain) : ''}</option>`).join('');
-      if (keep) sel.value = keep;
-      renderConfig();
+      const r = await fetch('/status?t=' + encodeURIComponent(CODE));
+      if (!r.ok) { stopMeter(); return; }
+      const d = await r.json();
+      const l = d.load || {};
+      if (l.cpu_ns != null && lastSample) {
+        const dt = l.sampled_at - lastSample.at;
+        if (dt > 0) {
+          cpuSeries.push(Math.max(0,
+            (l.cpu_ns - lastSample.ns) / 1_000_000_000 / dt * 100));
+          if (cpuSeries.length > 60) cpuSeries.shift();
+        }
+      }
+      if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
+      statusData = d;
+      renderLoad();
     } catch (e) {
-      setBadge($('cfg-site-badge'), 'badge-red', '✕ unreachable');
-      setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
-      showError($('cfg-site-error'), 'Could not read settings: ' + e.message);
+      // Nothing is listening any more — the admin command ended, or the
+      // tunnel closed. Keep polling and every attempt prints another
+      // 'channel N: open failed' in the operator's terminal.
+      stopMeter();
+      showError($('traffic-error'), TUNNEL_DOWN);
     }
   }
 
-  $('cfg-site-select').addEventListener('change', renderConfig);
+  function startMeter() {
+    if (meterTimer) return;
+    meterTimer = setInterval(sampleLoad, METER_SECONDS * 1000);
+    sampleLoad();
+  }
 
-  async function saveSettings(fields, siteIdx, badge, errEl) {
+  function stopMeter() {
+    clearInterval(meterTimer);
+    meterTimer = null;
+  }
+
+  // A backgrounded tab has nobody reading it, and a closing one is gone:
+  // either way the polling stops, so an abandoned page cannot keep dialing
+  // a tunnel whose command has ended.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopMeter();
+    else if (!$('panel-stats').classList.contains('hidden')) startMeter();
+  });
+  window.addEventListener('pagehide', stopMeter);
+
+  async function saveSettings(values, siteIdx, badge, errEl) {
     clearError(errEl);
-    const values = {};
-    for (const [k] of fields) values[k] = $('cfg-' + k).value.trim();
     setBadge(badge, 'badge-dim', 'saving…');
     try {
       const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
@@ -5567,27 +6446,67 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       try { data = await r.json(); } catch { data = {}; }
       if (r.ok && data.result === 'saved') {
         setBadge(badge, 'badge-green', '✓ saved');
-        loadConfig();
+        refresh();
       } else {
         throw new Error(data.error || 'HTTP ' + r.status);
       }
     } catch (e) {
       setBadge(badge, 'badge-red', '✕ not saved');
-      showError(errEl, e.message + ' — nothing was changed.');
+      showError(errEl, (e instanceof TypeError)
+        ? TUNNEL_DOWN + ' Nothing was changed.'
+        : e.message + ' — nothing was changed.');
     }
   }
 
-  $('btn-save-site').addEventListener('click', () => saveSettings(
-    SITE_FIELDS, parseInt($('cfg-site-select').value || '0', 10) || 0,
-    $('cfg-site-badge'), $('cfg-site-error')));
-  $('btn-save-host').addEventListener('click', () => saveSettings(
-    HOST_FIELDS, 0, $('cfg-host-badge'), $('cfg-host-error')));
+  $('btn-save-host').addEventListener('click', async () => {
+    const values = {};
+    for (const [k] of HOST_FIELDS) values[k] = $('cfg-' + k).value.trim();
+    const badge = $('cfg-host-badge'), errEl = $('cfg-host-error');
+    clearError(errEl);
+
+    // The swapfile is the one setting whose save does filesystem work, so it
+    // runs only when its number actually changed — pressing Save on an
+    // untouched field must never swapoff anything.
+    const field = $('cfg-swap_mb');
+    const want = field ? parseInt(field.value.trim(), 10) : NaN;
+    const active = ((statusData || {}).swap || {}).active_mb;
+    const resize = field && want > 0 && want !== active;
+    if (field && field.value.trim() && !(want > 0))
+      return showError(errEl, 'Swap file size must be a number of megabytes.');
+
+    setBadge(badge, 'badge-dim', 'saving…');
+    try {
+      const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
+        method: 'POST', body: JSON.stringify({ site: 0, values }),
+      });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'saved')
+        throw new Error(data.error || 'HTTP ' + r.status);
+
+      if (resize) {
+        setBadge(badge, 'badge-dim', 'resizing the swapfile…');
+        const rs = await fetch('/swap?t=' + encodeURIComponent(CODE), {
+          method: 'POST', body: JSON.stringify({ mb: want }),
+        });
+        let sd = {};
+        try { sd = await rs.json(); } catch { sd = {}; }
+        if (!rs.ok || sd.result !== 'ok')
+          throw new Error(sd.error || 'HTTP ' + rs.status);
+      }
+      setBadge(badge, 'badge-green', '✓ saved');
+      refresh();
+    } catch (e) {
+      setBadge(badge, 'badge-red', '✕ not saved');
+      showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+    }
+  });
 
   /* ══ Publish — the pub tool's bundle builder with the signing removed.
      The server's contract (_extract_bundle / _land_bundle): a tar.gz of
      plain files and directories, paths relative to the site root, no entry
      escaping it, under 500 MB uncompressed — POSTed to /upload with this
-     run's pairing code. ══ */
+     run's passcode. ══ */
 
   function splitTarName(path) {
     const len = (s) => new TextEncoder().encode(s).length;
@@ -5659,12 +6578,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  const state = {
-    files:  null,   // [{ path, file }]
-    folder: null,   // the picked folder's name, for messages
-  };
-
-  function setBadge(el, cls, text) { el.className = 'badge ' + cls; el.textContent = text; }
+  function setBadge(el, cls, text) {
+    el.className = 'badge ' + cls;
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
   function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
   function clearError(el) { el.classList.add('hidden'); }
 
@@ -5677,57 +6595,106 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const escapeHtml = (s) =>
     s.replace(/[&<>"']/g, (c) => '&#' + c.charCodeAt(0) + ';');
 
-  function refreshReady() {
-    const ready = !!(state.files && state.files.length);
-    $('btn-publish').disabled = !ready;
-    $('pub-done').classList.add('hidden');
-    setBadge($('pub-badge'), 'badge-dim', ready ? 'ready' : 'waiting');
-  }
-
   // The same hidden-path rule the server enforces: any '.'-segment except
   // .well-known is never served, so it is not bundled either — a .git or
   // .env under the site folder must not end up on the server.
   const isHiddenPath = (path) =>
     path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
 
-  // One intake for both doors — the picker and the drop — so they cannot
-  // drift on the hidden-path rule or the summary.
-  function useFolder(items, folderName) {
-    const kept = items.filter((e) => !isHiddenPath(e.path));
-    const hidden = items.length - kept.length;
+  // What a site's unhealthy row is called on its card — the fault named,
+  // rather than an exclamation mark standing in for the name.
+  const NEEDS_WORD = {
+    cert:     'Needs certificate',
+    password: 'Needs password',
+    dir:      'Folder missing',
+    channel:  'Channel unfinished',
+  };
 
-    if (!kept.length) {
-      showError($('dir-error'), 'That folder has no publishable files' +
-        (hidden ? ` (${hidden} hidden entries were excluded).` : '.'));
-      return;
+  const cardIndex = (el) =>
+    [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
+
+  // One op door for add, remove, and move: the server runs the same cores
+  // the terminal's add-site / remove-site / move-site run, then the cards
+  // re-render from fresh /config truth.
+  async function siteOp(body, errEl) {
+    clearError($('sites-error'));
+    if (errEl) clearError(errEl);
+    try {
+      const r = await fetch('/sites?t=' + encodeURIComponent(CODE), {
+        method: 'POST', body: JSON.stringify(body),
+      });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'ok')
+        throw new Error(data.error || 'HTTP ' + r.status);
+      await refresh();
+      return true;
+    } catch (e) {
+      showError(errEl || $('sites-error'),
+                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+      if (body.op === 'move')
+        renderSiteCards();  // snap the dragged DOM back to the loaded truth
+      return false;
     }
-    state.files  = kept;
-    state.folder = folderName;
-
-    const total = kept.reduce((n, e) => n + e.file.size, 0);
-    const hasIndex = kept.some((e) => e.path === 'index.html');
-    $('dir-summary').innerHTML =
-      `<b>${escapeHtml(state.folder)}/</b> — ${kept.length} file${kept.length === 1 ? '' : 's'}, ` +
-      `${fmtSize(total)}` +
-      (hidden ? ` · ${hidden} hidden entr${hidden === 1 ? 'y' : 'ies'} excluded ` +
-                `(paths starting with '.' are never served)` : '') +
-      (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
-                       `the site root would show a directory miss</span>`);
-    setBadge($('dir-badge'), 'badge-green', '✓ folder read');
-    refreshReady();
   }
 
-  $('btn-dir').addEventListener('click', () => $('dir-input').click());
-  $('dir-input').addEventListener('change', () => {
-    clearError($('dir-error'));
-    const all = [...$('dir-input').files];
-    if (!all.length) return;
-    // webkitRelativePath is '<picked folder>/rest…' — the folder name is
-    // stripped so index.html sits at the bundle root, where serve_dir wants it.
-    useFolder(all.map((f) => ({
-      path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
-    })).filter((e) => e.path), all[0].webkitRelativePath.split('/')[0]);
-  });
+  $('btn-add-site').addEventListener('click', () => siteOp({ op: 'add' }));
+
+  function renderSiteCards() {
+    const wrap = $('site-cards');
+    wrap.innerHTML = '';
+    const sites = (cfgData && cfgData.sites) || [];
+    // One site is a site; the plural is earned.
+    $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
+    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx, sites.length)));
+  }
+
+  // Reordering, in the notebook's grammar: grab the header, a ghost follows
+  // the cursor, the source dims to a placeholder, neighbours swap in place
+  // as the ghost crosses them — and the drop is a single move op.
+  function attachCardDrag(head, el) {
+    head.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || e.target.closest('button') || e.target.closest('a')) return;
+      const startX = e.clientX, startY = e.clientY;
+      const rect = el.getBoundingClientRect();
+      const offY = e.clientY - rect.top;
+      const startIdx = cardIndex(el);
+      let started = false, ghost = null;
+      const move = (ev) => {
+        if (!started) {
+          if (Math.abs(ev.clientX - startX) < 5 && Math.abs(ev.clientY - startY) < 5) return;
+          started = true;
+          ghost = el.cloneNode(true);
+          ghost.classList.add('card-ghost');
+          ghost.style.cssText = 'position:fixed;left:' + rect.left + 'px;top:' + rect.top +
+            'px;width:' + rect.width + 'px;margin:0;pointer-events:none;z-index:1000;opacity:0.93;';
+          document.body.appendChild(ghost);
+          el.classList.add('drag-placeholder');
+          document.body.style.userSelect = 'none';
+        }
+        ghost.style.top = (ev.clientY - offY) + 'px';
+        const cards = [...document.querySelectorAll('#site-cards .site-card')];
+        const i = cards.indexOf(el);
+        const gr = ghost.getBoundingClientRect();
+        if (i > 0 && gr.top < cards[i - 1].getBoundingClientRect().top)
+          el.parentNode.insertBefore(el, cards[i - 1]);
+        else if (i < cards.length - 1 && gr.bottom > cards[i + 1].getBoundingClientRect().bottom)
+          el.parentNode.insertBefore(cards[i + 1], el);
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        if (!started) return;
+        ghost.remove();
+        el.classList.remove('drag-placeholder');
+        document.body.style.userSelect = '';
+        const endIdx = cardIndex(el);
+        if (endIdx !== startIdx) siteOp({ op: 'move', from: startIdx, to: endIdx });
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+  }
 
   // The drop door: a dropped folder walks the same intake. A single dropped
   // directory is the site folder (its name stripped, exactly like the
@@ -5746,91 +6713,402 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
   }
 
-  const dropCard = $('drop-card');
-  dropCard.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropCard.classList.add('drag');
-  });
-  dropCard.addEventListener('dragleave', () => dropCard.classList.remove('drag'));
-  dropCard.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    dropCard.classList.remove('drag');
-    clearError($('dir-error'));
-    const entries = [...e.dataTransfer.items]
-      .map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry())
-      .filter(Boolean);
-    if (!entries.length) return;
-    try {
-      const items = [];
-      let folderName;
-      if (entries.length === 1 && entries[0].isDirectory) {
-        folderName = entries[0].name;
-        const reader = entries[0].createReader();
-        for (;;) {
-          const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
-          if (!batch.length) break;
-          for (const child of batch) await readDropped(child, '', items);
+  function buildSiteCard(siteData, idx, total) {
+    const label = siteData.domain || 'site ' + idx;
+    const inactive = siteData.active === false;
+    const siteNeeds = (((statusData || {}).checks) || [])
+      .filter((c) => c.site === idx && !c.ok);
+    const card = document.createElement('div');
+    card.className = 'card site-card' + (inactive ? ' inactive' : '');
+
+    // The remove panel behind ✕: red deletes, amber pauses, neutral
+    // cancels — one bullet says exactly what each choice means. A card
+    // that is already deactivated offers only the delete.
+    const confirmHtml =
+      `<div class="confirm hidden"><div class="split"></div>` +
+      `<p class="hint"><b>Delete</b> removes this server's copies — the ` +
+      `published files and their backup. Your originals in local storage ` +
+      `are untouched; publishing again rebuilds the site.</p>` +
+      (inactive ? '' :
+        `<p class="hint"><b>Deactivate</b> keeps everything on the server ` +
+        `and stops serving this site until you reactivate it.</p>`) +
+      `<div class="btn-row" style="margin-top:0.75rem">` +
+      `<button class="action danger do-delete" type="button">Delete</button>` +
+      (inactive ? '' :
+        `<button class="action pause do-deactivate" type="button">Deactivate</button>`) +
+      `<button class="action do-cancel" type="button">Cancel</button>` +
+      `</div></div>`;
+
+    const bodyHtml = inactive
+      ? (`<p class="hint">Not being served — its files and settings are kept, ` +
+         `and visitors get the plain not-found answer until it is reactivated.</p>` +
+         `<div class="btn-row" style="margin-top:0.75rem">` +
+         `<button class="action do-reactivate" type="button">Reactivate</button></div>`)
+      : (`<div class="dropstrip">drop this site's folder here, or <a href="#">choose it</a></div>` +
+         `<input type="file" webkitdirectory multiple class="hidden">` +
+         `<p class="hint summary">The folder to drop is the one holding the ` +
+         `site's <b>index.html</b>.</p>` +
+         `<div class="btn-row" style="margin-top:0.75rem">` +
+           `<button class="action pub" type="button" disabled>Publish</button>` +
+         `</div>` +
+         `<div class="done hidden">` +
+           `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
+           `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
+           `in the terminal is the one step back.</p>` +
+         `</div>` +
+
+         // ── Everything else this site is: its facts, and the controls
+         // that change them. One card per site, so no selector is needed
+         // to say which site any of it belongs to.
+         `<div class="split"></div>` +
+         `<div class="rows info"></div>` +
+
+         `<div class="switch-row"><span class="k">Domain</span>` +
+         `<span class="switch-value"><input class="dom-input" type="text" ` +
+         `placeholder="example.com" value="${escapeHtml(siteData.domain || '')}">` +
+         `<span class="switch-act"><button class="action tiny dom" type="button">` +
+         `Set</button></span></span></div>` +
+         `<div class="switch-row"><span class="k">Certificate</span>` +
+         `<span class="switch-value"><span class="cert-state"></span>` +
+         `<span class="switch-act"><button class="action tiny cert" type="button">` +
+         `Get certificate</button></span></span></div>` +
+
+         `<div class="switch-row">` +
+         `<label class="k auth-label">Access</label>` +
+         `<span class="switch-value"><span class="auth-state"></span>` +
+         `<span class="switch-act"><label class="auth-action"></label>` +
+         `<input class="switch auth-switch" type="checkbox"></span></span></div>` +
+         `<div class="auth-fields"></div>` +
+         `<div class="btn-row auth-save hidden" style="margin-top:0.9rem">` +
+         `<button class="action save-site" type="button">Save</button></div>` +
+         `<p class="hint auth-hint"></p>` +
+
+         `<p class="hint">A certificate is issued only for a name that ` +
+         `already points here — check that the domain's DNS has an A record ` +
+         `to this server's IP before requesting one.</p>` +
+
+         `<div class="split"></div>` +
+         `<div class="btn-row">` +
+         `<button class="action outside" type="button" disabled>Test connection</button>` +
+         `</div>`)
+
+    card.innerHTML =
+      `<div class="card-head">` +
+        `<span class="head-left"><span class="handle" title="Drag to reorder">⠿</span>` +
+        `<span class="card-title">${escapeHtml(label)}</span></span>` +
+        `<span class="head-right">` +
+          (siteNeeds.length
+            ? `<span class="badge badge-warn needs" title="${escapeHtml(
+                 siteNeeds.map((c) => c.detail).join(' · '))}">${
+                 siteNeeds.length === 1
+                   ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
+                   : siteNeeds.length + ' to review'}</span>`
+            : '') +
+          `<span class="badge badge-dim${inactive ? '' : ' hidden'}">${
+             inactive ? 'deactivated' : ''}</span>` +
+          `<button class="ca del" type="button" title="Remove or deactivate">` +
+            `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" ` +
+            `stroke="currentColor" stroke-width="1.3"><path d="M3 4h10M6.5 4V2.5h3V4` +
+            `M5 4l0.6 9.5h4.8L11 4"></path></svg></button>` +
+        `</span>` +
+      `</div>` +
+      `<div class="card-body">` + bodyHtml + confirmHtml +
+        `<p class="error hidden"></p>` +
+      `</div>`;
+
+    const q = (sel) => card.querySelector(sel);
+    const badge = q('.badge'), errEl = q('.error');
+    let files = null, folderName = '';
+    const mark = (cls, text) => setBadge(badge, cls, text);
+
+    // Deactivation rides the same settings write as everything else — it is
+    // a setting ('set n active=no' is the terminal spelling).
+    async function setActive(on) {
+      clearError(errEl);
+      try {
+        const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
+          method: 'POST',
+          body: JSON.stringify({ site: cardIndex(card),
+                                 values: { active: on ? 'yes' : 'no' } }),
+        });
+        let data = {};
+        try { data = await r.json(); } catch { data = {}; }
+        if (!r.ok || data.result !== 'saved')
+          throw new Error(data.error || 'HTTP ' + r.status);
+        await refresh();
+      } catch (e) {
+        showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+      }
+    }
+
+    q('.del').addEventListener('click', () => {
+      clearError(errEl);
+      q('.confirm').classList.toggle('hidden');
+    });
+    q('.do-cancel').addEventListener('click', () =>
+      q('.confirm').classList.add('hidden'));
+    q('.do-delete').addEventListener('click', () => {
+      if (document.querySelectorAll('#site-cards .site-card').length === 1) {
+        q('.confirm').classList.add('hidden');
+        showError(errEl, "Can't remove the only site — a box needs at least one.");
+        return;
+      }
+      siteOp({ op: 'remove', site: cardIndex(card) }, errEl);
+    });
+    const deact = q('.do-deactivate');
+    if (deact) deact.addEventListener('click', () => setActive(false));
+    const react = q('.do-reactivate');
+    if (react) react.addEventListener('click', () => setActive(true));
+
+    attachCardDrag(q('.card-head'), card);
+
+    // Everything below is the publish machinery only an active card carries.
+    if (inactive) return card;
+    const input = q('input'), pubBtn = q('.pub');
+    const summary = q('.summary'), done = q('.done');
+
+    // One intake for both doors — the picker and the drop — so they cannot
+    // drift on the hidden-path rule or the summary.
+    function useFolder(items, name) {
+      const kept = items.filter((en) => !isHiddenPath(en.path));
+      const hidden = items.length - kept.length;
+      if (!kept.length) {
+        showError(errEl, 'That folder has no publishable files' +
+          (hidden ? ` (${hidden} hidden entries were excluded).` : '.'));
+        return;
+      }
+      files = kept;
+      folderName = name;
+      const totalBytes = kept.reduce((n, en) => n + en.file.size, 0);
+      const hasIndex = kept.some((en) => en.path === 'index.html');
+      summary.innerHTML =
+        `<b>${escapeHtml(name)}/</b> — ${kept.length} file${kept.length === 1 ? '' : 's'}, ` +
+        `${fmtSize(totalBytes)}` +
+        (hidden ? ` · ${hidden} hidden entr${hidden === 1 ? 'y' : 'ies'} excluded ` +
+                  `(paths starting with '.' are never served)` : '') +
+        (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
+                         `the site root would show a directory miss</span>`);
+      done.classList.add('hidden');
+      pubBtn.disabled = false;
+      mark('badge-green', '✓ folder read');
+    }
+
+    q('.dropstrip a').addEventListener('click', (e) => { e.preventDefault(); input.click(); });
+    input.addEventListener('change', () => {
+      clearError(errEl);
+      const all = [...input.files];
+      if (!all.length) return;
+      // webkitRelativePath is '<picked folder>/rest…' — the folder name is
+      // stripped so index.html sits at the bundle root, where the site wants it.
+      useFolder(all.map((f) => ({
+        path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
+      })).filter((en) => en.path), all[0].webkitRelativePath.split('/')[0]);
+    });
+
+    card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag'); });
+    card.addEventListener('dragleave', () => card.classList.remove('drag'));
+    card.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      card.classList.remove('drag');
+      clearError(errEl);
+      const entries = [...e.dataTransfer.items]
+        .map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry())
+        .filter(Boolean);
+      if (!entries.length) return;
+      try {
+        const items = [];
+        let name;
+        if (entries.length === 1 && entries[0].isDirectory) {
+          name = entries[0].name;
+          const reader = entries[0].createReader();
+          for (;;) {
+            const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+            if (!batch.length) break;
+            for (const child of batch) await readDropped(child, '', items);
+          }
+        } else {
+          name = 'dropped files';
+          for (const entry of entries) await readDropped(entry, '', items);
         }
-      } else {
-        folderName = 'dropped files';
-        for (const entry of entries) await readDropped(entry, '', items);
+        useFolder(items, name);
+      } catch (err) {
+        showError(errEl, 'Could not read the dropped folder: ' + err.message);
       }
-      useFolder(items, folderName);
-    } catch (err) {
-      showError($('dir-error'), 'Could not read the dropped folder: ' + err.message);
-    }
-  });
+    });
 
-  $('btn-publish').addEventListener('click', async () => {
-    clearError($('pub-error'));
-    $('btn-publish').disabled = true;
-    setBadge($('pub-badge'), 'badge-dim', 'building…');
-    try {
-      const entries = [];
-      let total = 0;
-      for (const { path, file } of state.files) {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        total += bytes.length;
-        if (total > MAX_BUNDLE_BYTES)
-          throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
-                          `the server would reject it`);
-        entries.push({ path, bytes });
+    pubBtn.addEventListener('click', async () => {
+      clearError(errEl);
+      pubBtn.disabled = true;
+      mark('badge-dim', 'building…');
+      try {
+        const entries = [];
+        let totalBytes = 0;
+        for (const { path, file } of files) {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          totalBytes += bytes.length;
+          if (totalBytes > MAX_BUNDLE_BYTES)
+            throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
+                            `the server would reject it`);
+          entries.push({ path, bytes });
+        }
+        const gz = await gzipBytes(buildTar(entries));
+
+        mark('badge-dim', 'publishing…');
+        const resp = await fetch('/upload?t=' + encodeURIComponent(CODE) +
+                                 '&site=' + cardIndex(card), { method: 'POST', body: gz });
+        let result = '';
+        try { result = (await resp.json()).result; } catch { result = ''; }
+
+        if (resp.ok && result === 'published') {
+          q('.note-done').innerHTML = `<b>${escapeHtml(folderName)}/</b> is live — ` +
+            `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
+            `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
+            `content kept as the one-step backup.`;
+          done.classList.remove('hidden');
+          mark('badge-green', '✓ published');
+        } else if (resp.status === 403) {
+          throw new Error('The server refused the passcode — close this page, ' +
+                          'and open the fresh link the terminal prints for this run.');
+        } else {
+          throw new Error('The server rejected the bundle' +
+                          (result ? ` (${result})` : ` (HTTP ${resp.status})`) +
+                          ' — nothing was changed. The terminal log has the detail.');
+        }
+      } catch (e) {
+        // A dropped tunnel mid-upload cannot half-publish: the server swaps
+        // content in only after a complete, valid bundle has landed.
+        showError(errEl, (e instanceof TypeError)
+          ? TUNNEL_DOWN + ' Nothing was published.' : e.message);
+        mark('badge-red', '✕ failed');
       }
-      const gz = await gzipBytes(buildTar(entries));
+      pubBtn.disabled = !files;
+    });
 
-      setBadge($('pub-badge'), 'badge-dim', 'publishing…');
-      const resp = await fetch('/upload?t=' + encodeURIComponent(CODE), {
-        method: 'POST', body: gz,
+    // ── The site's own facts and controls, all card-local: each card owns
+    // its state, so nothing needs to say which site it means. ──
+    const info = q('.info');
+    if (info) {
+      const checksFor = (((statusData || {}).checks) || []).filter((c) => c.site === idx);
+      const certRow = checksFor.find((c) => c.key === 'cert');
+      const authRow = checksFor.find((c) => c.key === 'password');
+      const others  = checksFor.filter((c) => c.key !== 'cert' && c.key !== 'password');
+      let authDesired = null;   // null = follow the server
+      const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
+
+      const renderInfo = () => {
+        const on = authOn();
+        const pending = authDesired !== null && authDesired !== !!siteData.username;
+        info.innerHTML =
+          row('Status', siteNeeds.length
+            ? `<span class="warn">${siteNeeds.length} to review</span>`
+            : '<span class="ok">✓</span> healthy') +
+          row('Serving', siteData.domain
+            ? `<b>${escapeHtml('https://' + siteData.domain)}</b>`
+            : "this server's IP address (no domain set)") +
+          others.map((c) => {
+            const cut = c.label.indexOf(' · ');
+            return factRow(cut < 0 ? c
+              : Object.assign({}, c, { label: c.label.slice(cut + 3) }));
+          }).join('');
+
+        q('.cert-state').innerHTML = !certRow ? ''
+          : certRow.ok ? escapeHtml(certRow.detail)
+          : `<span class="warn">${escapeHtml(certRow.detail)}</span>`;
+        // Naming and certifying are two acts on one card: the name saves
+        // instantly, the certificate is asked for when you ask for it —
+        // and the button says so while the site has no trusted one.
+        const certBtn = q('.cert');
+        certBtn.disabled = !siteData.domain;
+        certBtn.classList.toggle('due', !!siteData.domain && !!certRow && !certRow.ok);
+        certBtn.textContent = (certRow && certRow.ok) ? 'Renew' : 'Get certificate';
+        certBtn.title = siteData.domain
+          ? 'Request a certificate for ' + siteData.domain
+          : 'Set a domain first — a certificate is issued for a name';
+
+        q('.auth-switch').checked = on;
+        q('.auth-action').textContent = on ? 'Make public' : 'Make private';
+        q('.auth-state').innerHTML = pending
+          ? `<span class="warn">${on ? 'username and password required'
+                                     : 'becoming public when saved'}</span>`
+          : (authRow && !authRow.ok)
+            ? `<span class="warn">${escapeHtml(authRow.detail)}</span>`
+            : (on ? 'private' : 'public');
+        q('.auth-fields').innerHTML = !on ? '' :
+          field('username-' + idx, 'Username', siteData.username,
+                { hint: 'Case-sensitive. Any characters except a colon.' }) +
+          field('password-' + idx,
+                siteData.has_password ? 'New password (blank = keep the current one)' : 'Password',
+                '', { type: 'password',
+                      hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
+        q('.auth-save').classList.toggle('hidden', !(on || pending));
+        q('.auth-hint').textContent = on ? ''
+          : (siteData.username
+             ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+             : '');
+
+        const outside = q('.outside');
+        outside.disabled = !siteData.domain;
+        outside.title = siteData.domain
+          ? 'Opens the connection test on ' + siteData.domain
+          : 'Needs a domain — a site without one has no public name to test';
+      };
+      renderInfo();
+
+      q('.auth-switch').addEventListener('change', (e) => {
+        authDesired = e.target.checked;
+        renderInfo();
       });
-      let result = '';
-      try { result = (await resp.json()).result; } catch { result = ''; }
 
-      if (resp.ok && result === 'published') {
-        $('pub-note').innerHTML = `<b>${escapeHtml(state.folder)}/</b> is live — ` +
-          `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
-          `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
-          `content kept as the one-step backup.`;
-        $('pub-done').classList.remove('hidden');
-        setBadge($('pub-badge'), 'badge-green', '✓ published');
-      } else if (resp.status === 403) {
-        throw new Error('The server refused the pairing code — close this page, ' +
-                        'and open the fresh link the terminal prints for this run.');
-      } else {
-        throw new Error('The server rejected the bundle' +
-                        (result ? ` (${result})` : ` (HTTP ${resp.status})`) +
-                        ' — nothing was changed. The terminal log has the detail.');
-      }
-    } catch (e) {
-      showError($('pub-error'), e.message);
-      setBadge($('pub-badge'), 'badge-red', '✕ failed');
+      q('.outside').addEventListener('click', () => {
+        if (siteData.domain)
+          window.open('https://' + siteData.domain + '/.well-known/servette-check', '_blank');
+      });
+
+      // Setting the name is a config write and nothing more — instant, and
+      // it cannot fail on someone else's DNS.
+      q('.dom').addEventListener('click', async () => {
+        const domain = q('.dom-input').value.trim().toLowerCase();
+        clearError(errEl);
+        if (!domain) return showError(errEl, 'Type the domain first.');
+        await siteOp({ op: 'name', site: cardIndex(card), domain }, errEl);
+      });
+
+      // Asking for the certificate is the slow, network-dependent act, so
+      // it waits itself out and reports its own failure.
+      q('.cert').addEventListener('click', async () => {
+        const b = q('.cert');
+        const old = b.textContent;
+        b.disabled = true;
+        b.textContent = 'requesting…';
+        const ok = await siteOp({ op: 'certificate', site: cardIndex(card) }, errEl);
+        if (!ok) { b.disabled = false; b.textContent = old; }
+      });
+
+      q('.save-site').addEventListener('click', () => {
+        clearError(errEl);
+        if (!authOn())
+          return saveSettings({ username: '' }, cardIndex(card), badge, errEl);
+        const username = q('#cfg-username-' + idx).value.trim();
+        const pw = q('#cfg-password-' + idx).value;
+        if (!username)
+          return showError(errEl, 'A username is needed — or make the site public.');
+        if (!siteData.has_password && !pw)
+          return showError(errEl, 'A password is needed the first time a site turns private.');
+        saveSettings(Object.assign({ username }, pw ? { password: pw } : {}),
+                     cardIndex(card), badge, errEl);
+      });
     }
-    $('btn-publish').disabled = false;
-  });
+
+    return card;
+  }
 
   /* ══ Feature gate & startup. ══ */
   const supported = typeof CompressionStream === 'function';
   $(supported ? 'app' : 'unsupported').classList.remove('hidden');
-  if (supported) showTab((location.hash || '').replace('#', ''));
+  if (supported) {
+    showTab((location.hash || '').replace('#', ''));
+    checkUpgrade();
+  }
 </script>
 
 </body>
@@ -5840,7 +7118,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
 # The loopback handler
 class _UIHandler(http.server.BaseHTTPRequestHandler):
-    """The loopback server's one handler. GET / is the page (pairing page
+    """The loopback server's one handler. GET / is the page (login page
     until the code is presented); POST /upload lands a content bundle. After
     _UI_MAX_BAD_CODES wrong guesses the run stops authenticating anyone,
     including the right code — re-run the command for a fresh one."""
@@ -5874,39 +7152,64 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path not in ("/", "/status", "/config"):
+        if path not in ("/", "/status", "/config", "/traffic", "/update"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
-            return self._respond(403, "Too many wrong codes. Close this page and re-run the command.")
+            return self._respond(403, "Too many wrong passcodes. Close this page and re-run the command.")
         if path == "/status":
             # The inside view, for the page's Status tab: exactly what
             # `status --json` prints, because it is the same function.
             if auth != "ok":
-                return self._respond(403, "Not paired.")
+                return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps(_status_data()), "application/json")
         if path == "/config":
             # The Config tab's read half: exactly the vocabulary `set`
-            # accepts, plus current values to fill the forms.
+            # accepts, plus current values to fill the forms — and
+            # has_password, a boolean only, so the page can show whether
+            # protection is on without the hash ever crossing the wire.
             if auth != "ok":
-                return self._respond(403, "Not paired.")
+                return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps({
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
+                           "active": s.active,
                            "username": s.username, "publish_url": s.publish_url,
-                           "publish_key": s.publish_key}
+                           "publish_key": s.publish_key,
+                           "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
+        if path == "/update":
+            # Asked, never volunteered: the page requests this when the
+            # operator opens it, and the answer is cached for six hours.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            return self._respond(200, json.dumps({"latest": _upgrade_available()}),
+                                 "application/json")
+
+        if path == "/traffic":
+            # The Analytics tab's feed: the journal re-read as counts, and
+            # never carrying a visitor's IP. The window is the reader's
+            # choice, bounded — a request for a year would read a year of
+            # journal to draw a chart nobody asked for.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            try:
+                days = int(parse_qs(urlsplit(self.path).query).get("days", ["7"])[0])
+            except ValueError:
+                days = 7
+            return self._respond(200, json.dumps(_traffic_summary(max(1, min(days, 90)))),
+                                 "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)
-        return self._respond(200, _UI_PAIR_PAGE)
+        return self._respond(200, _UI_LOGIN_PAGE)
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path not in ("/upload", "/config"):
+        if path not in ("/upload", "/config", "/sites", "/service", "/swap"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
-            return self._respond(403, "Not paired.")
+            return self._respond(403, "Not logged in.")
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -5914,26 +7217,168 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         if length <= 0:
             return self._respond(400, "Empty upload.")
 
+        if path == "/service":
+            # The page runs the service's lifecycle but never its
+            # installation: start, restart, stop. Stopping was withheld while
+            # the fear was that a misclick could darken a box with no way
+            # back — it cannot, because this page is served by the admin
+            # command's own process, not the server's, so Start survives a
+            # stopped server. `disable` stays terminal-only: removing the
+            # unit is installation, and it would take this page's own way
+            # back with it.
+            if length > 512:
+                return self._respond(413, "Body too large.")
+            try:
+                body_op = json.loads(self.rfile.read(length)).get("op", "start")
+            except (ValueError, TypeError):
+                body_op = "start"
+            if not _service_file_exists():
+                return self._respond(422, json.dumps(
+                    {"error": "no system service installed — run 'enable' in the terminal"}),
+                    "application/json")
+            verb = str(body_op) if str(body_op) in ("start", "restart", "stop") else "start"
+            try:
+                subprocess.run(["systemctl", verb, "servette"],
+                               check=True, capture_output=True)
+            except (OSError, subprocess.CalledProcessError) as e:
+                return self._respond(500, json.dumps(
+                    {"error": f"could not {verb} the service ({e})"}), "application/json")
+            return self._respond(200, json.dumps({"result": "ok"}), "application/json")
+
+        if path == "/swap":
+            # The size the terminal asks for at setup, asked for here
+            # instead — the same _apply_swapfile underneath, so the two
+            # surfaces cannot drift on disk checks, fstab, or the
+            # restore-the-old-size path when a resize fails.
+            if length > 512:
+                return self._respond(413, "Body too large.")
+            try:
+                mb = int(json.loads(self.rfile.read(length)).get("mb"))
+            except (ValueError, TypeError):
+                return self._respond(422, json.dumps(
+                    {"error": "a size in MB is needed"}), "application/json")
+            if not (64 <= mb <= 65536):
+                return self._respond(422, json.dumps(
+                    {"error": "swap size must be 64-65536 MB"}), "application/json")
+            err = _apply_swapfile(mb)
+            return self._respond(200 if not err else 422,
+                                 json.dumps({"result": "ok"} if not err
+                                            else {"error": err}),
+                                 "application/json")
+
+        if path == "/sites":
+            # The page's card row: add, remove, move — the same cores the
+            # terminal's add-site / remove-site / move-site run. Add invents
+            # the folder itself (a Servette-assigned name under the data
+            # directory): the folder is where publishes land, not a question
+            # an operator should have to answer.
+            if length > 4096:
+                return self._respond(413, "Body too large.")
+            try:
+                body = json.loads(self.rfile.read(length))
+                op   = str(body.get("op") or "")
+            except (ValueError, TypeError):
+                return self._respond(400, "Malformed body.")
+            try:
+                if op == "add":
+                    _append_site(_invent_site_dir())
+                    err = ""
+                    if _server_running() or _service_is_active():
+                        _reload_server()
+                elif op in ("remove", "move"):
+                    try:
+                        err = (_remove_site(int(body.get("site")))
+                               if op == "remove"
+                               else _move_site(int(body.get("from")),
+                                               int(body.get("to"))))
+                    except (TypeError, ValueError):
+                        err = "site indexes must be whole numbers"
+                elif op in ("name", "certificate"):
+                    # Naming and certifying are two acts, and the page shows
+                    # them as two. `name` is a config write: instant, and it
+                    # cannot fail on someone else's DNS. `certificate` is the
+                    # slow, network-dependent one — the same
+                    # _obtain_trusted_cert the terminal runs, which persists
+                    # and reloads on success. Between them a site can sit
+                    # named but self-signed; that state is honest and loud on
+                    # the card rather than hidden inside one button.
+                    try:
+                        idx = int(body.get("site"))
+                    except (TypeError, ValueError):
+                        idx = -1
+                    if not (0 <= idx < len(config.sites)):
+                        err = f"no site {idx}"
+                    elif op == "name":
+                        domain = str(body.get("domain") or "").strip().lower()
+                        if not domain:
+                            err = "a domain is needed"
+                        elif _domain_in_use(domain, excluding=config.sites[idx]):
+                            err = f"{domain} is already used by another site on this box"
+                        else:
+                            config.sites[idx].domain = domain
+                            config.save()
+                            err = ""
+                            if _server_running() or _service_is_active():
+                                _reload_server()
+                    else:
+                        target = config.sites[idx]
+                        if not target.domain:
+                            err = "set a domain first — a certificate is issued for a name"
+                        else:
+                            outcome = _obtain_trusted_cert(target.domain, target)
+                            err = ("" if outcome is None else
+                                   "the authority refused — is the domain's DNS "
+                                   "pointing at this server? The terminal has the "
+                                   "detail" if outcome == "refused" else
+                                   "could not reach the certificate authority — "
+                                   "try again in a moment")
+                else:
+                    err = "unknown op"
+            except PermissionError:
+                return self._respond(500, json.dumps(
+                    {"error": "writing the config needs root — re-run 'admin' elevated"}),
+                    "application/json")
+            return self._respond(200 if not err else 422,
+                                 json.dumps({"result": "ok"} if not err
+                                            else {"error": err}),
+                                 "application/json")
+
         if path == "/config":
             # The Config tab's write half: the same validate-then-apply path
             # `set` runs, so a value the terminal refuses the page refuses
-            # with the same sentence.
+            # with the same sentence. The password travels only here — never
+            # on argv, which is why `set` excludes it — and mirrors the
+            # terminal prompt's rules: a username must exist, and blank
+            # means unchanged, never cleared.
             if length > 65536:
                 return self._respond(413, "Settings body too large.")
             try:
                 body = json.loads(self.rfile.read(length))
                 idx  = int(body.get("site") or 0)
-                pairs = [(str(k).strip().lower(), str(v))
-                         for k, v in dict(body.get("values") or {}).items()]
+                values = {str(k).strip().lower(): str(v)
+                          for k, v in dict(body.get("values") or {}).items()}
             except (ValueError, TypeError):
                 return self._respond(400, "Malformed settings body.")
-            if not pairs:
+            password = values.pop("password", "")
+            pairs = list(values.items())
+            if not pairs and not password:
                 return self._respond(400, "No settings given.")
             if not (0 <= idx < len(config.sites)):
                 return self._respond(422, json.dumps({"error": f"no site {idx}"}),
                                      "application/json")
+            site = config.sites[idx]
+            # Judged before anything applies: a password riding with an empty
+            # (or emptied) username would otherwise half-write — the pairs
+            # land and save before the password check could object.
+            if password and not values.get("username", site.username):
+                return self._respond(422, json.dumps(
+                    {"error": "password: set a username first"}),
+                    "application/json")
             try:
-                err = _apply_settings(config.sites[idx], pairs)
+                err = _apply_settings(site, pairs) if pairs else ""
+                if not err and password:
+                    site.password_hash, site.password_salt = _hash_password(password)
+                    config.save()
             except PermissionError:
                 return self._respond(500, json.dumps(
                     {"error": "writing the config needs root — re-run 'admin' elevated"}),
@@ -5945,9 +7390,22 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
         if length > _MAX_BUNDLE_BYTES:
             return self._respond(413, "Bundle too large.")
-        result = _land_bundle(self.server.site, self.rfile.read(length), "browser upload")
+        # The page names the site each card publishes; without the parameter
+        # (older callers, the tests' bare posts) the command's own site stands.
+        site = self.server.site
+        picked = parse_qs(urlsplit(self.path).query).get("site")
+        if picked:
+            try:
+                idx = int(picked[0])
+            except ValueError:
+                idx = -1
+            if not (0 <= idx < len(config.sites)):
+                return self._respond(422, json.dumps({"result": "rejected"}),
+                                     "application/json")
+            site = config.sites[idx]
+        result = _land_bundle(site, self.rfile.read(length), "browser upload")
         if result == "published" and getattr(self.server, "on_publish", None):
-            self.server.on_publish()  # the terminal narrates what the browser did
+            self.server.on_publish(site)  # the terminal narrates what the browser did
         self._respond(200 if result == "published" else 422,
                       json.dumps({"result": result}), "application/json")
 
@@ -5973,23 +7431,25 @@ def _stop_ui(httpd):
 
 # admin
 def cmd_admin():
-    site = config.sites[0]  # the page publishes site 0 until it grows a picker
+    site = config.sites[0]  # the fallback when an upload names no site
     try:
         httpd, code = _start_ui(site, _UI_ADMIN_PAGE)
     except OSError as e:
         print(f"  Could not open the page (port {_UI_PORT}: {e.strerror or e}).")
         return
-    httpd.on_publish = lambda: print(
-        "\n  Published from browser: content swapped in — restore-site undoes it.")
+    httpd.on_publish = lambda s: print(
+        f"\n  Published from browser to {s.domain or s.serve_dir}: "
+        "content swapped in — restore-site undoes it.")
 
     try:
-        target = f" (publishes site 0: {site.domain or site.serve_dir})" if len(config.sites) > 1 else ""
-        print(f"  The admin page is up{target}:")
-        print(f"    open  http://localhost:{_UI_PORT}/?t={code}")
-        print(f"    (or your bookmark http://localhost:{_UI_PORT}/ and enter code {code})")
-        print()
-        print("  If the page won't load, your ssh config needs the one-time line:")
-        print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
+        # Link and passcode, printed apart: the link is stable and worth a
+        # bookmark, the passcode is this run's — the login page marries the
+        # two. The troubleshooting lives behind 'help', summoned exactly
+        # when the page fails to load.
+        print("  The admin page is up:")
+        print(f"    link      http://localhost:{_UI_PORT}/")
+        print(f"    passcode  {code}")
+        print("    (page won't load? type 'help')")
         print()
         while True:
             try:
@@ -5997,11 +7457,24 @@ def cmd_admin():
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
+            if raw in ("help", "?"):
+                print("  A page that won't load means this SSH connection isn't carrying")
+                print("  the tunnel. Add this line once to ~/.ssh/config on the computer")
+                print("  you ssh FROM, inside this server's entry, then reconnect:")
+                print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
+                print(f"  The link is worth a bookmark — the login page it opens")
+                print(f"  asks for this run's passcode: {code}")
+                continue
             if raw in ("back", "done", "exit", "quit", "q"):
                 break
     finally:
         _stop_ui(httpd)
-        print("  Page closed.")
+        # An abandoned tab keeps asking for a port nothing answers on any
+        # more, and the operator's own terminal is where SSH prints the
+        # refusals ('channel N: open failed'). Cheaper to say than to
+        # diagnose later.
+        print("  Page closed — close the browser tab too, or your terminal")
+        print("  will collect 'channel N: open failed' notices from it.")
 
 
 # Formatting uptime
@@ -6037,8 +7510,11 @@ def _production_issues():
             # contains, gets no HSTS, and is not reachable by name — so 'add a
             # domain' is the advice that actually changes any of that.
             issues.append(f"self-signed certificate{tag} — run 'config cert' to add a domain")
-        if not site.username:
-            issues.append(f"no password protection{tag} — run 'config' to set credentials")
+        # A public site is deliberately not listed: public is a choice, not
+        # a defect — most sites are public. The half-state IS a defect: a
+        # username with nothing stored to check locks every visitor out.
+        if site.username and not site.password_hash:
+            issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
         if bool(site.publish_url) != bool(site.publish_key):
             issues.append(f"publish channel partially configured{tag} — run 'config publish' to finish setup")
     mem_kb, avail_kb, committed_kb = _meminfo()
@@ -6102,7 +7578,8 @@ def _runtime_stats(service_active):
         try:
             result = subprocess.run(
                 ["systemctl", "show", "servette",
-                 "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,MainPID"],
+                 "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,"
+                 "CPUUsageNSec,MainPID"],
                 capture_output=True, text=True
             )
             props = dict(
@@ -6110,6 +7587,7 @@ def _runtime_stats(service_active):
             )
         except Exception:
             return rows
+        elapsed = None
         mono = props.get("ActiveEnterTimestampMonotonic", "")
         if mono and mono != "0":
             try:
@@ -6118,11 +7596,23 @@ def _runtime_stats(service_active):
                 elapsed = boot_elapsed - int(mono) / 1_000_000
                 if elapsed >= 0:
                     rows.append(("Uptime", _format_uptime(elapsed)))
+                else:
+                    elapsed = None
             except Exception:
-                pass
+                elapsed = None
         mem = props.get("MemoryCurrent", "")
         if mem and mem.isdigit() and int(mem) > 0:
             rows.append(("Memory", f"{int(mem) / (1024 * 1024):.1f} MB"))
+        # Average CPU for this run: systemd's cumulative CPU time over the
+        # uptime just computed. Free — the same systemctl call already
+        # answers it — and the honest reading on a static server, where
+        # sustained CPU means something is wrong rather than popular. It is
+        # an average, not a live meter: a spike that has passed is diluted
+        # by every quiet second since.
+        cpu = props.get("CPUUsageNSec", "")
+        if elapsed and cpu.isdigit() and elapsed > 0:
+            pct = (int(cpu) / 1_000_000_000) / elapsed * 100
+            rows.append(("CPU", f"{pct:.1f}% average this run"))
         pid = props.get("MainPID", "")
         if pid and pid != "0":
             rows.append(("PID", pid))
@@ -6154,6 +7644,7 @@ def _site_rows():
     return [{
         "index":     i,
         "domain":    site.domain,
+        "active":    site.active,
         "serve_dir": site.serve_dir,
         "auth":      bool(site.username),
         "cert_days": _cert_days_remaining(_resolve(site.cert_file)),
@@ -6161,9 +7652,203 @@ def _site_rows():
     } for i, site in enumerate(config.sites)]
 
 
+def _health_checks():
+    """Every health fact as a row, green included — the admin page's Health
+    checks card. The same ground _production_issues walks, saying what passes
+    as plainly as what needs attention: ok True is healthy, False needs it.
+    `key` is stable for consumers; `site` carries the index where the row is
+    site-scoped, None where it is host-wide — the admin page splits its
+    Settings cards (This site / This server) on exactly that."""
+    rows = []
+    service_active = _service_is_active()
+    running        = service_active or _server_running()
+    # Labeled Mode, because that is what its three answers describe — and
+    # the page prints no second Mode row beside it.
+    rows.append({"key": "service", "site": None, "ok": running, "label": "Mode",
+                 "detail": "system service (survives reboots)" if service_active
+                 else ("session only (stops when this terminal closes)" if running
+                       else "stopped — 'start' brings it up")})
+    if not _IS_MACOS:
+        armed = os.path.exists(NETWATCH_PATH + ".timer")
+        rows.append({"key": "netwatch", "site": None, "ok": armed, "label": "Network watchdog",
+                     "detail": "armed (checks once per minute)" if armed
+                     else "not installed — 'enable' provisions it"})
+        mem_kb, _avail_kb, committed_kb = _meminfo()
+        rec = _swap_recommendation(mem_kb, committed_kb,
+                                   _cache_headroom_mb(config.cache_size_mb))
+        ours_mb, foreign_mb = _swap_sizes()
+        rec_mb = (rec // (1024 * 1024)) if rec else None
+        offer  = _swap_offer(rec_mb, os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
+        have   = (ours_mb or 0) + foreign_mb
+        # The recommendation is named by the field that sets it, so this row
+        # states the size and speaks up only when it falls short. `offer` is
+        # a (description, hint) pair for the terminal's prompt — never a
+        # number, which is what it used to be interpolated as here.
+        if offer is None:
+            detail = f"{have} MB active" if have else "not needed at this host's memory"
+        elif have:
+            detail = (f"{have} MB active, below the {rec_mb} MB recommendation"
+                      if rec_mb else f"{have} MB active")
+        else:
+            detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
+        rows.append({"key": "swap", "site": None, "ok": offer is None,
+                     "label": "Swap file", "detail": detail})
+    labeled = len(config.sites) > 1
+    for i, site in enumerate(config.sites):
+        tag = f"Site {i} · " if labeled else ""
+        # The folder reports only when it is missing. Where content lives is
+        # Servette's business, not the operator's (the folder-retirement
+        # ruling) — but a serve directory that has vanished is a defect the
+        # operator must hear about.
+        dir_ok = bool(site.serve_dir) and os.path.exists(_resolve(site.serve_dir))
+        if not dir_ok:
+            rows.append({"key": "dir", "site": i, "ok": False, "label": tag + "Folder",
+                         "detail": "missing — publish to recreate it"})
+        days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
+        covers = _domain_from_cert(_resolve(site.cert_file)) if site.cert_file else None
+        mismatched = bool(site.domain) and bool(covers) and covers != site.domain
+        cert_ok = days is not None and days > 0 and bool(site.domain) and not mismatched
+        rows.append({"key": "cert", "site": i, "ok": cert_ok, "label": tag + "Certificate",
+                     "days": days,
+                     "detail": (f"{days} days remaining (auto-renew enabled)" if cert_ok
+                                else f"issued for {covers} — get one for this name" if mismatched
+                                else "expired" if (days is not None and days <= 0)
+                                else "self-signed" if days is not None
+                                else "not configured")})
+        # A public site is a choice, not a defect: no password is healthy.
+        # What IS broken is the half-state — a username with nothing stored
+        # to check against, which locks every visitor out.
+        half_auth = bool(site.username) and not site.password_hash
+        rows.append({"key": "password", "site": i, "ok": not half_auth,
+                     "label": tag + "Access",
+                     "detail": ("private — visitors sign in" if site.username and site.password_hash
+                                else "a username with no stored password — set one below, or make the site public"
+                                if half_auth
+                                else "public — anyone can view it (the form below makes it private)")})
+        # The pull channel reports only when it exists or is half-built. Its
+        # absence is the normal case — the admin page publishes directly —
+        # and a row saying so on every site is noise, not news.
+        half = bool(site.publish_url) != bool(site.publish_key)
+        if half or site.publish_url:
+            rows.append({"key": "channel", "site": i, "ok": not half,
+                         "label": tag + "Publish channel",
+                         "detail": ("partially configured — finish or clear it in the terminal: config publish"
+                                    if half else "configured — 'pull' fetches from it")})
+    return rows
+
+
+def _load_snapshot():
+    """Average CPU for this run and current memory, as numbers — the same
+    facts _status_rows prints for the terminal, in the form the page
+    renders. An average, not a live meter: cumulative CPU time over the
+    time the server has been up, so a spike that has passed is diluted by
+    every quiet second since. None for any figure that cannot be read."""
+    out = {"cpu_percent": None, "memory_mb": None, "uptime_s": None,
+           "started_at": None, "cpu_ns": None, "sampled_at": time.time()}
+    if _service_is_active():
+        try:
+            result = subprocess.run(
+                ["systemctl", "show", "servette",
+                 "--property=ActiveEnterTimestampMonotonic,MemoryCurrent,CPUUsageNSec"],
+                capture_output=True, text=True)
+            props = dict(line.split("=", 1) for line in result.stdout.strip().splitlines()
+                         if "=" in line)
+            mono = props.get("ActiveEnterTimestampMonotonic", "")
+            if mono.isdigit() and mono != "0":
+                with open("/proc/uptime") as f:
+                    elapsed = float(f.read().split()[0]) - int(mono) / 1_000_000
+                if elapsed > 0:
+                    out["uptime_s"] = elapsed
+                    out["started_at"] = out["sampled_at"] - elapsed
+                    cpu = props.get("CPUUsageNSec", "")
+                    if cpu.isdigit():
+                        # The raw counter travels too: successive readings
+                        # are what let the page draw a live meter without
+                        # anything being sampled or stored server-side.
+                        out["cpu_ns"] = int(cpu)
+                        out["cpu_percent"] = (int(cpu) / 1_000_000_000) / elapsed * 100
+            mem = props.get("MemoryCurrent", "")
+            if mem.isdigit() and int(mem) > 0:
+                out["memory_mb"] = int(mem) / (1024 * 1024)
+        except Exception:
+            pass
+    elif _server_running() and _server_start_time is not None:
+        # Session mode: the server IS this process, so its own CPU clock
+        # answers — no systemd to ask.
+        elapsed = time.monotonic() - _server_start_time
+        if elapsed > 0:
+            times = os.times()
+            out["uptime_s"] = elapsed
+            out["started_at"] = out["sampled_at"] - elapsed
+            out["cpu_ns"] = int((times[0] + times[1]) * 1_000_000_000)
+            out["cpu_percent"] = (times[0] + times[1]) / elapsed * 100
+    return out
+
+
+_LATEST_CACHE = {"at": None, "version": None}
+
+
+def _latest_release(ttl=21600):
+    """The newest Servette on PyPI, or None when the question cannot be
+    answered. Servette makes no outbound call on its own schedule: this one
+    happens when the operator opens the admin page and asks, is cached for
+    six hours, and fails silently — a box with no route out, or a PyPI
+    having a bad day, must cost the page nothing but this row."""
+    now = time.monotonic()
+    if _LATEST_CACHE["at"] is not None and now - _LATEST_CACHE["at"] < ttl:
+        return _LATEST_CACHE["version"]
+    version = None
+    try:
+        with urllib.request.urlopen(
+                "https://pypi.org/pypi/servette/json", timeout=4) as response:
+            version = json.loads(response.read().decode("utf-8"))["info"]["version"]
+    except Exception:
+        version = None
+    _LATEST_CACHE["at"], _LATEST_CACHE["version"] = now, version
+    return version
+
+
+def _version_parts(text):
+    """A version as comparable integers, ignoring anything that is not one —
+    Servette's own scheme is 0.<yy>.<doy>, and a suffix should never make a
+    release look older than it is."""
+    parts = []
+    for chunk in str(text).split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def _upgrade_available():
+    """The newer version's string when PyPI has one, else None. Telling is
+    all Servette does here: installing is the package manager's job, and
+    stays in the terminal (DECISIONS, 'pip install is the only installation
+    path')."""
+    latest = _latest_release()
+    if latest and _version_parts(latest) > _version_parts(__version__):
+        return latest
+    return None
+
+
+def _swap_snapshot():
+    """Servette's own swapfile as numbers — what is active and what the
+    sizing recommends — for the page's field. None on a host with no swap
+    to speak of (macOS manages its own)."""
+    if _IS_MACOS:
+        return {"active_mb": None, "recommended_mb": None}
+    mem_kb, _avail_kb, committed_kb = _meminfo()
+    rec = _swap_recommendation(mem_kb, committed_kb,
+                               _cache_headroom_mb(config.cache_size_mb))
+    ours_mb, _foreign = _swap_sizes()
+    return {"active_mb": ours_mb,
+            "recommended_mb": (rec // (1024 * 1024)) if rec else None}
+
+
 def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
-    external tooling. cert_days is None when no certificate is readable."""
+    external tooling. cert_days is None when no certificate is readable;
+    `checks` is the health-row form of the same facts, and `load` the
+    utilization figures the page's Traffic tab renders."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
     return {
@@ -6173,6 +7858,9 @@ def _status_data():
         "sites":    _site_rows(),
         "issues":   _production_issues(),
         "warnings": _cache_warnings(),
+        "checks":   _health_checks(),
+        "load":     _load_snapshot(),
+        "swap":     _swap_snapshot(),
     }
 
 
@@ -6348,7 +8036,14 @@ def _set_site_value(target, key, value):
             return f"directory not found: {resolved}"
         target.serve_dir = value
     elif key == "username":
+        # Auth is one switch, not two half-states: a cleared username takes
+        # the stored password with it, on every surface that writes settings
+        # (`set` and the page alike, since both land here) — the same rule
+        # the interactive prompt has always kept.
         target.username = value
+        if not value:
+            target.password_hash = ""
+            target.password_salt = ""
     elif key == "publish_url":
         if value and not value.startswith("https://"):
             return "publish_url must be https:// (or empty to clear)"
@@ -6358,13 +8053,20 @@ def _set_site_value(target, key, value):
         if v and not (len(v) == 64 and all(c in "0123456789abcdef" for c in v)):
             return "publish_key must be 64 hex characters (a 32-byte Ed25519 public key)"
         target.publish_key = v
+    elif key == "active":
+        # The pause between serving and deleting: a deactivated site keeps
+        # its config and files but is invisible to request routing.
+        v = value.strip().lower()
+        if v not in ("yes", "no"):
+            return "active must be yes or no"
+        target.active = (v == "yes")
     return ""
 
 
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
-_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key")
+_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key", "active")
 
 
 def _set_usage():
@@ -6610,6 +8312,8 @@ def run_command(cmd, args):
             cmd_log(int(args[0]) if args else 20)
         except ValueError:
             print("Usage: log [number]")
+    elif cmd == "traffic":
+        cmd_traffic()
     elif cmd == "admin":
         cmd_admin()
     elif cmd == "publish":
@@ -6630,8 +8334,8 @@ def run_command(cmd, args):
 # The shell
 def shell():
     _banner("Servette — The Simple Secure Server")
-    _startup_refresh()
     print(HELP)
+    _startup_refresh()
 
     while True:
         try:

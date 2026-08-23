@@ -12,6 +12,7 @@ import contextlib
 import gzip
 import http.client
 import http.server
+import inspect
 import io
 import json
 import logging
@@ -890,7 +891,8 @@ def run_dispatch_tests(s):
     calls       = []
     saved       = {n: getattr(s, n) for n in
                    ("cmd_status", "cmd_start", "stop_server", "cmd_pull",
-                    "cmd_restore_site", "cmd_publish", "cmd_admin")}
+                    "cmd_restore_site", "cmd_publish", "cmd_admin",
+                    "_startup_refresh")}
     saved_input = builtins.input
     try:
         s.cmd_status       = lambda json_mode=False: calls.append("status")
@@ -900,16 +902,21 @@ def run_dispatch_tests(s):
         s.cmd_restore_site = lambda site: calls.append(("restore-site", site))
         s.cmd_publish      = lambda: calls.append("publish")
         s.cmd_admin        = lambda: calls.append("admin")
+        s._startup_refresh = lambda: print("STARTUP-NOTICE-MARKER")
         script = iter(["status", "start", "pull 0", "restore-site 0", "publish",
                        "admin", "pull 99", "bogus", "quit"])
         builtins.input = lambda prompt="": next(script, "quit")
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()) as launch_buf:
             s.shell()
     finally:
         builtins.input = saved_input
         for n, fn in saved.items():
             setattr(s, n, fn)
         s.os.geteuid = saved_dispatch_euid
+
+    launch_out = launch_buf.getvalue()
+    check("A startup notice is the last thing before the prompt, not buried above the help",
+          launch_out.index("Commands") < launch_out.index("STARTUP-NOTICE-MARKER"))
 
     check("'status' routed to cmd_status", "status" in calls)
     check("'start' routed to cmd_start",   "start" in calls)
@@ -987,7 +994,7 @@ def run_dispatch_tests(s):
         s._start_ui = lambda site, page, port=None: (
             ui_started.append((site, page)) or (fake_ui, "abc123"))
         s._stop_ui  = lambda h: adm_calls.append(("stop", h))
-        script = iter(["back"])
+        script = iter(["help", "back"])
         builtins.input = lambda prompt="": next(script, "back")
         with contextlib.redirect_stdout(io.StringIO()) as adm_buf:
             s.cmd_admin()
@@ -1004,16 +1011,19 @@ def run_dispatch_tests(s):
     adm_out = adm_buf.getvalue()
     check("admin starts the page server with site 0 and the embedded page",
           ui_started == [(s.config.sites[0], s._UI_ADMIN_PAGE)])
-    check("...prints the printed-URL door with this run's code",
-          f"http://localhost:{s._UI_PORT}/?t=abc123" in adm_out)
-    check("...the bookmark door with the same code",
-          "enter code abc123" in adm_out)
-    check("...and the LocalForward line for a tunnel that isn't there yet",
-          f"LocalForward {s._UI_PORT} 127.0.0.1:{s._UI_PORT}" in adm_out)
+    check("...prints the stable link and this run's passcode side by side",
+          f"http://localhost:{s._UI_PORT}/" in adm_out
+          and "passcode  abc123" in adm_out)
+    check("...keeps the happy path to one pointer line",
+          "page won't load? type 'help'" in adm_out)
+    check("...and 'help' summons the tunnel line and reprints the passcode",
+          f"LocalForward {s._UI_PORT} 127.0.0.1:{s._UI_PORT}" in adm_out
+          and "passcode: abc123" in adm_out)
     check("...sets the terminal narration hook",
           callable(getattr(fake_ui, "on_publish", None)))
-    check("...and closes the page on the way out",
-          adm_calls == [("stop", fake_ui)] and "Page closed." in adm_out)
+    check("...and closes the page on the way out, tab included",
+          adm_calls == [("stop", fake_ui)] and "Page closed" in adm_out
+          and "close the browser tab" in adm_out)
     check("A busy port is one sentence, and no page to close",
           "Could not open the page" in busy_buf.getvalue()
           and len(adm_calls) == 1)
@@ -1022,8 +1032,9 @@ def run_dispatch_tests(s):
     check("The admin page is inlined whole, marker consumed",
           s._UI_ADMIN_PAGE.startswith("<!DOCTYPE html>")
           and "@@ADMIN_HTML@@" not in s._UI_ADMIN_PAGE)
-    check("...carries the Status and Publish tabs",
-          "tab-status" in s._UI_ADMIN_PAGE and "tab-publish" in s._UI_ADMIN_PAGE
+    check("...carries the Sites, Server, and Statistics tabs, reading the status feed",
+          "tab-sites" in s._UI_ADMIN_PAGE and "tab-server" in s._UI_ADMIN_PAGE
+          and "tab-stats" in s._UI_ADMIN_PAGE
           and "/status?t=" in s._UI_ADMIN_PAGE)
     check("...posts to the upload endpoint with the run's code",
           "/upload?t=" in s._UI_ADMIN_PAGE)
@@ -1037,9 +1048,86 @@ def run_dispatch_tests(s):
     check("...with a drop strip visible before anything is dragged",
           "dropstrip" in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
-          "btn-outside" in s._UI_ADMIN_PAGE)
-    check("...and the Config tab wired to the set vocabulary",
-          "tab-config" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
+          "outside" in s._UI_ADMIN_PAGE
+          and "servette-check" in s._UI_ADMIN_PAGE)
+    check("...and the Server panel wired to the set vocabulary",
+          "panel-server" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
+    check("...with every site's facts on its own card and the server's on the server tab",
+          "auth-switch" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
+          and "attention" in s._UI_ADMIN_PAGE
+          and "cfg-site-select" not in s._UI_ADMIN_PAGE)
+    check("...and the server tab reading the journal summary, charted with a scale",
+          "/traffic?t=" in s._UI_ADMIN_PAGE
+          and "lineSVG" in s._UI_ADMIN_PAGE and "chart-y" in s._UI_ADMIN_PAGE)
+
+    # Traffic: the journal re-read as counts. The lines are built through
+    # the program's OWN log formatter and then wrapped in journalctl's
+    # prefix, because hand-written lines were the bug: they matched the
+    # parser's assumption rather than what Servette actually writes (the
+    # formatter's timestamp and level sit between the two), so the parse
+    # counted nothing on a real box while the suite stayed green.
+    def _journal_line(day, message):
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(logging.getLogger().handlers[0].formatter)
+        handler.setLevel(logging.INFO)
+        s.log.addHandler(handler)
+        try:
+            s.log.info("%s", message)
+        finally:
+            s.log.removeHandler(handler)
+        return f"{day}T09:00:00+0000 box servette[1]: " + buf.getvalue().strip()
+
+    tlines = [
+        _journal_line("2026-08-20", "200 /index.html to 1.2.3.4"),
+        _journal_line("2026-08-20", "304 Not Modified /style.css to 1.2.3.4"),
+        _journal_line("2026-08-21", "404 /nope from 5.6.7.8"),
+        _journal_line("2026-08-21", "200 /index.html to 5.6.7.8"),
+        _journal_line("2026-08-21", "Config reloaded from disk"),
+        _journal_line("2026-08-21", "Rate limited 9.9.9.9"),
+        # systemd's own line: no level, and never traffic.
+        "2026-08-21T09:00:05+0000 box systemd[1]: Started servette.service.",
+    ]
+    check("A real log line carries the formatter's timestamp and level",
+          "INFO" in tlines[0] and tlines[0].endswith("200 /index.html to 1.2.3.4"))
+    tt = s._parse_traffic(tlines)
+    check("Traffic tallies days, statuses, and top paths from response lines only",
+          tt["days"] == [("2026-08-20", 2), ("2026-08-21", 2)]
+          and tt["statuses"] == {"200": 2, "304": 1, "404": 1}
+          and tt["top_paths"][0] == ("/index.html", 2)
+          and tt["bucket"] == "day")
+    hourly = s._parse_traffic(tlines, days=1)
+    check("...and buckets by hour on a short window, where a day is one point",
+          hourly["bucket"] == "hour"
+          and hourly["days"] == [("2026-08-20 09", 2), ("2026-08-21 09", 2)])
+    check("...and never carries a visitor's IP",
+          "1.2.3.4" not in json.dumps(tt) and "5.6.7.8" not in json.dumps(tt))
+    saved_tl = s._traffic_lines
+    s._traffic_lines = lambda days=7: tlines
+    with contextlib.redirect_stdout(io.StringIO()) as tbuf:
+        s.cmd_traffic()
+    s._traffic_lines = saved_tl
+    check("The traffic command prints the same summary",
+          "Requests: 4" in tbuf.getvalue() and "/index.html" in tbuf.getvalue())
+    check("...and the Publish tab as site cards, add/move/remove/domain wired to /sites",
+          "site-cards" in s._UI_ADMIN_PAGE and "btn-add-site" in s._UI_ADMIN_PAGE
+          and "/sites?t=" in s._UI_ADMIN_PAGE
+          and "attachCardDrag" in s._UI_ADMIN_PAGE
+          and "dom-input" in s._UI_ADMIN_PAGE)
+    check("...naming and certifying stay two acts, two ops",
+          "op: 'name'" in s._UI_ADMIN_PAGE
+          and "op: 'certificate'" in s._UI_ADMIN_PAGE
+          and "Get certificate" in s._UI_ADMIN_PAGE)
+    check("...whose remove panel offers delete, deactivate, cancel — no browser popup",
+          "do-delete" in s._UI_ADMIN_PAGE and "do-deactivate" in s._UI_ADMIN_PAGE
+          and "do-reactivate" in s._UI_ADMIN_PAGE and "do-cancel" in s._UI_ADMIN_PAGE
+          and "confirm(" not in s._UI_ADMIN_PAGE)
+    check("...as a public/private switch plus host basics — the advanced knobs stay in the terminal",
+          "auth-switch" in s._UI_ADMIN_PAGE
+          and "has_password" in s._UI_ADMIN_PAGE
+          and "cfg-port" not in s._UI_ADMIN_PAGE
+          and "trusted_proxy" not in s._UI_ADMIN_PAGE
+          and "publish_url" not in s._UI_ADMIN_PAGE)
 
     section("Loopback page server")
 
@@ -1079,10 +1167,12 @@ def run_dispatch_tests(s):
               httpd.socket.getsockname()[0] == "127.0.0.1")
 
         st, body = ui_req("GET", "/")
-        check("The bare URL answers the pairing page, never content",
-              st == 200 and b"code printed in your terminal" in body
+        check("The bare URL answers the login page, never content",
+              st == 200 and b"Passcode" in body
+              and b"Login" in body
+              and b"one-time passcode" in body
               and b"publish page" not in body)
-        check("...and the pairing page does not leak the code",
+        check("...and the login page does not leak the passcode",
               ui_code.encode() not in body)
         st, body = ui_req("GET", f"/?t={ui_code}")
         check("The printed URL's code opens the page",
@@ -1090,15 +1180,136 @@ def run_dispatch_tests(s):
 
         st, body = ui_req("GET", f"/status?t={ui_code}")
         check("GET /status with the code answers the inside view",
-              st == 200 and b'"version"' in body and b'"sites"' in body)
+              st == 200 and b'"version"' in body and b'"sites"' in body
+              and b'"checks"' in body)
+
+        health_keys = {r["key"] for r in s._health_checks()}
+        check("The health rows cover the roster, green included",
+              {"service", "cert", "password"} <= health_keys
+              and (s._IS_MACOS or {"netwatch", "swap"} <= health_keys))
+        check("...with the mode row labeled for what it describes",
+              any(r["key"] == "service" and r["label"] == "Mode"
+                  for r in s._health_checks()))
+
+        # The folder reports only when it is gone: where content lives is
+        # not the operator's question (the folder-retirement ruling).
+        check("A present folder is not a row",
+              not any(r["key"] == "dir" for r in s._health_checks()))
+        saved_dir = s.config.sites[0].serve_dir
+        s.config.sites[0].serve_dir = "no-such-folder-xyz"
+        check("...a missing one is a row that needs review",
+              any(r["key"] == "dir" and not r["ok"] for r in s._health_checks()))
+        s.config.sites[0].serve_dir = saved_dir
+
+        load = s._status_data()["load"]
+        check("The status snapshot carries the utilization figures, raw counter included",
+              set(load) == {"cpu_percent", "memory_mb", "uptime_s",
+                            "started_at", "cpu_ns", "sampled_at"}
+              and load["sampled_at"] > 0)
+
+        # The pull channel reports only when it exists or is half-built:
+        # its absence is the normal case, not news.
+        saved_chan = (s.config.sites[0].publish_url, s.config.sites[0].publish_key)
+        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
+        check("An absent publish channel is not a row",
+              not any(r["key"] == "channel" for r in s._health_checks()))
+        s.config.sites[0].publish_url = "https://example.com/b.tar.gz"
+        rows_half = [r for r in s._health_checks() if r["key"] == "channel"]
+        check("...a half-built one is a row that needs review",
+              len(rows_half) == 1 and not rows_half[0]["ok"])
+        (s.config.sites[0].publish_url, s.config.sites[0].publish_key) = saved_chan
+
+        saved_hc = (s.config.sites[0].username, s.config.sites[0].password_hash)
+        s.config.sites[0].username, s.config.sites[0].password_hash = "", ""
+        pw = [r for r in s._health_checks()
+              if r["key"] == "password" and r["site"] == 0][0]
+        check("No password is healthy — public is a choice, not a defect",
+              pw["ok"] and "public" in pw["detail"])
+        s.config.sites[0].username, s.config.sites[0].password_hash = "u", ""
+        pw = [r for r in s._health_checks()
+              if r["key"] == "password" and r["site"] == 0][0]
+        check("...but a username with nothing stored to check is flagged",
+              not pw["ok"])
+        check("...and the terminal lists that same half-state as the issue",
+              any("locked out" in i for i in s._production_issues())
+              and not any("no password" in i for i in s._production_issues()))
+        (s.config.sites[0].username, s.config.sites[0].password_hash) = saved_hc
         st, _ = ui_req("GET", "/status")
         check("GET /status without the code is refused", st == 403)
 
         st, body = ui_req("GET", f"/config?t={ui_code}")
         check("GET /config with the code answers the set vocabulary with values",
-              st == 200 and b'"trusted_proxy"' in body and b'"sites"' in body)
+              st == 200 and b'"trusted_proxy"' in body and b'"sites"' in body
+              and b'"has_password"' in body and b'"active"' in body)
         st, _ = ui_req("GET", "/config")
         check("GET /config without the code is refused", st == 403)
+
+        st, body = ui_req("GET", f"/traffic?t={ui_code}")
+        check("GET /traffic answers the summary shape",
+              st == 200 and b"window_days" in body and b"top_paths" in body)
+        st, _ = ui_req("GET", "/traffic")
+        check("GET /traffic without the code is refused", st == 403)
+
+        # Telling is all the page does about upgrades; installing stays in
+        # the terminal, and the check is asked for rather than volunteered.
+        check("A newer release reads as newer, an older one does not",
+              s._version_parts("0.26.240") > s._version_parts("0.26.234")
+              and s._version_parts("0.27.1") > s._version_parts("0.26.999")
+              and not s._version_parts("0.26.234") > s._version_parts("0.26.234"))
+        saved_latest = s._latest_release
+        s._latest_release = lambda ttl=0: "0.99.999"
+        check("...so a newer PyPI release is offered as news",
+              s._upgrade_available() == "0.99.999")
+        s._latest_release = lambda ttl=0: s.__version__
+        check("...and the current one is not",
+              s._upgrade_available() is None)
+        s._latest_release = lambda ttl=0: None
+        check("...nor is silence from PyPI mistaken for anything",
+              s._upgrade_available() is None)
+        st, body = ui_req("GET", f"/update?t={ui_code}")
+        check("GET /update answers the question the page asks",
+              st == 200 and b'"latest"' in body)
+        st, _ = ui_req("GET", "/update")
+        check("...and is code-gated like every other route", st == 403)
+        s._latest_release = saved_latest
+
+        # The swap size the terminal has always asked for, asked for here —
+        # the same core underneath, guarded before it can reach the disk.
+        check("The status snapshot carries the swap figures",
+              set(s._status_data()["swap"]) == {"active_mb", "recommended_mb"})
+        st, _ = ui_req("POST", "/swap", body=b'{"mb": 512}')
+        check("The swap endpoint is code-gated like every other", st == 403)
+        st, body = ui_req("POST", f"/swap?t={ui_code}", body=b'{"mb": "big"}')
+        check("...refusing a size that is not a number", st == 422)
+        st, body = ui_req("POST", f"/swap?t={ui_code}", body=b'{"mb": 4}')
+        check("...and one outside the sane range, before touching the disk",
+              st == 422 and b"64-65536" in body)
+        saved_apply = s._apply_swapfile
+        seen_mb = []
+        s._apply_swapfile = lambda mb: seen_mb.append(mb) or ""
+        st, _ = ui_req("POST", f"/swap?t={ui_code}", body=b'{"mb": 512}')
+        check("...running the same core the terminal's prompt runs",
+              st == 200 and seen_mb == [512])
+        s._apply_swapfile = lambda mb: "Not enough free disk for it."
+        st, body = ui_req("POST", f"/swap?t={ui_code}", body=b'{"mb": 512}')
+        check("...and reporting that core's own refusal",
+              st == 422 and b"free disk" in body)
+        s._apply_swapfile = saved_apply
+
+        # The page may move the service toward serving and no further.
+        st, _ = ui_req("POST", "/service", body=b"{}")
+        check("The service endpoint is code-gated like every other", st == 403)
+        saved_unit = s._service_file_exists
+        s._service_file_exists = lambda: False
+        st, body = ui_req("POST", f"/service?t={ui_code}", body=b"{}")
+        check("...and refuses to start a service that was never installed",
+              st == 422 and b"enable" in body)
+        s._service_file_exists = saved_unit
+        handler_src = inspect.getsource(s._UIHandler)
+        check("...running the lifecycle but never the installation",
+              '"systemctl", verb' in handler_src
+              and '("start", "restart", "stop")' in handler_src
+              and '"disable"' not in handler_src and '"enable"' not in handler_src)
 
         saved_cfg_user = s.config.sites[0].username
         st, _ = ui_req("POST", f"/config?t={ui_code}",
@@ -1113,9 +1324,51 @@ def run_dispatch_tests(s):
         st, _ = ui_req("POST", f"/config?t={ui_code}",
                        body=json.dumps({"values": {"bogus_key": "1"}}).encode())
         check("...and an unknown setting", st == 422)
+
+        # The page's deactivate/reactivate is a settings write like any other.
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"site": 0,
+                                        "values": {"active": "no"}}).encode())
+        check("Deactivation is a settings write",
+              st == 200 and s.config.sites[0].active is False)
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"site": 0,
+                                        "values": {"active": "yes"}}).encode())
+        check("...and reactivation restores serving",
+              st == 200 and s.config.sites[0].active is True)
         st, _ = ui_req("POST", f"/config?t={ui_code}", body=b"not json{")
         check("...and a malformed settings body", st == 400)
+
+        # The password travels only here — never on argv — and mirrors the
+        # terminal prompt's rules: username first, blank means unchanged.
+        saved_pw = (s.config.sites[0].password_hash, s.config.sites[0].password_salt)
+        s.config.sites[0].username = ""
+        st, body = ui_req("POST", f"/config?t={ui_code}",
+                          body=json.dumps({"values": {"password": "pw-probe"}}).encode())
+        check("A password without a username is refused, like the terminal",
+              st == 422 and b"set a username first" in body)
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"values": {"username": "cfg-auth",
+                                                   "password": "pw-probe"}}).encode())
+        check("Username and password land together, hashed server-side",
+              st == 200 and s.config.sites[0].username == "cfg-auth"
+              and s._check_password("pw-probe", s.config.sites[0].password_hash,
+                                    s.config.sites[0].password_salt))
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"site": 0,
+                                        "values": {"username": "",
+                                                   "password": "pw-2"}}).encode())
+        check("A password riding with an emptied username is refused whole",
+              st == 422 and s.config.sites[0].username == "cfg-auth")
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"site": 0,
+                                        "values": {"username": ""}}).encode())
+        check("Clearing the username over HTTP deletes the stored password with it",
+              st == 200 and s.config.sites[0].username == ""
+              and s.config.sites[0].password_hash == ""
+              and s.config.sites[0].password_salt == "")
         s.config.sites[0].username = saved_cfg_user
+        s.config.sites[0].password_hash, s.config.sites[0].password_salt = saved_pw
         s.config.save()
 
         st, _ = ui_req("POST", "/upload")
@@ -1137,6 +1390,171 @@ def run_dispatch_tests(s):
               st == 422 and b'"rejected"' in body
               and not os.path.exists(os.path.join(ui_dir, "evil.html"))
               and os.path.exists(os.path.join(ui_dir, "live", "new.html")))
+
+        # Site management ops — the page's card row runs the same cores the
+        # terminal's add-site / remove-site / move-site run. Reload guards
+        # are stubbed: these tests exercise config truth, not the restart.
+        saved_running = s._server_running
+        saved_active  = s._service_is_active
+        s._server_running    = lambda: False
+        s._service_is_active = lambda: False
+        added = None
+        try:
+            st, _ = ui_req("POST", "/sites",
+                           body=json.dumps({"op": "add"}).encode())
+            check("Site ops without the code are refused", st == 403)
+
+            n0 = len(s.config.sites)
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "add"}).encode())
+            added = s.config.sites[-1]
+            check("op=add appends a site with an assigned folder and its own cert pair",
+                  st == 200 and len(s.config.sites) == n0 + 1
+                  and added.serve_dir.startswith("site-")
+                  and os.path.isdir(s._resolve(added.serve_dir))
+                  and os.path.exists(s._resolve(added.cert_file))
+                  and added.cert_file != s.config.sites[0].cert_file)
+            added_base = s._resolve(added.serve_dir)
+
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "move", "from": n0, "to": 0}).encode())
+            check("op=move reorders — the new site leads the list",
+                  st == 200 and s.config.sites[0] is added)
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "move", "from": 0, "to": n0}).encode())
+            check("...and moves back", st == 200 and s.config.sites[-1] is added)
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "move", "from": 0, "to": 99}).encode())
+            check("op=move refuses an index off the list", st == 422)
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "sudo"}).encode())
+            check("An unknown op is refused", st == 422)
+
+            st, _ = ui_req("POST", f"/upload?t={ui_code}&site={n0}",
+                           body=_ui_tar([("second.html", "two")]))
+            check("An upload naming a site lands on that site, not the command's",
+                  st == 200
+                  and os.path.exists(os.path.join(added_base, "second.html"))
+                  and not os.path.exists(os.path.join(ui_dir, "live", "second.html")))
+            st, _ = ui_req("POST", f"/upload?t={ui_code}&site=99",
+                           body=_ui_tar([("x.html", "x")]))
+            check("An upload naming a site off the list is rejected", st == 422)
+
+            # op=domain runs the terminal's issuance core; stubbed here, since
+            # only a real box can talk to a certificate authority. The core
+            # assigns site.domain only on its success path, which is exactly
+            # what the handler judges by.
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "name", "site": n0,
+                                            "domain": "card.example"}).encode())
+            check("op=name is a config write, no authority involved",
+                  st == 200 and s.config.sites[n0].domain == "card.example")
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "name", "site": 0,
+                                               "domain": "card.example"}).encode())
+            check("...refusing a domain another site already holds",
+                  st == 422 and b"already used" in body)
+
+            # op=certificate is the slow act, reported by the issuance's own
+            # verdict — the domain is set before it runs, so comparing the
+            # domain afterwards would always look like success.
+            saved_obtain = s._obtain_trusted_cert
+            s._obtain_trusted_cert = lambda domain, site_obj: None
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "certificate", "site": n0}).encode())
+            check("op=certificate reports the issuance's own success",
+                  st == 200)
+            s._obtain_trusted_cert = lambda domain, site_obj: "refused"
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "certificate", "site": n0}).encode())
+            check("...and its refusal, with the DNS question that usually explains it",
+                  st == 422 and b"DNS" in body)
+            s._obtain_trusted_cert = lambda domain, site_obj: "transient"
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "certificate", "site": n0}).encode())
+            check("...telling a transient failure apart from a refusal",
+                  st == 422 and b"try again" in body)
+            s.config.sites[n0].domain = ""
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "certificate", "site": n0}).encode())
+            check("...and refusing to ask for a certificate with no name to put on it",
+                  st == 422 and b"set a domain first" in body)
+            s.config.sites[n0].domain = "card.example"
+            s._obtain_trusted_cert = saved_obtain
+
+            saved_sites_list = s.config.sites
+            s.config.sites = [s.config.sites[0]]
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "remove", "site": 0}).encode())
+            check("The last site can't be removed from the page either",
+                  st == 422 and b"only site" in body)
+            s.config.sites = saved_sites_list
+
+            st, _ = ui_req("POST", f"/sites?t={ui_code}",
+                           body=json.dumps({"op": "remove",
+                                            "site": len(s.config.sites) - 1}).encode())
+            check("op=remove drops the config and deletes the server copies",
+                  st == 200 and len(s.config.sites) == n0
+                  and added not in s.config.sites
+                  and not any(os.path.exists(added_base + suf)
+                              for suf in ("", ".a", ".b", ".bak"))
+                  and os.path.exists(s._resolve(added.cert_file)))
+
+            # A folder another site still points at is spared by removal.
+            twin_dir = s._invent_site_dir()
+            t1 = s.Site({"serve_dir": twin_dir})
+            t2 = s.Site({"serve_dir": twin_dir})
+            s.config.sites.extend([t1, t2])
+            err = s._remove_site(len(s.config.sites) - 1)
+            check("...but a folder another site still points at is spared",
+                  err == "" and t2 not in s.config.sites
+                  and os.path.isdir(s._resolve(twin_dir)))
+            s.config.sites.remove(t1)
+            s.config.save()
+            shutil.rmtree(s._resolve(twin_dir), ignore_errors=True)
+
+            # Deactivation: invisible to routing on every matching path —
+            # exact domain, the www pairing, and the domainless catch-all.
+            saved_sites_all = s.config.sites
+            sa = s.Site({"domain": "on.example"})
+            sb = s.Site({"domain": "off.example"}); sb.active = False
+            sc = s.Site({});                        sc.active = False
+            sd = s.Site({})
+            s.config.sites = [sa, sb, sc, sd]
+            check("A deactivated site is invisible to routing",
+                  s._select_site("off.example") is sd      # falls to the catch-all
+                  and s._select_site("on.example") is sa
+                  and s._select_site("anything.else") is sd)  # skips inactive sc
+            s.config.sites = [sa, sb, sc]
+            check("...and with no active catch-all its Host is a closed-system miss",
+                  s._select_site("off.example") is None
+                  and s._select_site("www.off.example") is None)
+            s.config.sites = saved_sites_all
+
+            check("move-site is in the config sub-shell's vocabulary",
+                  any(c.startswith("move-site") for c, _ in s._CONFIG_COMMANDS))
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                s._config_move_site(["1"])
+            check("move-site wants two indexes", "Usage" in buf.getvalue())
+        finally:
+            s._server_running    = saved_running
+            s._service_is_active = saved_active
+            if added is not None:
+                if added in s.config.sites:
+                    s.config.sites.remove(added)
+                    s.config.save()
+                base = s._resolve(added.serve_dir)
+                for suffix in ("", ".a", ".b", ".bak", ".new"):
+                    p = base + suffix
+                    if os.path.islink(p):
+                        os.unlink(p)
+                    elif os.path.isdir(p):
+                        shutil.rmtree(p, ignore_errors=True)
+                for leftover in (added.cert_file, added.key_file):
+                    try:
+                        os.remove(s._resolve(leftover))
+                    except OSError:
+                        pass
 
         # An oversize claim must be refused before the body is read — sent
         # raw, because http.client would insist on sending a real body.
@@ -1235,6 +1653,31 @@ def run_dispatch_tests(s):
             s.cmd_set(["password=hunter2"])
         check("set refuses unknown keys (password is interactive-only)",
               "Unknown or malformed" in buf.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["active=maybe"])
+        check("set rejects a non-yes/no active", "yes or no" in buf.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["active=no"])
+        deactivated = s.config.sites[0].active is False
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["active=yes"])
+        check("set active=no/yes is the deactivation switch",
+              deactivated and s.config.sites[0].active is True)
+
+        saved_auth = (s.config.sites[0].username, s.config.sites[0].password_hash,
+                      s.config.sites[0].password_salt)
+        s.config.sites[0].username = "probe"
+        s.config.sites[0].password_hash = "stale-hash"
+        s.config.sites[0].password_salt = "stale-salt"
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["username="])
+        check("set username= is the one auth switch — the stored password clears with it",
+              s.config.sites[0].username == ""
+              and s.config.sites[0].password_hash == ""
+              and s.config.sites[0].password_salt == "")
+        (s.config.sites[0].username, s.config.sites[0].password_hash,
+         s.config.sites[0].password_salt) = saved_auth
 
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["dir=/etc"])
@@ -3389,6 +3832,38 @@ def run_server_tests(s, serve_dir):
     s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
+    section("The connection test on its reserved path")
+
+    chk = req("GET", path="/.well-known/servette-check")
+    check("The check page answers 200 as HTML on its reserved path",
+          chk.status == 200 and b"Connection test" in chk.body
+          and "text/html" in chk.headers.get("Content-Type", ""))
+    etag_chk = chk.headers.get("ETag")
+    check("...with validators, revalidating to 304",
+          bool(etag_chk)
+          and req("GET", path="/.well-known/servette-check",
+                  headers={"If-None-Match": etag_chk}).status == 304)
+    check("...rendering every row pending upfront — dim, then resolve",
+          b"t-row pending" in chk.body and b"classList.remove('pending')" in chk.body)
+    check("The slim 404 links the check instead of running it",
+          b"run the connection test" in req("GET", path="/nonexistent.html").body
+          and b"t-log" not in req("GET", path="/nonexistent.html").body)
+
+    # The split's whole point: an operator's 404.html takes the miss body by
+    # existing — and can never take the check page with it.
+    live_root = os.path.realpath(s._resolve(s.config.sites[0].serve_dir))
+    custom = os.path.join(live_root, "404.html")
+    try:
+        with open(custom, "w") as f:
+            f.write("<h1>my own miss page</h1>")
+        check("A custom 404.html wins the miss body",
+              b"my own miss page" in req("GET", path="/nonexistent.html").body)
+        check("...and cannot shadow the check page",
+              b"Connection test" in req("GET", path="/.well-known/servette-check").body)
+    finally:
+        os.remove(custom)
+        s._file_cache.clear()
+
     section("The embedded error page under auth")
 
     # It is a response like any other: it rides the site's own gate. An error
@@ -4811,10 +5286,15 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # its signature check, the loopback page after its pairing code —
         # and _drop_backup retires the single-shot backup marker for both
         # the flip era (a symlink) and the era before it (a directory).
+        # _remove_site deletes a removed site's server copies (derived from
+        # the operator's originals; deactivation is the keep-everything
+        # path), sparing folders another site still points at.
         "_land_bundle", "_swap_site_content", "cmd_restore_site",
-        "_drop_backup",
-        # A site FOLDER, created empty — setup must never leave nothing to serve.
-        "cmd_setup",
+        "_drop_backup", "_remove_site",
+        # A site FOLDER, created empty — setup must never leave nothing to
+        # serve, and a page-added site gets a Servette-named folder because
+        # the folder is not a question an operator should have to answer.
+        "cmd_setup", "_invent_site_dir",
         # Servette's own state: config, certificates, the ACME account.
         "save", "_generate_self_signed_cert", "_ensure_default_cert",
         "_obtain_trusted_cert", "_persist_issued_cert", "issue",
@@ -4824,7 +5304,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         "_chown_config",
         # The host, at install time and as root.
         "_write_unit_files", "_build_runtime", "_commit_runtime", "cmd_disable",
-        "_ensure_swap", "_make_swapfile",
+        "_apply_swapfile", "_make_swapfile",
         # Staging: unpacks a verified bundle into a temporary directory.
         "_extract_bundle",
         # Removes a site's own generated certificate when the site goes.
@@ -4888,6 +5368,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
             ("GET",  "/index.html",            200),
             ("HEAD", "/index.html",            200),
             ("GET",  "/nothing-here",          404),   # the embedded error page
+            ("GET",  "/.well-known/servette-check", 200),  # the reserved check page
             ("POST", "/index.html",            405),
             ("GET",  "/../etc/passwd",         403),
             ("GET",  "/.well-known/servette",  404),   # no password on this site

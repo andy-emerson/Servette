@@ -82,6 +82,9 @@ class Site:
     def __init__(self, data=None):
         data = data or {}
         self.domain         = data.get("domain",         "")
+        # Deactivated sites keep their config and files but are invisible to
+        # request routing — the pause between serving and deleting.
+        self.active         = bool(data.get("active",    True))
         self.serve_dir      = data.get("serve_dir",      "site")
         self.cert_file      = data.get("cert_file",      "cert.pem")
         self.key_file       = data.get("key_file",       "key.pem")
@@ -330,6 +333,9 @@ class Config:
 [[site]]
 # Leave domain blank for a self-signed certificate (browsers will warn visitors)
 domain = {s(site.domain)}
+# Set active to false to keep the site configured and its files kept, but
+# stop serving it
+active = {'true' if site.active else 'false'}
 serve_dir = {s(site.serve_dir)}
 cert_file = {s(site.cert_file)}
 key_file = {s(site.key_file)}
@@ -877,11 +883,12 @@ def _security_headers(site):
 
 ## The request core
 
-Two things precede the handler: version discovery at `/.well-known/servette`, and the default 404 body, inlined into the module by the build so there is no file to lose.
+Three things precede the handler: version discovery at `/.well-known/servette`, the connection test at its reserved sibling path, and the default 404 body — the pages inlined into the module by the build so there is no file to lose.
 
 ```python
 # Reserved paths
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
+_CHECK_PATH              = "/.well-known/servette-check"
 
 # The default 404 body (DECISIONS.md: "The error page is server-delivered,
 # client-executed"): authored as src/404.html and inlined by build.py, so it is
@@ -891,6 +898,13 @@ _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
 # missing-file case to degrade through.
 _NOT_FOUND_PAGE = """@@NOT_FOUND_HTML@@""".encode()
 _NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
+
+# The connection test (src/check.html), served at _CHECK_PATH on every site —
+# a reserved path under /.well-known/, the one namespace the hidden-path rule
+# already sets apart, so an operator's content never shadows the outside
+# vantage the way a custom 404.html takes over the miss body.
+_CHECK_PAGE = """@@CHECK_HTML@@""".encode()
+_CHECK_ETAG = '"' + hashlib.sha256(_CHECK_PAGE).hexdigest()[:16] + '"'
 
 
 ```
@@ -1033,6 +1047,28 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
 
+    # The connection test, on its reserved path — code-first, so it answers
+    # whatever the site publishes: an operator's 404.html takes the miss body
+    # by existing, but it can never take the outside vantage with it. Behind
+    # the site's own auth like everything else, and carrying the same
+    # revalidate-always caching contract as the 404 body, for the same
+    # reason: the page's checks probe the URL it was served from.
+    if url_path.split("?", 1)[0] == _CHECK_PATH:
+        cache = _cache_control_header(site.username)
+        if "max-age" in cache:
+            cache = ("private" if site.username else "public") + ", no-cache"
+        if headers.get("If-None-Match", "") == _CHECK_ETAG:
+            log.info("304 Not Modified %s to %s", log_path, ip)
+            return resp(304, [(b"etag", _CHECK_ETAG.encode()),
+                              (b"cache-control", cache.encode())])
+        log.info("200 %s (connection test) to %s", log_path, ip)
+        return resp(200, [
+            (b"content-type",   b"text/html; charset=utf-8"),
+            (b"content-length", str(len(_CHECK_PAGE)).encode()),
+            (b"etag",           _CHECK_ETAG.encode()),
+            (b"cache-control",  cache.encode()),
+        ], _CHECK_PAGE)
+
     # Resolve request path to a file within the matched site's own serve_dir
     try:
         file_path, status = _resolve_request_path(url_path, site.serve_dir)
@@ -1049,19 +1085,17 @@ def _handle_request(method, url_path, headers, raw_ip):
     if status == 404 or file_path is None:
         # Every server needs an error page, and a bare "Not found." spends a
         # whole response telling the reader only that they were wrong. This one
-        # also says what the server is, that it is up, and what it is actually
-        # sending — the diagnosis is free, the request was already made. The
-        # operator's own 404.html wins by simply existing.
+        # leads with the path, says the server is up and answered, and links
+        # the connection test on its reserved path above — the split that
+        # keeps this a real 404 while the diagnosis survives an operator's
+        # own 404.html, which wins this role by simply existing.
         #
         # It also covers a site's own root while nothing is published there: no
         # index.html means the root is itself a miss, so the domain reports on
         # itself instead of answering with ten bytes of text.
         #
-        # The response mirrors the file path's caching contract (ETag,
-        # Cache-Control, 304) because the page's own checks probe the URL it
-        # was served from; without validators it would report a defect that is
-        # really this response's shape. The page checks, in the visitor's
-        # browser, the connection it arrived over, behind the site's own auth.
+        # The response keeps the caching contract (ETag, Cache-Control, 304),
+        # with any positive lifetime downgraded below.
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
         if not os.path.isfile(custom_404):
@@ -1168,8 +1202,11 @@ def _select_site(host):
     Host reaches a self-signed/LAN site with no domain configured). No
     domainless site and no domain match: None, the closed-system miss."""
     host = (host or "").split(":")[0].strip().lower()
+    # A deactivated site is invisible to routing everywhere below: its Host
+    # gets the closed-system miss (over a still-valid certificate), which is
+    # what "kept but not served" means on the wire.
     for site in config.sites:
-        if site.domain and site.domain.lower() == host:
+        if site.active and site.domain and site.domain.lower() == host:
             return site
     # www.<domain> reaches the site configured as <domain>. _obtain_trusted_cert
     # deliberately issues one certificate covering both names, so routing has to
@@ -1179,10 +1216,10 @@ def _select_site(host):
     if host.startswith("www."):
         bare = host[4:]
         for site in config.sites:
-            if site.domain and site.domain.lower() == bare:
+            if site.active and site.domain and site.domain.lower() == bare:
                 return site
     for site in config.sites:
-        if not site.domain:
+        if site.active and not site.domain:
             return site
     return None
 

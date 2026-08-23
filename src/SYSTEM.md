@@ -1488,33 +1488,48 @@ def _ensure_swap():
         except ValueError:
             print("  Not a number — skipping swap setup.")
             return
+    err = _apply_swapfile(mb)
+    if err:
+        print(f"  {err}")
+    else:
+        print(f"  Swapfile active ({mb} MB), persistent across reboots.")
+
+
+def _apply_swapfile(mb):
+    """Create or resize Servette's swapfile to `mb` MB — the mechanical half
+    of the swap offer, shared by the terminal's prompt and the admin page's
+    field so the two cannot drift. Returns an error sentence, empty on
+    success (including the no-op where the size asked for is already
+    active). Never raises: every failure path ends in a sentence."""
+    if _IS_MACOS:
+        return "macOS manages its own swap"
+    ours              = os.path.exists(_SWAP_PATH)
+    ours_mb, _foreign = _swap_sizes()
+    active_mb         = ours_mb or 0
     if ours and abs(mb - active_mb) <= _SWAP_SLACK_MB:
-        return  # the size asked for is the size already active — nothing to do
+        return ""  # the size asked for is the size already active
     size = mb * 1024 * 1024
     try:
         st        = os.statvfs("/")
         reclaimed = os.path.getsize(_SWAP_PATH) if ours else 0
         if st.f_bavail * st.f_frsize + reclaimed < size + 1024 ** 3:  # keep 1 GB free
-            print(f"  Not enough free disk for a {mb} MB swapfile plus 1 GB margin — skipping.")
-            return
-    except OSError:
-        return
+            return f"Not enough free disk for a {mb} MB swapfile plus 1 GB margin."
+    except OSError as e:
+        return f"Could not read free disk space ({e})."
     if ours and active_mb > 0:
         r = subprocess.run(["swapoff", _SWAP_PATH], capture_output=True)
         if r.returncode != 0:
-            print("  Could not deactivate the current swapfile (heavily in use?) — try again later.")
-            return
+            return "Could not deactivate the current swapfile (heavily in use?) — try again later."
     try:
         _make_swapfile(size)
         with open("/etc/fstab") as f:
             fstab = f.read()
         if _SWAP_PATH not in fstab.split():
             with open("/etc/fstab", "a") as f:
-                f.write(f"{_SWAP_PATH} none swap sw 0 0\n")
-        print(f"  Swapfile active ({mb} MB), persistent across reboots.")
+                f.write(f"{_SWAP_PATH} none swap sw 0 0" + chr(10))
         log.info("Swapfile active: %d MB at %s", mb, _SWAP_PATH)
+        return ""
     except (OSError, subprocess.CalledProcessError) as e:
-        print(f"  Could not set up swapfile: {e}")
         # A failed RESIZE has already truncated the old file, so try to give
         # the host back the swap it walked in with — a memory-tight host that
         # accepted a grow offer must not end up worse than it started. Swap
@@ -1523,8 +1538,7 @@ def _ensure_swap():
         if ours and active_mb > 0:
             try:
                 _make_swapfile(active_mb * 1024 * 1024)
-                print(f"  Restored the previous {active_mb} MB swapfile.")
-                return
+                return f"Could not set up the swapfile ({e}) — restored the previous {active_mb} MB."
             except (OSError, subprocess.CalledProcessError):
                 pass
         # Nothing to restore (or the restore failed): remove the dead file AND
@@ -1544,6 +1558,7 @@ def _ensure_swap():
                     f.writelines(kept)
         except OSError:
             pass
+        return f"Could not set up the swapfile ({e})."
 
 
 ```

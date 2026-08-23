@@ -6,6 +6,310 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The page is three tabs: a site is one card, the server is its own page
+
+**Ruled (Human):** **Sites** holds one card per site carrying everything
+about that site — publish, status, what it serves at, its domain, its
+certificate, its access switch — so every question about a site is
+answered in one place. **Server** holds what the box is doing and how it
+is set. **Statistics** holds the measurements, last, because they are
+consulted rather than worked in. The site dropdown is deleted outright:
+a card per site needs no selector to say which site it means. The tab
+is **Site** with one and **Sites** with more.
+**Why:** the selector scoped half a tab and confused the other half —
+three rounds of fussing over that control were really telling us the
+structure was wrong. **Supersedes** "The page is two tabs" below.
+**Rejected:** folding Statistics into Server (tried, and the Human
+preferred measurement kept apart); "Site(s)" as a label (a parenthetical
+plural where a count is already known). *(2026-08-23)*
+
+## Naming a site and certifying it are two acts
+
+**Ruled (Human):** `name` writes the domain into the config — instant,
+and it cannot fail on someone else's DNS. `certificate` runs the
+issuance, when the operator asks for it. Between them a site may sit
+named but self-signed; that state is honest and loud on its card (amber,
+with **Get certificate** beside it) rather than hidden inside one button.
+**Why:** fused, a DNS mistake made *naming* appear to fail when the name
+was perfectly fine to store. Split, the name saves and the certificate
+becomes retryable — better failure semantics, and it is what the Human
+saw before the Agent did. **Amends** "The domain is granted from the
+Publish card" below.
+**Two bugs the split exposed, both fixed in the same pass:** the
+certificate op cannot judge itself by comparing the domain afterwards
+(the name is already set by then, so failure would read as success) — it
+reports `_obtain_trusted_cert`'s own verdict, distinguishing a refusal
+from a transient network failure; and a renamed site keeps its old
+certificate until a new one is asked for, so the health row compares the
+certificate's subject against the site's name rather than reporting a
+comfortable "89 days" about a certificate for somewhere else.
+*(2026-08-23)*
+
+## The page runs the service's lifecycle, never its installation
+
+**Ruled (Human):** the Server status row carries **Restart** and one
+button that is **Stop** while running and **Start** while stopped. Stop
+asks first, in the page's own voice. `enable` and `disable` stay
+terminal-only.
+**Why the earlier line moved:** stopping was withheld on the premise
+that a misclick could darken a box with no way back. The premise is
+false — the page is served by the `admin` command's own process, not the
+server's, so Start survives a stopped server and recovery is one click.
+What the principle still forbids is *installation*: removing the unit
+would take the page's own way back with it.
+**Rejected:** three buttons where two carry the states (restart is
+meaningless on a stopped server). *(2026-08-23)*
+
+## Every button reads the same way, and the page never borrows the browser's voice
+
+**Ruled (Human):** one look for every action button — Servette green
+when it can be pressed, brighter on hover, dim (still green) and
+unclickable when it cannot. Buttons stay put rather than appearing and
+disappearing, so nothing a reader learned moves. Confirmation is drawn
+by the page: the browser's own modal dialogs appear nowhere.
+**And attention is a sentence, not a color:** a fault names itself
+("Needs certificate", "Needs password"), amber carries the alarm without
+an exclamation mark, and the one signal with nowhere else to live — the
+server's own trouble — is a notice that says what is wrong and links
+where to fix it. **Facts are not victories:** health rows read as
+label-and-value, and only a row needing attention wears a mark.
+*(2026-08-23)*
+
+## The swapfile size is a setting on the page, as it always was in the terminal
+
+**Ruled (Human):** setup has always asked "Swapfile size in MB [Enter =
+1100, any size, n = skip]", so it is a number the operator picks, and the
+page asks the same question — a field among the host settings, applied
+by the same Save, resizing only when its number changed.
+`_apply_swapfile` is the shared mechanical core (disk-space check,
+swapoff, mkswap, the fstab line, and the failure path that rebuilds the
+previous size rather than leaving a memory-tight host worse than it
+started), so the two surfaces cannot drift.
+**Rejected:** the Agent's "an operation, not a setting" resistance,
+which did not survive contact with the code; a separate Resize button
+(one Save covers every setting). *(2026-08-23)*
+
+## The page reports an available upgrade; installing stays in the terminal
+
+**Ruled (Human):** Server status names a newer release when PyPI has one,
+and points at `pipx upgrade servette` — it never installs. The check is
+asked for rather than volunteered: it happens because an operator opened
+the page, is cached for six hours, times out in four seconds, and fails
+silently, so a box with no route out costs nothing but that row.
+**Why the line holds:** a self-updater would fetch, write into its own
+venv, and restart itself mid-flight — the machinery ruled out by "`pip
+install` is the only installation path" below. *(2026-08-23)*
+
+## It is a connection test
+
+**Ruled (Human):** the word is *test* — "test connection" is the idiom
+people expect on a button, and consistency across the documents was an
+argument against churn, not a reason the other word was better. Renamed
+in both pages, the admin button, and every document. The reserved path
+stays `/.well-known/servette-check`: it is a URL, and URLs that may be
+bookmarked or linked from an already-published site are not renamed over
+a word choice. The report leads with findings in the reader's language,
+each carrying its evidence beneath in a footnote's voice; a public site
+withholding its version reads as a pass, not a skip, because that is the
+design working. *(2026-08-23)*
+
+## The front door is a login: link and passcode, printed apart
+
+**Ruled (Human):** the terminal prints the stable link and this run's
+passcode as two labeled lines; the bare bookmarkable URL answers a
+login page in the admin tool's own dress — dark, the logo, the
+tagline — whose one Passcode field submits the same `t` every request
+carries. A bookmark is the expected door: it holds the link, never the
+secret. With the flow itself teaching that the page rides the SSH
+tunnel, the taglines drop the mechanism and state only what each page
+is: **Login** on the door, **Admin** inside.
+**Rejected:** the code-bearing `?t=` URL as the *printed* door (two
+artifacts behaving differently — a magic link and a bare bookmark —
+where one flow teaches itself); the unstyled pairing form (browser-
+default white was the one off-brand surface in the family); "Admin —
+your server, through your SSH tunnel" as the tagline (trying to be
+punchy and failing — the Human's words). *(2026-08-23)*
+
+## Sites are public or private, not password-less or protected
+
+**Ruled (Human):** access is a property of the site, phrased that way
+on every surface: Settings carries a literal switch — Private site,
+on or off, the login fields existing only while it is on — the Access
+health row answers "public — anyone can
+view it" as a green fact, `sites` prints public/private, and the
+production-issues list stops counting a public site against readiness.
+The login fields exist only for a site that is private or becoming
+private. What every surface flags instead is the genuine defect: a
+username with nothing stored to check against, which locks every
+visitor out — caught by the page and the terminal with one judgment.
+**Why:** most sites are public on purpose; phrasing the absence of a
+password as a warning taught operators their healthy site was broken.
+*(2026-08-23)*
+
+## Remove deletes the server's copies; deactivate is the pause
+
+**Ruled (Human):** a site card's ✕ opens an in-card panel — never the
+browser's own popup — offering the honest three-way: **Delete** (red)
+removes the site's server copies with its config, the published tree,
+slots, and backup, because those are derived from the operator's
+originals in local storage and keeping them silently was disk nobody
+could reclaim within Servette's two surfaces; **Deactivate** (amber)
+keeps everything and stops serving — a real per-site setting
+(`active`), honored by routing on every path, spelled `set n active=no`
+in the terminal; **Cancel** (neutral). One explanatory bullet per
+action. Delete spares certificate files (tiny; re-adding the same
+domain skips re-issuance) and folders another site still points at.
+This supersedes the files-on-disk-untouched clause of the site-cards
+ruling below.
+**Rejected:** "remove, keep the files" as a third option — silent
+compounding, and a re-add collision waiting to happen; a green Cancel
+(green invites clicking — neutral is the honest no-op). *(2026-08-23)*
+
+## The domain is granted from the Publish card
+
+**Ruled (Human):** naming a site is a Publish-card act. A domainless
+card carries a Domain field and one button that runs the same
+certificate issuance the terminal runs (`_obtain_trusted_cert`) — DNS
+pointed at the box first, the button waiting out the issuance, failure
+reporting the DNS question and leaving the self-signed fallback in
+place. Encryption stays a Settings fact: the certificate health row
+lives there, and Settings' domain row is read-only, pointing at the
+card. This supersedes the "domain stays terminal-only" clauses of the
+Config-tab and site-cards rulings below; what stays off the page now is
+only what Servette itself cannot do — registering a domain and pointing
+its DNS.
+**Why:** the cards made and published sites but could not name them —
+the one remaining door that opened from the terminal side only.
+**Amended same day:** the field lives on every card, prefilled — a
+domain is changeable anytime, not only at birth; re-submitting the
+current name deliberately re-runs issuance (the repair path), and only
+names other sites hold are refused.
+**Rejected:** the domain field on Settings (naming belongs where sites
+are born and published). *(2026-08-23)*
+
+## The page is two tabs: Publish lands, Settings scopes
+
+**Ruled (Human):** the admin page is Publish and Settings. Publish is
+the landing tab — the site cards, the thing the operator came to do.
+Settings is a site dropdown under the tabs scoping a **This site** card
+(domain read-only with where it is granted, folder, that site's health
+rows, its connection-check button — now checking the *selected* site,
+not always site 0 — and the password form) above an unscoped **This
+server** card (mode, version, the host health rows, the host settings).
+Both render from one paired `/status` + `/config` fetch.
+**Why:** the Status tab's rows grew linearly with sites while Config
+already scoped per site — the same facts rendered twice, one of them
+unboundedly.
+**Accepted trade:** the at-a-glance health check moves one click from
+page-open; softened by an amber count pill on the Settings tab saying
+how many rows need review.
+**Rejected:** scoping host facts under the site dropdown (a site
+selector cannot scope the box); a third Status tab kept for the glance
+alone (two renderings of the same rows, drifting). *(2026-08-22)*
+
+## The folder is not a setting: serve_dir is retiring from the vocabulary
+
+**Ruled (Human):** where a site's content lives is Servette's business,
+not a question an operator answers. Content arrives only by publishing —
+the admin page's cards today, a terminal publish-from-folder to follow —
+and the folder it lands in is Servette-assigned. `dir` leaves the
+operator vocabulary (the Config tab already dropped it; `set dir=` and
+the config sub-shell's `dir` follow); setup stops asking. The build
+lands as its own commits at the end of this release's fixes, alongside
+the pull-channel removal it overlaps.
+**Why (user pov):** one less question with no wrong answer — every wrong
+answer to the folder question is a guard elsewhere (containment,
+secrets exposure, missing directory). **(developer pov):** those guards
+outlive the setting only where paths still enter from config files
+written by hand.
+**Rejected:** keeping `dir` as an advanced terminal knob (the knob is
+the footgun, not the surface it sits on).
+**First slice already in:** a page-added site is born with a
+Servette-invented folder (`_invent_site_dir`). *(2026-08-22)*
+
+## The Publish tab is the site list: cards add, move, and remove sites
+
+**Ruled (Human):** one card per configured site — the drop strip with
+the folder picker as a link inside it, and the card's own Publish
+button — and the cards are the list itself: add, delete, and reorder in
+place, in the notebook's cell grammar (drag the header — a ghost
+follows, neighbours swap live — or the arrow buttons; ✕ confirms with
+the terminal's exact promise). Order is config, not cosmetics: the
+first domainless site answers unmatched Hosts, so a move saves and
+reloads like any setting. Every op runs the same cores as the terminal
+(`add-site` / `remove-site` / the new `move-site`), the page re-renders
+from fresh `/config` truth after each, and `/upload` takes the card's
+site index. A page-added site is born domainless — domain stays
+terminal-bound to certificate issuance — and says so on its card.
+**Rejected:** a single-site page with Config's dropdown as the only
+multi-site surface (settings editable for sites the page couldn't
+publish — the asymmetry the ruling started from). *(2026-08-22)*
+
+## The Config tab is a password switch; the advanced knobs stay in the terminal
+
+**Ruled (Human):** password protection is one visible switch — a toggle
+that dims the username/password fields when off, states what saving
+will do, and on disable deletes the login. The one-switch rule
+("clearing the username clears the password with it") moves into the
+shared validator, so `set username=`, the page, and the interactive
+prompt behave identically — previously the first two left a stale hash.
+The page learns the state from a `has_password` boolean; the hash never
+crosses the wire, and a password riding with an emptied username is
+refused whole rather than half-applied. Off the page and terminal-kept:
+the serve folder, HTTPS port, and trusted proxy (behind-a-balancer
+territory), the pull channel's URL/key pair (dying with the channel),
+and every lifecycle verb. Every surviving field carries a one-line
+always-visible hint.
+**Rejected:** hover-only help icons (invisible until known, dead on
+touch); lifecycle toggles on the page (root-prompting verbs that
+narrate belong in the terminal, and a stop button one misclick from
+darkness is a footgun — reopen if an operator SSHes in only to flip
+the service). *(2026-08-22)*
+
+## The connection test is its own reserved page; the 404 is a real 404
+
+**Ruled (Human):** two public pages, each with one job. The default 404
+body is a traditional error page — the path, the server-is-up sentence, a
+home link, and a link to the check — and an operator's `404.html` takes
+that role by simply existing. The connection test is its own embedded
+page (`src/check.html`) at `/.well-known/servette-check`: code-first, so
+no site content ever shadows it; behind the site's own auth; answering
+200, because the page really is there; its report rendering every row
+upfront in a dimmed pending state and resolving each in place. The admin
+page's Status tab pairs the two vantages by name: **Health checks** (what
+the machine knows about itself) and the **connection test** (what a
+browser sees from the internet's side of the wire).
+**Why:** with the checks living inside the 404 body, the outside vantage
+vanished the moment an operator shipped a custom 404.html — and the page
+read as a contradiction, titled 404 while explaining there was no 404
+page. This supersedes "The page has one role" below on that ruling's own
+reopen trigger: the check returns as one named thing, not as a second
+role — under `/.well-known/`, the namespace the hidden-path rule already
+sets apart and the version endpoint already lives in, so the site's own
+namespace stays unreserved.
+**Rejected:** one dual-role page keyed off its own pathname (two headlines
+in one file, forever); build-time page-include machinery to share the
+check code between pages (new machinery for the same outcome);
+"inside/outside" as the vantage names (reads as metaphor — the Human's
+call). *(2026-08-22)*
+
+## The Config tab sets the password; argv still never does
+
+**Ruled (Human):** the admin page's Config tab carries a masked password
+field. It travels only in the paired loopback POST — through the
+operator's own SSH tunnel — and is hashed server-side by the same scrypt
+path as the terminal prompt, under the prompt's own rules: username
+first; blank means unchanged, never cleared; clearing the username is
+what turns auth off. `set` keeps excluding password, because its
+rationale is argv-specific — a secret on the command line leaks into
+shell history and the process table — and never applied to the page.
+Domain stays terminal-only on both surfaces: it is bound up with
+certificate issuance.
+**Rejected:** pointing the page's no-password attention row at a terminal
+command — a browser page telling its reader to go run a shell is the
+comprehension cliff again; the row links the Config tab instead.
+*(2026-08-22)*
+
 ## The structural pass adopted the marks, not the moves
 
 **Ruled (Human):** of the external feedback's six principles (#108), what
@@ -500,7 +804,7 @@ network fetch in the publish tool). **Superseded within this ruling:** a second
 role at a reserved `/selftest/` path answering 200, retired below.
 *(#79, 2026-08-16; narrowed 2026-08-17)*
 
-## The page has one role: there is no reserved path
+## The page has one role: there is no reserved path — *superseded*
 
 **Ruled:** the page is Servette's 404 body and nothing else. `/selftest/` is an
 ordinary path that 404s like any other, and no directory in a site root shadows
@@ -524,6 +828,10 @@ a second framing to buy a convenience a missing path already provides.
 **Reopen if:** operators are found routinely wanting a 200 health endpoint on a
 site with no content, in which case it returns as one named thing, not as a
 second role for this page. *(2026-08-17)*
+**Superseded** (2026-08-22) by exactly that reopen condition: the check
+returned as one named thing — see [the connection test's own reserved
+page](#the-connection-test-is-its-own-reserved-page-the-404-is-a-real-404).
+The 404 body keeps exactly one role, as this ruling wanted.
 
 ## site/pub/ is the operator tools page — *moved*
 

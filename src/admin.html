@@ -2,8 +2,10 @@
 <!-- src/admin — the operator's page, the browser half of the paired
      surfaces. Served only by the loopback page server (127.0.0.1, reached
      through the operator's SSH tunnel via `servette admin`), never by the
-     public site. One page, tabs per feature: Status (the inside view) and
-     Publish now; Config when it earns its forms.
+     public site. One page, three tabs: Sites (one card per site, carrying
+     everything about it — publish, domain, certificate, access), Server
+     (what the box is doing and how it is set), and Statistics (traffic
+     counted across every site, and the box's own load).
      Constraints, all load-bearing:
 
      - No signature, no key. Being here IS the authentication: only the
@@ -62,6 +64,9 @@
     .container {
       position: relative;
       z-index: 1;
+      /* Back to the reading width the public pages use: once the rows
+         became facts and the forms sat beside their labels, 760px was
+         empty space rather than room. */
       max-width: 560px;
       width: 100%;
     }
@@ -153,50 +158,65 @@
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
     .badge-dim   { background: rgba(255,255,255,0.04); color: var(--muted); border: 1px solid var(--border); }
+    .badge-warn  { background: rgba(251,191,36,0.12); color: var(--amber); border: 1px solid rgba(251,191,36,0.4); }
+    
 
+    /* Every button reads the same way: available is Servette green, hover
+       brightens it, unavailable is dim and says so by being unclickable. */
     button.action {
       font-family: inherit;
       font-size: 0.75rem;
       color: var(--text);
-      background: rgba(255,255,255,0.05);
-      border: 1px solid var(--border);
+      border: 1px solid rgba(90,132,102,0.6);
+      background: rgba(90,132,102,0.15);
       border-radius: 4px;
       padding: 0.5rem 0.9rem;
       cursor: pointer;
       letter-spacing: 0.03em;
     }
-    button.action:hover:not(:disabled) { border-color: #3a3a3a; background: rgba(255,255,255,0.08); }
-    button.action:disabled { color: var(--muted); cursor: not-allowed; }
-    button.action.primary { border-color: rgba(90,132,102,0.6); background: rgba(90,132,102,0.15); }
-    button.action.primary:hover:not(:disabled) { background: rgba(90,132,102,0.25); }
+    button.action:hover:not(:disabled) { background: rgba(90,132,102,0.28); }
+    button.action:disabled {
+      color: var(--muted);
+      border-color: rgba(90,132,102,0.25);
+      background: rgba(90,132,102,0.05);
+      cursor: not-allowed;
+    }
 
     .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 
     .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
+    .rows > div { padding: 0.18rem 0; }
+    .rows a.cfg-link { color: #5A8466; text-decoration: none; white-space: nowrap; }
+    .rows a.cfg-link:hover { text-decoration: underline; }
     .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
     .rows .gap { margin-top: 0.55rem; }
+    /* A ledger's total sits under a rule, at the foot of what it sums. */
+    .rows .ledger {
+      margin-top: 0.35rem;
+      padding-top: 0.35rem;
+      border-top: 1px solid var(--border);
+    }
     .rows b { color: var(--text); font-weight: 500; }
+    .rows .ok { color: #5A8466; }
+    .rows .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #5A8466;
+      margin-right: 0.45rem;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+      animation: pulse 2s ease infinite;
+    }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
     .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
     .hint b { color: var(--text); font-weight: 500; }
     .warn  { color: var(--amber); }
-    .good  { color: var(--green); }
-    .bad   { color: var(--red); }
     .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
-
-    pre.shell {
-      font-family: inherit;
-      font-size: 0.72rem;
-      color: var(--text);
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 0.7rem 0.9rem;
-      line-height: 1.7;
-      overflow-x: auto;
-      margin-top: 0.4rem;
-    }
-    pre.shell .c { color: var(--muted); }
 
     .note {
       font-size: 0.7rem;
@@ -207,13 +227,12 @@
 
     .hidden { display: none !important; }
 
-    #drop-card.drag {
+    .site-card.drag {
       border-color: rgba(90,132,102,0.7);
       background: rgba(90,132,102,0.08);
     }
 
     .dropstrip {
-      margin-top: 0.75rem;
       padding: 0.8rem;
       border: 1px dashed var(--border);
       border-radius: 4px;
@@ -222,28 +241,204 @@
       color: var(--muted);
       letter-spacing: 0.04em;
     }
-    #drop-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
+    .dropstrip a { color: #5A8466; text-decoration: none; }
+    .dropstrip a:hover { text-decoration: underline; }
+    .site-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
 
-    .cfg-field { margin-top: 0.7rem; }
+    /* Card reordering, the notebook's grammar: grab the header, a ghost
+       follows the cursor, the source dims to a dashed placeholder, and
+       neighbours swap in place as the ghost crosses them. */
+    .site-card .card-head { cursor: grab; user-select: none; }
+    .site-card.drag-placeholder { opacity: 0.35; border-style: dashed; }
+    .card-ghost { box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+    .head-left, .head-right { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+    .head-left .card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .handle { color: var(--muted); font-size: 0.8rem; }
+    button.ca {
+      font-family: inherit;
+      font-size: 0.8rem;
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      line-height: 1;
+    }
+    button.ca:hover { color: var(--text); background: rgba(255,255,255,0.07); }
+    button.ca.del:hover { color: var(--red); background: rgba(248,113,113,0.12); }
+    button.ca svg { display: block; }
+    .add-zone { display: flex; justify-content: center; margin-bottom: 1.5rem; }
+
+    /* The remove panel's warning ladder: red deletes, amber pauses,
+       neutral cancels. */
+    button.action.danger {
+      color: var(--red);
+      border-color: rgba(248,113,113,0.5);
+      background: rgba(248,113,113,0.08);
+    }
+    button.action.danger:hover:not(:disabled) { background: rgba(248,113,113,0.18); }
+    button.action.pause {
+      color: var(--amber);
+      border-color: rgba(251,191,36,0.5);
+      background: rgba(251,191,36,0.08);
+    }
+    button.action.pause:hover:not(:disabled) { background: rgba(251,191,36,0.18); }
+    .site-card.inactive .card-title { opacity: 0.55; }
+
+    /* Wide page, side-by-side forms: label left, field right, the hint
+       under the field. Narrow screens stack them again. */
+    .cfg-field {
+      margin-top: 0.9rem;
+      display: grid;
+      grid-template-columns: 8rem 1fr;
+      align-items: center;
+    }
     .cfg-field label {
-      display: block;
       font-size: 0.7rem;
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--muted);
-      margin-bottom: 0.25rem;
     }
-    .cfg-field input, select.cfg-site {
+    .cfg-field .cfg-hint { grid-column: 2; }
+    @media (max-width: 560px) {
+      .cfg-field { grid-template-columns: 1fr; row-gap: 0.25rem; }
+      .cfg-field .cfg-hint { grid-column: 1; }
+    }
+    input[type="text"], input[type="password"], select.cfg-site {
       font-family: inherit;
       font-size: 0.75rem;
       color: var(--text);
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 4px;
-      padding: 0.5rem 0.7rem;
+      padding: 0.4rem 0.7rem;
       width: 100%;
     }
-    select.cfg-site { width: auto; }
+    select.cfg-site { width: auto; margin-bottom: 1rem; }
+    .attention {
+      border: 1px solid rgba(251,191,36,0.35);
+      background: rgba(251,191,36,0.07);
+      border-radius: 8px;
+      padding: 0.7rem 1rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.72rem;
+      line-height: 1.8;
+      color: var(--amber);
+    }
+    .attention b { color: var(--text); font-weight: 500; }
+    .attention a { color: var(--amber); text-decoration: underline; }
+    .split { border-top: 1px solid var(--border); margin: 1rem 0; }
+
+    /* The public/private switch — a literal toggle: the knob's position and
+       a green tint say private (on). Laid out like the fields below it:
+       label left, control right, ending at the same right edge. */
+    /* The same 8rem key column the fact rows use, so the access value lines
+       up with Domain and Certificate above it. */
+    .switch-row {
+      display: grid;
+      grid-template-columns: 8rem 1fr;
+      align-items: center;
+      font-size: 0.72rem;
+      line-height: 1.9;
+      padding: 0.3rem 0;
+    }
+    .switch-row .k { color: var(--muted); }
+    .switch-row label.k { cursor: pointer; }
+    .switch-row .switch-value {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      color: var(--text);
+    }
+    .switch-act { display: flex; align-items: center; gap: 0.5rem; }
+    .switch-act label { color: var(--muted); cursor: pointer; }
+    button.action.tiny { padding: 0.2rem 0.55rem; font-size: 0.68rem; }
+    button.action.due {
+      color: var(--amber);
+      border-color: rgba(251,191,36,0.5);
+      background: rgba(251,191,36,0.08);
+    }
+    button.action.due:hover:not(:disabled) {
+      color: var(--text);
+      border-color: rgba(90,132,102,0.6);
+      background: rgba(90,132,102,0.15);
+    }
+
+    /* Charts: inline SVG, no library — the page loads no third-party code. */
+    .chart { width: 100%; height: 60px; display: block; }
+    .chart-wrap { display: flex; gap: 0.5rem; margin-top: 0.8rem; }
+    .chart-body { flex: 1; min-width: 0; }
+    .chart-y {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: flex-end;
+      height: 60px;
+      font-size: 0.62rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .chart-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.62rem;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
+    @media (max-width: 560px) {
+      .switch-row { grid-template-columns: 1fr auto; }
+    }
+    input.switch {
+      appearance: none;
+      -webkit-appearance: none;
+      margin: 0;
+      position: relative;
+      flex-shrink: 0;
+      width: 38px;
+      height: 20px;
+      border-radius: 99px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    input.switch::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--muted);
+      transform: translateY(-50%);
+      transition: left 0.15s, right 0.15s, background 0.15s;
+    }
+    input.switch:checked {
+      background: rgba(90,132,102,0.15);
+      border-color: rgba(90,132,102,0.6);
+    }
+    input.switch:checked::after { left: auto; right: 2px; background: #5A8466; }
+    input.switch:focus-visible { outline: 1px solid rgba(90,132,102,0.8); outline-offset: 1px; }
+    /* The browser's default focus halo clashes with the theme; replaced —
+       never just removed — so keyboard focus stays visible. */
+    input[type="text"]:focus, input[type="password"]:focus, select.cfg-site:focus {
+      outline: none;
+      border-color: rgba(90,132,102,0.8);
+      box-shadow: 0 0 0 2px rgba(90,132,102,0.25);
+    }
+    button:focus-visible {
+      outline: 1px solid rgba(90,132,102,0.8);
+      outline-offset: 1px;
+    }
+    .cfg-hint {
+      font-size: 0.68rem;
+      color: var(--muted);
+      line-height: 1.6;
+      margin-top: 0.3rem;
+    }
   </style>
 </head>
 <body>
@@ -252,7 +447,7 @@
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline">Admin — your server, through your SSH tunnel</div>
+    <div class="tagline">Admin</div>
   </div>
 
   <!-- Shown instead of the app when the browser lacks the pipeline. -->
@@ -271,118 +466,109 @@
 
   <div id="app" class="hidden">
 
+  <!-- What needs review, said in words and pointed at its fix — a marker
+       that only signals something is wrong, without saying what or where,
+       is a puzzle rather than a notice. -->
+  <div class="attention hidden" id="attention"></div>
+
   <nav class="tabs" role="tablist">
-    <button class="tab active" id="tab-status" type="button" role="tab">Status</button>
-    <button class="tab" id="tab-publish" type="button" role="tab">Publish</button>
-    <button class="tab" id="tab-config" type="button" role="tab">Config</button>
+    <button class="tab active" id="tab-sites" type="button" role="tab">Sites</button>
+    <button class="tab" id="tab-server" type="button" role="tab">Server</button>
+    <button class="tab" id="tab-stats" type="button" role="tab">Statistics</button>
   </nav>
 
-  <!-- ══ Status — the inside view ══ -->
-  <div id="panel-status" role="tabpanel">
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Server</span>
-        <span class="badge badge-dim" id="st-badge">loading…</span>
-      </div>
-      <div class="card-body">
-        <div class="rows" id="st-rows"></div>
-        <p class="error hidden" id="st-error"></p>
-        <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action" id="btn-refresh" type="button">Refresh</button>
-          <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once the status shows a domain">Run the outside check</button>
-        </div>
-        <p class="hint">The outside check opens a missing path on your site in
-        a new tab: the connection report that answers is served from the
-        public internet's side of the wire — the vantage this page, living on
-        your SSH tunnel, cannot have.</p>
-      </div>
+  <!-- ══ Publish — one card per site: drop or choose its folder, publish.
+       Cards can be added, removed, and reordered (drag the header, or the
+       arrows), because the cards ARE the site list: order is config —
+       the first domainless site answers unmatched Hosts. ══ -->
+  <div id="panel-sites" role="tabpanel" class="hidden">
+    <div id="site-cards"></div>
+    <div class="add-zone">
+      <button class="action" id="btn-add-site" type="button">+ Add a site</button>
     </div>
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Needs attention</span>
-        <span class="badge badge-dim" id="issue-badge">…</span>
-      </div>
-      <div class="card-body">
-        <div class="rows" id="issue-list"></div>
-      </div>
-    </div>
-
+    <p class="error hidden" id="sites-error"></p>
   </div>
 
-  <!-- ══ Publish — pick a folder, send it through the tunnel ══ -->
-  <div id="panel-publish" role="tabpanel" class="hidden">
+  <div id="panel-stats" role="tabpanel" class="hidden">
 
-    <div class="card" id="drop-card">
+    <div class="card">
       <div class="card-head">
-        <span class="card-title">1 · Site folder</span>
-        <span class="badge badge-dim" id="dir-badge">no folder chosen</span>
+        <span class="card-title">Site traffic</span>
+        <select class="cfg-site" id="traffic-window" style="margin:0">
+          <option value="1">last 24 hours</option>
+          <option value="2">last 48 hours</option>
+          <option value="7" selected>last 7 days</option>
+          <option value="30">last 30 days</option>
+          <option value="90">last 90 days</option>
+        </select>
       </div>
       <div class="card-body">
-        <div class="btn-row">
-          <button class="action" id="btn-dir" type="button">Choose your site's folder</button>
-          <input type="file" id="dir-input" webkitdirectory multiple class="hidden">
+        <div id="traffic-chart"></div>
+        <p class="hint">Every request this server answered, split by what
+        happened to it. Counted across every site the server answers for,
+        not one site alone; visitor IP addresses stay in the server log,
+        readable in the terminal.</p>
+        <div class="rows" id="traffic-rows" style="margin-top:1.1rem"></div>
+        <div class="btn-row" style="margin-top:1.1rem">
+          <button class="action" id="btn-traffic-refresh" type="button">Refresh</button>
         </div>
-        <div class="dropstrip">⤓&nbsp; or drop your site's folder anywhere on this card</div>
-        <p class="hint" id="dir-summary">It's the folder that holds your
-        <b>index.html</b>. Files are read here in the browser and travel only
-        through your SSH tunnel to your own server.</p>
-        <p class="error hidden" id="dir-error"></p>
+        <p class="error hidden" id="traffic-error"></p>
       </div>
     </div>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">2 · Publish</span>
-        <span class="badge badge-dim" id="pub-badge">waiting</span>
+        <span class="card-title">Server load</span>
       </div>
       <div class="card-body">
-        <div class="btn-row">
-          <button class="action primary" id="btn-publish" type="button" disabled>Publish to this server</button>
-        </div>
-        <div id="pub-done" class="hidden">
-          <p class="hint" id="pub-note" style="margin-top:0.75rem"></p>
-          <pre class="shell">restore-site     <span class="c"># in the terminal: one step back, if you want the previous content</span></pre>
-        </div>
-        <p class="error hidden" id="pub-error"></p>
+        <div class="rows" id="load-rows"></div>
+        <div id="load-chart"></div>
+        <p class="hint">Averages since the server started; the line is live
+        while this tab is open and is kept nowhere. High CPU on a static
+        server usually means a bot, not popularity.</p>
       </div>
     </div>
-
   </div>
 
-  <!-- ══ Config — forms over the same validators `set` runs ══ -->
-  <div id="panel-config" role="tabpanel" class="hidden">
+  <div id="panel-server" role="tabpanel" class="hidden">
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Site settings</span>
-        <span class="badge badge-dim" id="cfg-site-badge">loading…</span>
+        <span class="card-title">Server status</span>
       </div>
       <div class="card-body">
-        <select class="cfg-site" id="cfg-site-select"></select>
-        <div id="cfg-site-fields"></div>
-        <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action primary" id="btn-save-site" type="button">Save site settings</button>
+        <div class="switch-row">
+          <span class="k">Status</span>
+          <span class="switch-value"><span id="status-state"></span>
+            <span class="switch-act">
+            <button class="action tiny" id="btn-restart" type="button">Restart</button>
+            <button class="action tiny" id="btn-power" type="button">Stop</button>
+            </span>
+          </span>
         </div>
-        <p class="hint">Password and domain stay in the terminal on purpose:
-        a password is a secret with a guided prompt (<b>config &gt;
-        password</b>), and a domain is bound up with certificate issuance
-        (<b>config &gt; cert</b>).</p>
-        <p class="error hidden" id="cfg-site-error"></p>
+        <div class="rows" id="host-rows"></div>
+        <div class="confirm hidden" id="stop-confirm">
+          <div class="split"></div>
+          <p class="hint">Stopping takes <b>every site on this server</b>
+          offline until it is started again. This page keeps working — it is
+          served by the terminal command, not by the server.</p>
+          <div class="btn-row" style="margin-top:0.75rem">
+            <button class="action danger" id="btn-stop-yes" type="button">Stop the server</button>
+            <button class="action" id="btn-stop-no" type="button">Cancel</button>
+          </div>
+        </div>
       </div>
     </div>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Host settings</span>
-        <span class="badge badge-dim" id="cfg-host-badge">loading…</span>
+        <span class="card-title">Server settings</span>
+        <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
       </div>
       <div class="card-body">
         <div id="cfg-host-fields"></div>
         <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action primary" id="btn-save-host" type="button">Save host settings</button>
+          <button class="action" id="btn-save-host" type="button">Save</button>
         </div>
         <p class="error hidden" id="cfg-host-error"></p>
       </div>
@@ -393,12 +579,9 @@
   </div><!-- /app -->
 
   <div class="note">
-    This page is served by your own server on <b>127.0.0.1</b> and reached
-    only through your SSH tunnel — the address does not exist on the public
-    internet. No signature, no key: <b>being here is the authentication</b>,
-    because only your SSH key opens this pipe. Published content lands
-    through the same staging, checks, atomic swap, and backup as every
-    other publish.
+    This page is served on <b>127.0.0.1</b> through your SSH tunnel. It does
+    not exist on the public internet. No signature or password is required
+    because <b>only your SSH key can open the tunnel</b>.
   </div>
 
 </div>
@@ -410,157 +593,358 @@
   const MAX_BUNDLE_BYTES = 500 * 1024 * 1024;  // mirrors _MAX_BUNDLE_BYTES server-side
   const CODE = new URLSearchParams(location.search).get('t') || '';
 
+  // A fetch that dies with no HTTP response at all surfaces as a TypeError
+  // ('Failed to fetch') — the wire itself is gone, not the server saying
+  // no. On this page the wire is the SSH tunnel, so say that instead of
+  // echoing the browser's bare message (learned the hard way: issue #114).
+  const TUNNEL_DOWN = 'Could not reach the server — the SSH tunnel is ' +
+    'probably down. Check the terminal: if the ssh session or the admin ' +
+    'command has ended, reconnect, run servette admin again, and open the ' +
+    'fresh link it prints.';
+
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
-  const PANELS = { status: 'panel-status', publish: 'panel-publish', config: 'panel-config' };
+  const PANELS = { sites: 'panel-sites', server: 'panel-server',
+                   stats: 'panel-stats' };
 
   function showTab(name) {
-    if (!PANELS[name]) name = 'status';
+    // Old bookmarks still land somewhere sensible.
+    if (['status', 'config', 'settings'].includes(name)) name = 'server';
+    if (['analytics', 'traffic'].includes(name)) name = 'stats';
+    if (name === 'publish') name = 'sites';
+    if (!PANELS[name]) name = 'sites';
     for (const key of Object.keys(PANELS)) {
       $(PANELS[key]).classList.toggle('hidden', key !== name);
       $('tab-' + key).classList.toggle('active', key === name);
     }
-    if (name === 'status') loadStatus();
-    if (name === 'config') loadConfig();
+    refresh();  // every tab renders from the same /status + /config truth
+    if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
 
-  $('tab-status').addEventListener('click', () => showTab('status'));
-  $('tab-publish').addEventListener('click', () => showTab('publish'));
-  $('tab-config').addEventListener('click', () => showTab('config'));
+  $('tab-sites').addEventListener('click', () => showTab('sites'));
+  $('tab-server').addEventListener('click', () => showTab('server'));
+  $('tab-stats').addEventListener('click', () => showTab('stats'));
 
-  /* ══ Status — the inside view, rendered from GET /status. ══ */
+  /* ══ The page's truth: /status and /config fetched together, rendered
+     into both tabs at once. ══ */
 
   const row = (k, v, cls) =>
     `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
 
-  // The outside check: opens a missing path on the site itself, so the
-  // connection report answers from the public internet's vantage — the one
-  // view a page living on the tunnel cannot compute (cross-origin responses
-  // are opaque to it, by the browser's own rules).
-  let outsideDomain = '';
-  $('btn-outside').addEventListener('click', () => {
-    if (!outsideDomain) return;
-    const probe = 'servette-check-' + Math.random().toString(36).slice(2, 8);
-    window.open('https://' + outsideDomain + '/' + probe, '_blank');
-  });
+  // A fact is not a victory: rows read like the shell's status — label and
+  // value, plainly — and only a row that needs attention wears a mark.
+  const factRow = (c) => row(escapeHtml(c.label),
+    c.ok ? escapeHtml(c.detail)
+         : `<span class="warn">${escapeHtml(c.detail)}</span>`);
 
-  async function loadStatus() {
-    setBadge($('st-badge'), 'badge-dim', 'loading…');
-    clearError($('st-error'));
+  let statusData = null;
+  let latestVersion = null;   // filled once per page, by asking
+
+  // Asked once when the page opens, and never on a timer: Servette does not
+  // phone home on its own schedule, and this is the operator asking.
+  async function checkUpgrade() {
     try {
-      const r = await fetch('/status?t=' + encodeURIComponent(CODE));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const d = await r.json();
+      const r = await fetch('/update?t=' + encodeURIComponent(CODE));
+      if (!r.ok) return;
+      latestVersion = (await r.json()).latest || null;
+      if (latestVersion) renderServer();
+    } catch (e) { /* offline, or PyPI unreachable — the row simply omits it */ }
+  }
 
-      setBadge($('st-badge'), d.running ? 'badge-green' : 'badge-red',
-               d.running ? '● running · v' + d.version : '○ stopped · v' + d.version);
-      let h = row('Mode', d.mode === 'service'
-        ? 'system service (survives reboots)'
-        : d.mode === 'session' ? 'session only' : 'stopped');
-      for (const s of d.sites || []) {
-        h += row('Site ' + s.index, s.domain
-          ? `<b>${escapeHtml('https://' + s.domain)}</b>` : '(no domain)', 'gap');
-        h += row('Folder', escapeHtml(s.serve_dir || '(not set)'));
-        h += row('Password', s.auth ? 'enabled' : 'off');
-        h += row('Certificate', s.cert_days == null
-          ? '<span class="warn">none readable</span>'
-          : s.cert_days <= 0 ? '<span class="bad">expired</span>'
-          : s.cert_days < 30 ? `<span class="warn">${s.cert_days} days remaining</span>`
-          : `<span class="good">${s.cert_days} days remaining</span>`);
-        h += row('Channel', s.publish ? 'configured' : 'none (this page publishes directly)');
-      }
-      $('st-rows').innerHTML = h;
-
-      outsideDomain = ((d.sites || [])[0] || {}).domain || '';
-      $('btn-outside').disabled = !outsideDomain;
-      $('btn-outside').title = outsideDomain
-        ? 'Opens https://' + outsideDomain + '/<a-missing-path> in a new tab'
-        : 'Needs a domain — a LAN or self-signed site has no public vantage to check from';
-
-      const problems = [...(d.issues || []), ...(d.warnings || [])];
-      if (problems.length) {
-        setBadge($('issue-badge'), 'badge-red', problems.length + ' to review');
-        $('issue-list').innerHTML = problems
-          .map((p) => `<div class="warn">· ${escapeHtml(p)}</div>`).join('');
-      } else {
-        setBadge($('issue-badge'), 'badge-green', '✓ all clear');
-        $('issue-list').innerHTML =
-          '<div class="good">Nothing needs attention.</div>';
-      }
+  async function refresh() {
+    clearError($('cfg-host-error'));
+    try {
+      const [rs, rc] = await Promise.all([
+        fetch('/status?t=' + encodeURIComponent(CODE)),
+        fetch('/config?t=' + encodeURIComponent(CODE)),
+      ]);
+      if (!rs.ok) throw new Error('HTTP ' + rs.status);
+      if (!rc.ok) throw new Error('HTTP ' + rc.status);
+      statusData = await rs.json();
+      cfgData = await rc.json();
+      renderServer();
+      renderSiteCards();
+      clearError($('sites-error'));
     } catch (e) {
-      setBadge($('st-badge'), 'badge-red', '✕ unreachable');
-      showError($('st-error'), 'Could not read status: ' + e.message +
-        ' — if the terminal command was closed, re-run it and open the fresh link.');
+      setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
+      const msg = (e instanceof TypeError) ? TUNNEL_DOWN
+        : 'Could not read the server: ' + e.message +
+          ' — if the terminal command was closed, re-run it and open the fresh link.';
+      showError($('cfg-host-error'), msg);
+      showError($('sites-error'), msg);
     }
   }
 
-  $('btn-refresh').addEventListener('click', loadStatus);
 
-  /* ══ Config — forms over the same validators the `set` command runs, so a
-     value the terminal refuses the page refuses with the same sentence. ══ */
+  /* ══ Traffic — the journal re-read as counts, fetched on entry. ══ */
+
+  async function loadTraffic() {
+    clearError($('traffic-error'));
+    try {
+      const r = await fetch('/traffic?t=' + encodeURIComponent(CODE) +
+                            '&days=' + encodeURIComponent($('traffic-window').value));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const t = await r.json();
+      const total = t.total || 0;
+      // Status codes are the server's vocabulary, not the reader's: each
+      // count is named for what actually happened.
+      const NAMED = [['Files sent', ['200', '206']],
+                     ['Already cached', ['304']],
+                     ['Nothing there', ['404']],
+                     ['Refused', ['403', '405']],
+                     ['Sign-in needed', ['401']],
+                     ['Rate limited', ['429']]];
+      const named = NAMED
+        .map(([name, codes]) => [name, codes.reduce(
+          (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
+        .filter(([, n]) => n > 0);
+      $('traffic-chart').innerHTML = total
+        ? chart(lineSVG(t.days.map((d) => d[1])),
+                t.days.length ? t.days[0][0] : '',
+                t.days.length ? t.days[t.days.length - 1][0] : '',
+                Math.max(...t.days.map((d) => d[1])))
+        : '';
+      $('traffic-rows').innerHTML = !total
+        ? row('Requests', 'none in this window — or no readable journal on this host')
+        : named.map(([name, n]) => row(name, String(n))).join('') +
+          row('Total requests', `<b>${total}</b>`, 'ledger');
+    } catch (e) {
+      showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
+        : 'Could not read traffic: ' + e.message);
+    }
+  }
+
+  async function serviceOp(b, op) {
+    b.disabled = true;
+    clearError($('cfg-host-error'));
+    try {
+      const r = await fetch('/service?t=' + encodeURIComponent(CODE),
+                            { method: 'POST', body: JSON.stringify({ op }) });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'ok')
+        throw new Error(data.error || 'HTTP ' + r.status);
+      await refresh();
+    } catch (e) {
+      showError($('cfg-host-error'),
+                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+    }
+    b.disabled = false;
+  }
+
+  $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
+  // One control for the two states: starting needs no ceremony, stopping
+  // takes every site offline and asks first.
+  $('btn-power').addEventListener('click', () => {
+    if ((statusData || {}).running) $('stop-confirm').classList.toggle('hidden');
+    else serviceOp($('btn-power'), 'start');
+  });
+  // Every site on the box goes dark, so this one asks first — in the page's
+  // own voice, the way a site card asks before deleting.
+  $('btn-stop-no').addEventListener('click', () =>
+    $('stop-confirm').classList.add('hidden'));
+  $('btn-stop-yes').addEventListener('click', async () => {
+    $('stop-confirm').classList.add('hidden');
+    await serviceOp($('btn-power'), 'stop');
+  });
+
+  $('btn-traffic-refresh').addEventListener('click', loadTraffic);
+  $('traffic-window').addEventListener('change', loadTraffic);
+
+  /* ══ Settings forms — over the same validators the `set` command runs, so
+     a value the terminal refuses the page refuses with the same sentence.
+     Deliberately absent from these forms (the terminal keeps them): the
+     serve folder (publishing manages it), port and trusted proxy
+     (behind-a-balancer deployments), the pull channel's URL/key pair, and
+     every lifecycle verb. The domain is not a form either — naming a site
+     runs its certificate issuance, on the Publish card. ══ */
 
   const HOST_FIELDS = [
-    ['port',            'HTTPS port'],
-    ['email',           'Email (ACME registration)'],
-    ['rate_limit',      'Rate limit (requests / minute / visitor)'],
-    ['auth_rate_limit', 'Auth rate limit (failed logins / minute)'],
-    ['cache_size_mb',   'File cache size (MB)'],
-    ['trusted_proxy',   'Trusted proxy IP (blank = none)'],
-  ];
-  const SITE_FIELDS = [
-    ['dir',         'Folder to serve'],
-    ['username',    'Login username (blank = no password gate)'],
-    ['publish_url', 'Publish channel URL (blank = none)'],
-    ['publish_key', 'Publish channel key (64 hex)'],
+    ['email', 'Email',
+     'Registers this server with the certificate authority — one account for ' +
+     'every site here, not one per domain. Where renewal and expiry notices go.'],
+    ['rate_limit', 'Rate limit',
+     'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
+    ['auth_rate_limit', 'Auth rate limit',
+     'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
+    ['cache_size_mb', 'File cache size (MB)',
+     'Memory set aside to serve frequently requested files without re-reading the disk.'],
   ];
 
   let cfgData = null;
+  const field = (key, label, value, opts) => {
+    const o = opts || {};
+    return `<div class="cfg-field">` +
+      `<label for="cfg-${key}">${label}</label>` +
+      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
+      ` value="${escapeHtml(String(value == null ? '' : value))}">` +
+      (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
+      `</div>`;
+  };
 
-  const field = (key, label, value) =>
-    `<div class="cfg-field"><label for="cfg-${key}">${label}</label>` +
-    `<input id="cfg-${key}" value="${escapeHtml(String(value == null ? '' : value))}"></div>`;
+  function renderServer() {
+    const checks = (statusData && statusData.checks) || [];
+    const hostChecks = checks.filter((c) => c.site === null);
+    const d = statusData || {};
 
-  function renderConfig() {
-    const siteIdx = parseInt($('cfg-site-select').value || '0', 10) || 0;
-    const site = (cfgData.sites || [])[siteIdx] || {};
-    $('cfg-site-fields').innerHTML =
-      SITE_FIELDS.map(([k, l]) => field(k, l, site[k])).join('');
-    $('cfg-host-fields').innerHTML =
-      HOST_FIELDS.map(([k, l]) => field(k, l, (cfgData.host || {})[k])).join('');
-    setBadge($('cfg-site-badge'), 'badge-dim',
-             site.domain ? site.domain : 'site ' + siteIdx);
-    setBadge($('cfg-host-badge'), 'badge-dim', 'host-wide');
+    // What has no card of its own says its piece here; a site's trouble is
+    // worn by that site's card on the Sites tab.
+    const needs = hostChecks.filter((c) => !c.ok);
+    $('attention').classList.toggle('hidden', !needs.length);
+    $('attention').innerHTML = needs.map((c) =>
+      `<b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
+      `<a href="#server">open Server →</a>`).join('<br>');
+    for (const a of $('attention').querySelectorAll('a'))
+      a.addEventListener('click', (e) => { e.preventDefault(); showTab('server'); });
+
+    $('status-state').innerHTML = d.running
+      ? '<span class="dot"></span>running'
+      : '<span class="warn">stopped</span>';
+    // Two controls, not three: restart is meaningless on a stopped server,
+    // and the third is whichever of stop/start the state calls for.
+    $('btn-restart').disabled = !d.running;
+    $('btn-restart').title = d.running
+      ? 'Stop and start the service — applies a port change, or clears a wedged process'
+      : 'Nothing to restart — the server is stopped';
+    $('btn-power').textContent = d.running ? 'Stop' : 'Start';
+    $('btn-power').classList.toggle('danger', !!d.running);
+    $('btn-power').title = d.running
+      ? 'Take every site on this server offline until it is started again'
+      : 'Start the installed system service';
+
+    $('host-rows').innerHTML =
+      row('Version', 'v' + (d.version || '?') +
+        (latestVersion
+          ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
+            ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
+          : '')) +
+      hostChecks.map(factRow).join('');
+
+    // Present always, dim when there is nothing to start — the same rule
+    // every other button follows.
+    // Swap is a size the operator types — the terminal has always asked for
+    // it that way — so it is a field among fields, saved by the same button.
+    const sw = d.swap || {};
+    const swapField = (sw.active_mb == null && sw.recommended_mb == null) ? '' :
+      field('swap_mb', 'Swap file (MB)',
+            sw.active_mb != null ? sw.active_mb : '',
+            { hint: 'Disk that absorbs a memory spike, so a burst past free RAM ' +
+                    'cannot take the host down.' +
+                    (sw.recommended_mb
+                      ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
+                      : '') });
+    const typingInSwap = document.activeElement
+      && document.activeElement.id === 'cfg-swap_mb';
+    if (!typingInSwap)
+      $('cfg-host-fields').innerHTML =
+        HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('')
+        + swapField;
+
+    renderLoad();
   }
 
-  async function loadConfig() {
-    clearError($('cfg-site-error'));
-    clearError($('cfg-host-error'));
+  // Utilization lives with the other counts, on the Analytics tab: the two
+  // figures, then the live meter that builds while the page is open.
+  const when = (epoch) => new Date(epoch * 1000).toLocaleString(undefined,
+    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+  function renderLoad() {
+    const l = ((statusData || {}).load) || {};
+    $('load-rows').innerHTML =
+      row('CPU', l.cpu_percent == null ? '(not available on this host)'
+                 : l.cpu_percent.toFixed(1) + '% average' +
+                   (l.started_at ? ' since ' + escapeHtml(when(l.started_at)) : '')) +
+      row('Memory', l.memory_mb == null ? '(not available on this host)'
+                    : l.memory_mb.toFixed(1) + ' MB');
+    $('load-chart').innerHTML = cpuSeries.length < 2
+      ? '<p class="hint">Live CPU — the line starts when you open this tab.</p>'
+      : chart(lineSVG(cpuSeries),
+              (cpuSeries.length - 1) * METER_SECONDS + 's ago',
+              cpuSeries[cpuSeries.length - 1].toFixed(1) + '% now',
+              Math.max(1, ...cpuSeries).toFixed(0), '%');
+  }
+
+  /* ══ Charts — inline SVG, sized by viewBox, no library. Every chart is
+     drawn with its scale: a line without a y-axis is a shape, not a
+     measurement. ══ */
+
+  function lineSVG(values) {
+    const w = 300, h = 60, max = Math.max(1, ...values);
+    const pts = values.length === 1
+      ? [`0,${(h - (values[0] / max) * h).toFixed(1)}`,
+         `${w},${(h - (values[0] / max) * h).toFixed(1)}`]
+      : values.map((v, i) =>
+          `${(i / (values.length - 1) * w).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`);
+    return `<svg viewBox="0 0 ${w} ${h}" class="chart" preserveAspectRatio="none">` +
+      `<polyline points="${pts.join(' ')}" fill="none" stroke="#5A8466" ` +
+      `stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline></svg>`;
+  }
+
+  // A chart, its y-axis (top of scale and zero), and its x labels.
+  const chart = (svg, xFrom, xTo, yMax, unit) =>
+    `<div class="chart-wrap"><div class="chart-y">` +
+    `<span>${escapeHtml(String(yMax))}${unit || ''}</span><span>0</span></div>` +
+    `<div class="chart-body">${svg}` +
+    `<div class="chart-labels"><span>${escapeHtml(xFrom)}</span>` +
+    `<span>${escapeHtml(xTo)}</span></div></div></div>`;
+
+  /* ══ The live meter: successive readings of the server's own cumulative
+     CPU counter, differenced here. Nothing is sampled or stored on the
+     server — the line exists only while this tab is open. ══ */
+
+  const METER_SECONDS = 3;
+  let meterTimer = null, lastSample = null, cpuSeries = [];
+
+  async function sampleLoad() {
     try {
-      const r = await fetch('/config?t=' + encodeURIComponent(CODE));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      cfgData = await r.json();
-      const sel = $('cfg-site-select');
-      const keep = sel.value;
-      sel.innerHTML = (cfgData.sites || []).map((s) =>
-        `<option value="${s.index}">site ${s.index}` +
-        `${s.domain ? ' — ' + escapeHtml(s.domain) : ''}</option>`).join('');
-      if (keep) sel.value = keep;
-      renderConfig();
+      const r = await fetch('/status?t=' + encodeURIComponent(CODE));
+      if (!r.ok) { stopMeter(); return; }
+      const d = await r.json();
+      const l = d.load || {};
+      if (l.cpu_ns != null && lastSample) {
+        const dt = l.sampled_at - lastSample.at;
+        if (dt > 0) {
+          cpuSeries.push(Math.max(0,
+            (l.cpu_ns - lastSample.ns) / 1_000_000_000 / dt * 100));
+          if (cpuSeries.length > 60) cpuSeries.shift();
+        }
+      }
+      if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
+      statusData = d;
+      renderLoad();
     } catch (e) {
-      setBadge($('cfg-site-badge'), 'badge-red', '✕ unreachable');
-      setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
-      showError($('cfg-site-error'), 'Could not read settings: ' + e.message);
+      // Nothing is listening any more — the admin command ended, or the
+      // tunnel closed. Keep polling and every attempt prints another
+      // 'channel N: open failed' in the operator's terminal.
+      stopMeter();
+      showError($('traffic-error'), TUNNEL_DOWN);
     }
   }
 
-  $('cfg-site-select').addEventListener('change', renderConfig);
+  function startMeter() {
+    if (meterTimer) return;
+    meterTimer = setInterval(sampleLoad, METER_SECONDS * 1000);
+    sampleLoad();
+  }
 
-  async function saveSettings(fields, siteIdx, badge, errEl) {
+  function stopMeter() {
+    clearInterval(meterTimer);
+    meterTimer = null;
+  }
+
+  // A backgrounded tab has nobody reading it, and a closing one is gone:
+  // either way the polling stops, so an abandoned page cannot keep dialing
+  // a tunnel whose command has ended.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopMeter();
+    else if (!$('panel-stats').classList.contains('hidden')) startMeter();
+  });
+  window.addEventListener('pagehide', stopMeter);
+
+  async function saveSettings(values, siteIdx, badge, errEl) {
     clearError(errEl);
-    const values = {};
-    for (const [k] of fields) values[k] = $('cfg-' + k).value.trim();
     setBadge(badge, 'badge-dim', 'saving…');
     try {
       const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
@@ -571,27 +955,67 @@
       try { data = await r.json(); } catch { data = {}; }
       if (r.ok && data.result === 'saved') {
         setBadge(badge, 'badge-green', '✓ saved');
-        loadConfig();
+        refresh();
       } else {
         throw new Error(data.error || 'HTTP ' + r.status);
       }
     } catch (e) {
       setBadge(badge, 'badge-red', '✕ not saved');
-      showError(errEl, e.message + ' — nothing was changed.');
+      showError(errEl, (e instanceof TypeError)
+        ? TUNNEL_DOWN + ' Nothing was changed.'
+        : e.message + ' — nothing was changed.');
     }
   }
 
-  $('btn-save-site').addEventListener('click', () => saveSettings(
-    SITE_FIELDS, parseInt($('cfg-site-select').value || '0', 10) || 0,
-    $('cfg-site-badge'), $('cfg-site-error')));
-  $('btn-save-host').addEventListener('click', () => saveSettings(
-    HOST_FIELDS, 0, $('cfg-host-badge'), $('cfg-host-error')));
+  $('btn-save-host').addEventListener('click', async () => {
+    const values = {};
+    for (const [k] of HOST_FIELDS) values[k] = $('cfg-' + k).value.trim();
+    const badge = $('cfg-host-badge'), errEl = $('cfg-host-error');
+    clearError(errEl);
+
+    // The swapfile is the one setting whose save does filesystem work, so it
+    // runs only when its number actually changed — pressing Save on an
+    // untouched field must never swapoff anything.
+    const field = $('cfg-swap_mb');
+    const want = field ? parseInt(field.value.trim(), 10) : NaN;
+    const active = ((statusData || {}).swap || {}).active_mb;
+    const resize = field && want > 0 && want !== active;
+    if (field && field.value.trim() && !(want > 0))
+      return showError(errEl, 'Swap file size must be a number of megabytes.');
+
+    setBadge(badge, 'badge-dim', 'saving…');
+    try {
+      const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
+        method: 'POST', body: JSON.stringify({ site: 0, values }),
+      });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'saved')
+        throw new Error(data.error || 'HTTP ' + r.status);
+
+      if (resize) {
+        setBadge(badge, 'badge-dim', 'resizing the swapfile…');
+        const rs = await fetch('/swap?t=' + encodeURIComponent(CODE), {
+          method: 'POST', body: JSON.stringify({ mb: want }),
+        });
+        let sd = {};
+        try { sd = await rs.json(); } catch { sd = {}; }
+        if (!rs.ok || sd.result !== 'ok')
+          throw new Error(sd.error || 'HTTP ' + rs.status);
+      }
+      setBadge(badge, 'badge-green', '✓ saved');
+      refresh();
+    } catch (e) {
+      setBadge(badge, 'badge-red', '✕ not saved');
+      showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+    }
+  });
 
   /* ══ Publish — the pub tool's bundle builder with the signing removed.
      The server's contract (_extract_bundle / _land_bundle): a tar.gz of
      plain files and directories, paths relative to the site root, no entry
      escaping it, under 500 MB uncompressed — POSTed to /upload with this
-     run's pairing code. ══ */
+     run's passcode. ══ */
 
   function splitTarName(path) {
     const len = (s) => new TextEncoder().encode(s).length;
@@ -663,12 +1087,11 @@
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  const state = {
-    files:  null,   // [{ path, file }]
-    folder: null,   // the picked folder's name, for messages
-  };
-
-  function setBadge(el, cls, text) { el.className = 'badge ' + cls; el.textContent = text; }
+  function setBadge(el, cls, text) {
+    el.className = 'badge ' + cls;
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
   function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
   function clearError(el) { el.classList.add('hidden'); }
 
@@ -681,57 +1104,106 @@
   const escapeHtml = (s) =>
     s.replace(/[&<>"']/g, (c) => '&#' + c.charCodeAt(0) + ';');
 
-  function refreshReady() {
-    const ready = !!(state.files && state.files.length);
-    $('btn-publish').disabled = !ready;
-    $('pub-done').classList.add('hidden');
-    setBadge($('pub-badge'), 'badge-dim', ready ? 'ready' : 'waiting');
-  }
-
   // The same hidden-path rule the server enforces: any '.'-segment except
   // .well-known is never served, so it is not bundled either — a .git or
   // .env under the site folder must not end up on the server.
   const isHiddenPath = (path) =>
     path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
 
-  // One intake for both doors — the picker and the drop — so they cannot
-  // drift on the hidden-path rule or the summary.
-  function useFolder(items, folderName) {
-    const kept = items.filter((e) => !isHiddenPath(e.path));
-    const hidden = items.length - kept.length;
+  // What a site's unhealthy row is called on its card — the fault named,
+  // rather than an exclamation mark standing in for the name.
+  const NEEDS_WORD = {
+    cert:     'Needs certificate',
+    password: 'Needs password',
+    dir:      'Folder missing',
+    channel:  'Channel unfinished',
+  };
 
-    if (!kept.length) {
-      showError($('dir-error'), 'That folder has no publishable files' +
-        (hidden ? ` (${hidden} hidden entries were excluded).` : '.'));
-      return;
+  const cardIndex = (el) =>
+    [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
+
+  // One op door for add, remove, and move: the server runs the same cores
+  // the terminal's add-site / remove-site / move-site run, then the cards
+  // re-render from fresh /config truth.
+  async function siteOp(body, errEl) {
+    clearError($('sites-error'));
+    if (errEl) clearError(errEl);
+    try {
+      const r = await fetch('/sites?t=' + encodeURIComponent(CODE), {
+        method: 'POST', body: JSON.stringify(body),
+      });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'ok')
+        throw new Error(data.error || 'HTTP ' + r.status);
+      await refresh();
+      return true;
+    } catch (e) {
+      showError(errEl || $('sites-error'),
+                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+      if (body.op === 'move')
+        renderSiteCards();  // snap the dragged DOM back to the loaded truth
+      return false;
     }
-    state.files  = kept;
-    state.folder = folderName;
-
-    const total = kept.reduce((n, e) => n + e.file.size, 0);
-    const hasIndex = kept.some((e) => e.path === 'index.html');
-    $('dir-summary').innerHTML =
-      `<b>${escapeHtml(state.folder)}/</b> — ${kept.length} file${kept.length === 1 ? '' : 's'}, ` +
-      `${fmtSize(total)}` +
-      (hidden ? ` · ${hidden} hidden entr${hidden === 1 ? 'y' : 'ies'} excluded ` +
-                `(paths starting with '.' are never served)` : '') +
-      (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
-                       `the site root would show a directory miss</span>`);
-    setBadge($('dir-badge'), 'badge-green', '✓ folder read');
-    refreshReady();
   }
 
-  $('btn-dir').addEventListener('click', () => $('dir-input').click());
-  $('dir-input').addEventListener('change', () => {
-    clearError($('dir-error'));
-    const all = [...$('dir-input').files];
-    if (!all.length) return;
-    // webkitRelativePath is '<picked folder>/rest…' — the folder name is
-    // stripped so index.html sits at the bundle root, where serve_dir wants it.
-    useFolder(all.map((f) => ({
-      path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
-    })).filter((e) => e.path), all[0].webkitRelativePath.split('/')[0]);
-  });
+  $('btn-add-site').addEventListener('click', () => siteOp({ op: 'add' }));
+
+  function renderSiteCards() {
+    const wrap = $('site-cards');
+    wrap.innerHTML = '';
+    const sites = (cfgData && cfgData.sites) || [];
+    // One site is a site; the plural is earned.
+    $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
+    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx, sites.length)));
+  }
+
+  // Reordering, in the notebook's grammar: grab the header, a ghost follows
+  // the cursor, the source dims to a placeholder, neighbours swap in place
+  // as the ghost crosses them — and the drop is a single move op.
+  function attachCardDrag(head, el) {
+    head.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || e.target.closest('button') || e.target.closest('a')) return;
+      const startX = e.clientX, startY = e.clientY;
+      const rect = el.getBoundingClientRect();
+      const offY = e.clientY - rect.top;
+      const startIdx = cardIndex(el);
+      let started = false, ghost = null;
+      const move = (ev) => {
+        if (!started) {
+          if (Math.abs(ev.clientX - startX) < 5 && Math.abs(ev.clientY - startY) < 5) return;
+          started = true;
+          ghost = el.cloneNode(true);
+          ghost.classList.add('card-ghost');
+          ghost.style.cssText = 'position:fixed;left:' + rect.left + 'px;top:' + rect.top +
+            'px;width:' + rect.width + 'px;margin:0;pointer-events:none;z-index:1000;opacity:0.93;';
+          document.body.appendChild(ghost);
+          el.classList.add('drag-placeholder');
+          document.body.style.userSelect = 'none';
+        }
+        ghost.style.top = (ev.clientY - offY) + 'px';
+        const cards = [...document.querySelectorAll('#site-cards .site-card')];
+        const i = cards.indexOf(el);
+        const gr = ghost.getBoundingClientRect();
+        if (i > 0 && gr.top < cards[i - 1].getBoundingClientRect().top)
+          el.parentNode.insertBefore(el, cards[i - 1]);
+        else if (i < cards.length - 1 && gr.bottom > cards[i + 1].getBoundingClientRect().bottom)
+          el.parentNode.insertBefore(cards[i + 1], el);
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        if (!started) return;
+        ghost.remove();
+        el.classList.remove('drag-placeholder');
+        document.body.style.userSelect = '';
+        const endIdx = cardIndex(el);
+        if (endIdx !== startIdx) siteOp({ op: 'move', from: startIdx, to: endIdx });
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+  }
 
   // The drop door: a dropped folder walks the same intake. A single dropped
   // directory is the site folder (its name stripped, exactly like the
@@ -750,91 +1222,402 @@
     }
   }
 
-  const dropCard = $('drop-card');
-  dropCard.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropCard.classList.add('drag');
-  });
-  dropCard.addEventListener('dragleave', () => dropCard.classList.remove('drag'));
-  dropCard.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    dropCard.classList.remove('drag');
-    clearError($('dir-error'));
-    const entries = [...e.dataTransfer.items]
-      .map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry())
-      .filter(Boolean);
-    if (!entries.length) return;
-    try {
-      const items = [];
-      let folderName;
-      if (entries.length === 1 && entries[0].isDirectory) {
-        folderName = entries[0].name;
-        const reader = entries[0].createReader();
-        for (;;) {
-          const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
-          if (!batch.length) break;
-          for (const child of batch) await readDropped(child, '', items);
+  function buildSiteCard(siteData, idx, total) {
+    const label = siteData.domain || 'site ' + idx;
+    const inactive = siteData.active === false;
+    const siteNeeds = (((statusData || {}).checks) || [])
+      .filter((c) => c.site === idx && !c.ok);
+    const card = document.createElement('div');
+    card.className = 'card site-card' + (inactive ? ' inactive' : '');
+
+    // The remove panel behind ✕: red deletes, amber pauses, neutral
+    // cancels — one bullet says exactly what each choice means. A card
+    // that is already deactivated offers only the delete.
+    const confirmHtml =
+      `<div class="confirm hidden"><div class="split"></div>` +
+      `<p class="hint"><b>Delete</b> removes this server's copies — the ` +
+      `published files and their backup. Your originals in local storage ` +
+      `are untouched; publishing again rebuilds the site.</p>` +
+      (inactive ? '' :
+        `<p class="hint"><b>Deactivate</b> keeps everything on the server ` +
+        `and stops serving this site until you reactivate it.</p>`) +
+      `<div class="btn-row" style="margin-top:0.75rem">` +
+      `<button class="action danger do-delete" type="button">Delete</button>` +
+      (inactive ? '' :
+        `<button class="action pause do-deactivate" type="button">Deactivate</button>`) +
+      `<button class="action do-cancel" type="button">Cancel</button>` +
+      `</div></div>`;
+
+    const bodyHtml = inactive
+      ? (`<p class="hint">Not being served — its files and settings are kept, ` +
+         `and visitors get the plain not-found answer until it is reactivated.</p>` +
+         `<div class="btn-row" style="margin-top:0.75rem">` +
+         `<button class="action do-reactivate" type="button">Reactivate</button></div>`)
+      : (`<div class="dropstrip">drop this site's folder here, or <a href="#">choose it</a></div>` +
+         `<input type="file" webkitdirectory multiple class="hidden">` +
+         `<p class="hint summary">The folder to drop is the one holding the ` +
+         `site's <b>index.html</b>.</p>` +
+         `<div class="btn-row" style="margin-top:0.75rem">` +
+           `<button class="action pub" type="button" disabled>Publish</button>` +
+         `</div>` +
+         `<div class="done hidden">` +
+           `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
+           `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
+           `in the terminal is the one step back.</p>` +
+         `</div>` +
+
+         // ── Everything else this site is: its facts, and the controls
+         // that change them. One card per site, so no selector is needed
+         // to say which site any of it belongs to.
+         `<div class="split"></div>` +
+         `<div class="rows info"></div>` +
+
+         `<div class="switch-row"><span class="k">Domain</span>` +
+         `<span class="switch-value"><input class="dom-input" type="text" ` +
+         `placeholder="example.com" value="${escapeHtml(siteData.domain || '')}">` +
+         `<span class="switch-act"><button class="action tiny dom" type="button">` +
+         `Set</button></span></span></div>` +
+         `<div class="switch-row"><span class="k">Certificate</span>` +
+         `<span class="switch-value"><span class="cert-state"></span>` +
+         `<span class="switch-act"><button class="action tiny cert" type="button">` +
+         `Get certificate</button></span></span></div>` +
+
+         `<div class="switch-row">` +
+         `<label class="k auth-label">Access</label>` +
+         `<span class="switch-value"><span class="auth-state"></span>` +
+         `<span class="switch-act"><label class="auth-action"></label>` +
+         `<input class="switch auth-switch" type="checkbox"></span></span></div>` +
+         `<div class="auth-fields"></div>` +
+         `<div class="btn-row auth-save hidden" style="margin-top:0.9rem">` +
+         `<button class="action save-site" type="button">Save</button></div>` +
+         `<p class="hint auth-hint"></p>` +
+
+         `<p class="hint">A certificate is issued only for a name that ` +
+         `already points here — check that the domain's DNS has an A record ` +
+         `to this server's IP before requesting one.</p>` +
+
+         `<div class="split"></div>` +
+         `<div class="btn-row">` +
+         `<button class="action outside" type="button" disabled>Test connection</button>` +
+         `</div>`)
+
+    card.innerHTML =
+      `<div class="card-head">` +
+        `<span class="head-left"><span class="handle" title="Drag to reorder">⠿</span>` +
+        `<span class="card-title">${escapeHtml(label)}</span></span>` +
+        `<span class="head-right">` +
+          (siteNeeds.length
+            ? `<span class="badge badge-warn needs" title="${escapeHtml(
+                 siteNeeds.map((c) => c.detail).join(' · '))}">${
+                 siteNeeds.length === 1
+                   ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
+                   : siteNeeds.length + ' to review'}</span>`
+            : '') +
+          `<span class="badge badge-dim${inactive ? '' : ' hidden'}">${
+             inactive ? 'deactivated' : ''}</span>` +
+          `<button class="ca del" type="button" title="Remove or deactivate">` +
+            `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" ` +
+            `stroke="currentColor" stroke-width="1.3"><path d="M3 4h10M6.5 4V2.5h3V4` +
+            `M5 4l0.6 9.5h4.8L11 4"></path></svg></button>` +
+        `</span>` +
+      `</div>` +
+      `<div class="card-body">` + bodyHtml + confirmHtml +
+        `<p class="error hidden"></p>` +
+      `</div>`;
+
+    const q = (sel) => card.querySelector(sel);
+    const badge = q('.badge'), errEl = q('.error');
+    let files = null, folderName = '';
+    const mark = (cls, text) => setBadge(badge, cls, text);
+
+    // Deactivation rides the same settings write as everything else — it is
+    // a setting ('set n active=no' is the terminal spelling).
+    async function setActive(on) {
+      clearError(errEl);
+      try {
+        const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
+          method: 'POST',
+          body: JSON.stringify({ site: cardIndex(card),
+                                 values: { active: on ? 'yes' : 'no' } }),
+        });
+        let data = {};
+        try { data = await r.json(); } catch { data = {}; }
+        if (!r.ok || data.result !== 'saved')
+          throw new Error(data.error || 'HTTP ' + r.status);
+        await refresh();
+      } catch (e) {
+        showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+      }
+    }
+
+    q('.del').addEventListener('click', () => {
+      clearError(errEl);
+      q('.confirm').classList.toggle('hidden');
+    });
+    q('.do-cancel').addEventListener('click', () =>
+      q('.confirm').classList.add('hidden'));
+    q('.do-delete').addEventListener('click', () => {
+      if (document.querySelectorAll('#site-cards .site-card').length === 1) {
+        q('.confirm').classList.add('hidden');
+        showError(errEl, "Can't remove the only site — a box needs at least one.");
+        return;
+      }
+      siteOp({ op: 'remove', site: cardIndex(card) }, errEl);
+    });
+    const deact = q('.do-deactivate');
+    if (deact) deact.addEventListener('click', () => setActive(false));
+    const react = q('.do-reactivate');
+    if (react) react.addEventListener('click', () => setActive(true));
+
+    attachCardDrag(q('.card-head'), card);
+
+    // Everything below is the publish machinery only an active card carries.
+    if (inactive) return card;
+    const input = q('input'), pubBtn = q('.pub');
+    const summary = q('.summary'), done = q('.done');
+
+    // One intake for both doors — the picker and the drop — so they cannot
+    // drift on the hidden-path rule or the summary.
+    function useFolder(items, name) {
+      const kept = items.filter((en) => !isHiddenPath(en.path));
+      const hidden = items.length - kept.length;
+      if (!kept.length) {
+        showError(errEl, 'That folder has no publishable files' +
+          (hidden ? ` (${hidden} hidden entries were excluded).` : '.'));
+        return;
+      }
+      files = kept;
+      folderName = name;
+      const totalBytes = kept.reduce((n, en) => n + en.file.size, 0);
+      const hasIndex = kept.some((en) => en.path === 'index.html');
+      summary.innerHTML =
+        `<b>${escapeHtml(name)}/</b> — ${kept.length} file${kept.length === 1 ? '' : 's'}, ` +
+        `${fmtSize(totalBytes)}` +
+        (hidden ? ` · ${hidden} hidden entr${hidden === 1 ? 'y' : 'ies'} excluded ` +
+                  `(paths starting with '.' are never served)` : '') +
+        (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
+                         `the site root would show a directory miss</span>`);
+      done.classList.add('hidden');
+      pubBtn.disabled = false;
+      mark('badge-green', '✓ folder read');
+    }
+
+    q('.dropstrip a').addEventListener('click', (e) => { e.preventDefault(); input.click(); });
+    input.addEventListener('change', () => {
+      clearError(errEl);
+      const all = [...input.files];
+      if (!all.length) return;
+      // webkitRelativePath is '<picked folder>/rest…' — the folder name is
+      // stripped so index.html sits at the bundle root, where the site wants it.
+      useFolder(all.map((f) => ({
+        path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f,
+      })).filter((en) => en.path), all[0].webkitRelativePath.split('/')[0]);
+    });
+
+    card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag'); });
+    card.addEventListener('dragleave', () => card.classList.remove('drag'));
+    card.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      card.classList.remove('drag');
+      clearError(errEl);
+      const entries = [...e.dataTransfer.items]
+        .map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry())
+        .filter(Boolean);
+      if (!entries.length) return;
+      try {
+        const items = [];
+        let name;
+        if (entries.length === 1 && entries[0].isDirectory) {
+          name = entries[0].name;
+          const reader = entries[0].createReader();
+          for (;;) {
+            const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+            if (!batch.length) break;
+            for (const child of batch) await readDropped(child, '', items);
+          }
+        } else {
+          name = 'dropped files';
+          for (const entry of entries) await readDropped(entry, '', items);
         }
-      } else {
-        folderName = 'dropped files';
-        for (const entry of entries) await readDropped(entry, '', items);
+        useFolder(items, name);
+      } catch (err) {
+        showError(errEl, 'Could not read the dropped folder: ' + err.message);
       }
-      useFolder(items, folderName);
-    } catch (err) {
-      showError($('dir-error'), 'Could not read the dropped folder: ' + err.message);
-    }
-  });
+    });
 
-  $('btn-publish').addEventListener('click', async () => {
-    clearError($('pub-error'));
-    $('btn-publish').disabled = true;
-    setBadge($('pub-badge'), 'badge-dim', 'building…');
-    try {
-      const entries = [];
-      let total = 0;
-      for (const { path, file } of state.files) {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        total += bytes.length;
-        if (total > MAX_BUNDLE_BYTES)
-          throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
-                          `the server would reject it`);
-        entries.push({ path, bytes });
+    pubBtn.addEventListener('click', async () => {
+      clearError(errEl);
+      pubBtn.disabled = true;
+      mark('badge-dim', 'building…');
+      try {
+        const entries = [];
+        let totalBytes = 0;
+        for (const { path, file } of files) {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          totalBytes += bytes.length;
+          if (totalBytes > MAX_BUNDLE_BYTES)
+            throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
+                            `the server would reject it`);
+          entries.push({ path, bytes });
+        }
+        const gz = await gzipBytes(buildTar(entries));
+
+        mark('badge-dim', 'publishing…');
+        const resp = await fetch('/upload?t=' + encodeURIComponent(CODE) +
+                                 '&site=' + cardIndex(card), { method: 'POST', body: gz });
+        let result = '';
+        try { result = (await resp.json()).result; } catch { result = ''; }
+
+        if (resp.ok && result === 'published') {
+          q('.note-done').innerHTML = `<b>${escapeHtml(folderName)}/</b> is live — ` +
+            `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
+            `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
+            `content kept as the one-step backup.`;
+          done.classList.remove('hidden');
+          mark('badge-green', '✓ published');
+        } else if (resp.status === 403) {
+          throw new Error('The server refused the passcode — close this page, ' +
+                          'and open the fresh link the terminal prints for this run.');
+        } else {
+          throw new Error('The server rejected the bundle' +
+                          (result ? ` (${result})` : ` (HTTP ${resp.status})`) +
+                          ' — nothing was changed. The terminal log has the detail.');
+        }
+      } catch (e) {
+        // A dropped tunnel mid-upload cannot half-publish: the server swaps
+        // content in only after a complete, valid bundle has landed.
+        showError(errEl, (e instanceof TypeError)
+          ? TUNNEL_DOWN + ' Nothing was published.' : e.message);
+        mark('badge-red', '✕ failed');
       }
-      const gz = await gzipBytes(buildTar(entries));
+      pubBtn.disabled = !files;
+    });
 
-      setBadge($('pub-badge'), 'badge-dim', 'publishing…');
-      const resp = await fetch('/upload?t=' + encodeURIComponent(CODE), {
-        method: 'POST', body: gz,
+    // ── The site's own facts and controls, all card-local: each card owns
+    // its state, so nothing needs to say which site it means. ──
+    const info = q('.info');
+    if (info) {
+      const checksFor = (((statusData || {}).checks) || []).filter((c) => c.site === idx);
+      const certRow = checksFor.find((c) => c.key === 'cert');
+      const authRow = checksFor.find((c) => c.key === 'password');
+      const others  = checksFor.filter((c) => c.key !== 'cert' && c.key !== 'password');
+      let authDesired = null;   // null = follow the server
+      const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
+
+      const renderInfo = () => {
+        const on = authOn();
+        const pending = authDesired !== null && authDesired !== !!siteData.username;
+        info.innerHTML =
+          row('Status', siteNeeds.length
+            ? `<span class="warn">${siteNeeds.length} to review</span>`
+            : '<span class="ok">✓</span> healthy') +
+          row('Serving', siteData.domain
+            ? `<b>${escapeHtml('https://' + siteData.domain)}</b>`
+            : "this server's IP address (no domain set)") +
+          others.map((c) => {
+            const cut = c.label.indexOf(' · ');
+            return factRow(cut < 0 ? c
+              : Object.assign({}, c, { label: c.label.slice(cut + 3) }));
+          }).join('');
+
+        q('.cert-state').innerHTML = !certRow ? ''
+          : certRow.ok ? escapeHtml(certRow.detail)
+          : `<span class="warn">${escapeHtml(certRow.detail)}</span>`;
+        // Naming and certifying are two acts on one card: the name saves
+        // instantly, the certificate is asked for when you ask for it —
+        // and the button says so while the site has no trusted one.
+        const certBtn = q('.cert');
+        certBtn.disabled = !siteData.domain;
+        certBtn.classList.toggle('due', !!siteData.domain && !!certRow && !certRow.ok);
+        certBtn.textContent = (certRow && certRow.ok) ? 'Renew' : 'Get certificate';
+        certBtn.title = siteData.domain
+          ? 'Request a certificate for ' + siteData.domain
+          : 'Set a domain first — a certificate is issued for a name';
+
+        q('.auth-switch').checked = on;
+        q('.auth-action').textContent = on ? 'Make public' : 'Make private';
+        q('.auth-state').innerHTML = pending
+          ? `<span class="warn">${on ? 'username and password required'
+                                     : 'becoming public when saved'}</span>`
+          : (authRow && !authRow.ok)
+            ? `<span class="warn">${escapeHtml(authRow.detail)}</span>`
+            : (on ? 'private' : 'public');
+        q('.auth-fields').innerHTML = !on ? '' :
+          field('username-' + idx, 'Username', siteData.username,
+                { hint: 'Case-sensitive. Any characters except a colon.' }) +
+          field('password-' + idx,
+                siteData.has_password ? 'New password (blank = keep the current one)' : 'Password',
+                '', { type: 'password',
+                      hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
+        q('.auth-save').classList.toggle('hidden', !(on || pending));
+        q('.auth-hint').textContent = on ? ''
+          : (siteData.username
+             ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+             : '');
+
+        const outside = q('.outside');
+        outside.disabled = !siteData.domain;
+        outside.title = siteData.domain
+          ? 'Opens the connection test on ' + siteData.domain
+          : 'Needs a domain — a site without one has no public name to test';
+      };
+      renderInfo();
+
+      q('.auth-switch').addEventListener('change', (e) => {
+        authDesired = e.target.checked;
+        renderInfo();
       });
-      let result = '';
-      try { result = (await resp.json()).result; } catch { result = ''; }
 
-      if (resp.ok && result === 'published') {
-        $('pub-note').innerHTML = `<b>${escapeHtml(state.folder)}/</b> is live — ` +
-          `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
-          `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
-          `content kept as the one-step backup.`;
-        $('pub-done').classList.remove('hidden');
-        setBadge($('pub-badge'), 'badge-green', '✓ published');
-      } else if (resp.status === 403) {
-        throw new Error('The server refused the pairing code — close this page, ' +
-                        'and open the fresh link the terminal prints for this run.');
-      } else {
-        throw new Error('The server rejected the bundle' +
-                        (result ? ` (${result})` : ` (HTTP ${resp.status})`) +
-                        ' — nothing was changed. The terminal log has the detail.');
-      }
-    } catch (e) {
-      showError($('pub-error'), e.message);
-      setBadge($('pub-badge'), 'badge-red', '✕ failed');
+      q('.outside').addEventListener('click', () => {
+        if (siteData.domain)
+          window.open('https://' + siteData.domain + '/.well-known/servette-check', '_blank');
+      });
+
+      // Setting the name is a config write and nothing more — instant, and
+      // it cannot fail on someone else's DNS.
+      q('.dom').addEventListener('click', async () => {
+        const domain = q('.dom-input').value.trim().toLowerCase();
+        clearError(errEl);
+        if (!domain) return showError(errEl, 'Type the domain first.');
+        await siteOp({ op: 'name', site: cardIndex(card), domain }, errEl);
+      });
+
+      // Asking for the certificate is the slow, network-dependent act, so
+      // it waits itself out and reports its own failure.
+      q('.cert').addEventListener('click', async () => {
+        const b = q('.cert');
+        const old = b.textContent;
+        b.disabled = true;
+        b.textContent = 'requesting…';
+        const ok = await siteOp({ op: 'certificate', site: cardIndex(card) }, errEl);
+        if (!ok) { b.disabled = false; b.textContent = old; }
+      });
+
+      q('.save-site').addEventListener('click', () => {
+        clearError(errEl);
+        if (!authOn())
+          return saveSettings({ username: '' }, cardIndex(card), badge, errEl);
+        const username = q('#cfg-username-' + idx).value.trim();
+        const pw = q('#cfg-password-' + idx).value;
+        if (!username)
+          return showError(errEl, 'A username is needed — or make the site public.');
+        if (!siteData.has_password && !pw)
+          return showError(errEl, 'A password is needed the first time a site turns private.');
+        saveSettings(Object.assign({ username }, pw ? { password: pw } : {}),
+                     cardIndex(card), badge, errEl);
+      });
     }
-    $('btn-publish').disabled = false;
-  });
+
+    return card;
+  }
 
   /* ══ Feature gate & startup. ══ */
   const supported = typeof CompressionStream === 'function';
   $(supported ? 'app' : 'unsupported').classList.remove('hidden');
-  if (supported) showTab((location.hash || '').replace('#', ''));
+  if (supported) {
+    showTab((location.hash || '').replace('#', ''));
+    checkUpgrade();
+  }
 </script>
 
 </body>

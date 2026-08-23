@@ -1249,6 +1249,29 @@ def run_dispatch_tests(s):
         st, _ = ui_req("GET", "/traffic")
         check("GET /traffic without the code is refused", st == 403)
 
+        # The swap size the terminal has always asked for, asked for here —
+        # the same core underneath, guarded before it can reach the disk.
+        check("The status snapshot carries the swap figures",
+              set(s._status_data()["swap"]) == {"active_mb", "recommended_mb"})
+        st, _ = ui_req("POST", "/swap", body=b'{"mb": 512}')
+        check("The swap endpoint is code-gated like every other", st == 403)
+        st, body = ui_req("POST", f"/swap?t={ui_code}", body=b'{"mb": "big"}')
+        check("...refusing a size that is not a number", st == 422)
+        st, body = ui_req("POST", f"/swap?t={ui_code}", body=b'{"mb": 4}')
+        check("...and one outside the sane range, before touching the disk",
+              st == 422 and b"64-65536" in body)
+        saved_apply = s._apply_swapfile
+        seen_mb = []
+        s._apply_swapfile = lambda mb: seen_mb.append(mb) or ""
+        st, _ = ui_req("POST", f"/swap?t={ui_code}", body=b'{"mb": 512}')
+        check("...running the same core the terminal's prompt runs",
+              st == 200 and seen_mb == [512])
+        s._apply_swapfile = lambda mb: "Not enough free disk for it."
+        st, body = ui_req("POST", f"/swap?t={ui_code}", body=b'{"mb": 512}')
+        check("...and reporting that core's own refusal",
+              st == 422 and b"free disk" in body)
+        s._apply_swapfile = saved_apply
+
         # The page may move the service toward serving and no further.
         st, _ = ui_req("POST", "/service", body=b"{}")
         check("The service endpoint is code-gated like every other", st == 403)
@@ -5257,7 +5280,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         "_chown_config",
         # The host, at install time and as root.
         "_write_unit_files", "_build_runtime", "_commit_runtime", "cmd_disable",
-        "_ensure_swap", "_make_swapfile",
+        "_apply_swapfile", "_make_swapfile",
         # Staging: unpacks a verified bundle into a temporary directory.
         "_extract_bundle",
         # Removes a site's own generated certificate when the site goes.

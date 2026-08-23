@@ -3562,33 +3562,48 @@ def _ensure_swap():
         except ValueError:
             print("  Not a number — skipping swap setup.")
             return
+    err = _apply_swapfile(mb)
+    if err:
+        print(f"  {err}")
+    else:
+        print(f"  Swapfile active ({mb} MB), persistent across reboots.")
+
+
+def _apply_swapfile(mb):
+    """Create or resize Servette's swapfile to `mb` MB — the mechanical half
+    of the swap offer, shared by the terminal's prompt and the admin page's
+    field so the two cannot drift. Returns an error sentence, empty on
+    success (including the no-op where the size asked for is already
+    active). Never raises: every failure path ends in a sentence."""
+    if _IS_MACOS:
+        return "macOS manages its own swap"
+    ours              = os.path.exists(_SWAP_PATH)
+    ours_mb, _foreign = _swap_sizes()
+    active_mb         = ours_mb or 0
     if ours and abs(mb - active_mb) <= _SWAP_SLACK_MB:
-        return  # the size asked for is the size already active — nothing to do
+        return ""  # the size asked for is the size already active
     size = mb * 1024 * 1024
     try:
         st        = os.statvfs("/")
         reclaimed = os.path.getsize(_SWAP_PATH) if ours else 0
         if st.f_bavail * st.f_frsize + reclaimed < size + 1024 ** 3:  # keep 1 GB free
-            print(f"  Not enough free disk for a {mb} MB swapfile plus 1 GB margin — skipping.")
-            return
-    except OSError:
-        return
+            return f"Not enough free disk for a {mb} MB swapfile plus 1 GB margin."
+    except OSError as e:
+        return f"Could not read free disk space ({e})."
     if ours and active_mb > 0:
         r = subprocess.run(["swapoff", _SWAP_PATH], capture_output=True)
         if r.returncode != 0:
-            print("  Could not deactivate the current swapfile (heavily in use?) — try again later.")
-            return
+            return "Could not deactivate the current swapfile (heavily in use?) — try again later."
     try:
         _make_swapfile(size)
         with open("/etc/fstab") as f:
             fstab = f.read()
         if _SWAP_PATH not in fstab.split():
             with open("/etc/fstab", "a") as f:
-                f.write(f"{_SWAP_PATH} none swap sw 0 0\n")
-        print(f"  Swapfile active ({mb} MB), persistent across reboots.")
+                f.write(f"{_SWAP_PATH} none swap sw 0 0" + chr(10))
         log.info("Swapfile active: %d MB at %s", mb, _SWAP_PATH)
+        return ""
     except (OSError, subprocess.CalledProcessError) as e:
-        print(f"  Could not set up swapfile: {e}")
         # A failed RESIZE has already truncated the old file, so try to give
         # the host back the swap it walked in with — a memory-tight host that
         # accepted a grow offer must not end up worse than it started. Swap
@@ -3597,8 +3612,7 @@ def _ensure_swap():
         if ours and active_mb > 0:
             try:
                 _make_swapfile(active_mb * 1024 * 1024)
-                print(f"  Restored the previous {active_mb} MB swapfile.")
-                return
+                return f"Could not set up the swapfile ({e}) — restored the previous {active_mb} MB."
             except (OSError, subprocess.CalledProcessError):
                 pass
         # Nothing to restore (or the restore failed): remove the dead file AND
@@ -3618,6 +3632,7 @@ def _ensure_swap():
                     f.writelines(kept)
         except OSError:
             pass
+        return f"Could not set up the swapfile ({e})."
 
 
 # The service runtime
@@ -6039,6 +6054,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       </div>
       <div class="card-body">
         <div id="cfg-host-fields"></div>
+        <div class="switch-row" id="swap-row" style="margin-top:0.9rem">
+          <span class="k">Swap file (MB)</span>
+          <span class="switch-value"><input type="text" id="swap-mb">
+            <span class="switch-act">
+            <button class="action tiny" id="btn-swap" type="button">Resize</button></span>
+          </span>
+        </div>
+        <div class="cfg-hint" id="swap-hint"></div>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-save-host" type="button">Save</button>
         </div>
@@ -6194,6 +6217,30 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     b.disabled = false;
   }
 
+  $('btn-swap').addEventListener('click', async () => {
+    const b = $('btn-swap');
+    const mb = parseInt($('swap-mb').value.trim(), 10);
+    clearError($('cfg-host-error'));
+    if (!(mb > 0)) return showError($('cfg-host-error'), 'Type a size in MB.');
+    b.disabled = true;
+    const old = b.textContent;
+    b.textContent = 'resizing…';
+    try {
+      const r = await fetch('/swap?t=' + encodeURIComponent(CODE),
+                            { method: 'POST', body: JSON.stringify({ mb }) });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'ok')
+        throw new Error(data.error || 'HTTP ' + r.status);
+      await refresh();
+    } catch (e) {
+      showError($('cfg-host-error'),
+                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+    }
+    b.disabled = false;
+    b.textContent = old;
+  });
+
   $('btn-start').addEventListener('click', () => serviceOp($('btn-start'), 'start'));
   $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
   // Every site on the box goes dark, so this one asks first — in the page's
@@ -6279,6 +6326,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
+
+    // Swap is a size the operator types — the terminal has always asked for
+    // it that way, and the page asks the same question.
+    const sw = d.swap || {};
+    $('swap-row').classList.toggle('hidden', sw.recommended_mb == null && sw.active_mb == null);
+    if (document.activeElement !== $('swap-mb'))
+      $('swap-mb').value = sw.active_mb != null ? String(sw.active_mb) : '';
+    $('swap-hint').textContent =
+      'Disk that absorbs a memory spike, so a burst past free RAM cannot take ' +
+      'the host down' +
+      (sw.recommended_mb ? '. Recommended here: ' + sw.recommended_mb + ' MB.' : '.');
     renderLoad();
   }
 
@@ -7092,7 +7150,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path not in ("/upload", "/config", "/sites", "/service"):
+        if path not in ("/upload", "/config", "/sites", "/service", "/swap"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
             return self._respond(403, "Not logged in.")
@@ -7130,6 +7188,27 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(500, json.dumps(
                     {"error": f"could not {verb} the service ({e})"}), "application/json")
             return self._respond(200, json.dumps({"result": "ok"}), "application/json")
+
+        if path == "/swap":
+            # The size the terminal asks for at setup, asked for here
+            # instead — the same _apply_swapfile underneath, so the two
+            # surfaces cannot drift on disk checks, fstab, or the
+            # restore-the-old-size path when a resize fails.
+            if length > 512:
+                return self._respond(413, "Body too large.")
+            try:
+                mb = int(json.loads(self.rfile.read(length)).get("mb"))
+            except (ValueError, TypeError):
+                return self._respond(422, json.dumps(
+                    {"error": "a size in MB is needed"}), "application/json")
+            if not (64 <= mb <= 65536):
+                return self._respond(422, json.dumps(
+                    {"error": "swap size must be 64-65536 MB"}), "application/json")
+            err = _apply_swapfile(mb)
+            return self._respond(200 if not err else 422,
+                                 json.dumps({"result": "ok"} if not err
+                                            else {"error": err}),
+                                 "application/json")
 
         if path == "/sites":
             # The page's card row: add, remove, move — the same cores the
@@ -7640,6 +7719,20 @@ def _load_snapshot():
     return out
 
 
+def _swap_snapshot():
+    """Servette's own swapfile as numbers — what is active and what the
+    sizing recommends — for the page's field. None on a host with no swap
+    to speak of (macOS manages its own)."""
+    if _IS_MACOS:
+        return {"active_mb": None, "recommended_mb": None}
+    mem_kb, _avail_kb, committed_kb = _meminfo()
+    rec = _swap_recommendation(mem_kb, committed_kb,
+                               _cache_headroom_mb(config.cache_size_mb))
+    ours_mb, _foreign = _swap_sizes()
+    return {"active_mb": ours_mb,
+            "recommended_mb": (rec // (1024 * 1024)) if rec else None}
+
+
 def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
     external tooling. cert_days is None when no certificate is readable;
@@ -7656,6 +7749,7 @@ def _status_data():
         "warnings": _cache_warnings(),
         "checks":   _health_checks(),
         "load":     _load_snapshot(),
+        "swap":     _swap_snapshot(),
     }
 
 

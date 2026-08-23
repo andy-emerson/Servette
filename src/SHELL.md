@@ -1550,7 +1550,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path not in ("/upload", "/config", "/sites", "/service"):
+        if path not in ("/upload", "/config", "/sites", "/service", "/swap"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
             return self._respond(403, "Not logged in.")
@@ -1588,6 +1588,27 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(500, json.dumps(
                     {"error": f"could not {verb} the service ({e})"}), "application/json")
             return self._respond(200, json.dumps({"result": "ok"}), "application/json")
+
+        if path == "/swap":
+            # The size the terminal asks for at setup, asked for here
+            # instead — the same _apply_swapfile underneath, so the two
+            # surfaces cannot drift on disk checks, fstab, or the
+            # restore-the-old-size path when a resize fails.
+            if length > 512:
+                return self._respond(413, "Body too large.")
+            try:
+                mb = int(json.loads(self.rfile.read(length)).get("mb"))
+            except (ValueError, TypeError):
+                return self._respond(422, json.dumps(
+                    {"error": "a size in MB is needed"}), "application/json")
+            if not (64 <= mb <= 65536):
+                return self._respond(422, json.dumps(
+                    {"error": "swap size must be 64-65536 MB"}), "application/json")
+            err = _apply_swapfile(mb)
+            return self._respond(200 if not err else 422,
+                                 json.dumps({"result": "ok"} if not err
+                                            else {"error": err}),
+                                 "application/json")
 
         if path == "/sites":
             # The page's card row: add, remove, move — the same cores the
@@ -2135,6 +2156,20 @@ def _load_snapshot():
     return out
 
 
+def _swap_snapshot():
+    """Servette's own swapfile as numbers — what is active and what the
+    sizing recommends — for the page's field. None on a host with no swap
+    to speak of (macOS manages its own)."""
+    if _IS_MACOS:
+        return {"active_mb": None, "recommended_mb": None}
+    mem_kb, _avail_kb, committed_kb = _meminfo()
+    rec = _swap_recommendation(mem_kb, committed_kb,
+                               _cache_headroom_mb(config.cache_size_mb))
+    ours_mb, _foreign = _swap_sizes()
+    return {"active_mb": ours_mb,
+            "recommended_mb": (rec // (1024 * 1024)) if rec else None}
+
+
 def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
     external tooling. cert_days is None when no certificate is readable;
@@ -2151,6 +2186,7 @@ def _status_data():
         "warnings": _cache_warnings(),
         "checks":   _health_checks(),
         "load":     _load_snapshot(),
+        "swap":     _swap_snapshot(),
     }
 
 

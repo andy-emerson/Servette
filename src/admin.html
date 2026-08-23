@@ -563,6 +563,14 @@
       </div>
       <div class="card-body">
         <div id="cfg-host-fields"></div>
+        <div class="switch-row" id="swap-row" style="margin-top:0.9rem">
+          <span class="k">Swap file (MB)</span>
+          <span class="switch-value"><input type="text" id="swap-mb">
+            <span class="switch-act">
+            <button class="action tiny" id="btn-swap" type="button">Resize</button></span>
+          </span>
+        </div>
+        <div class="cfg-hint" id="swap-hint"></div>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-save-host" type="button">Save</button>
         </div>
@@ -718,6 +726,30 @@
     b.disabled = false;
   }
 
+  $('btn-swap').addEventListener('click', async () => {
+    const b = $('btn-swap');
+    const mb = parseInt($('swap-mb').value.trim(), 10);
+    clearError($('cfg-host-error'));
+    if (!(mb > 0)) return showError($('cfg-host-error'), 'Type a size in MB.');
+    b.disabled = true;
+    const old = b.textContent;
+    b.textContent = 'resizing…';
+    try {
+      const r = await fetch('/swap?t=' + encodeURIComponent(CODE),
+                            { method: 'POST', body: JSON.stringify({ mb }) });
+      let data = {};
+      try { data = await r.json(); } catch { data = {}; }
+      if (!r.ok || data.result !== 'ok')
+        throw new Error(data.error || 'HTTP ' + r.status);
+      await refresh();
+    } catch (e) {
+      showError($('cfg-host-error'),
+                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+    }
+    b.disabled = false;
+    b.textContent = old;
+  });
+
   $('btn-start').addEventListener('click', () => serviceOp($('btn-start'), 'start'));
   $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
   // Every site on the box goes dark, so this one asks first — in the page's
@@ -803,6 +835,17 @@
 
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
+
+    // Swap is a size the operator types — the terminal has always asked for
+    // it that way, and the page asks the same question.
+    const sw = d.swap || {};
+    $('swap-row').classList.toggle('hidden', sw.recommended_mb == null && sw.active_mb == null);
+    if (document.activeElement !== $('swap-mb'))
+      $('swap-mb').value = sw.active_mb != null ? String(sw.active_mb) : '';
+    $('swap-hint').textContent =
+      'Disk that absorbs a memory spike, so a burst past free RAM cannot take ' +
+      'the host down' +
+      (sw.recommended_mb ? '. Recommended here: ' + sw.recommended_mb + ' MB.' : '.');
     renderLoad();
   }
 

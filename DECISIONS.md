@@ -6,6 +6,22 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The footer says where more is written down; the wordmark stays inert
+
+**Ruled (Human):** the admin page's footer ends with "More information is
+available at **servette.org**", linked, opening in its own tab. The
+`Servette_` wordmark is not a link.
+**Why:** a tool needs somewhere to point a reader who wants the manual,
+and the footer — already the place the page explains its own transport —
+is where a reader looks for it. A wordmark that navigates is a small
+trap: the operator is mid-task on this page, and a stray click on the
+page's own name would abandon it. Its own tab, for the same reason.
+**Rejected:** linking the wordmark (a logo that leaves the tool). The
+public pages keep pointing at the GitHub repository rather than
+servette.org: that is where a visitor who lands on someone's error page
+can read the source, and it is reachable whether or not any particular
+site is up. *(2026-08-23)*
+
 ## The page is three tabs: a site is one card, the server is its own page
 
 **Ruled (Human):** **Sites** holds one card per site carrying everything
@@ -105,10 +121,14 @@ install` is the only installation path" below. *(2026-08-23)*
 **Ruled (Human):** the word is *test* — "test connection" is the idiom
 people expect on a button, and consistency across the documents was an
 argument against churn, not a reason the other word was better. Renamed
-in both pages, the admin button, and every document. The reserved path
-stays `/.well-known/servette-check`: it is a URL, and URLs that may be
-bookmarked or linked from an already-published site are not renamed over
-a word choice. The report leads with findings in the reader's language,
+in both pages, the admin button, and every document — and in the tree:
+the source is `src/connection-test.html`, with the build marker and the
+module's constants (`_CONNECTION_TEST_PAGE`, `_CONNECTION_TEST_PATH`)
+following it. The reserved path stays `/.well-known/servette-check`: it
+is a URL, and URLs that may be bookmarked or linked from an
+already-published site are not renamed over a word choice. The constant
+carries that note, so a reader meets the explanation where they meet the
+mismatch. The report leads with findings in the reader's language,
 each carrying its evidence beneath in a footnote's voice; a public site
 withholding its version reads as a pass, not a skip, because that is the
 design working. *(2026-08-23)*

@@ -171,7 +171,7 @@ Each site can have a **publish channel** — the path for publishing when no SSH
 
 | Path | What it is |
 |---|---|
-| `servette.py` | The entire product — server, system, and shell in one module, generated from `src/` and committed to be read. The package build regenerates it from `src/` at every install, and CI holds the committed copy equal to the sources. The error, connection-check, and admin pages are inlined into it from `src/404.html`, `src/connection-test.html`, and `src/admin.html`, so an install is Python only |
+| `servette.py` | The entire product — server, system, and shell in one module, generated from `src/` and committed to be read. The package build regenerates it from `src/` at every install, and CI holds the committed copy equal to the sources. The error page, the connection test, and the admin page are inlined into it from `src/404.html`, `src/connection-test.html`, and `src/admin.html`, so an install is Python only |
 | `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`), the three embedded pages (`404.html`, `connection-test.html`, `admin.html`), and the build — `build.py`, plus the backend that runs it inside every package build |
 | `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 and 3.14) and Debian 12 |
 | `README.md` | This file — the user-facing introduction and deploy guide |

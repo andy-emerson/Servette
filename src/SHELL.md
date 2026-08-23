@@ -1326,9 +1326,11 @@ _UI_LOGIN_PAGE = """<!doctype html>
          justify-content: center; padding: 2rem; box-sizing: border-box;
          font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo,
                       Consolas, 'Liberation Mono', 'Courier New', monospace; }
-  .logo { font-size: 3rem; font-weight: 500; line-height: 1; }
+  /* The cursor is absolute so it adds no width: the page centers on
+     "Servette", not "Servette_". */
+  .logo { font-size: 3rem; font-weight: 500; line-height: 1; position: relative; }
   .logo .ette { color: #5A8466; }
-  .logo .cursor { animation: blink 1.1s steps(1) infinite; }
+  .logo .cursor { position: absolute; animation: blink 1.1s steps(1) infinite; }
   @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
   .tagline { margin-top: 0.5rem; color: #555; font-size: 0.75rem;
              letter-spacing: 0.08em; text-transform: uppercase; }

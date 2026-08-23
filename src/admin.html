@@ -325,7 +325,7 @@
       transition: left 0.15s, right 0.15s, background 0.15s;
     }
     input.switch:checked {
-      background: rgba(90,132,102,0.3);
+      background: rgba(90,132,102,0.15);
       border-color: rgba(90,132,102,0.6);
     }
     input.switch:checked::after { left: auto; right: 2px; background: #5A8466; }
@@ -341,8 +341,6 @@
       outline: 1px solid rgba(90,132,102,0.8);
       outline-offset: 1px;
     }
-    .cfg-field input:disabled { opacity: 0.4; cursor: not-allowed; }
-    .cfg-field label.off { opacity: 0.4; }
     .cfg-hint {
       font-size: 0.68rem;
       color: var(--muted);
@@ -420,7 +418,7 @@
         <div class="split"></div>
         <div class="switch-row">
           <input class="switch" type="checkbox" id="auth-switch">
-          <label for="auth-switch">Private site — visitors sign in to view it</label>
+          <label for="auth-switch">Private site</label>
         </div>
         <div id="cfg-site-fields"></div>
         <div class="btn-row" style="margin-top:0.9rem">
@@ -585,9 +583,9 @@
   const field = (key, label, value, opts) => {
     const o = opts || {};
     return `<div class="cfg-field">` +
-      `<label for="cfg-${key}"${o.off ? ' class="off"' : ''}>${label}</label>` +
+      `<label for="cfg-${key}">${label}</label>` +
       `<input id="cfg-${key}" type="${o.type || 'text'}"` +
-      ` value="${escapeHtml(String(value == null ? '' : value))}"${o.off ? ' disabled' : ''}>` +
+      ` value="${escapeHtml(String(value == null ? '' : value))}">` +
       (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
       `</div>`;
   };
@@ -617,11 +615,19 @@
       : '(none — answers requests no other site matches; name it on its Publish card)');
     sh += row('Folder', escapeHtml(site.dir || '(not set)'));
     // The card already scopes to one site, so the rows drop the 'Site n ·'
-    // prefix the flat status feed carries for multi-site tellability.
+    // prefix the flat status feed carries for multi-site tellability. And
+    // while the private switch holds an unsaved intent, the Access row says
+    // so instead of asserting the old truth as if nothing were happening.
+    const pendingAuth = authDesired !== null && authDesired !== !!site.username;
     sh += siteChecks.map((c, i) => {
       const cut = c.label.indexOf(' · ');
-      const scoped = cut < 0 ? c
+      let scoped = cut < 0 ? c
         : Object.assign({}, c, { label: c.label.slice(cut + 3) });
+      if (pendingAuth && c.key === 'password')
+        scoped = Object.assign({}, scoped, { ok: false,
+          detail: authDesired
+            ? 'becoming private — save a username and password below'
+            : 'becoming public when saved' });
       return healthRow(scoped, i === 0);
     }).join('');
     $('site-rows').innerHTML = sh;

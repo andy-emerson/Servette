@@ -1581,14 +1581,16 @@ _CHECK_PAGE = """<!DOCTYPE html>
           : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
 
     // Version discovery — same-origin, password-gated: the one check only
-    // this page can make. Servette serves it solely on a password-gated
-    // site, so the exact version reaches a party that already holds the
-    // password (this browser, once you logged in) and never an anonymous
-    // scanner. Absent is a choice or an older Servette, not a defect.
+    // this page can make. Servette serves it solely on a private site, so
+    // the exact version reaches a party that already signed in (this
+    // browser) and never an anonymous scanner. On a public site the
+    // endpoint deliberately does not exist, so the row does not apply —
+    // it removes itself rather than reporting a skip with nothing to test.
     { req: 'GET /.well-known/servette', run: async () => {
         const r = await fetch('/.well-known/servette', { cache: 'no-store' });
+        if (r.status === 404) return { drop: true };
         if (r.status !== 200)
-          return { ok: null, obs: 'hidden without a password (or an older Servette)' };
+          return { ok: null, obs: 'hidden (an older Servette, or not signed in)' };
         const v = await r.json();
         return { ok: true, obs: 'running v' + v.running }; } },
   ];
@@ -1626,6 +1628,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
       let r;
       try { r = await c.run(); }
       catch (e) { r = { ok: null, obs: 'could not run' }; }
+      if (r.drop) { el.row.remove(); continue; }  // not applicable here
       el.obs.textContent = r.obs;
       if (r.ok === true)       { paint(el.row, el.st, 'pass'); pass++; }
       else if (r.ok === false) { paint(el.row, el.st, 'fail'); fail++; }
@@ -5331,9 +5334,11 @@ _UI_LOGIN_PAGE = """<!doctype html>
          justify-content: center; padding: 2rem; box-sizing: border-box;
          font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo,
                       Consolas, 'Liberation Mono', 'Courier New', monospace; }
-  .logo { font-size: 3rem; font-weight: 500; line-height: 1; }
+  /* The cursor is absolute so it adds no width: the page centers on
+     "Servette", not "Servette_". */
+  .logo { font-size: 3rem; font-weight: 500; line-height: 1; position: relative; }
   .logo .ette { color: #5A8466; }
-  .logo .cursor { animation: blink 1.1s steps(1) infinite; }
+  .logo .cursor { position: absolute; animation: blink 1.1s steps(1) infinite; }
   @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
   .tagline { margin-top: 0.5rem; color: #555; font-size: 0.75rem;
              letter-spacing: 0.08em; text-transform: uppercase; }
@@ -5699,7 +5704,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       transition: left 0.15s, right 0.15s, background 0.15s;
     }
     input.switch:checked {
-      background: rgba(90,132,102,0.3);
+      background: rgba(90,132,102,0.15);
       border-color: rgba(90,132,102,0.6);
     }
     input.switch:checked::after { left: auto; right: 2px; background: #5A8466; }
@@ -5715,8 +5720,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       outline: 1px solid rgba(90,132,102,0.8);
       outline-offset: 1px;
     }
-    .cfg-field input:disabled { opacity: 0.4; cursor: not-allowed; }
-    .cfg-field label.off { opacity: 0.4; }
     .cfg-hint {
       font-size: 0.68rem;
       color: var(--muted);
@@ -5794,7 +5797,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <div class="split"></div>
         <div class="switch-row">
           <input class="switch" type="checkbox" id="auth-switch">
-          <label for="auth-switch">Private site — visitors sign in to view it</label>
+          <label for="auth-switch">Private site</label>
         </div>
         <div id="cfg-site-fields"></div>
         <div class="btn-row" style="margin-top:0.9rem">
@@ -5959,9 +5962,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const field = (key, label, value, opts) => {
     const o = opts || {};
     return `<div class="cfg-field">` +
-      `<label for="cfg-${key}"${o.off ? ' class="off"' : ''}>${label}</label>` +
+      `<label for="cfg-${key}">${label}</label>` +
       `<input id="cfg-${key}" type="${o.type || 'text'}"` +
-      ` value="${escapeHtml(String(value == null ? '' : value))}"${o.off ? ' disabled' : ''}>` +
+      ` value="${escapeHtml(String(value == null ? '' : value))}">` +
       (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
       `</div>`;
   };
@@ -5991,11 +5994,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       : '(none — answers requests no other site matches; name it on its Publish card)');
     sh += row('Folder', escapeHtml(site.dir || '(not set)'));
     // The card already scopes to one site, so the rows drop the 'Site n ·'
-    // prefix the flat status feed carries for multi-site tellability.
+    // prefix the flat status feed carries for multi-site tellability. And
+    // while the private switch holds an unsaved intent, the Access row says
+    // so instead of asserting the old truth as if nothing were happening.
+    const pendingAuth = authDesired !== null && authDesired !== !!site.username;
     sh += siteChecks.map((c, i) => {
       const cut = c.label.indexOf(' · ');
-      const scoped = cut < 0 ? c
+      let scoped = cut < 0 ? c
         : Object.assign({}, c, { label: c.label.slice(cut + 3) });
+      if (pendingAuth && c.key === 'password')
+        scoped = Object.assign({}, scoped, { ok: false,
+          detail: authDesired
+            ? 'becoming private — save a username and password below'
+            : 'becoming public when saved' });
       return healthRow(scoped, i === 0);
     }).join('');
     $('site-rows').innerHTML = sh;

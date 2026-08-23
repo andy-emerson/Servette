@@ -392,14 +392,16 @@
           : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
 
     // Version discovery — same-origin, password-gated: the one check only
-    // this page can make. Servette serves it solely on a password-gated
-    // site, so the exact version reaches a party that already holds the
-    // password (this browser, once you logged in) and never an anonymous
-    // scanner. Absent is a choice or an older Servette, not a defect.
+    // this page can make. Servette serves it solely on a private site, so
+    // the exact version reaches a party that already signed in (this
+    // browser) and never an anonymous scanner. On a public site the
+    // endpoint deliberately does not exist, so the row does not apply —
+    // it removes itself rather than reporting a skip with nothing to test.
     { req: 'GET /.well-known/servette', run: async () => {
         const r = await fetch('/.well-known/servette', { cache: 'no-store' });
+        if (r.status === 404) return { drop: true };
         if (r.status !== 200)
-          return { ok: null, obs: 'hidden without a password (or an older Servette)' };
+          return { ok: null, obs: 'hidden (an older Servette, or not signed in)' };
         const v = await r.json();
         return { ok: true, obs: 'running v' + v.running }; } },
   ];
@@ -437,6 +439,7 @@
       let r;
       try { r = await c.run(); }
       catch (e) { r = { ok: null, obs: 'could not run' }; }
+      if (r.drop) { el.row.remove(); continue; }  // not applicable here
       el.obs.textContent = r.obs;
       if (r.ok === true)       { paint(el.row, el.st, 'pass'); pass++; }
       else if (r.ok === false) { paint(el.row, el.st, 'fail'); fail++; }

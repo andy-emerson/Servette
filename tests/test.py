@@ -1031,8 +1031,9 @@ def run_dispatch_tests(s):
     check("The admin page is inlined whole, marker consumed",
           s._UI_ADMIN_PAGE.startswith("<!DOCTYPE html>")
           and "@@ADMIN_HTML@@" not in s._UI_ADMIN_PAGE)
-    check("...carries the Sites and Server tabs, reading the status feed",
+    check("...carries the Sites, Server, and Statistics tabs, reading the status feed",
           "tab-sites" in s._UI_ADMIN_PAGE and "tab-server" in s._UI_ADMIN_PAGE
+          and "tab-stats" in s._UI_ADMIN_PAGE
           and "/status?t=" in s._UI_ADMIN_PAGE)
     check("...posts to the upload endpoint with the run's code",
           "/upload?t=" in s._UI_ADMIN_PAGE)
@@ -1259,7 +1260,8 @@ def run_dispatch_tests(s):
         s._service_file_exists = saved_unit
         handler_src = inspect.getsource(s._UIHandler)
         check("...and can only move it toward serving — no stop, no disable",
-              '"systemctl", "start"' in handler_src
+              '"systemctl", verb' in handler_src
+              and '"restart" if' in handler_src and 'else "start"' in handler_src
               and '"stop"' not in handler_src and '"disable"' not in handler_src)
 
         saved_cfg_user = s.config.sites[0].username

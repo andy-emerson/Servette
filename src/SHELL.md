@@ -1568,17 +1568,21 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             # that can only bring it back is a repair tool.
             if length > 512:
                 return self._respond(413, "Body too large.")
-            self.rfile.read(length)
+            try:
+                body_op = json.loads(self.rfile.read(length)).get("op", "start")
+            except (ValueError, TypeError):
+                body_op = "start"
             if not _service_file_exists():
                 return self._respond(422, json.dumps(
                     {"error": "no system service installed — run 'enable' in the terminal"}),
                     "application/json")
+            verb = "restart" if str(body_op) == "restart" else "start"
             try:
-                subprocess.run(["systemctl", "start", "servette"],
+                subprocess.run(["systemctl", verb, "servette"],
                                check=True, capture_output=True)
             except (OSError, subprocess.CalledProcessError) as e:
                 return self._respond(500, json.dumps(
-                    {"error": f"could not start the service ({e})"}), "application/json")
+                    {"error": f"could not {verb} the service ({e})"}), "application/json")
             return self._respond(200, json.dumps({"result": "ok"}), "application/json")
 
         if path == "/sites":
@@ -2027,11 +2031,14 @@ def _health_checks():
         offer = _swap_offer(rec // (1024 * 1024) if rec else None,
                             os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
         have = (ours_mb or 0) + foreign_mb
+        want = (rec // (1024 * 1024)) if rec else None
         rows.append({"key": "swap", "site": None, "ok": offer is None, "label": "Swap",
-                     "detail": ((f"{have} MB active" if have else "not needed at this host's memory")
+                     "detail": ((f"{have} MB active"
+                                 + (f" (recommended: {want} MB)" if want else "")
+                                 if have else "not needed at this host's memory")
                                 if offer is None else
-                                (f"{have} MB active, below the {offer} MB recommendation — setup offers a resize"
-                                 if have else f"none — setup offers a {offer} MB swapfile"))})
+                                (f"{have} MB active, below the {offer} MB recommendation — 'enable' offers a resize"
+                                 if have else f"none — 'enable' offers a {offer} MB swapfile"))})
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""

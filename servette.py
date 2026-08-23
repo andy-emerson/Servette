@@ -5478,9 +5478,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 <!-- src/admin — the operator's page, the browser half of the paired
      surfaces. Served only by the loopback page server (127.0.0.1, reached
      through the operator's SSH tunnel via `servette admin`), never by the
-     public site. One page, two tabs: Publish (one card per site — the
-     cards ARE the site list) and Settings (the selected site's truth and
-     knobs, then the server's).
+     public site. One page, three tabs: Sites (one card per site, carrying
+     everything about it — publish, domain, certificate, access), Server
+     (what the box is doing and how it is set), and Statistics (traffic
+     counted across every site, and the box's own load).
      Constraints, all load-bearing:
 
      - No signature, no key. Being here IS the authentication: only the
@@ -5660,6 +5661,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 
     .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
+    .rows > div { padding: 0.18rem 0; }
     .rows a.cfg-link { color: #5A8466; text-decoration: none; white-space: nowrap; }
     .rows a.cfg-link:hover { text-decoration: underline; }
     .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
@@ -5682,7 +5684,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       vertical-align: middle;
       position: relative;
       top: -1px;
+      animation: pulse 2s ease infinite;
     }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
     .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
     .hint b { color: var(--text); font-weight: 500; }
@@ -5760,7 +5765,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     /* Wide page, side-by-side forms: label left, field right, the hint
        under the field. Narrow screens stack them again. */
     .cfg-field {
-      margin-top: 0.7rem;
+      margin-top: 0.9rem;
       display: grid;
       grid-template-columns: 8rem 1fr;
       align-items: center;
@@ -5776,14 +5781,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       .cfg-field { grid-template-columns: 1fr; row-gap: 0.25rem; }
       .cfg-field .cfg-hint { grid-column: 1; }
     }
-    .cfg-field input, select.cfg-site {
+    input[type="text"], input[type="password"], select.cfg-site {
       font-family: inherit;
       font-size: 0.75rem;
       color: var(--text);
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 4px;
-      padding: 0.5rem 0.7rem;
+      padding: 0.4rem 0.7rem;
       width: 100%;
     }
     select.cfg-site { width: auto; margin-bottom: 1rem; }
@@ -5812,6 +5817,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       align-items: center;
       font-size: 0.72rem;
       line-height: 1.9;
+      padding: 0.3rem 0;
     }
     .switch-row .k { color: var(--muted); }
     .switch-row label.k { cursor: pointer; }
@@ -5894,7 +5900,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     input.switch:focus-visible { outline: 1px solid rgba(90,132,102,0.8); outline-offset: 1px; }
     /* The browser's default focus halo clashes with the theme; replaced —
        never just removed — so keyboard focus stays visible. */
-    .cfg-field input:focus, select.cfg-site:focus {
+    input[type="text"]:focus, input[type="password"]:focus, select.cfg-site:focus {
       outline: none;
       border-color: rgba(90,132,102,0.8);
       box-shadow: 0 0 0 2px rgba(90,132,102,0.25);
@@ -5944,6 +5950,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <nav class="tabs" role="tablist">
     <button class="tab active" id="tab-sites" type="button" role="tab">Sites</button>
     <button class="tab" id="tab-server" type="button" role="tab">Server</button>
+    <button class="tab" id="tab-stats" type="button" role="tab">Statistics</button>
   </nav>
 
   <!-- ══ Publish — one card per site: drop or choose its folder, publish.
@@ -5958,19 +5965,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     <p class="error hidden" id="sites-error"></p>
   </div>
 
-  <div id="panel-server" role="tabpanel" class="hidden">
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Server status</span>
-      </div>
-      <div class="card-body">
-        <div class="rows" id="host-rows"></div>
-        <div class="btn-row" style="margin-top:0.6rem">
-          <button class="action" id="btn-start" type="button">Start the server</button>
-        </div>
-      </div>
-    </div>
+  <div id="panel-stats" role="tabpanel" class="hidden">
 
     <div class="card">
       <div class="card-head">
@@ -5989,8 +5984,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         happened to it. Counted across every site the server answers for,
         not one site alone; visitor IP addresses stay in the server log,
         readable in the terminal.</p>
-        <div class="rows" id="traffic-rows"></div>
-        <div class="btn-row" style="margin-top:0.9rem">
+        <div class="rows" id="traffic-rows" style="margin-top:1.1rem"></div>
+        <div class="btn-row" style="margin-top:1.1rem">
           <button class="action" id="btn-traffic-refresh" type="button">Refresh</button>
         </div>
         <p class="error hidden" id="traffic-error"></p>
@@ -6009,6 +6004,23 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         server usually means a bot, not popularity.</p>
       </div>
     </div>
+  </div>
+
+  <div id="panel-server" role="tabpanel" class="hidden">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Server status</span>
+      </div>
+      <div class="card-body">
+        <div class="rows" id="host-rows"></div>
+        <div class="btn-row" style="margin-top:0.6rem">
+          <button class="action" id="btn-start" type="button">Start</button>
+          <button class="action" id="btn-restart" type="button">Restart</button>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-head">
         <span class="card-title">Server settings</span>
@@ -6053,12 +6065,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
-  const PANELS = { sites: 'panel-sites', server: 'panel-server' };
+  const PANELS = { sites: 'panel-sites', server: 'panel-server',
+                   stats: 'panel-stats' };
 
   function showTab(name) {
     // Old bookmarks still land somewhere sensible.
-    if (['status', 'config', 'settings', 'analytics', 'traffic'].includes(name))
-      name = 'server';
+    if (['status', 'config', 'settings'].includes(name)) name = 'server';
+    if (['analytics', 'traffic'].includes(name)) name = 'stats';
     if (name === 'publish') name = 'sites';
     if (!PANELS[name]) name = 'sites';
     for (const key of Object.keys(PANELS)) {
@@ -6066,13 +6079,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       $('tab-' + key).classList.toggle('active', key === name);
     }
     refresh();  // every tab renders from the same /status + /config truth
-    if (name === 'server') { loadTraffic(); startMeter(); } else stopMeter();
+    if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
 
   $('tab-sites').addEventListener('click', () => showTab('sites'));
   $('tab-server').addEventListener('click', () => showTab('server'));
+  $('tab-stats').addEventListener('click', () => showTab('stats'));
 
   /* ══ The page's truth: /status and /config fetched together, rendered
      into both tabs at once. ══ */
@@ -6151,13 +6165,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
   }
 
-  $('btn-start').addEventListener('click', async () => {
-    const b = $('btn-start');
+  async function serviceOp(b, op) {
     b.disabled = true;
     clearError($('cfg-host-error'));
     try {
       const r = await fetch('/service?t=' + encodeURIComponent(CODE),
-                            { method: 'POST', body: '{}' });
+                            { method: 'POST', body: JSON.stringify({ op }) });
       let data = {};
       try { data = await r.json(); } catch { data = {}; }
       if (!r.ok || data.result !== 'ok')
@@ -6168,7 +6181,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                 (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
     }
     b.disabled = false;
-  });
+  }
+
+  $('btn-start').addEventListener('click', () => serviceOp($('btn-start'), 'start'));
+  $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
 
   $('btn-traffic-refresh').addEventListener('click', loadTraffic);
   $('traffic-window').addEventListener('change', loadTraffic);
@@ -6182,8 +6198,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
      runs its certificate issuance, on the Publish card. ══ */
 
   const HOST_FIELDS = [
-    ['email', 'Email (ACME registration)',
-     'Where the certificate authority sends renewal and expiry notices.'],
+    ['email', 'Email',
+     'Registers this server with the certificate authority — one account for ' +
+     'every site here, not one per domain. Where renewal and expiry notices go.'],
     ['rate_limit', 'Rate limit',
      'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
     ['auth_rate_limit', 'Auth rate limit',
@@ -6230,6 +6247,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     $('btn-start').disabled = !!d.running;
     $('btn-start').title = d.running ? 'The server is already running'
                                      : 'Start the installed system service';
+    $('btn-restart').disabled = !d.running;
+    $('btn-restart').title = d.running
+      ? 'Stop and start the service — applies a port change, or clears a wedged process'
+      : 'Nothing to restart — the server is stopped';
 
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
@@ -6613,9 +6634,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `placeholder="example.com" value="${escapeHtml(siteData.domain || '')}">` +
          `<span class="switch-act"><button class="action tiny dom" type="button">` +
          `Set</button></span></span></div>` +
-         `<div class="cfg-hint dom-hint">Point the domain's DNS at this server ` +
-         `first (an A record to this box's IP).</div>` +
-
          `<div class="switch-row"><span class="k">Certificate</span>` +
          `<span class="switch-value"><span class="cert-state"></span>` +
          `<span class="switch-act"><button class="action tiny cert" type="button">` +
@@ -6630,6 +6648,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<div class="btn-row auth-save hidden" style="margin-top:0.9rem">` +
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
+
+         `<p class="hint">A certificate is issued only for a name that ` +
+         `already points here — check that the domain's DNS has an A record ` +
+         `to this server's IP before requesting one.</p>` +
 
          `<div class="split"></div>` +
          `<div class="btn-row">` +
@@ -7057,17 +7079,21 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             # that can only bring it back is a repair tool.
             if length > 512:
                 return self._respond(413, "Body too large.")
-            self.rfile.read(length)
+            try:
+                body_op = json.loads(self.rfile.read(length)).get("op", "start")
+            except (ValueError, TypeError):
+                body_op = "start"
             if not _service_file_exists():
                 return self._respond(422, json.dumps(
                     {"error": "no system service installed — run 'enable' in the terminal"}),
                     "application/json")
+            verb = "restart" if str(body_op) == "restart" else "start"
             try:
-                subprocess.run(["systemctl", "start", "servette"],
+                subprocess.run(["systemctl", verb, "servette"],
                                check=True, capture_output=True)
             except (OSError, subprocess.CalledProcessError) as e:
                 return self._respond(500, json.dumps(
-                    {"error": f"could not start the service ({e})"}), "application/json")
+                    {"error": f"could not {verb} the service ({e})"}), "application/json")
             return self._respond(200, json.dumps({"result": "ok"}), "application/json")
 
         if path == "/sites":
@@ -7479,11 +7505,14 @@ def _health_checks():
         offer = _swap_offer(rec // (1024 * 1024) if rec else None,
                             os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
         have = (ours_mb or 0) + foreign_mb
+        want = (rec // (1024 * 1024)) if rec else None
         rows.append({"key": "swap", "site": None, "ok": offer is None, "label": "Swap",
-                     "detail": ((f"{have} MB active" if have else "not needed at this host's memory")
+                     "detail": ((f"{have} MB active"
+                                 + (f" (recommended: {want} MB)" if want else "")
+                                 if have else "not needed at this host's memory")
                                 if offer is None else
-                                (f"{have} MB active, below the {offer} MB recommendation — setup offers a resize"
-                                 if have else f"none — setup offers a {offer} MB swapfile"))})
+                                (f"{have} MB active, below the {offer} MB recommendation — 'enable' offers a resize"
+                                 if have else f"none — 'enable' offers a {offer} MB swapfile"))})
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""

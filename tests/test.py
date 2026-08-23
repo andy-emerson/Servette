@@ -1249,6 +1249,29 @@ def run_dispatch_tests(s):
         st, _ = ui_req("GET", "/traffic")
         check("GET /traffic without the code is refused", st == 403)
 
+        # Telling is all the page does about upgrades; installing stays in
+        # the terminal, and the check is asked for rather than volunteered.
+        check("A newer release reads as newer, an older one does not",
+              s._version_parts("0.26.240") > s._version_parts("0.26.234")
+              and s._version_parts("0.27.1") > s._version_parts("0.26.999")
+              and not s._version_parts("0.26.234") > s._version_parts("0.26.234"))
+        saved_latest = s._latest_release
+        s._latest_release = lambda ttl=0: "0.99.999"
+        check("...so a newer PyPI release is offered as news",
+              s._upgrade_available() == "0.99.999")
+        s._latest_release = lambda ttl=0: s.__version__
+        check("...and the current one is not",
+              s._upgrade_available() is None)
+        s._latest_release = lambda ttl=0: None
+        check("...nor is silence from PyPI mistaken for anything",
+              s._upgrade_available() is None)
+        st, body = ui_req("GET", f"/update?t={ui_code}")
+        check("GET /update answers the question the page asks",
+              st == 200 and b'"latest"' in body)
+        st, _ = ui_req("GET", "/update")
+        check("...and is code-gated like every other route", st == 403)
+        s._latest_release = saved_latest
+
         # The swap size the terminal has always asked for, asked for here —
         # the same core underneath, guarded before it can reach the disk.
         check("The status snapshot carries the swap figures",

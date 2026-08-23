@@ -644,6 +644,18 @@
          : `<span class="warn">${escapeHtml(c.detail)}</span>`);
 
   let statusData = null;
+  let latestVersion = null;   // filled once per page, by asking
+
+  // Asked once when the page opens, and never on a timer: Servette does not
+  // phone home on its own schedule, and this is the operator asking.
+  async function checkUpgrade() {
+    try {
+      const r = await fetch('/update?t=' + encodeURIComponent(CODE));
+      if (!r.ok) return;
+      latestVersion = (await r.json()).latest || null;
+      if (latestVersion) renderServer();
+    } catch (e) { /* offline, or PyPI unreachable — the row simply omits it */ }
+  }
 
   async function refresh() {
     clearError($('cfg-host-error'));
@@ -816,7 +828,11 @@
       row('Status', d.running
         ? '<span class="dot"></span>running'
         : '<span class="warn">stopped</span>') +
-      row('Version', 'v' + (d.version || '?')) +
+      row('Version', 'v' + (d.version || '?') +
+        (latestVersion
+          ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
+            ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
+          : '')) +
       hostChecks.map(factRow).join('');
 
     // Present always, dim when there is nothing to start — the same rule
@@ -937,6 +953,15 @@
     clearInterval(meterTimer);
     meterTimer = null;
   }
+
+  // A backgrounded tab has nobody reading it, and a closing one is gone:
+  // either way the polling stops, so an abandoned page cannot keep dialing
+  // a tunnel whose command has ended.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopMeter();
+    else if (!$('panel-stats').classList.contains('hidden')) startMeter();
+  });
+  window.addEventListener('pagehide', stopMeter);
 
   async function saveSettings(values, siteIdx, badge, errEl) {
     clearError(errEl);
@@ -1569,7 +1594,10 @@
   /* ══ Feature gate & startup. ══ */
   const supported = typeof CompressionStream === 'function';
   $(supported ? 'app' : 'unsupported').classList.remove('hidden');
-  if (supported) showTab((location.hash || '').replace('#', ''));
+  if (supported) {
+    showTab((location.hash || '').replace('#', ''));
+    checkUpgrade();
+  }
 </script>
 
 </body>

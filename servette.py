@@ -6135,6 +6135,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          : `<span class="warn">${escapeHtml(c.detail)}</span>`);
 
   let statusData = null;
+  let latestVersion = null;   // filled once per page, by asking
+
+  // Asked once when the page opens, and never on a timer: Servette does not
+  // phone home on its own schedule, and this is the operator asking.
+  async function checkUpgrade() {
+    try {
+      const r = await fetch('/update?t=' + encodeURIComponent(CODE));
+      if (!r.ok) return;
+      latestVersion = (await r.json()).latest || null;
+      if (latestVersion) renderServer();
+    } catch (e) { /* offline, or PyPI unreachable — the row simply omits it */ }
+  }
 
   async function refresh() {
     clearError($('cfg-host-error'));
@@ -6307,7 +6319,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       row('Status', d.running
         ? '<span class="dot"></span>running'
         : '<span class="warn">stopped</span>') +
-      row('Version', 'v' + (d.version || '?')) +
+      row('Version', 'v' + (d.version || '?') +
+        (latestVersion
+          ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
+            ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
+          : '')) +
       hostChecks.map(factRow).join('');
 
     // Present always, dim when there is nothing to start — the same rule
@@ -6428,6 +6444,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     clearInterval(meterTimer);
     meterTimer = null;
   }
+
+  // A backgrounded tab has nobody reading it, and a closing one is gone:
+  // either way the polling stops, so an abandoned page cannot keep dialing
+  // a tunnel whose command has ended.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopMeter();
+    else if (!$('panel-stats').classList.contains('hidden')) startMeter();
+  });
+  window.addEventListener('pagehide', stopMeter);
 
   async function saveSettings(values, siteIdx, badge, errEl) {
     clearError(errEl);
@@ -7060,7 +7085,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   /* ══ Feature gate & startup. ══ */
   const supported = typeof CompressionStream === 'function';
   $(supported ? 'app' : 'unsupported').classList.remove('hidden');
-  if (supported) showTab((location.hash || '').replace('#', ''));
+  if (supported) {
+    showTab((location.hash || '').replace('#', ''));
+    checkUpgrade();
+  }
 </script>
 
 </body>
@@ -7104,7 +7132,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path not in ("/", "/status", "/config", "/traffic"):
+        if path not in ("/", "/status", "/config", "/traffic", "/update"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -7131,6 +7159,14 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                            "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
+        if path == "/update":
+            # Asked, never volunteered: the page requests this when the
+            # operator opens it, and the answer is cached for six hours.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            return self._respond(200, json.dumps({"latest": _upgrade_available()}),
+                                 "application/json")
+
         if path == "/traffic":
             # The Analytics tab's feed: the journal re-read as counts, and
             # never carrying a visitor's IP. The window is the reader's
@@ -7717,6 +7753,51 @@ def _load_snapshot():
             out["cpu_ns"] = int((times[0] + times[1]) * 1_000_000_000)
             out["cpu_percent"] = (times[0] + times[1]) / elapsed * 100
     return out
+
+
+_LATEST_CACHE = {"at": None, "version": None}
+
+
+def _latest_release(ttl=21600):
+    """The newest Servette on PyPI, or None when the question cannot be
+    answered. Servette makes no outbound call on its own schedule: this one
+    happens when the operator opens the admin page and asks, is cached for
+    six hours, and fails silently — a box with no route out, or a PyPI
+    having a bad day, must cost the page nothing but this row."""
+    now = time.monotonic()
+    if _LATEST_CACHE["at"] is not None and now - _LATEST_CACHE["at"] < ttl:
+        return _LATEST_CACHE["version"]
+    version = None
+    try:
+        with urllib.request.urlopen(
+                "https://pypi.org/pypi/servette/json", timeout=4) as response:
+            version = json.loads(response.read().decode("utf-8"))["info"]["version"]
+    except Exception:
+        version = None
+    _LATEST_CACHE["at"], _LATEST_CACHE["version"] = now, version
+    return version
+
+
+def _version_parts(text):
+    """A version as comparable integers, ignoring anything that is not one —
+    Servette's own scheme is 0.<yy>.<doy>, and a suffix should never make a
+    release look older than it is."""
+    parts = []
+    for chunk in str(text).split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def _upgrade_available():
+    """The newer version's string when PyPI has one, else None. Telling is
+    all Servette does here: installing is the package manager's job, and
+    stays in the terminal (DECISIONS, 'pip install is the only installation
+    path')."""
+    latest = _latest_release()
+    if latest and _version_parts(latest) > _version_parts(__version__):
+        return latest
+    return None
 
 
 def _swap_snapshot():

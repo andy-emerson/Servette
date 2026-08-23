@@ -1142,8 +1142,8 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
   </div>
 
   <div class="note">
-    This page ships inside Servette itself. Served by
-    <a href="https://github.com/andy-emerson/servette">Servette</a> —
+    Served by
+    <a href="https://servette.org">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
 
@@ -1466,7 +1466,7 @@ _CONNECTION_TEST_PAGE = """<!DOCTYPE html>
 
   <div class="note">
     Served by
-    <a href="https://github.com/andy-emerson/servette">Servette</a> —
+    <a href="https://servette.org">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
 
@@ -5946,7 +5946,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       cursor: pointer;
     }
     .dropstrip:hover { border-color: rgba(90,132,102,0.5); }
-    .dropstrip .drop-lead { color: var(--muted); }
+    .dropstrip .drop-lead { font-size: 0.8rem; color: var(--text); }
     .dropstrip a { color: var(--brand); text-decoration: none; }
     .dropstrip a:hover { text-decoration: underline; }
 
@@ -6062,7 +6062,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Server status</span>
+        <span class="card-title">Status</span>
       </div>
       <div class="card-body">
         <div class="switch-row">
@@ -6090,7 +6090,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Server settings</span>
+        <span class="card-title">Settings</span>
         <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
       </div>
       <div class="card-body">
@@ -6596,8 +6596,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<button class="action do-reactivate" type="button">Reactivate</button></div>`)
 
       // ── Publish: the card's primary action, at the top of it.
-      : (`<div class="dropstrip"><span class="drop-lead">drop this site's ` +
-         `folder here, or <a href="#">choose it</a></span></div>` +
+      : (`<div class="dropstrip"><span class="drop-lead">Drop this site's folder here</span>` +
+         `<span>or <a href="#">choose it</a></span></div>` +
          `<input type="file" webkitdirectory multiple class="hidden">` +
          `<p class="hint summary">The folder to drop is the one holding the ` +
          `site's <b>index.html</b>.</p>` +
@@ -7104,12 +7104,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       refresh();
     } catch (e) {
       setBadge(badge, 'badge-red', '✕ not saved');
-      // Not reason(): the two halves end differently, and the wording is
-      // ruled — the tunnel sentence takes a new sentence, the server's own
-      // takes a dash.
-      showError(errEl, (e instanceof TypeError)
-        ? TUNNEL_DOWN + ' Nothing was changed.'
-        : e.message + ' — nothing was changed.');
+      showError(errEl, reason(e) + ' Nothing was changed.');
     }
   }
 

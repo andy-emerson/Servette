@@ -15,10 +15,13 @@ inert.
 **Why (Agent, not part of the ruling):** the link opens in its own tab,
 because the operator is mid-task on this page and a stray click on the
 page's own name would abandon it.
-**Open, not decided here:** where the *public* pages' "Servette" link
-should point. Both still point at the GitHub repository, unchanged from
-before this ruling; whether they should follow the admin page to
-servette.org has not been put to the Human. *(2026-08-23)*
+Every footer link on every page points at **servette.org**, not at the
+GitHub repository — the 404 body and the connection test included. The
+404's footer reads exactly as the connection test's does: "Served by
+Servette — The Simple, Secure, Static-Site Server." The sentence about
+the page shipping inside Servette is gone from it; that is a fact about
+the build, not something a visitor who hit a missing page needs.
+*(2026-08-23)*
 
 ## The page is three tabs: a site is one card, the server is its own page
 

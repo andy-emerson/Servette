@@ -1010,13 +1010,14 @@ def run_dispatch_tests(s):
     adm_out = adm_buf.getvalue()
     check("admin starts the page server with site 0 and the embedded page",
           ui_started == [(s.config.sites[0], s._UI_ADMIN_PAGE)])
-    check("...prints the printed-URL door with this run's code",
-          f"http://localhost:{s._UI_PORT}/?t=abc123" in adm_out)
+    check("...prints the stable link and this run's passcode side by side",
+          f"http://localhost:{s._UI_PORT}/" in adm_out
+          and "passcode  abc123" in adm_out)
     check("...keeps the happy path to one pointer line",
           "page won't load? type 'help'" in adm_out)
-    check("...and 'help' summons the tunnel line and the bookmark door",
+    check("...and 'help' summons the tunnel line and reprints the passcode",
           f"LocalForward {s._UI_PORT} 127.0.0.1:{s._UI_PORT}" in adm_out
-          and "this run's code: abc123" in adm_out)
+          and "passcode: abc123" in adm_out)
     check("...sets the terminal narration hook",
           callable(getattr(fake_ui, "on_publish", None)))
     check("...and closes the page on the way out",
@@ -1106,10 +1107,11 @@ def run_dispatch_tests(s):
               httpd.socket.getsockname()[0] == "127.0.0.1")
 
         st, body = ui_req("GET", "/")
-        check("The bare URL answers the pairing page, never content",
-              st == 200 and b"code printed in your terminal" in body
+        check("The bare URL answers the login page, never content",
+              st == 200 and b"Passcode" in body
+              and b"Server administration" in body
               and b"publish page" not in body)
-        check("...and the pairing page does not leak the code",
+        check("...and the login page does not leak the passcode",
               ui_code.encode() not in body)
         st, body = ui_req("GET", f"/?t={ui_code}")
         check("The printed URL's code opens the page",
@@ -1136,6 +1138,9 @@ def run_dispatch_tests(s):
               if r["key"] == "password" and r["site"] == 0][0]
         check("...but a username with nothing stored to check is flagged",
               not pw["ok"])
+        check("...and the terminal lists that same half-state as the issue",
+              any("locked out" in i for i in s._production_issues())
+              and not any("no password" in i for i in s._production_issues()))
         (s.config.sites[0].username, s.config.sites[0].password_hash) = saved_hc
         st, _ = ui_req("GET", "/status")
         check("GET /status without the code is refused", st == 403)

@@ -2,9 +2,9 @@
 <!-- src/admin — the operator's page, the browser half of the paired
      surfaces. Served only by the loopback page server (127.0.0.1, reached
      through the operator's SSH tunnel via `servette admin`), never by the
-     public site. One page, tabs per feature: Status (health from the
-     machine's side), Publish (one card per site — the cards are the site
-     list), Config (password protection and host basics).
+     public site. One page, two tabs: Publish (one card per site — the
+     cards ARE the site list) and Settings (the selected site's truth and
+     knobs, then the server's).
      Constraints, all load-bearing:
 
      - No signature, no key. Being here IS the authentication: only the
@@ -313,7 +313,7 @@
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline">Admin tool — over your SSH tunnel</div>
+    <div class="tagline">Server administration</div>
   </div>
 
   <!-- Shown instead of the app when the browser lacks the pipeline. -->
@@ -588,10 +588,13 @@
       ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
       : 'Needs a domain — a site without one has no public name to check';
 
+    // Public or private is a property of the site, not a security verdict:
+    // public sites are most sites. Private means a login; the fields exist
+    // only while the site is (or is becoming) private.
     const on = authOn(site);
     const off = !on;
     $('btn-auth-toggle').textContent =
-      on ? 'Turn password protection off' : 'Turn password protection on';
+      on ? 'Make this site public' : 'Make this site private';
     $('cfg-site-fields').innerHTML =
       field('username', 'Username', site.username,
             { off, hint: 'What visitors type to open the site.' }) +
@@ -601,11 +604,11 @@
                   hint: 'Stored only as a hash on your server. Spaces count; nothing is trimmed.' });
     $('auth-hint').textContent = on
       ? (site.has_password
-          ? 'The site asks every visitor for this login.'
-          : 'Choose a username and a password, then save — the site will ask every visitor for them.')
+          ? 'The site is private — visitors sign in with this login.'
+          : 'Choose a username and a password, then save — the site becomes private.')
       : (site.username
-          ? 'Saving now removes the login: the site becomes public and the stored password is deleted.'
-          : 'The site is public — anyone can view it. Turn protection on to require a login.');
+          ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+          : 'The site is public — anyone can view it.');
 
     // ── This server: the box's identity and health, then the host knobs. ──
     const d = statusData || {};
@@ -677,10 +680,10 @@
     const pw = $('cfg-password').value;
     if (!username)
       return showError($('cfg-site-error'),
-        'A username is needed — or turn protection off.');
+        'A username is needed — or make the site public.');
     if (!site.has_password && !pw)
       return showError($('cfg-site-error'),
-        'A password is needed the first time protection turns on.');
+        'A password is needed the first time a site turns private.');
     saveSettings([], siteIdx, $('cfg-site-badge'), $('cfg-site-error'),
                  Object.assign({ username }, pw ? { password: pw } : {}));
   });
@@ -691,7 +694,7 @@
      The server's contract (_extract_bundle / _land_bundle): a tar.gz of
      plain files and directories, paths relative to the site root, no entry
      escaping it, under 500 MB uncompressed — POSTed to /upload with this
-     run's pairing code. ══ */
+     run's passcode. ══ */
 
   function splitTarName(path) {
     const len = (s) => new TextEncoder().encode(s).length;
@@ -1113,7 +1116,7 @@
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');
         } else if (resp.status === 403) {
-          throw new Error('The server refused the pairing code — close this page, ' +
+          throw new Error('The server refused the passcode — close this page, ' +
                           'and open the fresh link the terminal prints for this run.');
         } else {
           throw new Error('The server rejected the bundle' +

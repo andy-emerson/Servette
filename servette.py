@@ -4335,7 +4335,7 @@ def _config_show():
 def _config_sites():
     _section("Sites")
     for i, site in enumerate(config.sites):
-        auth = "password-protected" if site.username else "no password"
+        auth = "private" if site.username else "public"
         state = "" if site.active else ", DEACTIVATED (set active=yes to serve)"
         print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}{state}")
     print()
@@ -5320,14 +5320,53 @@ _UI_MAX_BAD_CODES = 5     # then the run stops authenticating anyone: a six-char
                           # process free to try millions over loopback
 
 
-# The pairing page
-_UI_PAIR_PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Servette</title></head>
-<body style="font-family: system-ui, sans-serif; max-width: 26rem; margin: 4rem auto;">
-<h1>Servette</h1>
-<p>Enter the code printed in your terminal:</p>
-<form method="get" action="/"><input name="t" autofocus autocomplete="off">
-<button>Open</button></form>
+# The login page
+_UI_LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Servette — Log in</title>
+<style>
+  body { background: #0e0e0e; color: #e8e8e8; min-height: 100vh; margin: 0;
+         display: flex; flex-direction: column; align-items: center;
+         justify-content: center; padding: 2rem; box-sizing: border-box;
+         font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo,
+                      Consolas, 'Liberation Mono', 'Courier New', monospace; }
+  .logo { font-size: 3rem; font-weight: 500; line-height: 1; }
+  .logo .ette { color: #5A8466; }
+  .logo .cursor { animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+  .tagline { margin-top: 0.5rem; color: #555; font-size: 0.75rem;
+             letter-spacing: 0.08em; text-transform: uppercase; }
+  .card { margin-top: 3rem; width: 100%; max-width: 26rem; background: #161616;
+          border: 1px solid #2a2a2a; border-radius: 8px; padding: 1.25rem; }
+  label { display: block; color: #555; font-size: 0.7rem;
+          letter-spacing: 0.1em; text-transform: uppercase;
+          margin-bottom: 0.35rem; }
+  input { width: 100%; box-sizing: border-box; font-family: inherit;
+          font-size: 0.9rem; color: #e8e8e8; background: #0e0e0e;
+          border: 1px solid #2a2a2a; border-radius: 4px;
+          padding: 0.6rem 0.7rem; }
+  input:focus { outline: none; border-color: rgba(90,132,102,0.8);
+                box-shadow: 0 0 0 2px rgba(90,132,102,0.25); }
+  button { margin-top: 0.75rem; font-family: inherit; font-size: 0.75rem;
+           color: #e8e8e8; background: rgba(90,132,102,0.15);
+           border: 1px solid rgba(90,132,102,0.6); border-radius: 4px;
+           padding: 0.5rem 0.9rem; cursor: pointer; }
+  .hint { margin-top: 0.75rem; color: #555; font-size: 0.72rem;
+          line-height: 1.7; }
+</style></head>
+<body>
+<div class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
+<div class="tagline">Server administration</div>
+<div class="card">
+  <form method="get" action="/">
+    <label for="t">Passcode</label>
+    <input id="t" name="t" autofocus autocomplete="off">
+    <button>Log in</button>
+  </form>
+  <p class="hint">The passcode is printed in your terminal by
+  'servette admin', fresh for each run.</p>
+</div>
 </body></html>
 """
 
@@ -5337,9 +5376,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 <!-- src/admin — the operator's page, the browser half of the paired
      surfaces. Served only by the loopback page server (127.0.0.1, reached
      through the operator's SSH tunnel via `servette admin`), never by the
-     public site. One page, tabs per feature: Status (health from the
-     machine's side), Publish (one card per site — the cards are the site
-     list), Config (password protection and host basics).
+     public site. One page, two tabs: Publish (one card per site — the
+     cards ARE the site list) and Settings (the selected site's truth and
+     knobs, then the server's).
      Constraints, all load-bearing:
 
      - No signature, no key. Being here IS the authentication: only the
@@ -5648,7 +5687,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline">Admin tool — over your SSH tunnel</div>
+    <div class="tagline">Server administration</div>
   </div>
 
   <!-- Shown instead of the app when the browser lacks the pipeline. -->
@@ -5923,10 +5962,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
       : 'Needs a domain — a site without one has no public name to check';
 
+    // Public or private is a property of the site, not a security verdict:
+    // public sites are most sites. Private means a login; the fields exist
+    // only while the site is (or is becoming) private.
     const on = authOn(site);
     const off = !on;
     $('btn-auth-toggle').textContent =
-      on ? 'Turn password protection off' : 'Turn password protection on';
+      on ? 'Make this site public' : 'Make this site private';
     $('cfg-site-fields').innerHTML =
       field('username', 'Username', site.username,
             { off, hint: 'What visitors type to open the site.' }) +
@@ -5936,11 +5978,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                   hint: 'Stored only as a hash on your server. Spaces count; nothing is trimmed.' });
     $('auth-hint').textContent = on
       ? (site.has_password
-          ? 'The site asks every visitor for this login.'
-          : 'Choose a username and a password, then save — the site will ask every visitor for them.')
+          ? 'The site is private — visitors sign in with this login.'
+          : 'Choose a username and a password, then save — the site becomes private.')
       : (site.username
-          ? 'Saving now removes the login: the site becomes public and the stored password is deleted.'
-          : 'The site is public — anyone can view it. Turn protection on to require a login.');
+          ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+          : 'The site is public — anyone can view it.');
 
     // ── This server: the box's identity and health, then the host knobs. ──
     const d = statusData || {};
@@ -6012,10 +6054,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const pw = $('cfg-password').value;
     if (!username)
       return showError($('cfg-site-error'),
-        'A username is needed — or turn protection off.');
+        'A username is needed — or make the site public.');
     if (!site.has_password && !pw)
       return showError($('cfg-site-error'),
-        'A password is needed the first time protection turns on.');
+        'A password is needed the first time a site turns private.');
     saveSettings([], siteIdx, $('cfg-site-badge'), $('cfg-site-error'),
                  Object.assign({ username }, pw ? { password: pw } : {}));
   });
@@ -6026,7 +6068,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
      The server's contract (_extract_bundle / _land_bundle): a tar.gz of
      plain files and directories, paths relative to the site root, no entry
      escaping it, under 500 MB uncompressed — POSTed to /upload with this
-     run's pairing code. ══ */
+     run's passcode. ══ */
 
   function splitTarName(path) {
     const len = (s) => new TextEncoder().encode(s).length;
@@ -6448,7 +6490,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');
         } else if (resp.status === 403) {
-          throw new Error('The server refused the pairing code — close this page, ' +
+          throw new Error('The server refused the passcode — close this page, ' +
                           'and open the fresh link the terminal prints for this run.');
         } else {
           throw new Error('The server rejected the bundle' +
@@ -6497,7 +6539,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
 # The loopback handler
 class _UIHandler(http.server.BaseHTTPRequestHandler):
-    """The loopback server's one handler. GET / is the page (pairing page
+    """The loopback server's one handler. GET / is the page (login page
     until the code is presented); POST /upload lands a content bundle. After
     _UI_MAX_BAD_CODES wrong guesses the run stops authenticating anyone,
     including the right code — re-run the command for a fresh one."""
@@ -6535,12 +6577,12 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
-            return self._respond(403, "Too many wrong codes. Close this page and re-run the command.")
+            return self._respond(403, "Too many wrong passcodes. Close this page and re-run the command.")
         if path == "/status":
             # The inside view, for the page's Status tab: exactly what
             # `status --json` prints, because it is the same function.
             if auth != "ok":
-                return self._respond(403, "Not paired.")
+                return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps(_status_data()), "application/json")
         if path == "/config":
             # The Config tab's read half: exactly the vocabulary `set`
@@ -6548,7 +6590,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             # has_password, a boolean only, so the page can show whether
             # protection is on without the hash ever crossing the wire.
             if auth != "ok":
-                return self._respond(403, "Not paired.")
+                return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps({
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
@@ -6560,14 +6602,14 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             }), "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)
-        return self._respond(200, _UI_PAIR_PAGE)
+        return self._respond(200, _UI_LOGIN_PAGE)
 
     def do_POST(self):
         path = urlsplit(self.path).path
         if path not in ("/upload", "/config", "/sites"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
-            return self._respond(403, "Not paired.")
+            return self._respond(403, "Not logged in.")
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -6738,10 +6780,13 @@ def cmd_admin():
         "content swapped in — restore-site undoes it.")
 
     try:
-        # The happy path pays one line; the troubleshooting lives behind
-        # 'help', summoned exactly when the page fails to load.
+        # Link and passcode, printed apart: the link is stable and worth a
+        # bookmark, the passcode is this run's — the login page marries the
+        # two. The troubleshooting lives behind 'help', summoned exactly
+        # when the page fails to load.
         print("  The admin page is up:")
-        print(f"    open  http://localhost:{_UI_PORT}/?t={code}")
+        print(f"    link      http://localhost:{_UI_PORT}/")
+        print(f"    passcode  {code}")
         print("    (page won't load? type 'help')")
         print()
         while True:
@@ -6755,8 +6800,8 @@ def cmd_admin():
                 print("  the tunnel. Add this line once to ~/.ssh/config on the computer")
                 print("  you ssh FROM, inside this server's entry, then reconnect:")
                 print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
-                print(f"  You can also bookmark http://localhost:{_UI_PORT}/ — the bare page")
-                print(f"  asks for this run's code: {code}")
+                print(f"  The link is worth a bookmark — the login page it opens")
+                print(f"  asks for this run's passcode: {code}")
                 continue
             if raw in ("back", "done", "exit", "quit", "q"):
                 break
@@ -6798,8 +6843,11 @@ def _production_issues():
             # contains, gets no HSTS, and is not reachable by name — so 'add a
             # domain' is the advice that actually changes any of that.
             issues.append(f"self-signed certificate{tag} — run 'config cert' to add a domain")
-        if not site.username:
-            issues.append(f"no password protection{tag} — run 'config' to set credentials")
+        # A public site is deliberately not listed: public is a choice, not
+        # a defect — most sites are public. The half-state IS a defect: a
+        # username with nothing stored to check locks every visitor out.
+        if site.username and not site.password_hash:
+            issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
         if bool(site.publish_url) != bool(site.publish_key):
             issues.append(f"publish channel partially configured{tag} — run 'config publish' to finish setup")
     mem_kb, avail_kb, committed_kb = _meminfo()
@@ -6972,11 +7020,11 @@ def _health_checks():
         # to check against, which locks every visitor out.
         half_auth = bool(site.username) and not site.password_hash
         rows.append({"key": "password", "site": i, "ok": not half_auth,
-                     "label": tag + "Password",
-                     "detail": ("enabled" if site.username and site.password_hash
-                                else "a username with no stored password — set one below, or turn protection off"
+                     "label": tag + "Access",
+                     "detail": ("private — visitors sign in" if site.username and site.password_hash
+                                else "a username with no stored password — set one below, or make the site public"
                                 if half_auth
-                                else "none — the site is public; the password form below adds a login")})
+                                else "public — anyone can view it (the form below makes it private)")})
         half = bool(site.publish_url) != bool(site.publish_key)
         rows.append({"key": "channel", "site": i, "ok": not half,
                      "label": tag + "Publish channel",

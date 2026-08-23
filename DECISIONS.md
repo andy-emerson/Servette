@@ -6,6 +6,113 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The page is three tabs: a site is one card, the server is its own page
+
+**Ruled (Human):** **Sites** holds one card per site carrying everything
+about that site — publish, status, what it serves at, its domain, its
+certificate, its access switch — so every question about a site is
+answered in one place. **Server** holds what the box is doing and how it
+is set. **Statistics** holds the measurements, last, because they are
+consulted rather than worked in. The site dropdown is deleted outright:
+a card per site needs no selector to say which site it means. The tab
+is **Site** with one and **Sites** with more.
+**Why:** the selector scoped half a tab and confused the other half —
+three rounds of fussing over that control were really telling us the
+structure was wrong. **Supersedes** "The page is two tabs" below.
+**Rejected:** folding Statistics into Server (tried, and the Human
+preferred measurement kept apart); "Site(s)" as a label (a parenthetical
+plural where a count is already known). *(2026-08-23)*
+
+## Naming a site and certifying it are two acts
+
+**Ruled (Human):** `name` writes the domain into the config — instant,
+and it cannot fail on someone else's DNS. `certificate` runs the
+issuance, when the operator asks for it. Between them a site may sit
+named but self-signed; that state is honest and loud on its card (amber,
+with **Get certificate** beside it) rather than hidden inside one button.
+**Why:** fused, a DNS mistake made *naming* appear to fail when the name
+was perfectly fine to store. Split, the name saves and the certificate
+becomes retryable — better failure semantics, and it is what the Human
+saw before the Agent did. **Amends** "The domain is granted from the
+Publish card" below.
+**Two bugs the split exposed, both fixed in the same pass:** the
+certificate op cannot judge itself by comparing the domain afterwards
+(the name is already set by then, so failure would read as success) — it
+reports `_obtain_trusted_cert`'s own verdict, distinguishing a refusal
+from a transient network failure; and a renamed site keeps its old
+certificate until a new one is asked for, so the health row compares the
+certificate's subject against the site's name rather than reporting a
+comfortable "89 days" about a certificate for somewhere else.
+*(2026-08-23)*
+
+## The page runs the service's lifecycle, never its installation
+
+**Ruled (Human):** the Server status row carries **Restart** and one
+button that is **Stop** while running and **Start** while stopped. Stop
+asks first, in the page's own voice. `enable` and `disable` stay
+terminal-only.
+**Why the earlier line moved:** stopping was withheld on the premise
+that a misclick could darken a box with no way back. The premise is
+false — the page is served by the `admin` command's own process, not the
+server's, so Start survives a stopped server and recovery is one click.
+What the principle still forbids is *installation*: removing the unit
+would take the page's own way back with it.
+**Rejected:** three buttons where two carry the states (restart is
+meaningless on a stopped server). *(2026-08-23)*
+
+## Every button reads the same way, and the page never borrows the browser's voice
+
+**Ruled (Human):** one look for every action button — Servette green
+when it can be pressed, brighter on hover, dim (still green) and
+unclickable when it cannot. Buttons stay put rather than appearing and
+disappearing, so nothing a reader learned moves. Confirmation is drawn
+by the page: the browser's own modal dialogs appear nowhere.
+**And attention is a sentence, not a color:** a fault names itself
+("Needs certificate", "Needs password"), amber carries the alarm without
+an exclamation mark, and the one signal with nowhere else to live — the
+server's own trouble — is a notice that says what is wrong and links
+where to fix it. **Facts are not victories:** health rows read as
+label-and-value, and only a row needing attention wears a mark.
+*(2026-08-23)*
+
+## The swapfile size is a setting on the page, as it always was in the terminal
+
+**Ruled (Human):** setup has always asked "Swapfile size in MB [Enter =
+1100, any size, n = skip]", so it is a number the operator picks, and the
+page asks the same question — a field among the host settings, applied
+by the same Save, resizing only when its number changed.
+`_apply_swapfile` is the shared mechanical core (disk-space check,
+swapoff, mkswap, the fstab line, and the failure path that rebuilds the
+previous size rather than leaving a memory-tight host worse than it
+started), so the two surfaces cannot drift.
+**Rejected:** the Agent's "an operation, not a setting" resistance,
+which did not survive contact with the code; a separate Resize button
+(one Save covers every setting). *(2026-08-23)*
+
+## The page reports an available upgrade; installing stays in the terminal
+
+**Ruled (Human):** Server status names a newer release when PyPI has one,
+and points at `pipx upgrade servette` — it never installs. The check is
+asked for rather than volunteered: it happens because an operator opened
+the page, is cached for six hours, times out in four seconds, and fails
+silently, so a box with no route out costs nothing but that row.
+**Why the line holds:** a self-updater would fetch, write into its own
+venv, and restart itself mid-flight — the machinery ruled out by "`pip
+install` is the only installation path" below. *(2026-08-23)*
+
+## It is a connection test
+
+**Ruled (Human):** the word is *test* — "test connection" is the idiom
+people expect on a button, and consistency across the documents was an
+argument against churn, not a reason the other word was better. Renamed
+in both pages, the admin button, and every document. The reserved path
+stays `/.well-known/servette-check`: it is a URL, and URLs that may be
+bookmarked or linked from an already-published site are not renamed over
+a word choice. The report leads with findings in the reader's language,
+each carrying its evidence beneath in a footnote's voice; a public site
+withholding its version reads as a pass, not a skip, because that is the
+design working. *(2026-08-23)*
+
 ## The front door is a login: link and passcode, printed apart
 
 **Ruled (Human):** the terminal prints the stable link and this run's
@@ -14,8 +121,8 @@ login page in the admin tool's own dress — dark, the logo, the
 tagline — whose one Passcode field submits the same `t` every request
 carries. A bookmark is the expected door: it holds the link, never the
 secret. With the flow itself teaching that the page rides the SSH
-tunnel, the admin tagline drops the mechanism and states only the
-identity: **Server administration**.
+tunnel, the taglines drop the mechanism and state only what each page
+is: **Login** on the door, **Admin** inside.
 **Rejected:** the code-bearing `?t=` URL as the *printed* door (two
 artifacts behaving differently — a magic link and a bare bookmark —
 where one flow teaches itself); the unstyled pairing form (browser-

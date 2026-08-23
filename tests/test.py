@@ -1047,6 +1047,14 @@ def run_dispatch_tests(s):
           and "useFolder" in s._UI_ADMIN_PAGE)
     check("...with a drop strip visible before anything is dragged",
           "dropstrip" in s._UI_ADMIN_PAGE)
+    # A drop target the size of one line of text is a target you have to aim
+    # at. The strip carries its own lead line and takes the click itself, so
+    # the picker is not reachable only through four exact words.
+    check("...sized and clickable as a drop target, not a caption",
+          "drop-lead" in s._UI_ADMIN_PAGE
+          and "q('.dropstrip').addEventListener" in s._UI_ADMIN_PAGE)
+    check("...and the footer saying where more is written down",
+          "servette.org" in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
           "outside" in s._UI_ADMIN_PAGE
           and "servette-check" in s._UI_ADMIN_PAGE)

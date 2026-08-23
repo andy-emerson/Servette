@@ -5722,6 +5722,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       line-height: 1.7;
     }
     .note b { color: var(--text); font-weight: 500; }
+    /* The one link that leaves this page, so it opens in its own tab: the
+       operator is mid-task here, and navigating away would lose it. */
+    .note a { color: #5A8466; text-decoration: none; }
+    .note a:hover { text-decoration: underline; }
 
     .hidden { display: none !important; }
 
@@ -5730,15 +5734,27 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       background: rgba(90,132,102,0.08);
     }
 
+    /* The primary action on a site card, sized like one: a target you can
+       drop a folder onto without aiming. The whole strip is clickable, so
+       the picker is reachable without hitting the link exactly. */
     .dropstrip {
-      padding: 0.8rem;
+      min-height: 116px;
+      padding: 1.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.35rem;
       border: 1px dashed var(--border);
-      border-radius: 4px;
+      border-radius: 6px;
       text-align: center;
       font-size: 0.72rem;
       color: var(--muted);
       letter-spacing: 0.04em;
+      cursor: pointer;
     }
+    .dropstrip:hover { border-color: rgba(90,132,102,0.5); }
+    .dropstrip .drop-lead { font-size: 0.8rem; color: var(--text); }
     .dropstrip a { color: #5A8466; text-decoration: none; }
     .dropstrip a:hover { text-decoration: underline; }
     .site-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
@@ -6080,6 +6096,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     This page is served on <b>127.0.0.1</b> through your SSH tunnel. It does
     not exist on the public internet. No signature or password is required
     because <b>only your SSH key can open the tunnel</b>.
+    More information is available at
+    <a href="https://servette.org" target="_blank" rel="noopener">servette.org</a>.
   </div>
 
 </div>
@@ -6751,7 +6769,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `and visitors get the plain not-found answer until it is reactivated.</p>` +
          `<div class="btn-row" style="margin-top:0.75rem">` +
          `<button class="action do-reactivate" type="button">Reactivate</button></div>`)
-      : (`<div class="dropstrip">drop this site's folder here, or <a href="#">choose it</a></div>` +
+      : (`<div class="dropstrip"><span class="drop-lead">Drop this site's folder here</span>` +
+         `<span>or <a href="#">choose it</a></span></div>` +
          `<input type="file" webkitdirectory multiple class="hidden">` +
          `<p class="hint summary">The folder to drop is the one holding the ` +
          `site's <b>index.html</b>.</p>` +
@@ -6900,7 +6919,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       mark('badge-green', '✓ folder read');
     }
 
-    q('.dropstrip a').addEventListener('click', (e) => { e.preventDefault(); input.click(); });
+    // The whole strip opens the picker, not just the link inside it — a drop
+    // target that only accepts a click on four exact words is a smaller
+    // target than it looks.
+    q('.dropstrip').addEventListener('click', (e) => { e.preventDefault(); input.click(); });
     input.addEventListener('change', () => {
       clearError(errEl);
       const all = [...input.files];

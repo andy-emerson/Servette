@@ -3773,11 +3773,11 @@ def run_server_tests(s, serve_dir):
     s.config.sites[0].password_salt = ""
     s._auth_fail_times.clear()
 
-    section("The connection check on its reserved path")
+    section("The connection test on its reserved path")
 
     chk = req("GET", path="/.well-known/servette-check")
     check("The check page answers 200 as HTML on its reserved path",
-          chk.status == 200 and b"Connection check" in chk.body
+          chk.status == 200 and b"Connection test" in chk.body
           and "text/html" in chk.headers.get("Content-Type", ""))
     etag_chk = chk.headers.get("ETag")
     check("...with validators, revalidating to 304",
@@ -3787,7 +3787,7 @@ def run_server_tests(s, serve_dir):
     check("...rendering every row pending upfront — dim, then resolve",
           b"t-row pending" in chk.body and b"classList.remove('pending')" in chk.body)
     check("The slim 404 links the check instead of running it",
-          b"run the connection check" in req("GET", path="/nonexistent.html").body
+          b"run the connection test" in req("GET", path="/nonexistent.html").body
           and b"t-log" not in req("GET", path="/nonexistent.html").body)
 
     # The split's whole point: an operator's 404.html takes the miss body by
@@ -3800,7 +3800,7 @@ def run_server_tests(s, serve_dir):
         check("A custom 404.html wins the miss body",
               b"my own miss page" in req("GET", path="/nonexistent.html").body)
         check("...and cannot shadow the check page",
-              b"Connection check" in req("GET", path="/.well-known/servette-check").body)
+              b"Connection test" in req("GET", path="/.well-known/servette-check").body)
     finally:
         os.remove(custom)
         s._file_cache.clear()

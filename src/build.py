@@ -62,7 +62,7 @@ CHECK_SOURCE = "check.html"
 _CHECK_MARKER = "@@CHECK_HTML@@"
 # Every page the module embeds: (source file, the marker it replaces). Each
 # marker sits inside a triple-quoted literal in the sources. Three pages:
-# the 404 body and the connection check on the public surface, the admin
+# the 404 body and the connection test on the public surface, the admin
 # page on the loopback surface.
 EMBEDDED_PAGES = [(NOT_FOUND_SOURCE, _NOT_FOUND_MARKER),
                   (CHECK_SOURCE, _CHECK_MARKER),

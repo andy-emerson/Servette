@@ -883,7 +883,7 @@ def _security_headers(site):
 
 ## The request core
 
-Three things precede the handler: version discovery at `/.well-known/servette`, the connection check at its reserved sibling path, and the default 404 body — the pages inlined into the module by the build so there is no file to lose.
+Three things precede the handler: version discovery at `/.well-known/servette`, the connection test at its reserved sibling path, and the default 404 body — the pages inlined into the module by the build so there is no file to lose.
 
 ```python
 # Reserved paths
@@ -899,7 +899,7 @@ _CHECK_PATH              = "/.well-known/servette-check"
 _NOT_FOUND_PAGE = """@@NOT_FOUND_HTML@@""".encode()
 _NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
 
-# The connection check (src/check.html), served at _CHECK_PATH on every site —
+# The connection test (src/check.html), served at _CHECK_PATH on every site —
 # a reserved path under /.well-known/, the one namespace the hidden-path rule
 # already sets apart, so an operator's content never shadows the outside
 # vantage the way a custom 404.html takes over the miss body.
@@ -1047,7 +1047,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
 
-    # The connection check, on its reserved path — code-first, so it answers
+    # The connection test, on its reserved path — code-first, so it answers
     # whatever the site publishes: an operator's 404.html takes the miss body
     # by existing, but it can never take the outside vantage with it. Behind
     # the site's own auth like everything else, and carrying the same
@@ -1061,7 +1061,7 @@ def _handle_request(method, url_path, headers, raw_ip):
             log.info("304 Not Modified %s to %s", log_path, ip)
             return resp(304, [(b"etag", _CHECK_ETAG.encode()),
                               (b"cache-control", cache.encode())])
-        log.info("200 %s (connection check) to %s", log_path, ip)
+        log.info("200 %s (connection test) to %s", log_path, ip)
         return resp(200, [
             (b"content-type",   b"text/html; charset=utf-8"),
             (b"content-length", str(len(_CHECK_PAGE)).encode()),
@@ -1086,7 +1086,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         # Every server needs an error page, and a bare "Not found." spends a
         # whole response telling the reader only that they were wrong. This one
         # leads with the path, says the server is up and answered, and links
-        # the connection check on its reserved path above — the split that
+        # the connection test on its reserved path above — the split that
         # keeps this a real 404 while the diagnosis survives an operator's
         # own 404.html, which wins this role by simply existing.
         #

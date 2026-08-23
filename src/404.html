@@ -285,7 +285,7 @@
       <div class="badge" id="badge">—</div>
     </div>
     <div class="verified-links">
-      <a href="/.well-known/servette-check">run the connection check →</a>
+      <a href="/.well-known/servette-check">run the connection test →</a>
     </div>
   </div>
 
@@ -311,7 +311,7 @@
   $('notfound-path').textContent = shown;
 
   // The one live judgment this page keeps: whether the connection carrying
-  // it is encrypted. Everything deeper belongs to the connection check,
+  // it is encrypted. Everything deeper belongs to the connection test,
   // linked on the card below.
   $('url').textContent = location.protocol + '//' + location.host;
   if (location.protocol === 'https:') {

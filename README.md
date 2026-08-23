@@ -58,7 +58,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 | Automatic recovery | A dead server process is restarted by systemd within seconds; a watchdog timer recovers a dropped network route |
 | A browser admin page | `servette admin` serves a publish-and-settings page (health status folded in) to your browser over your own SSH tunnel — it never exists on the public internet, and being there is the login |
-| A connection check built in | Every site serves a live check page at `/.well-known/servette-check`: the encryption, the security headers, and whether your site root is published at all, reported from a real browser's vantage. The default 404 page links it — and your own `404.html` can take the error page over without ever losing the check |
+| A connection test built in | Every site serves a live check page at `/.well-known/servette-check`: the encryption, the security headers, and whether your site root is published at all, reported from a real browser's vantage. The default 404 page links it — and your own `404.html` can take the error page over without ever losing the check |
 
 **Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette), and that is by design, not a limitation to work around; see [Scope & non-goals](DESIGN.md#scope--non-goals) for what is out of scope and why.
 
@@ -165,7 +165,7 @@ Each site can have a **publish channel** — the path for publishing when no SSH
 - **Let's Encrypt won't issue** → your domain must already resolve to this server's IP (`dig +short yourdomain.com`); Let's Encrypt validates over port 80. If `www.` has no DNS record, Servette falls back to a bare-domain certificate and tells you.
 - **Browser warns about the certificate** → expected with a self-signed cert; add a domain, then `config` → `cert`.
 - **A page 404s that shouldn't** → open the URL and read the error page: it reports whether your site root is published at all, which separates a wrong path from content that never landed. `GET /` showing `200` means the site is fine and the path is wrong.
-- **Anything else** → `log` in the shell (or `journalctl -u servette`), and open any missing path on your own site — the default error page runs the connection checks and reports what it found.
+- **Anything else** → `log` in the shell (or `journalctl -u servette`), and open any missing path on your own site — the default error page runs the connection tests and reports what it found.
 
 ## Repository map
 

@@ -159,18 +159,18 @@ narrate belong in the terminal, and a stop button one misclick from
 darkness is a footgun — reopen if an operator SSHes in only to flip
 the service). *(2026-08-22)*
 
-## The connection check is its own reserved page; the 404 is a real 404
+## The connection test is its own reserved page; the 404 is a real 404
 
 **Ruled (Human):** two public pages, each with one job. The default 404
 body is a traditional error page — the path, the server-is-up sentence, a
 home link, and a link to the check — and an operator's `404.html` takes
-that role by simply existing. The connection check is its own embedded
+that role by simply existing. The connection test is its own embedded
 page (`src/check.html`) at `/.well-known/servette-check`: code-first, so
 no site content ever shadows it; behind the site's own auth; answering
 200, because the page really is there; its report rendering every row
 upfront in a dimmed pending state and resolving each in place. The admin
 page's Status tab pairs the two vantages by name: **Health checks** (what
-the machine knows about itself) and the **connection check** (what a
+the machine knows about itself) and the **connection test** (what a
 browser sees from the internet's side of the wire).
 **Why:** with the checks living inside the 404 body, the outside vantage
 vanished the moment an operator shipped a custom 404.html — and the page
@@ -722,8 +722,8 @@ a second framing to buy a convenience a missing path already provides.
 site with no content, in which case it returns as one named thing, not as a
 second role for this page. *(2026-08-17)*
 **Superseded** (2026-08-22) by exactly that reopen condition: the check
-returned as one named thing — see [the connection check's own reserved
-page](#the-connection-check-is-its-own-reserved-page-the-404-is-a-real-404).
+returned as one named thing — see [the connection test's own reserved
+page](#the-connection-test-is-its-own-reserved-page-the-404-is-a-real-404).
 The 404 body keeps exactly one role, as this ruling wanted.
 
 ## site/pub/ is the operator tools page — *moved*

@@ -1138,7 +1138,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       <div class="badge" id="badge">—</div>
     </div>
     <div class="verified-links">
-      <a href="/.well-known/servette-check">run the connection check →</a>
+      <a href="/.well-known/servette-check">run the connection test →</a>
     </div>
   </div>
 
@@ -1164,7 +1164,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
   $('notfound-path').textContent = shown;
 
   // The one live judgment this page keeps: whether the connection carrying
-  // it is encrypted. Everything deeper belongs to the connection check,
+  // it is encrypted. Everything deeper belongs to the connection test,
   // linked on the card below.
   $('url').textContent = location.protocol + '//' + location.host;
   if (location.protocol === 'https:') {
@@ -1183,14 +1183,14 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 """.encode()
 _NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
 
-# The connection check (src/check.html), served at _CHECK_PATH on every site —
+# The connection test (src/check.html), served at _CHECK_PATH on every site —
 # a reserved path under /.well-known/, the one namespace the hidden-path rule
 # already sets apart, so an operator's content never shadows the outside
 # vantage the way a custom 404.html takes over the miss body.
 _CHECK_PAGE = """<!DOCTYPE html>
-<!-- src/check.html — the connection check, inlined into the module by
+<!-- src/check.html — the connection test, inlined into the module by
      build.py and served at the reserved path /.well-known/servette-check
-     (DECISIONS.md, "The connection check has its own reserved page").
+     (DECISIONS.md, "The connection test has its own reserved page").
      Linked from the default 404 body and from the admin page's Status tab.
 
      Same-origin by construction, so it can read what a cross-origin probe
@@ -1210,7 +1210,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Connection check</title>
+  <title>Connection test</title>
   <style>
     :root {
       --bg:      #0e0e0e;
@@ -1454,7 +1454,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
   <div class="checks">
     <div class="checks-head">
-      <span class="checks-title">Connection check</span>
+      <span class="checks-title">Connection test</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>
@@ -1799,7 +1799,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(200, [(b"content-type", b"application/json"),
                           (b"content-length", str(len(body)).encode())], body)
 
-    # The connection check, on its reserved path — code-first, so it answers
+    # The connection test, on its reserved path — code-first, so it answers
     # whatever the site publishes: an operator's 404.html takes the miss body
     # by existing, but it can never take the outside vantage with it. Behind
     # the site's own auth like everything else, and carrying the same
@@ -1813,7 +1813,7 @@ def _handle_request(method, url_path, headers, raw_ip):
             log.info("304 Not Modified %s to %s", log_path, ip)
             return resp(304, [(b"etag", _CHECK_ETAG.encode()),
                               (b"cache-control", cache.encode())])
-        log.info("200 %s (connection check) to %s", log_path, ip)
+        log.info("200 %s (connection test) to %s", log_path, ip)
         return resp(200, [
             (b"content-type",   b"text/html; charset=utf-8"),
             (b"content-length", str(len(_CHECK_PAGE)).encode()),
@@ -1838,7 +1838,7 @@ def _handle_request(method, url_path, headers, raw_ip):
         # Every server needs an error page, and a bare "Not found." spends a
         # whole response telling the reader only that they were wrong. This one
         # leads with the path, says the server is up and answered, and links
-        # the connection check on its reserved path above — the split that
+        # the connection test on its reserved path above — the split that
         # keeps this a real 404 while the diagnosis survives an operator's
         # own 404.html, which wins this role by simply existing.
         #
@@ -5664,6 +5664,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .rows a.cfg-link:hover { text-decoration: underline; }
     .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
     .rows .gap { margin-top: 0.55rem; }
+    /* A ledger's total sits under a rule, at the foot of what it sums. */
+    .rows .ledger {
+      margin-top: 0.35rem;
+      padding-top: 0.35rem;
+      border-top: 1px solid var(--border);
+    }
     .rows b { color: var(--text); font-weight: 500; }
     .rows .ok { color: #5A8466; }
     .rows .dot {
@@ -6036,7 +6042,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <div class="split"></div>
         <div class="btn-row">
           <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once this site has a domain">Check connection</button>
+                  title="Loads once this site has a domain">Test connection</button>
         </div>
       </div>
     </div>
@@ -6123,7 +6129,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     c.ok ? escapeHtml(c.detail)
          : `<span class="warn">${escapeHtml(c.detail)}</span>`);
 
-  // The connection check: opens the selected site's own check page — a
+  // The connection test: opens the selected site's own check page — a
   // reserved path no content shadows — so the report answers from the
   // public internet's vantage, the one view a page living on the tunnel
   // cannot compute (cross-origin responses are opaque to it, by the
@@ -6204,8 +6210,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         : '';
       $('traffic-rows').innerHTML = !total
         ? row('Requests', 'none in this window — or no readable journal on this host')
-        : row('Requests', String(total)) +
-          named.map(([name, n]) => row(name, String(n))).join('');
+        : named.map(([name, n]) => row(name, String(n))).join('') +
+          row('Total requests', `<b>${total}</b>`, 'ledger');
     } catch (e) {
       showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
         : 'Could not read traffic: ' + e.message);

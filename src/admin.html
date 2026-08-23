@@ -188,6 +188,12 @@
     .rows a.cfg-link:hover { text-decoration: underline; }
     .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
     .rows .gap { margin-top: 0.55rem; }
+    /* A ledger's total sits under a rule, at the foot of what it sums. */
+    .rows .ledger {
+      margin-top: 0.35rem;
+      padding-top: 0.35rem;
+      border-top: 1px solid var(--border);
+    }
     .rows b { color: var(--text); font-weight: 500; }
     .rows .ok { color: #5A8466; }
     .rows .dot {
@@ -560,7 +566,7 @@
         <div class="split"></div>
         <div class="btn-row">
           <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once this site has a domain">Check connection</button>
+                  title="Loads once this site has a domain">Test connection</button>
         </div>
       </div>
     </div>
@@ -647,7 +653,7 @@
     c.ok ? escapeHtml(c.detail)
          : `<span class="warn">${escapeHtml(c.detail)}</span>`);
 
-  // The connection check: opens the selected site's own check page — a
+  // The connection test: opens the selected site's own check page — a
   // reserved path no content shadows — so the report answers from the
   // public internet's vantage, the one view a page living on the tunnel
   // cannot compute (cross-origin responses are opaque to it, by the
@@ -728,8 +734,8 @@
         : '';
       $('traffic-rows').innerHTML = !total
         ? row('Requests', 'none in this window — or no readable journal on this host')
-        : row('Requests', String(total)) +
-          named.map(([name, n]) => row(name, String(n))).join('');
+        : named.map(([name, n]) => row(name, String(n))).join('') +
+          row('Total requests', `<b>${total}</b>`, 'ledger');
     } catch (e) {
       showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
         : 'Could not read traffic: ' + e.message);

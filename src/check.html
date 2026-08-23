@@ -1,7 +1,7 @@
 <!DOCTYPE html>
-<!-- src/check.html — the connection check, inlined into the module by
+<!-- src/check.html — the connection test, inlined into the module by
      build.py and served at the reserved path /.well-known/servette-check
-     (DECISIONS.md, "The connection check has its own reserved page").
+     (DECISIONS.md, "The connection test has its own reserved page").
      Linked from the default 404 body and from the admin page's Status tab.
 
      Same-origin by construction, so it can read what a cross-origin probe
@@ -21,7 +21,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Connection check</title>
+  <title>Connection test</title>
   <style>
     :root {
       --bg:      #0e0e0e;
@@ -265,7 +265,7 @@
 
   <div class="checks">
     <div class="checks-head">
-      <span class="checks-title">Connection check</span>
+      <span class="checks-title">Connection test</span>
       <button class="run-again" id="run-again" type="button">↻ run again</button>
     </div>
     <div class="t-log" id="t-log"></div>

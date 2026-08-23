@@ -945,11 +945,12 @@ def _parse_traffic(lines, days=7):
     Paths are tallied from content responses (200/206/304). IPs are never
     carried into the result."""
     per_day, statuses, paths = {}, {}, {}
+    stamp = (lambda p: p[:13].replace("T", " ")) if days <= 2 else (lambda p: p[:10])
     for line in lines:
         parts = line.split()
         if len(parts) < 4 or len(parts[0]) < 10 or parts[0][4:5] != "-":
             continue
-        day = parts[0][:10]
+        day = stamp(parts[0])
         lvl = next((i for i, p in enumerate(parts) if p in _LOG_LEVELS), None)
         if lvl is None:
             continue
@@ -965,6 +966,7 @@ def _parse_traffic(lines, days=7):
     top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
     return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
             "top_paths": top, "window_days": days,
+            "bucket": "hour" if days <= 2 else "day",
             "total": sum(statuses.values())}
 
 
@@ -1540,7 +1542,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 days = int(parse_qs(urlsplit(self.path).query).get("days", ["7"])[0])
             except ValueError:
                 days = 7
-            return self._respond(200, json.dumps(_traffic_summary(max(1, min(days, 30)))),
+            return self._respond(200, json.dumps(_traffic_summary(max(1, min(days, 90)))),
                                  "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)

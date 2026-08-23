@@ -471,11 +471,13 @@
   <div id="panel-analytics" role="tabpanel" class="hidden">
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Traffic — all sites</span>
+        <span class="card-title">Site traffic</span>
         <select class="cfg-site" id="traffic-window" style="margin:0">
           <option value="1">last 24 hours</option>
+          <option value="2">last 48 hours</option>
           <option value="7" selected>last 7 days</option>
           <option value="30">last 30 days</option>
+          <option value="90">last 90 days</option>
         </select>
       </div>
       <div class="card-body">
@@ -483,10 +485,9 @@
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-traffic-refresh" type="button">Refresh</button>
         </div>
-        <p class="hint">Counts read from the server's own log, for every
-        site this server answers for — the log records the path, not which
-        site it belonged to. Visitor IP addresses stay in the raw log (the
-        terminal's <b>log</b>), never here.</p>
+        <p class="hint">Counted across every site this server answers for,
+        not one site alone. Visitor IP addresses stay in the server log,
+        readable in the terminal.</p>
         <p class="error hidden" id="traffic-error"></p>
       </div>
     </div>
@@ -498,11 +499,9 @@
       <div class="card-body">
         <div class="rows" id="load-rows"></div>
         <div id="load-chart"></div>
-        <p class="hint">The figures are averages over the whole time the
-        server has been up; the line is live, drawn from readings taken
-        while this tab is open and kept nowhere. On a static server a high
-        average means something is working it — a hammering bot, not
-        popularity.</p>
+        <p class="hint">Averages since the server started; the line is live
+        while this tab is open and is kept nowhere. High CPU on a static
+        server usually means a bot, not popularity.</p>
       </div>
     </div>
   </div>
@@ -559,7 +558,7 @@
       </div>
       <div class="card-body">
         <div class="rows" id="host-rows"></div>
-        <div class="btn-row hidden" id="start-row" style="margin-top:0.6rem">
+        <div class="btn-row" style="margin-top:0.6rem">
           <button class="action" id="btn-start" type="button">Start the server</button>
         </div>
         <div class="split"></div>
@@ -910,7 +909,11 @@
              hostAttention ? hostAttention + ' to review'
                            : (d.running ? '● running' : '○ stopped'));
 
-    $('start-row').classList.toggle('hidden', !!d.running);
+    // Present always, dim when there is nothing to start — the same rule
+    // every other button follows.
+    $('btn-start').disabled = !!d.running;
+    $('btn-start').title = d.running ? 'The server is already running'
+                                     : 'Start the installed system service';
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
     renderLoad();

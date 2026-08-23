@@ -1387,7 +1387,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
     /* Rows render all at once in the pending state and resolve in place —
        dim, then verdict — so the report never appears to assemble itself. */
-    .t-row.pending .t-req, .t-row.pending .t-obs { opacity: 0.45; }
+    .t-row.pending .t-req, .t-row.pending .t-obs, .t-row.pending .t-ev { opacity: 0.45; }
 
     .t-st       { flex: 0 0 2.6em; font-weight: 500; }
     .t-pass     { color: var(--green); }
@@ -1398,6 +1398,10 @@ _CHECK_PAGE = """<!DOCTYPE html>
     .t-body { flex: 1; min-width: 0; }
     .t-req  { color: var(--text); }
     .t-obs  { color: var(--muted); }
+    /* The evidence that earned the finding, kept where it belongs: under
+       the finding, in the smaller voice of a footnote. */
+    .t-ev   { color: #3d3d3d; font-size: 0.66rem; margin-top: 0.15rem;
+              overflow-wrap: anywhere; }
 
     .t-summary {
       padding: 0.75rem 1.25rem;
@@ -1501,111 +1505,125 @@ _CHECK_PAGE = """<!DOCTYPE html>
   const H = async () => (_hdrs ||= (await fetch(here, { cache: 'no-store' })).headers);
   const seen = (v) => v || '(absent)';
 
+  // Each row is a finding in the reader's language, with the evidence that
+  // earned it underneath. The requests are the same ones as ever; what
+  // changed is that the report leads with what they mean, and several
+  // probes that answer one question now share one row.
   const checks = [
-    // This page's own response first — it is the reserved path answering.
-    { req: 'GET ' + P, run: async () => {
+    { name: 'Encrypted', run: async () => {
         const r = await fetch(here, { cache: 'no-store' });
         const ct = r.headers.get('Content-Type') || '(absent)';
-        return { ok: r.status === 200 && ct.includes('text/html'),
-                 obs: '→ ' + r.status + ', ' + ct }; } },
+        return { ok: location.protocol === 'https:' && r.status === 200,
+                 obs: location.protocol === 'https:'
+                   ? 'HTTPS, and this browser accepted the certificate'
+                   : 'served over plain HTTP — visitors are unprotected',
+                 ev: 'GET ' + P + ' → ' + r.status + ', ' + ct }; } },
 
     // Is anything published? A working home page and a passworded one both
     // count as answers; anything else is the deploy-never-landed signal.
-    { req: 'GET /', run: async () => {
+    { name: 'Home page', run: async () => {
         const s = (await fetch('/', { cache: 'no-store' })).status;
         if (s === 200)
-          return { ok: true, obs: '→ 200 — the site has a home page' };
+          return { ok: true, obs: 'published and answering', ev: 'GET / → 200' };
         if (s === 401)
-          return { ok: null, obs: '→ 401 — home page needs a password' };
-        return { ok: false, obs: '→ ' + s + ' — nothing is published at the root' }; } },
+          return { ok: true, obs: 'published, behind the site login',
+                   ev: 'GET / → 401' };
+        return { ok: false, obs: 'nothing is published at the site root',
+                 ev: 'GET / → ' + s }; } },
 
-    { req: 'GET ' + P, run: async () => {
-        const v = (await H()).get('X-Frame-Options');
-        return { ok: v === 'DENY', obs: 'X-Frame-Options: ' + seen(v) }; } },
-
-    { req: 'GET ' + P, run: async () => {
-        const v = (await H()).get('X-Content-Type-Options');
-        return { ok: v === 'nosniff', obs: 'X-Content-Type-Options: ' + seen(v) }; } },
-
-    { req: 'GET ' + P, run: async () => {
-        const v = (await H()).get('Referrer-Policy');
-        return { ok: !!v, obs: 'Referrer-Policy: ' + seen(v) }; } },
-
-    // Optional (config: csp). Absent means disabled, not broken.
-    { req: 'GET ' + P, run: async () => {
-        const v = (await H()).get('Content-Security-Policy');
-        return v
-          ? { ok: true, obs: 'Content-Security-Policy: present' }
-          : { ok: null, obs: 'CSP: disabled in config' }; } },
-
-    // Optional (config: permissions_policy). Absent means disabled.
-    { req: 'GET ' + P, run: async () => {
-        const v = (await H()).get('Permissions-Policy');
-        return v
-          ? { ok: true, obs: 'Permissions-Policy: present' }
-          : { ok: null, obs: 'Permissions-Policy: disabled in config' }; } },
-
-    { req: 'GET ' + P, run: async () => {
+    // Five headers, one question: is the browser being told how to behave?
+    // Two of the five are optional in config, so their absence is reported
+    // as a choice rather than a defect.
+    { name: 'Security headers', run: async () => {
         const h = await H();
-        return { ok: !!h.get('ETag') && !!h.get('Cache-Control'),
-                 obs: 'Cache-Control + ETag: ' + (h.get('ETag') || '(absent)') }; } },
-
-    { req: 'GET ' + P + '  (If-None-Match)', run: async () => {
-        const etag = (await H()).get('ETag');
-        if (!etag) return { ok: null, obs: 'no ETag to revalidate' };
-        const r = await fetch(here, { cache: 'no-store', headers: { 'If-None-Match': etag } });
-        return r.status === 304
-          ? { ok: true, obs: '→ 304 Not Modified' }
-          : { ok: null, obs: '→ ' + r.status + ' (browser cache varies)' }; } },
-
-    { req: 'POST ' + P, run: async () => {
-        const s = (await fetch(here, { method: 'POST' })).status;
-        return { ok: s === 405, obs: '→ ' + s + (s === 405 ? ' Method Not Allowed' : '') }; } },
-
-    { req: 'GET /<random>', run: async () => {
-        const s = (await fetch('/__servette_probe_' + Date.now())).status;
-        return { ok: s === 404, obs: '→ ' + s + (s === 404 ? ' Not Found' : '') }; } },
-
-    { req: 'GET /%2e%2e%2f…', run: async () => {
-        const s = (await fetch('/%2e%2e%2f%2e%2e%2fetc%2fpasswd')).status;
-        return { ok: s === 403, obs: '→ ' + s + (s === 403 ? ' Forbidden' : '') }; } },
+        const want = [['X-Frame-Options', 'DENY'], ['X-Content-Type-Options', 'nosniff'],
+                      ['Referrer-Policy', null]];
+        const missing = want.filter(([k, v]) => {
+          const got = h.get(k);
+          return v ? got !== v : !got;
+        }).map(([k]) => k);
+        const optional = [['Content-Security-Policy', 'CSP'],
+                          ['Permissions-Policy', 'Permissions-Policy']]
+          .filter(([k]) => !h.get(k)).map(([, name]) => name);
+        return { ok: !missing.length,
+                 obs: missing.length ? 'missing: ' + missing.join(', ')
+                      : optional.length ? 'sent (' + optional.join(' and ') +
+                                          ' switched off in config)'
+                      : 'all sent',
+                 ev: want.concat([['Content-Security-Policy'], ['Permissions-Policy']])
+                        .map(([k]) => k + ': ' + seen(h.get(k))).join(' · ') }; } },
 
     // HSTS is only sent for a site with a real domain certificate, so on a
     // self-signed or LAN server its absence is correct.
-    { req: 'GET ' + P, run: async () => {
+    { name: 'HTTPS enforced', run: async () => {
         const v = (await H()).get('Strict-Transport-Security');
         return v
-          ? { ok: true, obs: 'Strict-Transport-Security: present' }
-          : { ok: null, obs: 'HSTS: needs a domain cert (self-signed)' }; } },
+          ? { ok: true, obs: 'browsers are told to refuse plain HTTP here',
+              ev: 'Strict-Transport-Security: ' + v }
+          : { ok: null, obs: 'needs a domain certificate (this one is self-signed)',
+              ev: 'Strict-Transport-Security: (absent)' }; } },
 
-    // Version discovery — same-origin, password-gated: the one check only
-    // this page can make. Servette serves it solely on a private site, so
-    // the exact version reaches a party that already signed in (this
-    // browser) and never an anonymous scanner. On a public site the
-    // endpoint deliberately does not exist, so the row does not apply —
-    // it removes itself rather than reporting a skip with nothing to test.
-    { req: 'GET /.well-known/servette', run: async () => {
+    { name: 'Caching', run: async () => {
+        const h = await H();
+        const etag = h.get('ETag');
+        if (!etag || !h.get('Cache-Control'))
+          return { ok: false, obs: 'no validator — every visit re-downloads',
+                   ev: 'Cache-Control: ' + seen(h.get('Cache-Control')) +
+                       ' · ETag: ' + seen(etag) };
+        const r = await fetch(here, { cache: 'no-store', headers: { 'If-None-Match': etag } });
+        return r.status === 304
+          ? { ok: true, obs: 'unchanged files are revalidated, not re-sent',
+              ev: 'If-None-Match ' + etag + ' → 304' }
+          : { ok: null, obs: 'validator sent; this browser re-downloaded anyway',
+              ev: 'If-None-Match ' + etag + ' → ' + r.status }; } },
+
+    // Three refusals, one question: does the server say no where it should?
+    { name: 'Refusals', run: async () => {
+        const post = (await fetch(here, { method: 'POST' })).status;
+        const miss = (await fetch('/__servette_probe_' + Date.now())).status;
+        const trav = (await fetch('/%2e%2e%2f%2e%2e%2fetc%2fpasswd')).status;
+        const bad = [];
+        if (post !== 405) bad.push('POST answered ' + post + ', not 405');
+        if (miss !== 404) bad.push('unknown path answered ' + miss + ', not 404');
+        if (trav !== 403) bad.push('path traversal answered ' + trav + ', not 403');
+        return { ok: !bad.length,
+                 obs: bad.length ? bad.join('; ')
+                      : 'uploads, unknown paths, and traversal all refused',
+                 ev: 'POST → ' + post + ' · unknown → ' + miss +
+                     ' · traversal → ' + trav }; } },
+
+    // Version discovery — same-origin, auth-gated: the one check only this
+    // page can make. Servette serves it solely on a private site, so the
+    // exact version reaches a party that already signed in (this browser)
+    // and never an anonymous scanner. A public site withholding it is the
+    // design working, which is a pass, not a skip.
+    { name: 'Version', run: async () => {
         const r = await fetch('/.well-known/servette', { cache: 'no-store' });
-        if (r.status === 404) return { drop: true };
+        if (r.status === 404)
+          return { ok: true, obs: 'withheld — the site is public, so nobody is told',
+                   ev: 'GET /.well-known/servette → 404' };
         if (r.status !== 200)
-          return { ok: null, obs: 'hidden (an older Servette, or not signed in)' };
+          return { ok: null, obs: 'not answered (an older Servette, or not signed in)',
+                   ev: 'GET /.well-known/servette → ' + r.status };
         const v = await r.json();
-        return { ok: true, obs: 'running v' + v.running }; } },
+        return { ok: true, obs: 'running v' + v.running + ', readable only once signed in',
+                 ev: 'GET /.well-known/servette → 200' }; } },
   ];
 
   const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };
   const logEl = $('t-log');
 
-  function addRow(reqText) {
+  function addRow(name) {
     const st  = document.createElement('span'); st.className  = 't-st t-pending'; st.textContent = LABEL.pending;
-    const req = document.createElement('span'); req.className = 't-req';  req.textContent = reqText;
+    const req = document.createElement('span'); req.className = 't-req';  req.textContent = name;
     const obs = document.createElement('span'); obs.className = 't-obs';  obs.textContent = '';
+    const ev  = document.createElement('div');  ev.className  = 't-ev';   ev.textContent  = '';
     const body = document.createElement('span'); body.className = 't-body';
-    body.append(req, document.createTextNode('  '), obs);
+    body.append(req, document.createTextNode('  '), obs, ev);
     const row = document.createElement('div'); row.className = 't-row pending';
     row.append(st, body);
     logEl.appendChild(row);
-    return { row, st, obs };
+    return { row, st, obs, ev };
   }
 
   function paint(row, st, state) {
@@ -1621,13 +1639,13 @@ _CHECK_PAGE = """<!DOCTYPE html>
     let pass = 0, fail = 0, skip = 0;
     // Every row exists before any check runs — the full report is visible
     // immediately, dimmed, and each row resolves in place.
-    const rows = checks.map((c) => ({ c, el: addRow(c.req) }));
+    const rows = checks.map((c) => ({ c, el: addRow(c.name) }));
     for (const { c, el } of rows) {
       let r;
       try { r = await c.run(); }
       catch (e) { r = { ok: null, obs: 'could not run' }; }
-      if (r.drop) { el.row.remove(); continue; }  // not applicable here
       el.obs.textContent = r.obs;
+      el.ev.textContent = r.ev || '';
       if (r.ok === true)       { paint(el.row, el.st, 'pass'); pass++; }
       else if (r.ok === false) { paint(el.row, el.st, 'fail'); fail++; }
       else                     { paint(el.row, el.st, 'skip'); skip++; }
@@ -5011,11 +5029,12 @@ def _parse_traffic(lines, days=7):
     Paths are tallied from content responses (200/206/304). IPs are never
     carried into the result."""
     per_day, statuses, paths = {}, {}, {}
+    stamp = (lambda p: p[:13].replace("T", " ")) if days <= 2 else (lambda p: p[:10])
     for line in lines:
         parts = line.split()
         if len(parts) < 4 or len(parts[0]) < 10 or parts[0][4:5] != "-":
             continue
-        day = parts[0][:10]
+        day = stamp(parts[0])
         lvl = next((i for i, p in enumerate(parts) if p in _LOG_LEVELS), None)
         if lvl is None:
             continue
@@ -5031,6 +5050,7 @@ def _parse_traffic(lines, days=7):
     top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
     return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
             "top_paths": top, "window_days": days,
+            "bucket": "hour" if days <= 2 else "day",
             "total": sum(statuses.values())}
 
 
@@ -5927,11 +5947,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <div id="panel-analytics" role="tabpanel" class="hidden">
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Traffic — all sites</span>
+        <span class="card-title">Site traffic</span>
         <select class="cfg-site" id="traffic-window" style="margin:0">
           <option value="1">last 24 hours</option>
+          <option value="2">last 48 hours</option>
           <option value="7" selected>last 7 days</option>
           <option value="30">last 30 days</option>
+          <option value="90">last 90 days</option>
         </select>
       </div>
       <div class="card-body">
@@ -5939,10 +5961,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-traffic-refresh" type="button">Refresh</button>
         </div>
-        <p class="hint">Counts read from the server's own log, for every
-        site this server answers for — the log records the path, not which
-        site it belonged to. Visitor IP addresses stay in the raw log (the
-        terminal's <b>log</b>), never here.</p>
+        <p class="hint">Counted across every site this server answers for,
+        not one site alone. Visitor IP addresses stay in the server log,
+        readable in the terminal.</p>
         <p class="error hidden" id="traffic-error"></p>
       </div>
     </div>
@@ -5954,11 +5975,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       <div class="card-body">
         <div class="rows" id="load-rows"></div>
         <div id="load-chart"></div>
-        <p class="hint">The figures are averages over the whole time the
-        server has been up; the line is live, drawn from readings taken
-        while this tab is open and kept nowhere. On a static server a high
-        average means something is working it — a hammering bot, not
-        popularity.</p>
+        <p class="hint">Averages since the server started; the line is live
+        while this tab is open and is kept nowhere. High CPU on a static
+        server usually means a bot, not popularity.</p>
       </div>
     </div>
   </div>
@@ -6015,7 +6034,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       </div>
       <div class="card-body">
         <div class="rows" id="host-rows"></div>
-        <div class="btn-row hidden" id="start-row" style="margin-top:0.6rem">
+        <div class="btn-row" style="margin-top:0.6rem">
           <button class="action" id="btn-start" type="button">Start the server</button>
         </div>
         <div class="split"></div>
@@ -6366,7 +6385,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
              hostAttention ? hostAttention + ' to review'
                            : (d.running ? '● running' : '○ stopped'));
 
-    $('start-row').classList.toggle('hidden', !!d.running);
+    // Present always, dim when there is nothing to start — the same rule
+    // every other button follows.
+    $('btn-start').disabled = !!d.running;
+    $('btn-start').title = d.running ? 'The server is already running'
+                                     : 'Start the installed system service';
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
     renderLoad();
@@ -7089,7 +7112,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 days = int(parse_qs(urlsplit(self.path).query).get("days", ["7"])[0])
             except ValueError:
                 days = 7
-            return self._respond(200, json.dumps(_traffic_summary(max(1, min(days, 30)))),
+            return self._respond(200, json.dumps(_traffic_summary(max(1, min(days, 90)))),
                                  "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)

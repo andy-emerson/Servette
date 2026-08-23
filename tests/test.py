@@ -1092,7 +1092,12 @@ def run_dispatch_tests(s):
     check("Traffic tallies days, statuses, and top paths from response lines only",
           tt["days"] == [("2026-08-20", 2), ("2026-08-21", 2)]
           and tt["statuses"] == {"200": 2, "304": 1, "404": 1}
-          and tt["top_paths"][0] == ("/index.html", 2))
+          and tt["top_paths"][0] == ("/index.html", 2)
+          and tt["bucket"] == "day")
+    hourly = s._parse_traffic(tlines, days=1)
+    check("...and buckets by hour on a short window, where a day is one point",
+          hourly["bucket"] == "hour"
+          and hourly["days"] == [("2026-08-20 09", 2), ("2026-08-21 09", 2)])
     check("...and never carries a visitor's IP",
           "1.2.3.4" not in json.dumps(tt) and "5.6.7.8" not in json.dumps(tt))
     saved_tl = s._traffic_lines

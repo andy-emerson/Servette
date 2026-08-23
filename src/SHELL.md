@@ -179,7 +179,8 @@ def _config_sites():
     _section("Sites")
     for i, site in enumerate(config.sites):
         auth = "password-protected" if site.username else "no password"
-        print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}")
+        state = "" if site.active else ", DEACTIVATED (set active=yes to serve)"
+        print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}{state}")
     print()
     print("  Edit one with e.g. 'dir 1', 'cert 1', 'publish 1' (index defaults to 0).")
     print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
@@ -341,20 +342,39 @@ def _config_add_site():
 
 ```
 
-Removal discards config only — files on disk are never touched — and the last site can't be removed. The core is shared with the page's delete-card, which does its confirming in the browser.
+Removal deletes the server's copies — the published tree, its slots, and its backup — because keeping them silently was the trap: folders compounding with no way to reclaim them short of raw shell commands, which is not one of Servette's two surfaces. The pause that keeps everything is `active=no`, a setting like any other. Certificates stay (tiny, and re-adding the same domain skips re-issuance); a folder another site still points at stays too; the last site can't be removed.
 
 ```python
 # remove-site
 def _remove_site(idx):
-    """Drop site `idx` from config — files on disk are never touched, and
-    the last site can't be removed. Returns an error sentence, empty on
-    success. Shared by the terminal's remove-site and the page's cards."""
+    """Drop site `idx` and delete its server copies — the content tree, the
+    publish slots, and the one-step backup. The operator's originals live in
+    their own local storage; everything here is a derived copy, which is what
+    makes deletion the honest meaning of 'remove' (deactivation is the
+    keep-everything alternative). The site's certificate files are kept, and
+    a folder another site still points at is left alone. Returns an error
+    sentence, empty on success. Shared by the terminal's remove-site and the
+    page's cards."""
     if not (0 <= idx < len(config.sites)):
         return f"no site {idx}"
     if len(config.sites) == 1:
         return "can't remove the only site — a box needs at least one"
+    victim = config.sites[idx]
+    base   = _resolve(victim.serve_dir)
     del config.sites[idx]
     config.save()
+    shared = any(os.path.realpath(_resolve(s.serve_dir)) == os.path.realpath(base)
+                 for s in config.sites)
+    if not shared and _is_within_base_dir(base):
+        for suffix in ("", ".a", ".b", ".bak", ".new"):
+            path = base + suffix
+            try:
+                if os.path.islink(path):
+                    os.unlink(path)
+                elif os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                pass  # a copy that resists deletion must not block the removal
     if _server_running() or _service_is_active():
         _reload_server()
     return ""
@@ -378,7 +398,9 @@ def _config_remove_site(args):
 
     site  = config.sites[idx]
     label = site.domain or site.serve_dir
-    if not _prompt(f"Remove site {idx} ({label})? Its config is discarded; its files on disk are not touched."):
+    if not _prompt(f"Remove site {idx} ({label})? Its server copies are deleted — "
+                   f"originals in your local storage are untouched "
+                   f"('set {idx} active=no' deactivates without deleting)."):
         print("  Cancelled.")
         return
 
@@ -1376,6 +1398,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._respond(200, json.dumps({
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
+                           "active": s.active,
                            "username": s.username, "publish_url": s.publish_url,
                            "publish_key": s.publish_key,
                            "has_password": bool(s.password_hash)}
@@ -1775,6 +1798,7 @@ def _site_rows():
     return [{
         "index":     i,
         "domain":    site.domain,
+        "active":    site.active,
         "serve_dir": site.serve_dir,
         "auth":      bool(site.username),
         "cert_days": _cert_days_remaining(_resolve(site.cert_file)),
@@ -2074,6 +2098,13 @@ def _set_site_value(target, key, value):
         if v and not (len(v) == 64 and all(c in "0123456789abcdef" for c in v)):
             return "publish_key must be 64 hex characters (a 32-byte Ed25519 public key)"
         target.publish_key = v
+    elif key == "active":
+        # The pause between serving and deleting: a deactivated site keeps
+        # its config and files but is invisible to request routing.
+        v = value.strip().lower()
+        if v not in ("yes", "no"):
+            return "active must be yes or no"
+        target.active = (v == "yes")
     return ""
 
 
@@ -2085,7 +2116,7 @@ The vocabulary `set` accepts, and its usage line.
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
-_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key")
+_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key", "active")
 
 
 def _set_usage():

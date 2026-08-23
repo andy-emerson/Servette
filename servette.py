@@ -143,6 +143,9 @@ class Site:
     def __init__(self, data=None):
         data = data or {}
         self.domain         = data.get("domain",         "")
+        # Deactivated sites keep their config and files but are invisible to
+        # request routing — the pause between serving and deleting.
+        self.active         = bool(data.get("active",    True))
         self.serve_dir      = data.get("serve_dir",      "site")
         self.cert_file      = data.get("cert_file",      "cert.pem")
         self.key_file       = data.get("key_file",       "key.pem")
@@ -381,6 +384,9 @@ class Config:
 [[site]]
 # Leave domain blank for a self-signed certificate (browsers will warn visitors)
 domain = {s(site.domain)}
+# Set active to false to keep the site configured and its files kept, but
+# stop serving it
+active = {'true' if site.active else 'false'}
 serve_dir = {s(site.serve_dir)}
 cert_file = {s(site.cert_file)}
 key_file = {s(site.key_file)}
@@ -1471,9 +1477,9 @@ _CHECK_PAGE = """<!DOCTYPE html>
   if (isHttps) {
     $('badge').textContent = '✓ Verified encrypted';
     $('badge').className    = 'badge badge-green';
-    // Deliberately not "your server": this page serves on every Servette
-    // site, and the reader may be anyone the operator sent the link to.
-    $('tagline-text').textContent = 'THE SERVER IS RUNNING — CHECKED FROM YOUR BROWSER';
+    // Just the verdict: the report card below already names the vantage
+    // ("live from your browser").
+    $('tagline-text').textContent = 'THE SERVER IS RUNNING';
   } else {
     $('badge').textContent = '⚠ Not encrypted';
     $('badge').className    = 'badge badge-red';
@@ -1922,8 +1928,11 @@ def _select_site(host):
     Host reaches a self-signed/LAN site with no domain configured). No
     domainless site and no domain match: None, the closed-system miss."""
     host = (host or "").split(":")[0].strip().lower()
+    # A deactivated site is invisible to routing everywhere below: its Host
+    # gets the closed-system miss (over a still-valid certificate), which is
+    # what "kept but not served" means on the wire.
     for site in config.sites:
-        if site.domain and site.domain.lower() == host:
+        if site.active and site.domain and site.domain.lower() == host:
             return site
     # www.<domain> reaches the site configured as <domain>. _obtain_trusted_cert
     # deliberately issues one certificate covering both names, so routing has to
@@ -1933,10 +1942,10 @@ def _select_site(host):
     if host.startswith("www."):
         bare = host[4:]
         for site in config.sites:
-            if site.domain and site.domain.lower() == bare:
+            if site.active and site.domain and site.domain.lower() == bare:
                 return site
     for site in config.sites:
-        if not site.domain:
+        if site.active and not site.domain:
             return site
     return None
 
@@ -4327,7 +4336,8 @@ def _config_sites():
     _section("Sites")
     for i, site in enumerate(config.sites):
         auth = "password-protected" if site.username else "no password"
-        print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}")
+        state = "" if site.active else ", DEACTIVATED (set active=yes to serve)"
+        print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}{state}")
     print()
     print("  Edit one with e.g. 'dir 1', 'cert 1', 'publish 1' (index defaults to 0).")
     print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
@@ -4479,15 +4489,34 @@ def _config_add_site():
 
 # remove-site
 def _remove_site(idx):
-    """Drop site `idx` from config — files on disk are never touched, and
-    the last site can't be removed. Returns an error sentence, empty on
-    success. Shared by the terminal's remove-site and the page's cards."""
+    """Drop site `idx` and delete its server copies — the content tree, the
+    publish slots, and the one-step backup. The operator's originals live in
+    their own local storage; everything here is a derived copy, which is what
+    makes deletion the honest meaning of 'remove' (deactivation is the
+    keep-everything alternative). The site's certificate files are kept, and
+    a folder another site still points at is left alone. Returns an error
+    sentence, empty on success. Shared by the terminal's remove-site and the
+    page's cards."""
     if not (0 <= idx < len(config.sites)):
         return f"no site {idx}"
     if len(config.sites) == 1:
         return "can't remove the only site — a box needs at least one"
+    victim = config.sites[idx]
+    base   = _resolve(victim.serve_dir)
     del config.sites[idx]
     config.save()
+    shared = any(os.path.realpath(_resolve(s.serve_dir)) == os.path.realpath(base)
+                 for s in config.sites)
+    if not shared and _is_within_base_dir(base):
+        for suffix in ("", ".a", ".b", ".bak", ".new"):
+            path = base + suffix
+            try:
+                if os.path.islink(path):
+                    os.unlink(path)
+                elif os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                pass  # a copy that resists deletion must not block the removal
     if _server_running() or _service_is_active():
         _reload_server()
     return ""
@@ -4511,7 +4540,9 @@ def _config_remove_site(args):
 
     site  = config.sites[idx]
     label = site.domain or site.serve_dir
-    if not _prompt(f"Remove site {idx} ({label})? Its config is discarded; its files on disk are not touched."):
+    if not _prompt(f"Remove site {idx} ({label})? Its server copies are deleted — "
+                   f"originals in your local storage are untouched "
+                   f"('set {idx} active=no' deactivates without deleting)."):
         print("  Cancelled.")
         return
 
@@ -5544,6 +5575,22 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     button.ca.del:hover { color: var(--red); }
     .add-zone { display: flex; justify-content: center; margin-bottom: 1.5rem; }
 
+    /* The remove panel's warning ladder: red deletes, amber pauses,
+       neutral cancels. */
+    button.action.danger {
+      color: var(--red);
+      border-color: rgba(248,113,113,0.5);
+      background: rgba(248,113,113,0.08);
+    }
+    button.action.danger:hover:not(:disabled) { background: rgba(248,113,113,0.18); }
+    button.action.pause {
+      color: var(--amber);
+      border-color: rgba(251,191,36,0.5);
+      background: rgba(251,191,36,0.08);
+    }
+    button.action.pause:hover:not(:disabled) { background: rgba(251,191,36,0.18); }
+    .site-card.inactive .card-title { opacity: 0.55; }
+
     .cfg-field { margin-top: 0.7rem; }
     .cfg-field label {
       display: block;
@@ -5601,7 +5648,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline">Admin — your server, through your SSH tunnel</div>
+    <div class="tagline">Admin tool — over your SSH tunnel</div>
   </div>
 
   <!-- Shown instead of the app when the browser lacks the pipeline. -->
@@ -6173,8 +6220,59 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   function buildSiteCard(siteData, idx, total) {
     const label = siteData.domain || 'site ' + idx;
+    const inactive = siteData.active === false;
     const card = document.createElement('div');
-    card.className = 'card site-card';
+    card.className = 'card site-card' + (inactive ? ' inactive' : '');
+
+    // The remove panel behind ✕: red deletes, amber pauses, neutral
+    // cancels — one bullet says exactly what each choice means. A card
+    // that is already deactivated offers only the delete.
+    const confirmHtml =
+      `<div class="confirm hidden"><div class="split"></div>` +
+      `<p class="hint"><b>Delete</b> removes this server's copies — the ` +
+      `published files and their backup. Your originals in local storage ` +
+      `are untouched; publishing again rebuilds the site.</p>` +
+      (inactive ? '' :
+        `<p class="hint"><b>Deactivate</b> keeps everything on the server ` +
+        `and stops serving this site until you reactivate it.</p>`) +
+      `<div class="btn-row" style="margin-top:0.75rem">` +
+      `<button class="action danger do-delete" type="button">Delete</button>` +
+      (inactive ? '' :
+        `<button class="action pause do-deactivate" type="button">Deactivate</button>`) +
+      `<button class="action do-cancel" type="button">Cancel</button>` +
+      `</div></div>`;
+
+    const bodyHtml = inactive
+      ? (`<p class="hint">Not being served — its files and settings are kept, ` +
+         `and visitors get the plain not-found answer until it is reactivated.</p>` +
+         `<div class="btn-row" style="margin-top:0.75rem">` +
+         `<button class="action do-reactivate" type="button">Reactivate</button></div>`)
+      : (`<div class="dropstrip">⤓&nbsp; drop this site's folder here, or <a href="#">choose it</a></div>` +
+         `<input type="file" webkitdirectory multiple class="hidden">` +
+         `<p class="hint summary">` +
+           (siteData.domain
+             ? `Publishes to <b>${escapeHtml('https://' + siteData.domain)}</b>.`
+             : `No domain yet — this site answers requests no other site matches.`) +
+           ` The folder to drop is the one holding the site's <b>index.html</b>.</p>` +
+         `<div class="btn-row" style="margin-top:0.75rem">` +
+           `<button class="action primary pub" type="button" disabled>Publish</button>` +
+         `</div>` +
+         (siteData.domain ? '' :
+           `<div class="split"></div>` +
+           `<div class="cfg-field"><label>Domain</label>` +
+           `<input class="dom-input" type="text" placeholder="example.com">` +
+           `<div class="cfg-hint">Point the domain's DNS at this server first ` +
+           `(an A record to this box's IP). Setting it requests the certificate — ` +
+           `issuing one is what binds a name to a site.</div></div>` +
+           `<div class="btn-row" style="margin-top:0.75rem">` +
+           `<button class="action dom" type="button">Set domain — get its certificate</button>` +
+           `</div>`) +
+         `<div class="done hidden">` +
+           `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
+           `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
+           `in the terminal is the one step back.</p>` +
+         `</div>`);
+
     card.innerHTML =
       `<div class="card-head">` +
         `<span class="head-left"><span class="handle" title="Drag to reorder">⠿</span>` +
@@ -6182,44 +6280,73 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         `<span class="head-right">` +
           `<button class="ca up" type="button" title="Move up">↑</button>` +
           `<button class="ca down" type="button" title="Move down">↓</button>` +
-          `<button class="ca del" type="button" title="Remove this site">✕</button>` +
-          `<span class="badge badge-dim">no folder chosen</span>` +
+          `<button class="ca del" type="button" title="Remove or deactivate">✕</button>` +
+          `<span class="badge badge-dim">${inactive ? 'deactivated' : 'no folder chosen'}</span>` +
         `</span>` +
       `</div>` +
-      `<div class="card-body">` +
-        `<div class="dropstrip">⤓&nbsp; drop this site's folder here, or <a href="#">choose it</a></div>` +
-        `<input type="file" webkitdirectory multiple class="hidden">` +
-        `<p class="hint summary">` +
-          (siteData.domain
-            ? `Publishes to <b>${escapeHtml('https://' + siteData.domain)}</b>.`
-            : `No domain yet — this site answers requests no other site matches.`) +
-          ` The folder to drop is the one holding the site's <b>index.html</b>.</p>` +
-        `<div class="btn-row" style="margin-top:0.75rem">` +
-          `<button class="action primary pub" type="button" disabled>Publish</button>` +
-        `</div>` +
-        (siteData.domain ? '' :
-          `<div class="split"></div>` +
-          `<div class="cfg-field"><label>Domain</label>` +
-          `<input class="dom-input" type="text" placeholder="example.com">` +
-          `<div class="cfg-hint">Point the domain's DNS at this server first ` +
-          `(an A record to this box's IP). Setting it requests the certificate — ` +
-          `issuing one is what binds a name to a site.</div></div>` +
-          `<div class="btn-row" style="margin-top:0.75rem">` +
-          `<button class="action dom" type="button">Set domain — get its certificate</button>` +
-          `</div>`) +
-        `<div class="done hidden">` +
-          `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
-          `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
-          `in the terminal is the one step back.</p>` +
-        `</div>` +
+      `<div class="card-body">` + bodyHtml + confirmHtml +
         `<p class="error hidden"></p>` +
       `</div>`;
 
     const q = (sel) => card.querySelector(sel);
-    const badge = q('.badge'), input = q('input'), pubBtn = q('.pub');
-    const errEl = q('.error'), summary = q('.summary'), done = q('.done');
+    const badge = q('.badge'), errEl = q('.error');
     let files = null, folderName = '';
     const mark = (cls, text) => setBadge(badge, cls, text);
+
+    // Deactivation rides the same settings write as everything else — it is
+    // a setting ('set n active=no' is the terminal spelling).
+    async function setActive(on) {
+      clearError(errEl);
+      try {
+        const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
+          method: 'POST',
+          body: JSON.stringify({ site: cardIndex(card),
+                                 values: { active: on ? 'yes' : 'no' } }),
+        });
+        let data = {};
+        try { data = await r.json(); } catch { data = {}; }
+        if (!r.ok || data.result !== 'saved')
+          throw new Error(data.error || 'HTTP ' + r.status);
+        await refresh();
+      } catch (e) {
+        showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+      }
+    }
+
+    q('.del').addEventListener('click', () => {
+      clearError(errEl);
+      q('.confirm').classList.toggle('hidden');
+    });
+    q('.do-cancel').addEventListener('click', () =>
+      q('.confirm').classList.add('hidden'));
+    q('.do-delete').addEventListener('click', () => {
+      if (document.querySelectorAll('#site-cards .site-card').length === 1) {
+        q('.confirm').classList.add('hidden');
+        showError(errEl, "Can't remove the only site — a box needs at least one.");
+        return;
+      }
+      siteOp({ op: 'remove', site: cardIndex(card) }, errEl);
+    });
+    const deact = q('.do-deactivate');
+    if (deact) deact.addEventListener('click', () => setActive(false));
+    const react = q('.do-reactivate');
+    if (react) react.addEventListener('click', () => setActive(true));
+
+    q('.up').addEventListener('click', () => {
+      const i = cardIndex(card);
+      if (i > 0) siteOp({ op: 'move', from: i, to: i - 1 });
+    });
+    q('.down').addEventListener('click', () => {
+      const i = cardIndex(card);
+      const n = document.querySelectorAll('#site-cards .site-card').length;
+      if (i < n - 1) siteOp({ op: 'move', from: i, to: i + 1 });
+    });
+    attachCardDrag(q('.card-head'), card);
+
+    // Everything below is the publish machinery only an active card carries.
+    if (inactive) return card;
+    const input = q('input'), pubBtn = q('.pub');
+    const summary = q('.summary'), done = q('.done');
 
     // One intake for both doors — the picker and the drop — so they cannot
     // drift on the hidden-path rule or the summary.
@@ -6338,25 +6465,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       pubBtn.disabled = !files;
     });
 
-    q('.up').addEventListener('click', () => {
-      const i = cardIndex(card);
-      if (i > 0) siteOp({ op: 'move', from: i, to: i - 1 });
-    });
-    q('.down').addEventListener('click', () => {
-      const i = cardIndex(card);
-      const n = document.querySelectorAll('#site-cards .site-card').length;
-      if (i < n - 1) siteOp({ op: 'move', from: i, to: i + 1 });
-    });
-    q('.del').addEventListener('click', () => {
-      if (total === 1) {
-        showError(errEl, "Can't remove the only site — a box needs at least one.");
-        return;
-      }
-      if (!confirm('Remove ' + label + ' from this server? Its config is discarded; ' +
-                   'its files on disk are not touched.')) return;
-      siteOp({ op: 'remove', site: cardIndex(card) }, errEl);
-    });
-
     // Naming the site: the act runs the certificate issuance, so the button
     // waits it out honestly instead of pretending it was instant.
     const domBtn = q('.dom');
@@ -6373,7 +6481,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         domBtn.textContent = oldText;
       }
     });
-    attachCardDrag(q('.card-head'), card);
     return card;
   }
 
@@ -6445,6 +6552,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._respond(200, json.dumps({
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
+                           "active": s.active,
                            "username": s.username, "publish_url": s.publish_url,
                            "publish_key": s.publish_key,
                            "has_password": bool(s.password_hash)}
@@ -6807,6 +6915,7 @@ def _site_rows():
     return [{
         "index":     i,
         "domain":    site.domain,
+        "active":    site.active,
         "serve_dir": site.serve_dir,
         "auth":      bool(site.username),
         "cert_days": _cert_days_remaining(_resolve(site.cert_file)),
@@ -7083,13 +7192,20 @@ def _set_site_value(target, key, value):
         if v and not (len(v) == 64 and all(c in "0123456789abcdef" for c in v)):
             return "publish_key must be 64 hex characters (a 32-byte Ed25519 public key)"
         target.publish_key = v
+    elif key == "active":
+        # The pause between serving and deleting: a deactivated site keeps
+        # its config and files but is invisible to request routing.
+        v = value.strip().lower()
+        if v not in ("yes", "no"):
+            return "active must be yes or no"
+        target.active = (v == "yes")
     return ""
 
 
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
-_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key")
+_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key", "active")
 
 
 def _set_usage():

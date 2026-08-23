@@ -288,9 +288,9 @@
   if (isHttps) {
     $('badge').textContent = '✓ Verified encrypted';
     $('badge').className    = 'badge badge-green';
-    // Deliberately not "your server": this page serves on every Servette
-    // site, and the reader may be anyone the operator sent the link to.
-    $('tagline-text').textContent = 'THE SERVER IS RUNNING — CHECKED FROM YOUR BROWSER';
+    // Just the verdict: the report card below already names the vantage
+    // ("live from your browser").
+    $('tagline-text').textContent = 'THE SERVER IS RUNNING';
   } else {
     $('badge').textContent = '⚠ Not encrypted';
     $('badge').className    = 'badge badge-red';

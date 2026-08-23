@@ -82,6 +82,9 @@ class Site:
     def __init__(self, data=None):
         data = data or {}
         self.domain         = data.get("domain",         "")
+        # Deactivated sites keep their config and files but are invisible to
+        # request routing — the pause between serving and deleting.
+        self.active         = bool(data.get("active",    True))
         self.serve_dir      = data.get("serve_dir",      "site")
         self.cert_file      = data.get("cert_file",      "cert.pem")
         self.key_file       = data.get("key_file",       "key.pem")
@@ -330,6 +333,9 @@ class Config:
 [[site]]
 # Leave domain blank for a self-signed certificate (browsers will warn visitors)
 domain = {s(site.domain)}
+# Set active to false to keep the site configured and its files kept, but
+# stop serving it
+active = {'true' if site.active else 'false'}
 serve_dir = {s(site.serve_dir)}
 cert_file = {s(site.cert_file)}
 key_file = {s(site.key_file)}
@@ -1196,8 +1202,11 @@ def _select_site(host):
     Host reaches a self-signed/LAN site with no domain configured). No
     domainless site and no domain match: None, the closed-system miss."""
     host = (host or "").split(":")[0].strip().lower()
+    # A deactivated site is invisible to routing everywhere below: its Host
+    # gets the closed-system miss (over a still-valid certificate), which is
+    # what "kept but not served" means on the wire.
     for site in config.sites:
-        if site.domain and site.domain.lower() == host:
+        if site.active and site.domain and site.domain.lower() == host:
             return site
     # www.<domain> reaches the site configured as <domain>. _obtain_trusted_cert
     # deliberately issues one certificate covering both names, so routing has to
@@ -1207,10 +1216,10 @@ def _select_site(host):
     if host.startswith("www."):
         bare = host[4:]
         for site in config.sites:
-            if site.domain and site.domain.lower() == bare:
+            if site.active and site.domain and site.domain.lower() == bare:
                 return site
     for site in config.sites:
-        if not site.domain:
+        if site.active and not site.domain:
             return site
     return None
 

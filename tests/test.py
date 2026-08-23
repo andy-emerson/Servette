@@ -1056,6 +1056,10 @@ def run_dispatch_tests(s):
           and "/sites?t=" in s._UI_ADMIN_PAGE
           and "attachCardDrag" in s._UI_ADMIN_PAGE
           and "dom-input" in s._UI_ADMIN_PAGE)
+    check("...whose remove panel offers delete, deactivate, cancel — no browser popup",
+          "do-delete" in s._UI_ADMIN_PAGE and "do-deactivate" in s._UI_ADMIN_PAGE
+          and "do-reactivate" in s._UI_ADMIN_PAGE and "do-cancel" in s._UI_ADMIN_PAGE
+          and "confirm(" not in s._UI_ADMIN_PAGE)
     check("...as a protection toggle plus host basics — the advanced knobs stay in the terminal",
           "btn-auth-toggle" in s._UI_ADMIN_PAGE
           and "has_password" in s._UI_ADMIN_PAGE
@@ -1139,7 +1143,7 @@ def run_dispatch_tests(s):
         st, body = ui_req("GET", f"/config?t={ui_code}")
         check("GET /config with the code answers the set vocabulary with values",
               st == 200 and b'"trusted_proxy"' in body and b'"sites"' in body
-              and b'"has_password"' in body)
+              and b'"has_password"' in body and b'"active"' in body)
         st, _ = ui_req("GET", "/config")
         check("GET /config without the code is refused", st == 403)
 
@@ -1156,6 +1160,18 @@ def run_dispatch_tests(s):
         st, _ = ui_req("POST", f"/config?t={ui_code}",
                        body=json.dumps({"values": {"bogus_key": "1"}}).encode())
         check("...and an unknown setting", st == 422)
+
+        # The page's deactivate/reactivate is a settings write like any other.
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"site": 0,
+                                        "values": {"active": "no"}}).encode())
+        check("Deactivation is a settings write",
+              st == 200 and s.config.sites[0].active is False)
+        st, _ = ui_req("POST", f"/config?t={ui_code}",
+                       body=json.dumps({"site": 0,
+                                        "values": {"active": "yes"}}).encode())
+        check("...and reactivation restores serving",
+              st == 200 and s.config.sites[0].active is True)
         st, _ = ui_req("POST", f"/config?t={ui_code}", body=b"not json{")
         check("...and a malformed settings body", st == 400)
 
@@ -1297,9 +1313,43 @@ def run_dispatch_tests(s):
             st, _ = ui_req("POST", f"/sites?t={ui_code}",
                            body=json.dumps({"op": "remove",
                                             "site": len(s.config.sites) - 1}).encode())
-            check("op=remove drops the config and leaves the files alone",
+            check("op=remove drops the config and deletes the server copies",
                   st == 200 and len(s.config.sites) == n0
-                  and added not in s.config.sites and os.path.isdir(added_base))
+                  and added not in s.config.sites
+                  and not any(os.path.exists(added_base + suf)
+                              for suf in ("", ".a", ".b", ".bak"))
+                  and os.path.exists(s._resolve(added.cert_file)))
+
+            # A folder another site still points at is spared by removal.
+            twin_dir = s._invent_site_dir()
+            t1 = s.Site({"serve_dir": twin_dir})
+            t2 = s.Site({"serve_dir": twin_dir})
+            s.config.sites.extend([t1, t2])
+            err = s._remove_site(len(s.config.sites) - 1)
+            check("...but a folder another site still points at is spared",
+                  err == "" and t2 not in s.config.sites
+                  and os.path.isdir(s._resolve(twin_dir)))
+            s.config.sites.remove(t1)
+            s.config.save()
+            shutil.rmtree(s._resolve(twin_dir), ignore_errors=True)
+
+            # Deactivation: invisible to routing on every matching path —
+            # exact domain, the www pairing, and the domainless catch-all.
+            saved_sites_all = s.config.sites
+            sa = s.Site({"domain": "on.example"})
+            sb = s.Site({"domain": "off.example"}); sb.active = False
+            sc = s.Site({});                        sc.active = False
+            sd = s.Site({})
+            s.config.sites = [sa, sb, sc, sd]
+            check("A deactivated site is invisible to routing",
+                  s._select_site("off.example") is sd      # falls to the catch-all
+                  and s._select_site("on.example") is sa
+                  and s._select_site("anything.else") is sd)  # skips inactive sc
+            s.config.sites = [sa, sb, sc]
+            check("...and with no active catch-all its Host is a closed-system miss",
+                  s._select_site("off.example") is None
+                  and s._select_site("www.off.example") is None)
+            s.config.sites = saved_sites_all
 
             check("move-site is in the config sub-shell's vocabulary",
                   any(c.startswith("move-site") for c, _ in s._CONFIG_COMMANDS))
@@ -1423,6 +1473,17 @@ def run_dispatch_tests(s):
             s.cmd_set(["password=hunter2"])
         check("set refuses unknown keys (password is interactive-only)",
               "Unknown or malformed" in buf.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["active=maybe"])
+        check("set rejects a non-yes/no active", "yes or no" in buf.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["active=no"])
+        deactivated = s.config.sites[0].active is False
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["active=yes"])
+        check("set active=no/yes is the deactivation switch",
+              deactivated and s.config.sites[0].active is True)
 
         saved_auth = (s.config.sites[0].username, s.config.sites[0].password_hash,
                       s.config.sites[0].password_salt)
@@ -5045,8 +5106,11 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # its signature check, the loopback page after its pairing code —
         # and _drop_backup retires the single-shot backup marker for both
         # the flip era (a symlink) and the era before it (a directory).
+        # _remove_site deletes a removed site's server copies (derived from
+        # the operator's originals; deactivation is the keep-everything
+        # path), sparing folders another site still points at.
         "_land_bundle", "_swap_site_content", "cmd_restore_site",
-        "_drop_backup",
+        "_drop_backup", "_remove_site",
         # A site FOLDER, created empty — setup must never leave nothing to
         # serve, and a page-added site gets a Servette-named folder because
         # the folder is not a question an operator should have to answer.

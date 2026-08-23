@@ -1055,7 +1055,7 @@ def run_dispatch_tests(s):
     check("...and the Traffic tab reading the journal summary, renew beside the cert row",
           "tab-analytics" in s._UI_ADMIN_PAGE and "/traffic?t=" in s._UI_ADMIN_PAGE
           and "btn-renew" in s._UI_ADMIN_PAGE
-          and "barsSVG" in s._UI_ADMIN_PAGE and "lineSVG" in s._UI_ADMIN_PAGE)
+          and "lineSVG" in s._UI_ADMIN_PAGE and "chart-y" in s._UI_ADMIN_PAGE)
 
     # Traffic: the journal re-read as counts. The lines are built through
     # the program's OWN log formatter and then wrapped in journalctl's
@@ -1162,7 +1162,7 @@ def run_dispatch_tests(s):
         st, body = ui_req("GET", "/")
         check("The bare URL answers the login page, never content",
               st == 200 and b"Passcode" in body
-              and b"Server login" in body
+              and b"Login" in body
               and b"one-time passcode" in body
               and b"publish page" not in body)
         check("...and the login page does not leak the passcode",

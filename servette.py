@@ -1458,9 +1458,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
   </div>
 
   <div class="note">
-    This page ships inside Servette itself, on a reserved path, and runs on
-    this site's own domain — that is why it can read what it tests, and why
-    it keeps answering whatever the site publishes. Served by
+    Served by
     <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
@@ -5032,7 +5030,8 @@ def _parse_traffic(lines, days=7):
                 paths[path] = paths.get(path, 0) + 1
     top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
     return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
-            "top_paths": top, "window_days": days}
+            "top_paths": top, "window_days": days,
+            "total": sum(statuses.values())}
 
 
 def _traffic_summary(days=7):
@@ -5440,7 +5439,7 @@ _UI_LOGIN_PAGE = """<!doctype html>
 </style></head>
 <body>
 <div class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-<div class="tagline">Server login</div>
+<div class="tagline">Login</div>
 <div class="card">
   <form method="get" action="/">
     <label for="t">Passcode</label>
@@ -5770,7 +5769,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       font-size: 0.72rem;
       line-height: 1.9;
     }
-    .switch-row label.k { color: var(--muted); cursor: pointer; }
+    .switch-row .k { color: var(--muted); }
+    .switch-row label.k { cursor: pointer; }
     .switch-row .switch-value {
       display: flex;
       align-items: center;
@@ -5781,9 +5781,31 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .switch-act { display: flex; align-items: center; gap: 0.5rem; }
     .switch-act label { color: var(--muted); cursor: pointer; }
     button.action.tiny { padding: 0.2rem 0.55rem; font-size: 0.68rem; }
+    button.action.due {
+      color: var(--amber);
+      border-color: rgba(251,191,36,0.5);
+      background: rgba(251,191,36,0.08);
+    }
+    button.action.due:hover:not(:disabled) {
+      color: var(--text);
+      border-color: rgba(90,132,102,0.6);
+      background: rgba(90,132,102,0.15);
+    }
 
     /* Charts: inline SVG, no library — the page loads no third-party code. */
-    .chart { width: 100%; height: 60px; display: block; margin-top: 0.6rem; }
+    .chart { width: 100%; height: 60px; display: block; }
+    .chart-wrap { display: flex; gap: 0.5rem; margin-top: 0.8rem; }
+    .chart-body { flex: 1; min-width: 0; }
+    .chart-y {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: flex-end;
+      height: 60px;
+      font-size: 0.62rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
     .chart-labels {
       display: flex;
       justify-content: space-between;
@@ -5851,7 +5873,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline">Server administration</div>
+    <div class="tagline">Admin</div>
   </div>
 
   <!-- Shown instead of the app when the browser lacks the pipeline. -->
@@ -5899,16 +5921,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <div id="panel-analytics" role="tabpanel" class="hidden">
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Traffic — last 7 days</span>
-        <span class="badge badge-dim" id="traffic-badge">loading…</span>
+        <span class="card-title">Traffic</span>
+        <select class="cfg-site" id="traffic-window" style="margin:0">
+          <option value="1">last 24 hours</option>
+          <option value="7" selected>last 7 days</option>
+          <option value="30">last 30 days</option>
+        </select>
       </div>
       <div class="card-body">
         <div class="rows" id="traffic-rows"></div>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action" id="btn-traffic-refresh" type="button">Refresh</button>
         </div>
-        <p class="hint">Counts read from the server's own log: requests per
-        day, response statuses, and the most-requested paths. Visitor IP
+        <p class="hint">Counts read from the server's own log. Visitor IP
         addresses stay in the raw log (the terminal's <b>log</b>), never
         here.</p>
         <p class="error hidden" id="traffic-error"></p>
@@ -5999,12 +6024,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   </div><!-- /app -->
 
   <div class="note">
-    This page is served by your own server on <b>127.0.0.1</b> and reached
-    only through your SSH tunnel — the address does not exist on the public
-    internet. No signature, no key: <b>being here is the authentication</b>,
-    because only your SSH key opens this pipe. Published content lands
-    through the same staging, checks, atomic swap, and backup as every
-    other publish.
+    This page is served on <b>127.0.0.1</b> through your SSH tunnel. It does
+    not exist on the public internet. No signature or password is required
+    because <b>only your SSH key can open the tunnel</b>.
   </div>
 
 </div>
@@ -6115,37 +6137,38 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   /* ══ Traffic — the journal re-read as counts, fetched on entry. ══ */
 
   async function loadTraffic() {
-    setBadge($('traffic-badge'), 'badge-dim', 'loading…');
     clearError($('traffic-error'));
     try {
-      const r = await fetch('/traffic?t=' + encodeURIComponent(CODE));
+      const r = await fetch('/traffic?t=' + encodeURIComponent(CODE) +
+                            '&days=' + encodeURIComponent($('traffic-window').value));
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const t = await r.json();
-      const total = (t.days || []).reduce((n, d) => n + d[1], 0);
-      let h;
-      if (!total) {
-        h = row('Requests', 'none in the last 7 days — or no readable journal on this host');
-      } else {
-        h = row('Requests', String(total)) +
-            barsSVG(t.days) +
-            `<div class="chart-labels"><span>${escapeHtml(t.days[0][0])}</span>` +
-            `<span>${escapeHtml(t.days[t.days.length - 1][0])}</span></div>`;
-        h += row('Statuses', Object.entries(t.statuses || {})
-          .map(([code, n]) => code + ' × ' + n).join(' · '), 'gap');
-        h += row('Top paths', (t.top_paths || [])
-          .map(([p, n]) => n + ' × ' + escapeHtml(p)).join('<br>'), 'gap');
-      }
-      $('traffic-rows').innerHTML = h;
-      setBadge($('traffic-badge'), total ? 'badge-green' : 'badge-dim',
-               total ? total + ' requests' : 'no requests');
+      const total = t.total || 0;
+      // Status codes are the server's vocabulary, not the reader's: each
+      // count is named for what actually happened.
+      const NAMED = [['Served', ['200', '206']], ['Cached', ['304']],
+                     ['Not found', ['404']], ['Refused', ['403', '405']],
+                     ['Sign-in needed', ['401']], ['Rate limited', ['429']]];
+      const named = NAMED
+        .map(([name, codes]) => [name, codes.reduce(
+          (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
+        .filter(([, n]) => n > 0);
+      $('traffic-rows').innerHTML = !total
+        ? row('Requests', 'none in this window — or no readable journal on this host')
+        : row('Requests', String(total)) +
+          named.map(([name, n]) => row(name, String(n))).join('') +
+          chart(lineSVG(t.days.map((d) => d[1])),
+                t.days.length ? t.days[0][0] : '',
+                t.days.length ? t.days[t.days.length - 1][0] : '',
+                Math.max(...t.days.map((d) => d[1])));
     } catch (e) {
-      setBadge($('traffic-badge'), 'badge-red', '✕ unreachable');
       showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
         : 'Could not read traffic: ' + e.message);
     }
   }
 
   $('btn-traffic-refresh').addEventListener('click', loadTraffic);
+  $('traffic-window').addEventListener('change', loadTraffic);
 
   // Renewal is automatic (the watchdog renews before expiry), so the button
   // exists only while the Certificate row needs attention — it re-runs
@@ -6173,11 +6196,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   const HOST_FIELDS = [
     ['email', 'Email (ACME registration)',
-     'Where the certificate authority sends renewal and expiry notices. Never shown on the site.'],
+     'Where the certificate authority sends renewal and expiry notices.'],
     ['rate_limit', 'Rate limit',
-     'Requests one visitor may make per minute before the server answers 429 and makes them wait.'],
+     'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
     ['auth_rate_limit', 'Auth rate limit',
-     'Wrong-password attempts one visitor may make per minute before being made to wait.'],
+     'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
     ['cache_size_mb', 'File cache size (MB)',
      'Memory set aside to serve frequently requested files without re-reading the disk.'],
   ];
@@ -6252,6 +6275,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     if (cert)
       $('cert-state').innerHTML = cert.ok ? escapeHtml(cert.detail)
         : `<span class="warn">! ${escapeHtml(cert.detail)}</span>`;
+    // Amber once the certificate is inside the window the watchdog itself
+    // renews in (under 30 days) — the point where pressing it does
+    // something the server was about to do anyway.
+    $('btn-renew').classList.toggle('due',
+      !!cert && (!cert.ok || (cert.days != null && cert.days < 30)));
     // One word while all is well — the sentence-length detail belongs to
     // the amber cases, where it says what to do about it.
     const access = scoped.find((c) => c.key === 'password');
@@ -6288,13 +6316,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // Nothing to save on a public site that is staying public — but turning
     // one public IS a change, so the button survives that pending state.
     $('site-save-row').classList.toggle('hidden', !(on || pendingAuth));
+    // Only the states that ask something of the reader speak; the settled
+    // ones are already said by the Access row itself.
     $('auth-hint').textContent = on
-      ? (site.has_password
-          ? 'The site is private — visitors sign in with this login.'
-          : 'Choose a username and a password, then save — the site becomes private.')
+      ? (site.has_password ? ''
+         : 'Choose a username and a password, then save — the site becomes private.')
       : (site.username
-          ? 'Saving makes the site public: the login is removed and the stored password deleted.'
-          : 'The site is public — anyone can view it.');
+         ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+         : '');
 
     // ── This server: the box's identity and health, then the host knobs. ──
     // No Mode row here: the service health row below is labeled Mode and
@@ -6329,33 +6358,35 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                     : l.memory_mb.toFixed(1) + ' MB');
     $('load-chart').innerHTML = cpuSeries.length < 2
       ? '<p class="hint">Live CPU — the line starts when you open this tab.</p>'
-      : lineSVG(cpuSeries) +
-        `<div class="chart-labels"><span>${cpuSeries.length * METER_SECONDS}s ago</span>` +
-        `<span>${cpuSeries[cpuSeries.length - 1].toFixed(1)}% now</span></div>`;
+      : chart(lineSVG(cpuSeries),
+              (cpuSeries.length - 1) * METER_SECONDS + 's ago',
+              cpuSeries[cpuSeries.length - 1].toFixed(1) + '% now',
+              Math.max(1, ...cpuSeries).toFixed(0), '%');
   }
 
-  /* ══ Charts — inline SVG, sized by viewBox, no library. ══ */
+  /* ══ Charts — inline SVG, sized by viewBox, no library. Every chart is
+     drawn with its scale: a line without a y-axis is a shape, not a
+     measurement. ══ */
 
   function lineSVG(values) {
     const w = 300, h = 60, max = Math.max(1, ...values);
-    const pts = values.map((v, i) =>
-      `${(i / (values.length - 1) * w).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`);
+    const pts = values.length === 1
+      ? [`0,${(h - (values[0] / max) * h).toFixed(1)}`,
+         `${w},${(h - (values[0] / max) * h).toFixed(1)}`]
+      : values.map((v, i) =>
+          `${(i / (values.length - 1) * w).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`);
     return `<svg viewBox="0 0 ${w} ${h}" class="chart" preserveAspectRatio="none">` +
       `<polyline points="${pts.join(' ')}" fill="none" stroke="#5A8466" ` +
       `stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline></svg>`;
   }
 
-  function barsSVG(pairs) {
-    const w = 300, h = 60, gap = 4;
-    const max = Math.max(1, ...pairs.map((p) => p[1]));
-    const bw = (w - gap * (pairs.length - 1)) / pairs.length;
-    return `<svg viewBox="0 0 ${w} ${h}" class="chart" preserveAspectRatio="none">` +
-      pairs.map((p, i) => {
-        const bh = Math.max(1, (p[1] / max) * h);
-        return `<rect x="${(i * (bw + gap)).toFixed(1)}" y="${(h - bh).toFixed(1)}" ` +
-               `width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="#5A8466"></rect>`;
-      }).join('') + '</svg>';
-  }
+  // A chart, its y-axis (top of scale and zero), and its x labels.
+  const chart = (svg, xFrom, xTo, yMax, unit) =>
+    `<div class="chart-wrap"><div class="chart-y">` +
+    `<span>${escapeHtml(String(yMax))}${unit || ''}</span><span>0</span></div>` +
+    `<div class="chart-body">${svg}` +
+    `<div class="chart-labels"><span>${escapeHtml(xFrom)}</span>` +
+    `<span>${escapeHtml(xTo)}</span></div></div></div>`;
 
   /* ══ The live meter: successive readings of the server's own cumulative
      CPU counter, differenced here. Nothing is sampled or stored on the
@@ -6689,7 +6720,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<p class="hint summary">` +
            (siteData.domain
              ? `Publishes to <b>${escapeHtml('https://' + siteData.domain)}</b>.`
-             : `No domain yet — this site answers requests no other site matches.`) +
+             : `No domain yet — reachable only at this server's IP address until you set one.`) +
            ` The folder to drop is the one holding the site's <b>index.html</b>.</p>` +
          `<div class="btn-row" style="margin-top:0.75rem">` +
            `<button class="action primary pub" type="button" disabled>Publish</button>` +
@@ -6721,8 +6752,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         `<span class="head-left"><span class="handle" title="Drag to reorder">⠿</span>` +
         `<span class="card-title">${escapeHtml(label)}</span></span>` +
         `<span class="head-right">` +
-          `<button class="ca up" type="button" title="Move up">↑</button>` +
-          `<button class="ca down" type="button" title="Move down">↓</button>` +
           `<button class="ca del" type="button" title="Remove or deactivate">✕</button>` +
           (siteNeeds.length
             ? `<span class="badge badge-warn needs" title="${escapeHtml(
@@ -6730,7 +6759,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                  siteNeeds.length === 1 ? escapeHtml(siteNeeds[0].label.split(' · ').pop())
                                         : siteNeeds.length + ' to review'}</span>`
             : '') +
-          `<span class="badge badge-dim">${inactive ? 'deactivated' : 'no folder chosen'}</span>` +
+          `<span class="badge badge-dim${inactive ? '' : ' hidden'}">${
+             inactive ? 'deactivated' : ''}</span>` +
         `</span>` +
       `</div>` +
       `<div class="card-body">` + bodyHtml + confirmHtml +
@@ -6740,7 +6770,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const q = (sel) => card.querySelector(sel);
     const badge = q('.badge'), errEl = q('.error');
     let files = null, folderName = '';
-    const mark = (cls, text) => setBadge(badge, cls, text);
+    const mark = (cls, text) => { setBadge(badge, cls, text);
+                                  badge.classList.remove('hidden'); };
 
     // Deactivation rides the same settings write as everything else — it is
     // a setting ('set n active=no' is the terminal spelling).
@@ -6788,15 +6819,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const react = q('.do-reactivate');
     if (react) react.addEventListener('click', () => setActive(true));
 
-    q('.up').addEventListener('click', () => {
-      const i = cardIndex(card);
-      if (i > 0) siteOp({ op: 'move', from: i, to: i - 1 });
-    });
-    q('.down').addEventListener('click', () => {
-      const i = cardIndex(card);
-      const n = document.querySelectorAll('#site-cards .site-card').length;
-      if (i < n - 1) siteOp({ op: 'move', from: i, to: i + 1 });
-    });
     attachCardDrag(q('.card-head'), card);
 
     // Everything below is the publish machinery only an active card carries.
@@ -7015,11 +7037,17 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                           for i, s in enumerate(config.sites)],
             }), "application/json")
         if path == "/traffic":
-            # The Traffic tab's feed: the journal re-read as counts, and
-            # never carrying a visitor's IP.
+            # The Analytics tab's feed: the journal re-read as counts, and
+            # never carrying a visitor's IP. The window is the reader's
+            # choice, bounded — a request for a year would read a year of
+            # journal to draw a chart nobody asked for.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
-            return self._respond(200, json.dumps(_traffic_summary()),
+            try:
+                days = int(parse_qs(urlsplit(self.path).query).get("days", ["7"])[0])
+            except ValueError:
+                days = 7
+            return self._respond(200, json.dumps(_traffic_summary(max(1, min(days, 30)))),
                                  "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)
@@ -7422,13 +7450,13 @@ def _health_checks():
     # Labeled Mode, because that is what its three answers describe — and
     # the page prints no second Mode row beside it.
     rows.append({"key": "service", "site": None, "ok": running, "label": "Mode",
-                 "detail": "running as a system service — survives reboots" if service_active
-                 else ("running in this session only — 'enable' outlives the terminal" if running
+                 "detail": "system service (survives reboots)" if service_active
+                 else ("session only (stops when this terminal closes)" if running
                        else "stopped — 'start' brings it up")})
     if not _IS_MACOS:
         armed = os.path.exists(NETWATCH_PATH + ".timer")
         rows.append({"key": "netwatch", "site": None, "ok": armed, "label": "Network watchdog",
-                     "detail": "armed — a dropped default route recovers within a minute" if armed
+                     "detail": "armed (checks every minute)" if armed
                      else "not installed — 'enable' provisions it"})
         mem_kb, _avail_kb, committed_kb = _meminfo()
         rec = _swap_recommendation(mem_kb, committed_kb,
@@ -7456,7 +7484,8 @@ def _health_checks():
         days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
         cert_ok = days is not None and days > 0 and bool(site.domain)
         rows.append({"key": "cert", "site": i, "ok": cert_ok, "label": tag + "Certificate",
-                     "detail": (f"trusted, {days} days remaining — renews itself" if cert_ok
+                     "days": days,
+                     "detail": (f"{days} days remaining (auto-renew enabled)" if cert_ok
                                 else "expired" if (days is not None and days <= 0)
                                 else "self-signed — a domain earns a trusted one" if days is not None
                                 else "not configured")})

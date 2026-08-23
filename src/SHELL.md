@@ -964,7 +964,8 @@ def _parse_traffic(lines, days=7):
                 paths[path] = paths.get(path, 0) + 1
     top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
     return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
-            "top_paths": top, "window_days": days}
+            "top_paths": top, "window_days": days,
+            "total": sum(statuses.values())}
 
 
 def _traffic_summary(days=7):
@@ -1437,7 +1438,7 @@ _UI_LOGIN_PAGE = """<!doctype html>
 </style></head>
 <body>
 <div class="logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-<div class="tagline">Server login</div>
+<div class="tagline">Login</div>
 <div class="card">
   <form method="get" action="/">
     <label for="t">Passcode</label>
@@ -1529,11 +1530,17 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                           for i, s in enumerate(config.sites)],
             }), "application/json")
         if path == "/traffic":
-            # The Traffic tab's feed: the journal re-read as counts, and
-            # never carrying a visitor's IP.
+            # The Analytics tab's feed: the journal re-read as counts, and
+            # never carrying a visitor's IP. The window is the reader's
+            # choice, bounded — a request for a year would read a year of
+            # journal to draw a chart nobody asked for.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
-            return self._respond(200, json.dumps(_traffic_summary()),
+            try:
+                days = int(parse_qs(urlsplit(self.path).query).get("days", ["7"])[0])
+            except ValueError:
+                days = 7
+            return self._respond(200, json.dumps(_traffic_summary(max(1, min(days, 30)))),
                                  "application/json")
         if auth == "ok":
             return self._respond(200, self.server.page)
@@ -1973,13 +1980,13 @@ def _health_checks():
     # Labeled Mode, because that is what its three answers describe — and
     # the page prints no second Mode row beside it.
     rows.append({"key": "service", "site": None, "ok": running, "label": "Mode",
-                 "detail": "running as a system service — survives reboots" if service_active
-                 else ("running in this session only — 'enable' outlives the terminal" if running
+                 "detail": "system service (survives reboots)" if service_active
+                 else ("session only (stops when this terminal closes)" if running
                        else "stopped — 'start' brings it up")})
     if not _IS_MACOS:
         armed = os.path.exists(NETWATCH_PATH + ".timer")
         rows.append({"key": "netwatch", "site": None, "ok": armed, "label": "Network watchdog",
-                     "detail": "armed — a dropped default route recovers within a minute" if armed
+                     "detail": "armed (checks every minute)" if armed
                      else "not installed — 'enable' provisions it"})
         mem_kb, _avail_kb, committed_kb = _meminfo()
         rec = _swap_recommendation(mem_kb, committed_kb,
@@ -2007,7 +2014,8 @@ def _health_checks():
         days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
         cert_ok = days is not None and days > 0 and bool(site.domain)
         rows.append({"key": "cert", "site": i, "ok": cert_ok, "label": tag + "Certificate",
-                     "detail": (f"trusted, {days} days remaining — renews itself" if cert_ok
+                     "days": days,
+                     "detail": (f"{days} days remaining (auto-renew enabled)" if cert_ok
                                 else "expired" if (days is not None and days <= 0)
                                 else "self-signed — a domain earns a trusted one" if days is not None
                                 else "not configured")})

@@ -272,7 +272,7 @@ the service). *(2026-08-22)*
 body is a traditional error page — the path, the server-is-up sentence, a
 home link, and a link to the check — and an operator's `404.html` takes
 that role by simply existing. The connection test is its own embedded
-page (`src/check.html`) at `/.well-known/servette-check`: code-first, so
+page (`src/connection-test.html`) at `/.well-known/servette-check`: code-first, so
 no site content ever shadows it; behind the site's own auth; answering
 200, because the page really is there; its report rendering every row
 upfront in a dimmed pending state and resolving each in place. The admin

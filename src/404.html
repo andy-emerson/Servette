@@ -20,6 +20,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>404 — not found</title>
   <style>
+    /* ── Theme and reset ─────────────────────────────────────────────── */
     :root {
       --bg:      #0e0e0e;
       --surface: #161616;
@@ -36,6 +37,7 @@
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ── Page frame: centred column over a faint noise wash ──────────── */
     body {
       background: var(--bg);
       color: var(--text);
@@ -65,6 +67,7 @@
       width: 100%;
     }
 
+    /* ── Wordmark and tagline ────────────────────────────────────────── */
     .header {
       margin-bottom: 3rem;
     }
@@ -106,6 +109,7 @@
 
     .dot.red { background: var(--red); animation: none; }
 
+    /* ── The miss itself: code, path, and why you are seeing this ────── */
     .notfound {
       border: 1px solid var(--border);
       border-left: 3px solid var(--muted);
@@ -166,15 +170,7 @@
       flex-wrap: wrap;
     }
 
-    .notfound-links a {
-      font-size: 0.75rem;
-      color: #5A8466;
-      text-decoration: none;
-    }
-
-    .notfound-links a:hover { text-decoration: underline; }
-
-    /* ── Connection card ── */
+    /* ── Connection card: the one live judgment this page keeps ──────── */
     .verified {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -220,22 +216,23 @@
       background: var(--surface);
     }
 
-    .verified-links a {
+    /* Every link on the page is a Servette link — one rule for all of them. */
+    .notfound-links a, .verified-links a, .note a {
       font-size: 0.75rem;
       color: #5A8466;
       text-decoration: none;
     }
+    .notfound-links a:hover, .verified-links a:hover, .note a:hover {
+      text-decoration: underline;
+    }
 
-    .verified-links a:hover { text-decoration: underline; }
-
+    /* ── Footer ──────────────────────────────────────────────────────── */
     .note {
       font-size: 0.7rem;
       color: var(--muted);
       line-height: 1.7;
     }
-    .note a { color: #60a5fa; text-decoration: none; }
-    .note a:hover { text-decoration: underline; }
-    .note a.brand { color: #5A8466; }
+    .note a { font-size: inherit; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -253,7 +250,7 @@
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline" id="tagline">
+    <div class="tagline">
       <span class="dot" id="dot"></span><span id="tagline-text">THE SERVER IS RUNNING — THIS PATH IS NOT</span>
     </div>
   </div>
@@ -266,7 +263,7 @@
       <span class="notfound-msg">Nothing published here</span>
     </div>
     <div class="notfound-path" id="notfound-path">—</div>
-    <p class="notfound-why" id="notfound-why">
+    <p class="notfound-why">
       The server is running and answered this request, so the connection is
       fine — only the path is missing. You are seeing this page because the
       site publishes no <code>404.html</code> of its own.
@@ -291,7 +288,7 @@
 
   <div class="note">
     This page ships inside Servette itself. Served by
-    <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
+    <a href="https://github.com/andy-emerson/servette">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
 

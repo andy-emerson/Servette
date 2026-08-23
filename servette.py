@@ -841,9 +841,11 @@ def _security_headers(site):
     return headers
 
 
-# Reserved paths
+# Reserved paths. The connection test's URL keeps the older word: the page
+# was renamed, the address cannot be (DECISIONS.md, "It is a connection
+# test") — a published URL outlives the name someone gave the page.
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
-_CHECK_PATH              = "/.well-known/servette-check"
+_CONNECTION_TEST_PATH    = "/.well-known/servette-check"
 
 # The default 404 body (DECISIONS.md: "The error page is server-delivered,
 # client-executed"): authored as src/404.html and inlined by build.py, so it is
@@ -873,6 +875,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>404 — not found</title>
   <style>
+    /* ── Theme and reset ─────────────────────────────────────────────── */
     :root {
       --bg:      #0e0e0e;
       --surface: #161616;
@@ -889,6 +892,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ── Page frame: centred column over a faint noise wash ──────────── */
     body {
       background: var(--bg);
       color: var(--text);
@@ -918,6 +922,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       width: 100%;
     }
 
+    /* ── Wordmark and tagline ────────────────────────────────────────── */
     .header {
       margin-bottom: 3rem;
     }
@@ -959,6 +964,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
     .dot.red { background: var(--red); animation: none; }
 
+    /* ── The miss itself: code, path, and why you are seeing this ────── */
     .notfound {
       border: 1px solid var(--border);
       border-left: 3px solid var(--muted);
@@ -1019,15 +1025,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       flex-wrap: wrap;
     }
 
-    .notfound-links a {
-      font-size: 0.75rem;
-      color: #5A8466;
-      text-decoration: none;
-    }
-
-    .notfound-links a:hover { text-decoration: underline; }
-
-    /* ── Connection card ── */
+    /* ── Connection card: the one live judgment this page keeps ──────── */
     .verified {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1073,22 +1071,23 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       background: var(--surface);
     }
 
-    .verified-links a {
+    /* Every link on the page is a Servette link — one rule for all of them. */
+    .notfound-links a, .verified-links a, .note a {
       font-size: 0.75rem;
       color: #5A8466;
       text-decoration: none;
     }
+    .notfound-links a:hover, .verified-links a:hover, .note a:hover {
+      text-decoration: underline;
+    }
 
-    .verified-links a:hover { text-decoration: underline; }
-
+    /* ── Footer ──────────────────────────────────────────────────────── */
     .note {
       font-size: 0.7rem;
       color: var(--muted);
       line-height: 1.7;
     }
-    .note a { color: #60a5fa; text-decoration: none; }
-    .note a:hover { text-decoration: underline; }
-    .note a.brand { color: #5A8466; }
+    .note a { font-size: inherit; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -1106,7 +1105,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline" id="tagline">
+    <div class="tagline">
       <span class="dot" id="dot"></span><span id="tagline-text">THE SERVER IS RUNNING — THIS PATH IS NOT</span>
     </div>
   </div>
@@ -1119,7 +1118,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       <span class="notfound-msg">Nothing published here</span>
     </div>
     <div class="notfound-path" id="notfound-path">—</div>
-    <p class="notfound-why" id="notfound-why">
+    <p class="notfound-why">
       The server is running and answered this request, so the connection is
       fine — only the path is missing. You are seeing this page because the
       site publishes no <code>404.html</code> of its own.
@@ -1144,7 +1143,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
   <div class="note">
     This page ships inside Servette itself. Served by
-    <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
+    <a href="https://github.com/andy-emerson/servette">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
 
@@ -1183,15 +1182,17 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 """.encode()
 _NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
 
-# The connection test (src/check.html), served at _CHECK_PATH on every site —
-# a reserved path under /.well-known/, the one namespace the hidden-path rule
+# The connection test (src/connection-test.html), served on every site at a
+# reserved path under /.well-known/ — the one namespace the hidden-path rule
 # already sets apart, so an operator's content never shadows the outside
 # vantage the way a custom 404.html takes over the miss body.
-_CHECK_PAGE = """<!DOCTYPE html>
-<!-- src/check.html — the connection test, inlined into the module by
-     build.py and served at the reserved path /.well-known/servette-check
-     (DECISIONS.md, "The connection test has its own reserved page").
-     Linked from the default 404 body and from the admin page's Status tab.
+_CONNECTION_TEST_PAGE = """<!DOCTYPE html>
+<!-- src/connection-test.html — inlined into the module by build.py and
+     served at the reserved path /.well-known/servette-check (DECISIONS.md,
+     "The connection test has its own reserved page"). The URL keeps the
+     older word on purpose: the page was renamed, the address cannot be.
+     Linked from the default 404 body, and from each site's card on the
+     admin page.
 
      Same-origin by construction, so it can read what a cross-origin probe
      never could: it checks the connection it was itself loaded over. It
@@ -1212,6 +1213,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Connection test</title>
   <style>
+    /* ── Theme and reset ─────────────────────────────────────────────── */
     :root {
       --bg:      #0e0e0e;
       --surface: #161616;
@@ -1228,6 +1230,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ── Page frame: centred column over a faint noise wash ──────────── */
     body {
       background: var(--bg);
       color: var(--text);
@@ -1257,6 +1260,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
       width: 100%;
     }
 
+    /* ── Wordmark and tagline ────────────────────────────────────────── */
     .header {
       margin-bottom: 3rem;
     }
@@ -1298,7 +1302,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
     .dot.red { background: var(--red); animation: none; }
 
-    /* ── Connection card ── */
+    /* ── Connection card: the headline verdict ───────────────────────── */
     .verified {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1338,7 +1342,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
 
-    /* ── The report ── */
+    /* ── The report: one row per finding, evidence underneath ────────── */
     .checks {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1417,9 +1421,8 @@ _CHECK_PAGE = """<!DOCTYPE html>
       color: var(--muted);
       line-height: 1.7;
     }
-    .note a { color: #60a5fa; text-decoration: none; }
+    .note a { color: #5A8466; text-decoration: none; }
     .note a:hover { text-decoration: underline; }
-    .note a.brand { color: #5A8466; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -1437,7 +1440,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline" id="tagline">
+    <div class="tagline">
       <span class="dot" id="dot"></span><span id="tagline-text">checking...</span>
     </div>
   </div>
@@ -1463,7 +1466,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
   <div class="note">
     Served by
-    <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
+    <a href="https://github.com/andy-emerson/servette">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
 
@@ -1513,8 +1516,8 @@ _CHECK_PAGE = """<!DOCTYPE html>
     { name: 'Encrypted', run: async () => {
         const r = await fetch(here, { cache: 'no-store' });
         const ct = r.headers.get('Content-Type') || '(absent)';
-        return { ok: location.protocol === 'https:' && r.status === 200,
-                 obs: location.protocol === 'https:'
+        return { ok: isHttps && r.status === 200,
+                 obs: isHttps
                    ? 'HTTPS, and this browser accepted the certificate'
                    : 'served over plain HTTP — visitors are unprotected',
                  ev: 'GET ' + P + ' → ' + r.status + ', ' + ct }; } },
@@ -1610,6 +1613,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
                  ev: 'GET /.well-known/servette → 200' }; } },
   ];
 
+  // ── Rendering the report ──────────────────────────────────────────
   const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };
   const logEl = $('t-log');
 
@@ -1642,8 +1646,11 @@ _CHECK_PAGE = """<!DOCTYPE html>
     const rows = checks.map((c) => ({ c, el: addRow(c.name) }));
     for (const { c, el } of rows) {
       let r;
+      // A check that throws is a skip, not a failure — the request never
+      // completed, so nothing was observed. What went wrong becomes the
+      // evidence, the same as for a check that did complete.
       try { r = await c.run(); }
-      catch (e) { r = { ok: null, obs: 'could not run' }; }
+      catch (e) { r = { ok: null, obs: 'could not run', ev: String(e) }; }
       el.obs.textContent = r.obs;
       el.ev.textContent = r.ev || '';
       if (r.ok === true)       { paint(el.row, el.st, 'pass'); pass++; }
@@ -1666,7 +1673,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 </body>
 </html>
 """.encode()
-_CHECK_ETAG = '"' + hashlib.sha256(_CHECK_PAGE).hexdigest()[:16] + '"'
+_CONNECTION_TEST_ETAG = '"' + hashlib.sha256(_CONNECTION_TEST_PAGE).hexdigest()[:16] + '"'
 
 
 # Log escaping
@@ -1805,21 +1812,21 @@ def _handle_request(method, url_path, headers, raw_ip):
     # the site's own auth like everything else, and carrying the same
     # revalidate-always caching contract as the 404 body, for the same
     # reason: the page's checks probe the URL it was served from.
-    if url_path.split("?", 1)[0] == _CHECK_PATH:
+    if url_path.split("?", 1)[0] == _CONNECTION_TEST_PATH:
         cache = _cache_control_header(site.username)
         if "max-age" in cache:
             cache = ("private" if site.username else "public") + ", no-cache"
-        if headers.get("If-None-Match", "") == _CHECK_ETAG:
+        if headers.get("If-None-Match", "") == _CONNECTION_TEST_ETAG:
             log.info("304 Not Modified %s to %s", log_path, ip)
-            return resp(304, [(b"etag", _CHECK_ETAG.encode()),
+            return resp(304, [(b"etag", _CONNECTION_TEST_ETAG.encode()),
                               (b"cache-control", cache.encode())])
         log.info("200 %s (connection test) to %s", log_path, ip)
         return resp(200, [
             (b"content-type",   b"text/html; charset=utf-8"),
-            (b"content-length", str(len(_CHECK_PAGE)).encode()),
-            (b"etag",           _CHECK_ETAG.encode()),
+            (b"content-length", str(len(_CONNECTION_TEST_PAGE)).encode()),
+            (b"etag",           _CONNECTION_TEST_ETAG.encode()),
             (b"cache-control",  cache.encode()),
-        ], _CHECK_PAGE)
+        ], _CONNECTION_TEST_PAGE)
 
     # Resolve request path to a file within the matched site's own serve_dir
     try:

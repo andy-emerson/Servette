@@ -1029,8 +1029,8 @@ def run_dispatch_tests(s):
     check("The admin page is inlined whole, marker consumed",
           s._UI_ADMIN_PAGE.startswith("<!DOCTYPE html>")
           and "@@ADMIN_HTML@@" not in s._UI_ADMIN_PAGE)
-    check("...carries the Status and Publish tabs",
-          "tab-status" in s._UI_ADMIN_PAGE and "tab-publish" in s._UI_ADMIN_PAGE
+    check("...carries the Publish and Settings tabs, reading the status feed",
+          "tab-publish" in s._UI_ADMIN_PAGE and "tab-settings" in s._UI_ADMIN_PAGE
           and "/status?t=" in s._UI_ADMIN_PAGE)
     check("...posts to the upload endpoint with the run's code",
           "/upload?t=" in s._UI_ADMIN_PAGE)
@@ -1045,10 +1045,12 @@ def run_dispatch_tests(s):
           "dropstrip" in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
           "btn-outside" in s._UI_ADMIN_PAGE)
-    check("...and the Config tab wired to the set vocabulary",
-          "tab-config" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
-    check("...with the Health checks card and the masked password field",
-          "health-list" in s._UI_ADMIN_PAGE and "cfg-password" in s._UI_ADMIN_PAGE)
+    check("...and the Settings panel wired to the set vocabulary",
+          "panel-settings" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
+    check("...with the health rows split site/server and the masked password field",
+          "site-rows" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
+          and "settings-dot" in s._UI_ADMIN_PAGE
+          and "cfg-password" in s._UI_ADMIN_PAGE)
     check("...and the Publish tab as site cards, add/move/remove wired to /sites",
           "site-cards" in s._UI_ADMIN_PAGE and "btn-add-site" in s._UI_ADMIN_PAGE
           and "/sites?t=" in s._UI_ADMIN_PAGE

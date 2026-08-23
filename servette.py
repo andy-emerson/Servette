@@ -5563,7 +5563,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       padding: 0.5rem 0.7rem;
       width: 100%;
     }
-    select.cfg-site { width: auto; }
+    select.cfg-site { width: auto; margin-bottom: 1rem; }
+    .tab-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--amber);
+      margin-left: 0.45rem;
+      vertical-align: middle;
+    }
+    .split { border-top: 1px solid var(--border); margin: 1rem 0; }
     /* The browser's default focus halo clashes with the theme; replaced —
        never just removed — so keyboard focus stays visible. */
     .cfg-field input:focus, select.cfg-site:focus {
@@ -5611,48 +5621,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   <div id="app" class="hidden">
 
   <nav class="tabs" role="tablist">
-    <button class="tab active" id="tab-status" type="button" role="tab">Status</button>
-    <button class="tab" id="tab-publish" type="button" role="tab">Publish</button>
-    <button class="tab" id="tab-config" type="button" role="tab">Config</button>
+    <button class="tab active" id="tab-publish" type="button" role="tab">Publish</button>
+    <button class="tab" id="tab-settings" type="button" role="tab">Settings<span
+      class="tab-dot hidden" id="settings-dot" title="Something needs review"></span></button>
   </nav>
-
-  <!-- ══ Status — the inside view ══ -->
-  <div id="panel-status" role="tabpanel">
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Server status</span>
-        <span class="badge badge-dim" id="st-badge">loading…</span>
-      </div>
-      <div class="card-body">
-        <div class="rows" id="st-rows"></div>
-        <p class="error hidden" id="st-error"></p>
-        <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action" id="btn-refresh" type="button">Refresh</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Health checks</span>
-        <span class="badge badge-dim" id="health-badge">…</span>
-      </div>
-      <div class="card-body">
-        <div class="rows" id="health-list"></div>
-        <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action" id="btn-outside" type="button" disabled
-                  title="Loads once the status shows a domain">Run the connection check</button>
-        </div>
-        <p class="hint">These rows are what the machine knows about itself.
-        The connection check is the counterpart: it opens your site's own
-        check page in a new tab, reporting from the public internet's side of
-        the wire — the vantage this page, living on your SSH tunnel, cannot
-        have.</p>
-      </div>
-    </div>
-
-  </div>
 
   <!-- ══ Publish — one card per site: drop or choose its folder, publish.
        Cards can be added, removed, and reordered (drag the header, or the
@@ -5666,16 +5638,30 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     <p class="error hidden" id="sites-error"></p>
   </div>
 
-  <!-- ══ Config — forms over the same validators `set` runs ══ -->
-  <div id="panel-config" role="tabpanel" class="hidden">
+  <!-- ══ Settings — the selected site's truth and knobs, then the box's.
+       The dropdown under the tabs scopes the site card; the server card is
+       never scoped. Status lives here compressed: identity rows, then the
+       health rows, then the forms. ══ -->
+  <div id="panel-settings" role="tabpanel" class="hidden">
+
+    <select class="cfg-site hidden" id="cfg-site-select"></select>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Password protection</span>
+        <span class="card-title">This site</span>
         <span class="badge badge-dim" id="cfg-site-badge">loading…</span>
       </div>
       <div class="card-body">
-        <select class="cfg-site hidden" id="cfg-site-select"></select>
+        <div class="rows" id="site-rows"></div>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action" id="btn-outside" type="button" disabled
+                  title="Loads once this site has a domain">Run the connection check</button>
+        </div>
+        <p class="hint">The rows are what the machine knows about itself; the
+        connection check opens this site's own check page in a new tab,
+        reporting from the public internet's side of the wire — the vantage
+        this page, living on your SSH tunnel, cannot have.</p>
+        <div class="split"></div>
         <div class="btn-row">
           <button class="action" id="btn-auth-toggle" type="button">…</button>
         </div>
@@ -5690,13 +5676,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Host settings</span>
+        <span class="card-title">This server</span>
         <span class="badge badge-dim" id="cfg-host-badge">loading…</span>
       </div>
       <div class="card-body">
+        <div class="rows" id="host-rows"></div>
+        <div class="split"></div>
         <div id="cfg-host-fields"></div>
         <div class="btn-row" style="margin-top:0.9rem">
           <button class="action primary" id="btn-save-host" type="button">Save host settings</button>
+          <button class="action" id="btn-refresh" type="button">Refresh</button>
         </div>
         <p class="error hidden" id="cfg-host-error"></p>
       </div>
@@ -5735,96 +5724,87 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
 
-  const PANELS = { status: 'panel-status', publish: 'panel-publish', config: 'panel-config' };
+  const PANELS = { publish: 'panel-publish', settings: 'panel-settings' };
 
   function showTab(name) {
-    if (!PANELS[name]) name = 'status';
+    if (name === 'status' || name === 'config') name = 'settings';  // old bookmarks
+    if (!PANELS[name]) name = 'publish';
     for (const key of Object.keys(PANELS)) {
       $(PANELS[key]).classList.toggle('hidden', key !== name);
       $('tab-' + key).classList.toggle('active', key === name);
     }
-    if (name === 'status') loadStatus();
-    // The site cards and the Config forms render from the same /config
-    // truth, so both tabs refresh it on entry.
-    if (name === 'config' || name === 'publish') loadConfig();
+    refresh();  // both tabs render from the same /status + /config truth
     if (location.hash !== '#' + name)
       history.replaceState(null, '', '#' + name + location.search);
   }
 
-  $('tab-status').addEventListener('click', () => showTab('status'));
   $('tab-publish').addEventListener('click', () => showTab('publish'));
-  $('tab-config').addEventListener('click', () => showTab('config'));
+  $('tab-settings').addEventListener('click', () => showTab('settings'));
 
-  /* ══ Status — the inside view, rendered from GET /status. ══ */
+  /* ══ The page's truth: /status and /config fetched together, rendered
+     into both tabs at once. ══ */
 
   const row = (k, v, cls) =>
     `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
 
-  // The connection check: opens the site's own check page — a reserved path
-  // no content shadows — so the report answers from the public internet's
-  // vantage, the one view a page living on the tunnel cannot compute
-  // (cross-origin responses are opaque to it, by the browser's own rules).
+  const healthRow = (c, gap) =>
+    `<div class="${gap ? 'gap' : ''}">` +
+    (c.ok ? '<span class="good">✓</span>' : '<span class="warn">!</span>') +
+    ` <b>${escapeHtml(c.label)}</b> — ` +
+    `<span class="${c.ok ? '' : 'warn'}">${escapeHtml(c.detail)}</span></div>`;
+
+  // The connection check: opens the selected site's own check page — a
+  // reserved path no content shadows — so the report answers from the
+  // public internet's vantage, the one view a page living on the tunnel
+  // cannot compute (cross-origin responses are opaque to it, by the
+  // browser's own rules).
   let outsideDomain = '';
   $('btn-outside').addEventListener('click', () => {
     if (!outsideDomain) return;
     window.open('https://' + outsideDomain + '/.well-known/servette-check', '_blank');
   });
 
-  async function loadStatus() {
-    setBadge($('st-badge'), 'badge-dim', 'loading…');
-    clearError($('st-error'));
+  let statusData = null;
+
+  async function refresh() {
+    clearError($('cfg-site-error'));
+    clearError($('cfg-host-error'));
     try {
-      const r = await fetch('/status?t=' + encodeURIComponent(CODE));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const d = await r.json();
-
-      setBadge($('st-badge'), d.running ? 'badge-green' : 'badge-red',
-               d.running ? '● running · v' + d.version : '○ stopped · v' + d.version);
-      let h = row('Mode', d.mode === 'service'
-        ? 'system service (survives reboots)'
-        : d.mode === 'session' ? 'session only' : 'stopped');
-      for (const s of d.sites || []) {
-        h += row('Site ' + s.index, s.domain
-          ? `<b>${escapeHtml('https://' + s.domain)}</b>` : '(no domain)', 'gap');
-        h += row('Folder', escapeHtml(s.serve_dir || '(not set)'));
-      }
-      $('st-rows').innerHTML = h;
-
-      outsideDomain = ((d.sites || [])[0] || {}).domain || '';
-      $('btn-outside').disabled = !outsideDomain;
-      $('btn-outside').title = outsideDomain
-        ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
-        : 'Needs a domain — a LAN or self-signed site has no public vantage to check from';
-
-      // Health rows: green said as plainly as amber, and the rows the
-      // Config tab can fix carry a link straight to it.
-      const checksRows = d.checks || [];
-      const attention = checksRows.filter((c) => !c.ok).length;
-      setBadge($('health-badge'),
-               attention ? 'badge-red' : 'badge-green',
-               attention ? attention + ' to review' : '✓ all healthy');
-      $('health-list').innerHTML = checksRows.map((c) => {
-        const mark = c.ok ? '<span class="good">✓</span>' : '<span class="warn">!</span>';
-        const goto = (!c.ok && c.key === 'password')
-          ? ' <a href="#config" class="cfg-link">open the Config tab →</a>' : '';
-        return `<div class="${c.ok ? '' : 'gap'}">${mark} <b>${escapeHtml(c.label)}</b>` +
-               ` — <span class="${c.ok ? '' : 'warn'}">${escapeHtml(c.detail)}</span>${goto}</div>`;
-      }).join('');
-      for (const a of document.querySelectorAll('.cfg-link'))
-        a.addEventListener('click', (e) => { e.preventDefault(); showTab('config'); });
+      const [rs, rc] = await Promise.all([
+        fetch('/status?t=' + encodeURIComponent(CODE)),
+        fetch('/config?t=' + encodeURIComponent(CODE)),
+      ]);
+      if (!rs.ok) throw new Error('HTTP ' + rs.status);
+      if (!rc.ok) throw new Error('HTTP ' + rc.status);
+      statusData = await rs.json();
+      cfgData = await rc.json();
+      authDesired = null;  // fresh truth from the server resets the toggle
+      const sel = $('cfg-site-select');
+      const keep = parseInt(sel.value || '0', 10) || 0;
+      sel.innerHTML = (cfgData.sites || []).map((s) =>
+        `<option value="${s.index}">site ${s.index}` +
+        `${s.domain ? ' — ' + escapeHtml(s.domain) : ''}</option>`).join('');
+      if (keep < (cfgData.sites || []).length) sel.value = String(keep);
+      // A one-site server needs no site picker — it appears with a second site.
+      sel.classList.toggle('hidden', (cfgData.sites || []).length < 2);
+      renderSettings();
+      renderSiteCards();
+      clearError($('sites-error'));
     } catch (e) {
-      setBadge($('st-badge'), 'badge-red', '✕ unreachable');
-      setBadge($('health-badge'), 'badge-red', '✕ unreachable');
-      showError($('st-error'), (e instanceof TypeError) ? TUNNEL_DOWN
-        : 'Could not read status: ' + e.message +
-          ' — if the terminal command was closed, re-run it and open the fresh link.');
+      setBadge($('cfg-site-badge'), 'badge-red', '✕ unreachable');
+      setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
+      const msg = (e instanceof TypeError) ? TUNNEL_DOWN
+        : 'Could not read the server: ' + e.message +
+          ' — if the terminal command was closed, re-run it and open the fresh link.';
+      showError($('cfg-site-error'), msg);
+      showError($('sites-error'), msg);
     }
   }
 
-  $('btn-refresh').addEventListener('click', loadStatus);
+  $('btn-refresh').addEventListener('click', refresh);
 
-  /* ══ Config — forms over the same validators the `set` command runs, so a
-     value the terminal refuses the page refuses with the same sentence.
+  /* ══ Settings forms — over the same validators the `set` command runs, so
+     a value the terminal refuses the page refuses with the same sentence.
      Deliberately absent from the page (the terminal keeps them all): domain
      (bound up with certificate issuance), the serve folder (publishing
      manages it), port and trusted proxy (behind-a-balancer deployments),
@@ -5861,11 +5841,35 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   const authOn = (site) => (authDesired === null) ? !!site.username : authDesired;
 
-  function renderConfig() {
-    const [site] = currentSite();
+  function renderSettings() {
+    const [site, siteIdx] = currentSite();
+    const checks = (statusData && statusData.checks) || [];
+    const siteChecks = checks.filter((c) => c.site === siteIdx);
+    const hostChecks = checks.filter((c) => c.site === null);
+
+    // The one-glance health signal survives the tab merge as the dot on
+    // the Settings tab itself.
+    $('settings-dot').classList.toggle('hidden', !checks.some((c) => !c.ok));
+
+    // ── This site: identity, its health rows, then the auth form. ──
+    let sh = row('Domain', site.domain
+      ? `<b>${escapeHtml('https://' + site.domain)}</b>`
+      : '(none — answers requests no other site matches; granted in the terminal: <b>config</b>)');
+    sh += row('Folder', escapeHtml(site.dir || '(not set)'));
+    sh += siteChecks.map((c, i) => healthRow(c, i === 0)).join('');
+    $('site-rows').innerHTML = sh;
+    const siteAttention = siteChecks.filter((c) => !c.ok).length;
+    setBadge($('cfg-site-badge'), siteAttention ? 'badge-red' : 'badge-green',
+             siteAttention ? siteAttention + ' to review' : '✓ healthy');
+
+    outsideDomain = site.domain || '';
+    $('btn-outside').disabled = !outsideDomain;
+    $('btn-outside').title = outsideDomain
+      ? 'Opens https://' + outsideDomain + '/.well-known/servette-check in a new tab'
+      : 'Needs a domain — a site without one has no public name to check';
+
     const on = authOn(site);
     const off = !on;
-
     $('btn-auth-toggle').textContent =
       on ? 'Turn password protection off' : 'Turn password protection on';
     $('cfg-site-fields').innerHTML =
@@ -5882,50 +5886,33 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       : (site.username
           ? 'Saving now removes the login: the site becomes public and the stored password is deleted.'
           : 'The site is public — anyone can view it. Turn protection on to require a login.');
-    setBadge($('cfg-site-badge'), on ? 'badge-green' : 'badge-dim',
-             on ? 'on' : 'off');
+
+    // ── This server: the box's identity and health, then the host knobs. ──
+    const d = statusData || {};
+    let hh = row('Mode', d.mode === 'service'
+      ? 'system service (survives reboots)'
+      : d.mode === 'session' ? 'session only' : 'stopped');
+    hh += row('Version', 'v' + (d.version || '?'));
+    hh += hostChecks.map((c, i) => healthRow(c, i === 0)).join('');
+    $('host-rows').innerHTML = hh;
+    const hostAttention = hostChecks.filter((c) => !c.ok).length;
+    setBadge($('cfg-host-badge'),
+             hostAttention ? 'badge-red' : (d.running ? 'badge-green' : 'badge-red'),
+             hostAttention ? hostAttention + ' to review'
+                           : (d.running ? '● running' : '○ stopped'));
 
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('');
-    setBadge($('cfg-host-badge'), 'badge-dim', 'host-wide');
-  }
-
-  async function loadConfig() {
-    clearError($('cfg-site-error'));
-    clearError($('cfg-host-error'));
-    try {
-      const r = await fetch('/config?t=' + encodeURIComponent(CODE));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      cfgData = await r.json();
-      authDesired = null;  // fresh truth from the server resets the toggle
-      const sel = $('cfg-site-select');
-      const keep = sel.value;
-      sel.innerHTML = (cfgData.sites || []).map((s) =>
-        `<option value="${s.index}">site ${s.index}` +
-        `${s.domain ? ' — ' + escapeHtml(s.domain) : ''}</option>`).join('');
-      if (keep) sel.value = keep;
-      // A one-site server needs no site picker — it appears with a second site.
-      sel.classList.toggle('hidden', (cfgData.sites || []).length < 2);
-      renderConfig();
-      renderSiteCards();
-    } catch (e) {
-      setBadge($('cfg-site-badge'), 'badge-red', '✕ unreachable');
-      setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
-      const msg = (e instanceof TypeError) ? TUNNEL_DOWN
-        : 'Could not read settings: ' + e.message;
-      showError($('cfg-site-error'), msg);
-      showError($('sites-error'), msg);
-    }
   }
 
   $('cfg-site-select').addEventListener('change', () => {
     authDesired = null;  // the toggle's unsaved intent belongs to one site
-    renderConfig();
+    renderSettings();
   });
 
   $('btn-auth-toggle').addEventListener('click', () => {
     authDesired = !authOn(currentSite()[0]);
-    renderConfig();
+    renderSettings();
   });
 
   async function saveSettings(fields, siteIdx, badge, errEl, extra) {
@@ -5942,7 +5929,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       try { data = await r.json(); } catch { data = {}; }
       if (r.ok && data.result === 'saved') {
         setBadge(badge, 'badge-green', '✓ saved');
-        loadConfig();
+        refresh();
       } else {
         throw new Error(data.error || 'HTTP ' + r.status);
       }
@@ -6091,7 +6078,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       try { data = await r.json(); } catch { data = {}; }
       if (!r.ok || data.result !== 'ok')
         throw new Error(data.error || 'HTTP ' + r.status);
-      await loadConfig();
+      await refresh();
     } catch (e) {
       showError($('sites-error'), (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
       renderSiteCards();  // snap the cards back to the last loaded truth

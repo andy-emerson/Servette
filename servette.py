@@ -6308,6 +6308,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     /* Folded: the head stays, so the card still says which site it is and
        whether it needs attention. Only the body goes. */
     .site-card.folded .card-body { display: none; }
+    /* The pill is the folded card's Status line, not a second copy of it.
+       Open, the Status row inside the card carries the count; folded, that
+       row is hidden and the pill takes over. Never both. */
+    .site-card:not(.folded) .badge.needs { display: none; }
     .site-card.folded .card-head { border-bottom: none; }
 
     /* The remove panel is a popover under the button that opens it, not a
@@ -6998,6 +7002,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<span class="switch-value"><span class="cert-state"></span>` +
          `<span class="switch-act"><button class="action tiny cert" type="button">` +
          `Get certificate</button></span></span></div>` +
+         // The explanation belongs under the button it explains, not three
+         // controls further down where it read as a note about access.
+         `<p class="cfg-hint">A certificate is issued only for a name that ` +
+         `already points here — check that the domain's DNS has an A record ` +
+         `to this server's IP before requesting one.</p>` +
 
          `<div class="switch-row">` +
          `<label class="k auth-label">Access</label>` +
@@ -7008,10 +7017,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<div class="btn-row auth-save hidden" style="margin-top:0.9rem">` +
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
-
-         `<p class="hint">A certificate is issued only for a name that ` +
-         `already points here — check that the domain's DNS has an A record ` +
-         `to this server's IP before requesting one.</p>` +
 
          // ── Publishing: drop a folder, look at it, ship it.
          `<div class="split"></div>` +
@@ -7520,13 +7525,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const on = authOn();
       const pending = authDesired !== null && authDesired !== !!siteData.username;
       info.innerHTML =
-        // No Status row. A fault is said ONCE, on the row that carries its
-        // fix — the certificate row for a certificate, the access row for a
-        // login. A count above them repeated what those rows already say in
-        // colour, and left the head pill saying it a third time: one
-        // certificate problem read as three problems. The pill stays,
-        // because it is the only thing a folded card shows and the only
-        // thing visible when scanning a list of them.
+        // The summary line, and the only place the card says it is well.
+        // A count needs a set to count, so it names its members; with
+        // nothing wrong it is the green tick that says so, which no other
+        // row on the card can say. Each fault ALSO appears on the row that
+        // carries its fix, and nowhere else — the head pill shows only
+        // while the card is folded and this line is hidden.
+        row('Status', siteNeeds.length
+          ? `<span class="${siteNeeds.some((c) => c.blocking) ? 'fault' : 'warn'}">` +
+            `${siteNeeds.length} to review — ` +
+            `${escapeHtml(siteNeeds.map((c) => NEEDS_WORD[c.key] || c.key)
+                 .join(', ').toLowerCase())}</span>`
+          : '<span class="ok">✓</span> healthy') +
         // The site itself, one click away and in its own tab: the fastest
         // answer to "did that publish land" is looking at it.
         row('Serving', siteData.domain

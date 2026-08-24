@@ -6173,15 +6173,24 @@ def run_browser_tests(s, tmpdir):
                 page.click("#tab-sites")
                 page.wait_for_timeout(900)
                 info = page.locator(".info").first.inner_text()
-                check("...a faulted card wears the fault, and wears it once",
-                      page.locator(".badge.needs").count() == 1
-                      and "to review" not in info
-                      and "Status" not in info
-                      # The fault is on the row that carries its fix, in
-                      # colour, and nowhere else on the card.
+                # Two indicators for one fault, and exactly two: the Status
+                # line, which is also the only place the card says it is
+                # well, and the row that carries the fix. The head pill is
+                # the folded card's Status line, so it must be hidden while
+                # this one is showing.
+                check("...a faulted card counts it once and marks it once",
+                      "1 to review" in info and "certificate" in info.lower()
                       and page.locator(".cert-state .warn, .cert-state .fault"
                                        ).count() == 1
-                      and page.locator(".info .warn, .info .fault").count() == 0)
+                      and not page.locator(".badge.needs").first.is_visible())
+                # Folded, the pill takes over — the count does not vanish
+                # just because the body is hidden.
+                page.locator("button.fold").first.click()
+                page.wait_for_timeout(300)
+                check("...and folding hands that count to the pill",
+                      page.locator(".badge.needs").first.is_visible())
+                page.locator("button.fold").first.click()
+                page.wait_for_timeout(300)
             finally:
                 s.config.sites[0].cert_file = saved_cert
                 page.click("#tab-sites")
@@ -6191,12 +6200,23 @@ def run_browser_tests(s, tmpdir):
             # the far end of a very long card.
             page.locator(".auth-switch").first.check()   # Save appears with it
             page.wait_for_timeout(300)
-            _save = page.locator("button.save-site").first.bounding_box()
             page.locator("button.save-site").first.click()
             page.wait_for_timeout(400)
-            _err = page.locator(".site-card .error").first.bounding_box()
+            # Both rectangles read in one evaluate, at one scroll position:
+            # bounding_box() is viewport-relative, and clicking a button
+            # scrolls it into view, so two Playwright calls either side of a
+            # click measure against different origins and disagree by the
+            # scroll distance. That is what the first version of this check
+            # actually caught — the page was right, the measurement was not.
+            gap = page.evaluate("""() => {
+              const sv = document.querySelector('button.save-site');
+              const er = document.querySelector('.site-card .error');
+              if (!sv || !er || er.classList.contains('hidden')) return null;
+              return Math.abs(er.getBoundingClientRect().top -
+                              sv.getBoundingClientRect().bottom);
+            }""")
             check("...and a refusal lands next to the button that refused",
-                  _err is not None and abs(_err["y"] - _save["y"]) < 200)
+                  gap is not None and gap < 120)
             page.locator(".auth-switch").first.uncheck()
             page.wait_for_timeout(300)
 

@@ -6,24 +6,38 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
-## A fault is said once, on the row that fixes it
+## A count, and one mark per problem where its fix is
 
-**Ruled (Human):** one certificate problem was wearing three warnings —
-the head pill, a Status row counting them, and the certificate row
-itself — while a login problem wore one, at the far end of the card from
-the field that fixes it. The Status row is gone. A fault appears on the
-row that carries its fix, and on the head pill, which stays because it is
-the only thing a folded card shows and the only thing visible when
-scanning a list.
-**And a refusal moves to the control that refused.** The card's single
-error element is re-anchored beside whichever button produced it, rather
-than living at the foot of a very long card below Test connection.
-**What can actually raise the count, asked and answered honestly:** with
-the page as the only surface, essentially nothing but the certificate. A
-missing serve folder can, and a half-built pull channel can, but the
-channel is terminal-only and the half-authenticated state the access row
-would report is one the page's own guard prevents reaching. The count was
-summarising a set of size one. *(2026-08-24)*
+**Ruled (Human):** two things, and only two.
+
+1. **The Status line** — the count, naming what it counts, and the only
+   place on the card that says the site is *well*. No other row can say
+   that: they report their own subject, and a card with nothing wrong
+   would otherwise say nothing at all.
+2. **One mark per problem, on the row that carries its fix** — the
+   certificate row for a certificate, the access row for a login. An
+   indicator anywhere else is an indicator you have to go and find the fix
+   for.
+
+**The head pill is not a third thing.** It is the Status line for a folded
+card: shown only while the body is hidden, so the count never vanishes
+because a card is closed, and never doubles the line inside it.
+**Refusals move to the control that refused**, for the same reason — the
+login refusal belongs under Save, not at the foot of the card below Test
+connection. So does explanatory text: the DNS note sat below the access
+block explaining a certificate button three controls above it, and now
+sits under that button.
+**The Agent got this backwards once**, removing the count and keeping the
+pill — optimising away the one indicator that carried information for the
+two that repeated it. Recorded because the reasoning that produced it
+("say it once, on the row that fixes it") was right and still led
+somewhere wrong: the count is not a repetition of the rows, it is the
+summary and the all-clear.
+**Worth knowing about the count's set:** with the page as the only
+surface, little but the certificate raises it today. A missing serve
+folder can; a half-built pull channel can, but that is terminal-only; and
+the half-authenticated state the access row reports is one the page's own
+guard prevents reaching. *(2026-08-24)*
 
 ## The connection test does not report the version
 
@@ -47,9 +61,9 @@ button has, in the colour the stop button already wears. Beside it, a
 fold control (chevrons toward each other to close, away to open) hides
 the card's body for a box serving more sites than fit on a screen.
 **What folding keeps:** the head. A folded card still shows its name, its
-fault pill, and its controls, because the reason to fold is length, not
-secrecy — and a card that hid whether it needed attention would make
-folding cost something.
+controls, and — only while folded — the pill standing in for the Status
+line, because the reason to fold is length, not secrecy, and a card that
+hid whether it needed attention would make folding cost something.
 **Fold state survives a re-render.** Every op re-renders the site list, so
 a fold held on the card element would spring open on each save; it is
 held by site instead, keyed on the domain where there is one, since
@@ -64,15 +78,14 @@ form that no longer existed.
 **Not a fault, and not counted as one:** a refused save changes nothing,
 so the site gains no defect, and the head pill is right to stay where it
 is. What was wrong was the message outliving its cause — and, separately,
-where it appeared, which "A fault is said once" above closes.
-*(2026-08-24)*
+where it appeared, which "A count, and one mark per problem where its
+fix is" above closes. *(2026-08-24)*
 
 ## The card says what the site is, then what you do to it
 
-**Ruled (Human):** what the site is — Serving, Domain, Certificate,
-Access — sits at the top of a site card. Publishing, versions, redirects
-and the connection test follow underneath. (A Status row led that block
-for one round; "A fault is said once" above removed it.)
+**Ruled (Human):** what the site is — Status, Serving, Domain,
+Certificate, Access — sits at the top of a site card. Publishing,
+versions, redirects and the connection test follow underneath.
 **Why:** the identity of the site answers the question a card is opened
 to answer; the actions are what you do once you know it. The publish
 strip led the card because publishing was the first thing the card could
@@ -118,10 +131,9 @@ site" and "this works, and something wants doing" — and a first site,
 freshly added and self-signed with no domain yet, would open in red on
 its normal starting state. Crying wolf there costs the colour its meaning
 where it matters.
-**Superseded in part** by "A fault is said once, on the row that fixes
-it" above: the Status line named what it counted for one round and is
-gone — the severity it carried lives on each row and on the head pill.
-*(2026-08-24)*
+**Also:** the Status line names what it counts ("2 to review — needs
+certificate, needs password") rather than leaving a reader to work out
+which rows the number meant. *(2026-08-24)*
 
 ## The 404 page leads with the connection, then the miss
 

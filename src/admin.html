@@ -271,6 +271,8 @@
     .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
     .rows > div { padding: 0.18rem 0; }
     .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
+    .rows a { color: var(--brand); text-decoration: none; }
+    .rows a:hover { text-decoration: underline; }
     /* A ledger's total sits under a rule, at the foot of what it sums. */
     .rows .ledger {
       margin-top: 0.35rem;
@@ -1373,8 +1375,11 @@
         row('Status', siteNeeds.length
           ? `<span class="warn">${siteNeeds.length} to review</span>`
           : '<span class="ok">✓</span> healthy') +
+        // The site itself, one click away and in its own tab: the fastest
+        // answer to "did that publish land" is looking at it.
         row('Serving', siteData.domain
-          ? `<b>${escapeHtml('https://' + siteData.domain)}</b>`
+          ? `<a href="${escapeHtml('https://' + siteData.domain)}" target="_blank" ` +
+            `rel="noopener">${escapeHtml('https://' + siteData.domain)}</a>`
           : "this server's IP address (no domain set)") +
         // A host-wide check's label carries a 'site · ' prefix for the
         // terminal's flat list; on a card the site is the card, so the

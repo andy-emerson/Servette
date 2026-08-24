@@ -1214,8 +1214,36 @@ def run_dispatch_tests(s):
 
         health_keys = {r["key"] for r in s._health_checks()}
         check("The health rows cover the roster, green included",
-              {"service", "cert", "password"} <= health_keys
+              {"service", "cert", "password", "disk"} <= health_keys
               and (s._IS_MACOS or {"netwatch", "swap"} <= health_keys))
+
+        # Disk: the outage every other row assumes is not happening. Two
+        # thresholds, because one does not fit a Pi card and a VPS both.
+        disk = s._status_data()["disk"]
+        check("The status snapshot carries free and total disk",
+              set(disk) == {"free_mb", "total_mb"}
+              and disk["free_mb"] is not None and disk["total_mb"] > 0)
+        check("...low by the absolute floor",
+              s._disk_is_low({"free_mb": 100.0, "total_mb": 100000.0}))
+        check("...low by the fraction, on a disk with plenty left in MB",
+              s._disk_is_low({"free_mb": 5000.0, "total_mb": 200000.0}))
+        check("...and roomy is not low",
+              not s._disk_is_low({"free_mb": 50000.0, "total_mb": 200000.0}))
+        check("...an unreadable disk is not reported as low",
+              not s._disk_is_low({"free_mb": None, "total_mb": None}))
+        check("The disk row is host-wide, not hung on a site",
+              all(r["site"] is None for r in s._health_checks() if r["key"] == "disk"))
+        # Both surfaces say the same thing: the page reads the health row,
+        # the terminal reads the issue list, and neither may know something
+        # the other does not.
+        saved_disk_snap = s._disk_snapshot
+        s._disk_snapshot = lambda: {"free_mb": 12.0, "total_mb": 100000.0}
+        try:
+            check("...and a low disk reaches the terminal's issue list too",
+                  any("free where content lands" in i for i in s._production_issues())
+                  and any(r["key"] == "disk" and not r["ok"] for r in s._health_checks()))
+        finally:
+            s._disk_snapshot = saved_disk_snap
         check("...with the mode row labeled for what it describes",
               any(r["key"] == "service" and r["label"] == "Mode"
                   for r in s._health_checks()))

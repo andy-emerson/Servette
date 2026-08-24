@@ -12,6 +12,13 @@ Menus are generated so the right-hand column always begins at the same place (2-
 # Menu metrics
 _PAD = 22
 
+# When free disk is worth saying out loud. Two thresholds because one does
+# not fit both a 4 GB Pi card and a 200 GB VPS: an absolute floor a publish
+# plus its kept versions can exhaust, and a fraction that catches a large
+# disk filling steadily.
+_DISK_LOW_MB       = 512
+_DISK_LOW_FRACTION = 0.10
+
 
 def _banner(title):
     """Full-width entry banner — the visual weight reserved for the two moments
@@ -1905,6 +1912,13 @@ def _production_issues():
                           "recommended — run 'enable' to resize")
         else:
             issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'enable' to add a swapfile")
+    # Both surfaces say the same thing about disk: the page reads the health
+    # row, the terminal reads this list, and neither may know something the
+    # other does not.
+    disk = _disk_snapshot()
+    if _disk_is_low(disk):
+        issues.append(f"only {disk['free_mb']:,.0f} MB free where content lands — "
+                      "a publish may fail; remove what the box no longer needs")
     return issues
 
 
@@ -2082,6 +2096,19 @@ def _health_checks():
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
         rows.append({"key": "swap", "site": None, "ok": offer is None,
                      "label": "Swap file", "detail": detail})
+    # Disk is host-wide and platform-independent: a full disk is the outage
+    # every other row assumes is not happening. A publish that cannot write
+    # its tree fails in staging and leaves the live site alone, so this is a
+    # warning rather than a fault — but an unread number prevents nothing,
+    # which is why it is a row and not only a figure.
+    disk = _disk_snapshot()
+    if disk["free_mb"] is not None:
+        low = _disk_is_low(disk)
+        rows.append({"key": "disk", "site": None, "ok": not low, "label": "Disk",
+                     "detail": f"{disk['free_mb']:,.0f} MB free of "
+                               f"{disk['total_mb']:,.0f} MB"
+                               + (" — publishing may fail" if low else "")})
+
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""
@@ -2233,11 +2260,34 @@ def _swap_snapshot():
             "recommended_mb": (rec // (1024 * 1024)) if rec else None}
 
 
+def _disk_snapshot():
+    """Free and total disk on the filesystem holding the data directory —
+    where site content, the versions kept behind it, and the config live.
+    That filesystem rather than '/' because it is the one a publish can
+    fill. None for a figure the host will not answer."""
+    try:
+        total, _used, free = shutil.disk_usage(BASE_DIR)
+    except OSError:
+        return {"free_mb": None, "total_mb": None}
+    return {"free_mb": free / (1024 * 1024), "total_mb": total / (1024 * 1024)}
+
+
+def _disk_is_low(disk):
+    """Whether free disk is low enough to say so. Two thresholds, because
+    one does not fit both a 4 GB Pi card and a 200 GB VPS: an absolute
+    floor that a publish plus its kept versions can exhaust, and a
+    fraction that catches a large disk filling steadily."""
+    if disk["free_mb"] is None:
+        return False
+    return (disk["free_mb"] < _DISK_LOW_MB
+            or disk["free_mb"] < disk["total_mb"] * _DISK_LOW_FRACTION)
+
+
 def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
     external tooling. cert_days is None when no certificate is readable;
-    `checks` is the health-row form of the same facts, and `load` the
-    utilization figures the page's Traffic tab renders."""
+    `checks` is the health-row form of the same facts, `load` the
+    utilization figures, and `disk` the space left where content lands."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
     return {
@@ -2250,6 +2300,7 @@ def _status_data():
         "checks":   _health_checks(),
         "load":     _load_snapshot(),
         "swap":     _swap_snapshot(),
+        "disk":     _disk_snapshot(),
     }
 
 

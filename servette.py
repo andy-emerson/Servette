@@ -4375,10 +4375,9 @@ HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d i
 # The config commands
 _CONFIG_COMMANDS = [
     ("sites",           "list configured sites"),
-    ("add-site",        "add a new site (folder, domain, password, publish channel)"),
+    ("add-site",        "add a new site (domain, password, publish channel)"),
     ("remove-site <n>", "remove a site"),
     ("move-site <n> <to>", "reorder sites (the first domainless one answers unmatched Hosts)"),
-    ("dir [n]",         "directory to serve"),
     ("port",            "HTTPS port"),
     ("cert [n]",        "SSL certificate and key"),
     ("email",           "email address"),
@@ -4508,10 +4507,11 @@ def _serve_dir_exposes_secrets(path):
 
 # add-site
 def _invent_site_dir():
-    """Create and own an empty folder for a page-added site. Servette names
-    it: the folder is where publishes land, not a question an operator
-    should have to answer (the add-card ruling — and the folder concept is
-    on its way out of the vocabulary entirely)."""
+    """Create and own an empty folder for a new site. Servette names it: the
+    folder is where publishes land, not a question an operator answers
+    ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-is-retiring-from-the-vocabulary)).
+    Both doors — the page's add-card and the terminal's add-site — come
+    here, so neither can invent a folder the other would not."""
     name = f"site-{os.urandom(3).hex()}"
     os.makedirs(_resolve(name), exist_ok=True)
     _chown_operator(_resolve(name))
@@ -4545,33 +4545,18 @@ def _append_site(serve_dir):
 
 
 def _config_add_site():
-    """Add a site — the same questions cmd_setup asks for the very first one
-    (domain, password), plus the folder question the first site gets for free
-    (its default, 'site', is baked in and can't also serve a second site)."""
+    """Add a site — the same two questions cmd_setup asks for the very first
+    one, domain and password. The folder is not among them: Servette names
+    and creates it, the same way the page's add-card does."""
     print("\n  Adding a new site.\n")
-    dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
-    if dirs:
-        print("  Existing folders:")
-        for d in dirs:
-            print(f"    {d}")
-        print()
-    folder = _input("  serve_dir: ").strip()
-    if not folder or not os.path.isdir(_resolve(folder)):
-        print(f"  → directory not found: {_resolve(folder or '(blank)')}. Create it first, then try again.")
-        return
-    if not _is_within_base_dir(_resolve(folder)):
-        print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
-        return
-    if _serve_dir_exposes_secrets(_resolve(folder)):
-        print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
-        return
-    # Nothing is written and nothing is offered: a site with no index.html
-    # answers its own domain with the embedded error page, which says the
-    # server is up and that nothing is published yet. Setup still never leaves
-    # a site with nothing to serve (#37) — it just no longer needs to put a
-    # file in the operator's folder to keep that promise.
-    if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
-        print("  No index.html yet — the site will answer with Servette's error page until you publish one.")
+    # Nothing is written into it and nothing is offered: a site with no
+    # index.html answers its own domain with the embedded error page, which
+    # says the server is up and that nothing is published yet. Setup still
+    # never leaves a site with nothing to serve (#37) — it just no longer
+    # needs to put a file in a folder to keep that promise.
+    folder = _invent_site_dir()
+    print(f"  Content will land in {_resolve(folder)} — Servette's to manage.")
+    print("  Until you publish, the site answers with Servette's error page.")
 
     # The self-signed pair keeps a second site from colliding with the
     # first's cert.pem/key.pem — overwritten if a domain is obtained below,
@@ -4707,32 +4692,6 @@ def _config_move_site(args):
         return
     err = _move_site(int(args[0]), int(args[1]))
     print(f"  {err}" if err else "  → moved.")
-
-
-# dir
-def _config_dir(site):
-    dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
-    if dirs:
-        print()
-        for d in dirs:
-            print(f"    {d}{' ←' if d == site.serve_dir else ''}")
-    new_value = _input(f"\n  serve_dir [{site.serve_dir}]: ").strip()
-    if not new_value:
-        print("  → unchanged")
-        return
-    path = _resolve(new_value)
-    if not os.path.isdir(path):
-        print(f"  → directory not found: {path}")
-        return
-    if not _is_within_base_dir(path):
-        print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
-        return
-    if _serve_dir_exposes_secrets(path):
-        print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
-        return
-    site.serve_dir = new_value
-    config.save()
-    print("  → saved")
 
 
 # The generic setter
@@ -5000,10 +4959,6 @@ def cmd_config():
             _config_remove_site(args)
         elif cmd == "move-site":
             _config_move_site(args)
-        elif cmd in ("dir", "directory"):
-            site = _config_site_arg(args)
-            if site is not None:
-                _config_dir(site)
         elif cmd == "port":
             _config_set("port", "port", int, lambda v: 1 <= v <= 65535, "invalid port number")
         elif cmd == "cert":
@@ -9132,7 +9087,12 @@ def cmd_setup():
             except OSError as e:
                 print(f"  Could not create {serve_path}: {e}")
         else:
-            print(f"  serve_dir {serve_path} is outside {BASE_DIR} — fix it with 'config' > 'dir' first.")
+            # Unreachable from any command: every folder Servette assigns is
+            # under BASE_DIR. It takes a hand-edited servette.toml to get
+            # here, so the sentence names the file rather than a command
+            # that no longer exists.
+            print(f"  serve_dir {serve_path} is outside {BASE_DIR}, where the publish")
+            print(f"  swap and the service sandbox both need it — fix it in {Config.CONFIG_FILE}.")
     if os.path.isdir(serve_path):
         if os.path.exists(os.path.join(serve_path, "index.html")):
             print(f"  Serving {serve_path}.")
@@ -9207,23 +9167,7 @@ def _set_site_value(target, key, value):
     """Validate one per-site pair and apply it to target (the chosen site, or
     a scratch Site during the validation pass). Returns an error string,
     empty on success."""
-    if key == "dir":
-        # The same inline-barrier discipline as _resolve_request_path, for
-        # the same reason: this value can arrive over HTTP (the admin page's
-        # Config tab — loopback and paired, but HTTP all the same), so the
-        # containment check is written out where an analyzer can see it
-        # dominate every probe below — a guard folded into a helper is, to
-        # it and strictly speaking, not a guard. Containment first, the
-        # filesystem probe last.
-        resolved = os.path.realpath(_resolve(value))
-        if not resolved.startswith(os.path.realpath(BASE_DIR) + os.sep):
-            return f"dir must live under {BASE_DIR} (the publish swap and the service sandbox depend on it)"
-        if _serve_dir_exposes_secrets(resolved):
-            return "dir would serve Servette's own config and keys — refused"
-        if not os.path.isdir(resolved):
-            return f"directory not found: {resolved}"
-        target.serve_dir = value
-    elif key == "username":
+    if key == "username":
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
         # (`set` and the page alike, since both land here) — the same rule
@@ -9276,7 +9220,7 @@ def _set_site_value(target, key, value):
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
-_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key", "active",
+_SET_SITE_KEYS = ("username", "publish_url", "publish_key", "active",
                   "redirect")
 
 

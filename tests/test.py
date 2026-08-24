@@ -1920,15 +1920,17 @@ def run_dispatch_tests(s):
         (s.config.sites[0].username, s.config.sites[0].password_hash,
          s.config.sites[0].password_salt) = saved_auth
 
+        # The folder left the vocabulary by ruling: Servette assigns it, so
+        # there is no key to answer wrongly. 'set dir=' is now as unknown as
+        # any other invented key — the useful pin is that it is refused
+        # rather than silently ignored.
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["dir=/etc"])
-        check("set refuses a dir outside the data directory",
-              "must live under" in buf.getvalue())
-
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_set(["dir=no-such-folder-xyz"])
-        check("set refuses a dir that doesn't exist (mirrors the interactive rule)",
-              "not found" in buf.getvalue())
+        check("'dir' is not a setting any more, and saying so is not silent",
+              "Unknown or malformed" in buf.getvalue()
+              and "dir" not in s._SET_SITE_KEYS + s._SET_HOST_KEYS)
+        check("...and nothing was written",
+              s.config.sites[0].serve_dir != "/etc")
 
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["99", "username=x"])
@@ -2492,15 +2494,20 @@ def run_dispatch_tests(s):
 
         saved_input = builtins.input
         try:
-            # add-site: folder, domain (blank → self-signed), username (blank). No
-            # placeholder offer any more — an empty folder is left empty.
-            script = iter([site_test_dir, "", ""])
+            # add-site: domain (blank → self-signed), username (blank). The
+            # folder is not asked for — Servette invents it — and nothing is
+            # written into it, so an empty folder is left empty.
+            script = iter(["", ""])
             builtins.input = lambda prompt="": next(script, "")
             with contextlib.redirect_stdout(io.StringIO()) as buf:
                 s._config_add_site()
             check("add-site appends exactly one site", len(s.config.sites) == 2)
-            check("add-site's new site uses the given folder",
-                  s.config.sites[1].serve_dir == site_test_dir)
+            check("add-site invents the folder rather than asking for one",
+                  re.fullmatch(r"site-[0-9a-f]{6}", s.config.sites[1].serve_dir)
+                  and os.path.isdir(s._resolve(s.config.sites[1].serve_dir)))
+            check("...and says where content will land, without asking",
+                  s.config.sites[1].serve_dir in buf.getvalue()
+                  and "serve_dir:" not in buf.getvalue())
             check("add-site's new site gets a unique cert/key (no collision with site 0)",
                   s.config.sites[1].cert_file != s.config.sites[0].cert_file)
             check("add-site generates a real self-signed cert",
@@ -2709,16 +2716,14 @@ def run_dispatch_tests(s):
         # Duplicate-domain guard: add-site falls back to self-signed rather than
         # creating a second site that would silently steal the first's TLS identity.
         s.config.sites[1].domain = "taken.example.com"
-        dir7 = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input4 = builtins.input
         try:
-            script4 = iter([dir7, "taken.example.com", ""])
+            script4 = iter(["taken.example.com", ""])
             builtins.input = lambda prompt="": next(script4, "")
             with contextlib.redirect_stdout(io.StringIO()) as buf:
                 s._config_add_site()
         finally:
             builtins.input = saved_input4
-            shutil.rmtree(dir7, ignore_errors=True)
         check("add-site refuses a domain already claimed by another site",
               "already used by another site" in buf.getvalue())
         check("...and the new site ends up self-signed instead", s.config.sites[-1].domain == "")
@@ -2739,38 +2744,24 @@ def run_dispatch_tests(s):
         check("...and leaves the editing site's own domain unchanged",
               s.config.sites[0].domain != "taken.example.com")
 
-        # serve_dir outside BASE_DIR breaks the publish pipeline's same-filesystem
-        # atomic swap and the systemd sandbox's ReadWritePaths — both add-site and
-        # 'dir' must refuse it rather than accept a site that silently can't publish.
-        outside_dir = tempfile.mkdtemp()  # deliberately NOT under BASE_DIR
+        # A serve_dir outside BASE_DIR breaks the publish pipeline's
+        # same-filesystem atomic swap and the systemd sandbox's
+        # ReadWritePaths. That used to be two refusals, on add-site and on
+        # 'dir'. With the folder out of the vocabulary there is nothing left
+        # to refuse — the invariant is now that every folder Servette hands
+        # out is inside BASE_DIR, which is what this pins. A hand-edited
+        # servette.toml is the only remaining way past it.
+        invented = [s._invent_site_dir() for _ in range(8)]
         try:
-            sites_before = len(s.config.sites)
-            saved_input6 = builtins.input
-            try:
-                script6 = iter([outside_dir, "", ""])
-                builtins.input = lambda prompt="": next(script6, "")
-                with contextlib.redirect_stdout(io.StringIO()) as buf3:
-                    s._config_add_site()
-            finally:
-                builtins.input = saved_input6
-            check("add-site refuses a serve_dir outside BASE_DIR",
-                  f"must be inside {s.BASE_DIR}" in buf3.getvalue())
-            check("...and no site was added", len(s.config.sites) == sites_before)
-
-            saved_dir = s.config.sites[0].serve_dir
-            saved_input7 = builtins.input
-            try:
-                builtins.input = lambda prompt="": outside_dir
-                with contextlib.redirect_stdout(io.StringIO()) as buf4:
-                    s._config_dir(s.config.sites[0])
-            finally:
-                builtins.input = saved_input7
-            check("'dir' refuses a serve_dir outside BASE_DIR",
-                  f"must be inside {s.BASE_DIR}" in buf4.getvalue())
-            check("...and leaves the site's serve_dir unchanged",
-                  s.config.sites[0].serve_dir == saved_dir)
+            check("Every invented folder lands inside the data directory",
+                  all(s._is_within_base_dir(s._resolve(d)) for d in invented))
+            check("...and none of them collides with another",
+                  len(set(invented)) == len(invented))
+            check("...and none of them is a folder holding Servette's secrets",
+                  not any(s._serve_dir_exposes_secrets(s._resolve(d)) for d in invented))
         finally:
-            shutil.rmtree(outside_dir, ignore_errors=True)
+            for d in invented:
+                shutil.rmtree(s._resolve(d), ignore_errors=True)
     finally:
         for fname in generated_files:
             p = os.path.join(s.BASE_DIR, fname)

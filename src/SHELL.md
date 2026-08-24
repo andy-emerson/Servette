@@ -1357,6 +1357,73 @@ def cmd_pull(site):
     print(f"  {messages[result]}")
 
 
+def _preview_dir(site):
+    """Where a staged preview lives: a sibling of the site's tree, never
+    inside it. Inside, the public server would serve the unpublished draft
+    to the internet."""
+    return _resolve(site.serve_dir).rstrip(os.sep) + ".preview"
+
+
+def _stage_preview(site, bundle):
+    """Extract `bundle` where the loopback server can serve it, without
+    going near the live tree. Returns "staged" or "rejected".
+
+    The same _extract_bundle every content channel runs, so a bundle the
+    publish door would refuse the preview refuses identically — a preview
+    that accepted more than a publish would be a preview of something that
+    can never ship."""
+    dest = _preview_dir(site)
+    shutil.rmtree(dest, ignore_errors=True)
+    try:
+        _extract_bundle(bundle, dest)
+    except Exception as e:
+        log.error("Preview bundle rejected: %s", e)
+        shutil.rmtree(dest, ignore_errors=True)
+        return "rejected"
+    log.info("Staged a preview for %s", site.domain or site.serve_dir)
+    return "staged"
+
+
+def _clear_previews():
+    """Drop every staged preview. A preview belongs to one `admin` run: it is
+    a draft nobody published, and leaving it on disk would keep an
+    unpublished tree beside a live site indefinitely."""
+    for site in config.sites:
+        shutil.rmtree(_preview_dir(site), ignore_errors=True)
+
+
+def _tar_live_site(site, cap=_MAX_BUNDLE_BYTES):
+    """The site's live tree as gzipped tar bytes, or None if it is too big to
+    hold in memory. Content leaves the box the same way it arrived — same
+    format, same cap — so a downloaded archive is a bundle the publish door
+    would accept back.
+
+    Paths are relative to the site root and the hidden-path rule applies on
+    the way out as it does on the way in: a dot-directory is not served, so
+    it is not handed over either."""
+    root = os.path.realpath(_resolve(site.serve_dir).rstrip(os.sep))
+    if not os.path.isdir(root):
+        return None
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for base, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs if not d.startswith(".") or d == ".well-known"]
+            for name in sorted(names):
+                if name.startswith("."):
+                    continue
+                full = os.path.join(base, name)
+                if os.path.islink(full) or not os.path.isfile(full):
+                    continue        # only regular files, as _extract_bundle accepts
+                rel = os.path.relpath(full, root)
+                try:
+                    tf.add(full, arcname=rel, recursive=False)
+                except OSError:
+                    continue
+                if buf.tell() > cap:
+                    return None
+    return buf.getvalue()
+
+
 def _site_versions(site):
     """The kept trees of one site as rows both surfaces render: the name to
     restore by, when it was published, how many files and bytes it holds, and
@@ -1636,14 +1703,71 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info("ui: " + fmt % args)  # the default writes to stderr, past the log
 
-    def _respond(self, status, body, ctype="text/html; charset=utf-8"):
-        data = body.encode()
+    def _respond(self, status, body, ctype="text/html; charset=utf-8", extra=()):
+        # `body` is text for every JSON and message answer, and bytes for the
+        # two that hand back a file: the site download and a preview asset.
+        data = body if isinstance(body, bytes) else body.encode()
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in extra:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve_preview(self, path):
+        """Serve one file out of a staged preview: /preview/TOKEN/SITE/rest.
+
+        The token rides in the PATH, not the query, and that is the whole
+        reason a preview is staged server-side at all. A draft's own
+        `<link href="s.css">` resolves against the path and drops any query
+        string, so a token in the query would authenticate the page and then
+        403 every stylesheet and image it asks for — a preview showing
+        unstyled text. With the token as a path segment, every relative
+        reference inside the draft resolves and works, which is exactly what
+        an operator is previewing for. (Found in a browser: the page loaded,
+        the stylesheet did not.)
+
+        Everything the draft could reach is bounded here. The token is not
+        the run's passcode — a previewed page can read its own URL, and a
+        script in someone's own content must not learn the credential that
+        publishes. The tree is the staging directory, never the live one.
+        Resolution is the server's own _resolve_request_path, so traversal
+        and hidden paths are refused by the code that refuses them on the
+        public side. And the response says twice that this is untrusted
+        content: nosniff, and a CSP sandbox so the draft has an opaque
+        origin even if it is opened outside the page's own frame."""
+        rest = path[len("/preview"):]
+        parts = rest[1:].split("/", 2) if rest.startswith("/") else []
+        if len(parts) < 2:
+            return self._respond(404, "Not a live preview.")
+        token = getattr(self.server, "preview_code", "")
+        if not token or not hmac.compare_digest(parts[0], token):
+            return self._respond(403, "Not a live preview.")
+        try:
+            idx = int(parts[1])
+        except ValueError:
+            return self._respond(400, "site must be a whole number.")
+        if not (0 <= idx < len(config.sites)):
+            return self._respond(404, "No such site.")
+        staged = _preview_dir(config.sites[idx])
+        if not os.path.isdir(staged):
+            return self._respond(404, "Nothing staged for this site.")
+        file_path, status = _resolve_request_path("/" + (parts[2] if len(parts) > 2 else ""),
+                                                  staged)
+        if status != 200 or file_path is None:
+            return self._respond(status, "Not in this preview."
+                                 if status == 404 else "Refused.")
+        try:
+            with open(file_path, "rb") as f:
+                body = f.read(_MAX_BUNDLE_BYTES)
+        except OSError:
+            return self._respond(404, "Not in this preview.")
+        return self._respond(200, body, _mime_type(file_path), [
+            ("X-Content-Type-Options", "nosniff"),
+            ("Content-Security-Policy", "sandbox allow-scripts allow-forms"),
+        ])
 
     def _auth(self):
         """"ok", "locked", "bad", or "none". A wrong code is a guess and is
@@ -1662,8 +1786,17 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
+
+        # Preview content, on its own token. NOT the run's passcode: a
+        # previewed page can read its own URL, and a draft with a script in
+        # it must not be able to lift the credential that publishes. The
+        # preview token buys exactly one thing — reading the staged tree —
+        # and it is minted fresh by each staging.
+        if path == "/preview" or path.startswith("/preview/"):
+            return self._serve_preview(path)
+
         if path not in ("/", "/status", "/config", "/traffic", "/update",
-                        "/versions"):
+                        "/versions", "/download"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -1698,6 +1831,31 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps({"latest": _upgrade_available()}),
                                  "application/json")
+
+        if path == "/download":
+            # Content leaves the box the way it arrived: the same tar.gz the
+            # publish door takes, so what comes down can go back up. A site
+            # too large to hold in memory says so rather than half-sending.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            try:
+                idx = int(parse_qs(urlsplit(self.path).query).get("site", ["0"])[0])
+            except ValueError:
+                return self._respond(400, "site must be a whole number.")
+            if not (0 <= idx < len(config.sites)):
+                return self._respond(404, "No such site.")
+            target = config.sites[idx]
+            blob = _tar_live_site(target)
+            if blob is None:
+                return self._respond(413, json.dumps(
+                    {"error": f"this site is larger than {_MAX_BUNDLE_BYTES // (1024 * 1024)} MB "
+                              "— copy it with scp instead"}), "application/json")
+            # The filename is built from the site's own name, never from
+            # anything a request supplied.
+            stem = re.sub(r"[^a-z0-9.-]", "-", (target.domain or f"site-{idx}").lower())
+            return self._respond(200, blob, "application/gzip",
+                                 [("Content-Disposition",
+                                   f'attachment; filename="{stem}.tar.gz"')])
 
         if path == "/versions":
             # One site's kept trees. Its own endpoint rather than a field on
@@ -1734,7 +1892,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path not in ("/upload", "/config", "/sites", "/service", "/swap"):
+        if path not in ("/upload", "/preview", "/config", "/sites", "/service",
+                        "/swap"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
             return self._respond(403, "Not logged in.")
@@ -1946,6 +2105,20 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(422, json.dumps({"result": "rejected"}),
                                      "application/json")
             site = config.sites[idx]
+
+        if path == "/preview":
+            # The same bundle, staged where only this page can see it. A
+            # fresh token per staging, so a preview's reach ends when the
+            # next one is staged or the command exits.
+            result = _stage_preview(site, self.rfile.read(length))
+            if result != "staged":
+                return self._respond(422, json.dumps({"result": result}),
+                                     "application/json")
+            self.server.preview_code = os.urandom(8).hex()
+            return self._respond(200, json.dumps(
+                {"result": "staged", "token": self.server.preview_code}),
+                "application/json")
+
         result = _land_bundle(site, self.rfile.read(length), "browser upload")
         if result == "published" and getattr(self.server, "on_publish", None):
             self.server.on_publish(site)  # the terminal narrates what the browser did
@@ -1967,14 +2140,18 @@ def _start_ui(site, page, port=_UI_PORT):
     httpd = http.server.ThreadingHTTPServer((_UI_HOST, port), _UIHandler)
     httpd.site, httpd.page = site, page
     httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
+    httpd.preview_code = ""      # minted by the first staging, not before
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, httpd.code
 
 
 def _stop_ui(httpd):
-    """The page dies with the command: stop accepting, close the socket."""
+    """The page dies with the command: stop accepting, close the socket, and
+    drop any staged preview — a draft nobody published has no business
+    outliving the session that made it."""
     httpd.shutdown()
     httpd.server_close()
+    _clear_previews()
 
 
 ```

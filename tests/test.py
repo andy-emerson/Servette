@@ -1087,6 +1087,22 @@ def run_dispatch_tests(s):
           "const siteIndex = () =>" in s._UI_ADMIN_PAGE)
     # Redirects are a setting, so the page edits them through the settings
     # write both surfaces share — not through a door of their own.
+    # Preview and download on the page. The frame withholds
+    # allow-same-origin deliberately: a draft runs on an opaque origin and
+    # cannot read the page that staged it.
+    # Read the attribute itself, not the page text: prose about the sandbox
+    # is not the sandbox, and an assertion that cannot tell them apart would
+    # pass on a comment while the frame ran wide open.
+    sandboxes = re.findall(r'sandbox="([^"]*)"', s._UI_ADMIN_PAGE)
+    check("...offers a preview in a frame that cannot reach back",
+          sandboxes == ["allow-scripts allow-forms"]
+          and "api('/preview'" in s._UI_ADMIN_PAGE)
+    check("...whose frame URL carries the preview token, never the passcode",
+          "'/preview/' + encodeURIComponent(data.token)" in s._UI_ADMIN_PAGE)
+    check("...and a download beside publish, the same format in reverse",
+          "api('/download'" in s._UI_ADMIN_PAGE)
+    check("...building one bundle for both, so they cannot diverge",
+          s._UI_ADMIN_PAGE.count("gzipBytes(buildTar(") == 1)
     check("...and edits redirects through the shared settings write",
           "redir-save" in s._UI_ADMIN_PAGE
           and "redirect: from + ',' + to" in s._UI_ADMIN_PAGE
@@ -1467,6 +1483,42 @@ def run_dispatch_tests(s):
               st == 422 and b'"rejected"' in body
               and not os.path.exists(os.path.join(ui_dir, "evil.html"))
               and os.path.exists(os.path.join(ui_dir, "live", "new.html")))
+
+        # Preview (#116): the same bundle, staged where only this page can
+        # see it. Everything below is a boundary, not a nicety — a preview
+        # is the operator's own unvetted content running in their browser.
+        st, body = ui_req("POST", f"/preview?t={ui_code}&site=0",
+                          body=_ui_tar([("index.html", "DRAFT"),
+                                        ("a/b.css", "body{}")]))
+        preview_token = json.loads(body)["token"] if st == 200 else ""
+        check("A preview stages without touching the live tree",
+              st == 200 and b'"staged"' in body
+              and open(os.path.join(ui_dir, "live", "new.html")).read() == "fresh")
+        check("...on its own token, which is not the run's passcode",
+              preview_token and preview_token != ui_code)
+        # The reason for the separate token: a previewed page can read its
+        # own URL. If that URL carried the passcode, a script in the
+        # operator's own draft could publish with it.
+        check("...and that token buys nothing but the preview",
+              ui_req("GET", f"/status?t={preview_token}")[0] == 403
+              and ui_req("POST", f"/upload?t={preview_token}",
+                         body=_ui_tar([("x.html", "no")]))[0] == 403)
+        st, body = ui_req("GET", f"/preview/{preview_token}/0/")
+        check("The staged root is served over the tunnel", st == 200 and body == b"DRAFT")
+        # The token is a path segment because a draft's relative links drop
+        # the query: with it in the query, the page loaded and every
+        # stylesheet 403'd. Found in a browser, pinned here.
+        check("...with relative paths resolving, which is why it is staged at all",
+              ui_req("GET", f"/preview/{preview_token}/0/a/b.css")[1] == b"body{}")
+        check("...refusing traversal through the server's own resolver",
+              ui_req("GET", f"/preview/{preview_token}/0/../../etc/passwd")[0] == 403)
+        check("...and refusing a wrong or absent preview token",
+              ui_req("GET", "/preview/wrong/0/")[0] == 403
+              and ui_req("GET", "/preview/")[0] == 404)
+        st, body = ui_req("POST", f"/preview?t={ui_code}&site=0",
+                          body=_ui_tar([("../evil.html", "pwned")]))
+        check("A bundle a publish would refuse, a preview refuses identically",
+              st == 422 and not os.path.exists(os.path.join(ui_dir, "evil.html")))
 
         # Site management ops — the page's card row runs the same cores the
         # terminal's add-site / remove-site / move-site run. Reload guards
@@ -5545,6 +5597,11 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         "_land_bundle", "_swap_site_content", "_restore_site",
         "_prune_versions", "_adopt_legacy_slots",
         "_drop_backup", "_remove_site",
+        # A preview is a draft nobody published: staged beside the site's
+        # tree, never inside it, and cleared when the command that made it
+        # exits. It writes content, so it is claimed here — but never the
+        # live tree, which is the whole point of previewing.
+        "_stage_preview", "_clear_previews",
         # A site FOLDER, created empty — setup must never leave nothing to
         # serve, and a page-added site gets a Servette-named folder because
         # the folder is not a question an operator should have to answer.

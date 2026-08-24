@@ -475,6 +475,19 @@
     /* A deactivated site keeps its card and dims its name. */
     .site-card.inactive .card-title { opacity: 0.55; }
 
+    /* The staged draft, in a frame that cannot reach back. The sandbox
+       attribute deliberately withholds allow-same-origin: the draft runs on
+       an opaque origin, so a script in someone's own content cannot read
+       this page or call its endpoints. */
+    .preview-frame {
+      width: 100%;
+      height: 420px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+      margin-top: 0.5rem;
+    }
+
     /* ── Charts: inline SVG, no library — the page loads no third-party
        code. The y-axis is part of the chart: a line without a scale is a
        shape, not a measurement. ─────────────────────────────────────── */
@@ -1107,6 +1120,20 @@
          `site's <b>index.html</b>.</p>` +
          `<div class="btn-row" style="margin-top:0.75rem">` +
            `<button class="action pub" type="button" disabled>Publish</button>` +
+           // Look before you ship. Content only — the real domain, its
+           // certificate, and its headers are not in scope here.
+           `<button class="action prev" type="button" disabled>Preview</button>` +
+           // The reverse of Publish: the live tree as the same tar.gz the
+           // publish door accepts, so what comes down can go back up.
+           `<button class="action dl" type="button">Download</button>` +
+         `</div>` +
+         `<div class="preview hidden">` +
+           `<p class="hint">This is the folder you chose, served over the ` +
+           `tunnel and not published. Links inside it work; the site's real ` +
+           `domain, certificate, and headers are not part of what you are ` +
+           `seeing.</p>` +
+           `<iframe class="preview-frame" sandbox="allow-scripts allow-forms" ` +
+           `title="Preview of the chosen folder"></iframe>` +
          `</div>` +
          `<div class="done hidden">` +
            `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
@@ -1250,6 +1277,7 @@
     // Everything below is the publish machinery only an active card carries.
     if (inactive) return card;
     const input = q('input[type="file"]'), pubBtn = q('.pub');
+    const prevBtn = q('.prev');
     const summary = q('.summary'), done = q('.done');
 
     /* ── Reading a folder: one intake for both doors, the picker and the
@@ -1275,7 +1303,9 @@
         (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
                          `the site root would show a directory miss</span>`);
       done.classList.add('hidden');
+      q('.preview').classList.add('hidden');
       pubBtn.disabled = false;
+      prevBtn.disabled = false;
       mark('badge-green', '✓ folder read');
     }
 
@@ -1338,17 +1368,7 @@
       pubBtn.disabled = true;
       mark('badge-dim', 'building…');
       try {
-        const entries = [];
-        let totalBytes = 0;
-        for (const { path, file } of files) {
-          const bytes = new Uint8Array(await file.arrayBuffer());
-          totalBytes += bytes.length;
-          if (totalBytes > MAX_BUNDLE_BYTES)
-            throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
-                            `the server would reject it`);
-          entries.push({ path, bytes });
-        }
-        const gz = await gzipBytes(buildTar(entries));
+        const { entries, gz } = await buildBundle();
 
         // Not through post(): the body is the gzipped bundle itself rather
         // than JSON, and a refused passcode earns its own sentence.
@@ -1384,6 +1404,57 @@
         mark('badge-red', '✕ failed');
       }
       pubBtn.disabled = !files;
+    });
+
+    /* ── Preview: the same bundle, staged where only this page can reach
+       it. Content only — HTTPS, the real domain, and the site's headers are
+       not part of what a preview shows, and the note beside it says so. ── */
+
+    // Building the bundle is the publish path's own work, so it is one
+    // function and both buttons call it.
+    async function buildBundle() {
+      const entries = [];
+      let totalBytes = 0;
+      for (const { path, file } of files) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        totalBytes += bytes.length;
+        if (totalBytes > MAX_BUNDLE_BYTES)
+          throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
+                          `the server would reject it`);
+        entries.push({ path, bytes });
+      }
+      return { entries, gz: await gzipBytes(buildTar(entries)) };
+    }
+
+    prevBtn.addEventListener('click', async () => {
+      clearError(errEl);
+      prevBtn.disabled = true;
+      mark('badge-dim', 'staging…');
+      try {
+        const { gz } = await buildBundle();
+        const resp = await fetch(api('/preview', { site: siteIndex() }),
+                                 { method: 'POST', body: gz });
+        let data = {};
+        try { data = await resp.json(); } catch (e) { data = {}; }
+        if (!resp.ok || data.result !== 'staged')
+          throw new Error('The server would not stage this folder' +
+                          (data.result ? ` (${data.result})` : '') +
+                          ' — the same check a publish would fail.');
+        // The token is a path segment, not a query parameter: a draft's own
+        // relative links resolve against the path and drop the query, so a
+        // token in the query would load the page and 403 every stylesheet
+        // it asks for. And it is the PREVIEW token, never the run's
+        // passcode — a draft can read its own address, and must not learn
+        // the credential that publishes.
+        q('.preview-frame').src = '/preview/' + encodeURIComponent(data.token) +
+          '/' + encodeURIComponent(siteIndex()) + '/';
+        q('.preview').classList.remove('hidden');
+        mark('badge-green', '✓ staged');
+      } catch (e) {
+        showError(errEl, reason(e));
+        mark('badge-red', '✕ not staged');
+      }
+      prevBtn.disabled = !files;
     });
 
     /* ── The version ring: what this site has served, and one click back
@@ -1437,6 +1508,14 @@
 
     q('.ver-refresh').addEventListener('click', loadVersions);
     loadVersions();
+
+    // The response carries Content-Disposition, so the browser saves it
+    // rather than navigating: the operator stays on the page they were
+    // working in.
+    q('.dl').addEventListener('click', () => {
+      clearError(errEl);
+      location.assign(api('/download', { site: siteIndex() }));
+    });
 
     /* ── Redirects. Both halves of the pair reach _set_site_value through
        the same settings write, so a rule the terminal refuses the page

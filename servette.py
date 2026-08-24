@@ -7440,11 +7440,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // Two lines: what is there, then when it landed. One line ran to
           // the buttons and wrapped mid-date; the switch-row still centres
           // the label and the buttons against the pair.
-          state.innerHTML = live
-            ? `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
-              `${fmtSize(live.bytes)}</span>` +
-              `<span>${escapeHtml(when(live.published))}</span>`
-            : 'nothing published yet';
+          // A missing folder is marked here, because publishing is what
+          // fixes it — the same rule every other fault follows. It has no
+          // row of its own and used to sit in the facts block, which is
+          // nowhere near anything that would put it right.
+          const gone = checksFor.find((c) => c.key === 'dir');
+          state.innerHTML = gone
+            ? `<span class="${faultClass(gone)}">${escapeHtml(gone.detail)}</span>`
+            : live
+              ? `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
+                `${fmtSize(live.bytes)}</span>` +
+                `<span>${escapeHtml(when(live.published))}</span>`
+              : 'nothing published yet';
           // Nothing published is nothing to download, and offering it
           // anyway made the card contradict itself in two adjacent words.
           const dl = q('.dl');
@@ -7534,47 +7541,124 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const checksFor = (((statusData || {}).checks) || []).filter((c) => c.site === idx);
     const certRow = checksFor.find((c) => c.key === 'cert');
     const authRow = checksFor.find((c) => c.key === 'password');
-    const others  = checksFor.filter((c) => c.key !== 'cert' && c.key !== 'password');
 
     // What the operator has asked for but not yet saved. null means the
     // switch is still showing what the server says.
     let authDesired = null;
     const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
 
-    const renderInfo = () => {
+    /* ── What this card wants dealt with ───────────────────────────────
+       ONE list, and everything about attention reads it: the count on the
+       Status line, and the mark on the row that fixes each item. Two
+       appearances per item, never three, and never a third register (a red
+       paragraph somewhere else) for the same fact.
+
+       It holds the server's stored faults AND an edit begun on this card
+       and not finished. An unfinished edit is not a defect of the site —
+       nothing is saved — but it is something to deal with, and a card that
+       said "healthy" beside a form it was refusing to accept was lying
+       about one of the two. */
+
+    // The switch says private; what the login still needs, in the words of
+    // the thing that is actually missing. Read live from the fields, so the
+    // count follows the typing. null means nothing is missing.
+    const authGap = () => {
+      if (!authOn()) return null;
+      const u = q('#cfg-username-' + idx), pw = q('#cfg-password-' + idx);
+      if (!u) return null;                    // the fields are not rendered yet
+      if (!u.value.trim()) return 'a username is needed';
+      if (!siteData.has_password && !pw.value) return 'a password is needed';
+      return null;
+    };
+    const authIncomplete = () => authGap() !== null;
+
+    const reviewList = () => {
+      const out = checksFor.filter((c) => !c.ok && c.key !== 'password');
+      const gap = authGap();
+      // The stored half-authenticated state and an edit in progress are the
+      // same row's business, so only one of them is ever listed. The stored
+      // one BLOCKS — a username saved with no password locks every visitor
+      // out — while an edit half-typed has changed nothing yet.
+      if (gap)
+        out.push({ key: 'password',
+                   blocking: !!siteData.username && !siteData.has_password,
+                   detail: gap });
+      else if (authRow && !authRow.ok)
+        out.push(authRow);
+      return out;
+    };
+
+    /* Two renders, because they run at different rates. renderInfo rebuilds
+       the card's controls — including the login fields — and runs when the
+       card's shape changes. renderAttention only re-states what needs
+       dealing with, and runs on every keystroke, because whether the login
+       is complete changes as you type. Rebuilding the fields on a keystroke
+       would wipe what was being typed into them; that is exactly what the
+       first version of this did. */
+
+    const renderAttention = () => {
       const on = authOn();
       const pending = authDesired !== null && authDesired !== !!siteData.username;
+      const needs = reviewList();
+      const blocking = needs.some((c) => c.blocking);
+
+      // The head pill is the Status line for a folded card, so it reads the
+      // same list rather than a snapshot taken when the card was built.
+      const pill = q('.badge.needs');
+      if (pill) {
+        pill.textContent = needs.length === 1
+          ? (NEEDS_WORD[needs[0].key] || 'Needs attention')
+          : needs.length + ' to review';
+        pill.classList.toggle('badge-red', blocking);
+        pill.classList.toggle('badge-warn', !blocking);
+        pill.classList.toggle('hidden', !needs.length);
+      }
+
       info.innerHTML =
-        // The summary line, and the only place the card says it is well.
-        // A count needs a set to count, so it names its members; with
-        // nothing wrong it is the green tick that says so, which no other
-        // row on the card can say. Each fault ALSO appears on the row that
-        // carries its fix, and nowhere else — the head pill shows only
-        // while the card is folded and this line is hidden.
-        row('Status', siteNeeds.length
-          ? `<span class="${siteNeeds.some((c) => c.blocking) ? 'fault' : 'warn'}">` +
-            `${siteNeeds.length} to review — ` +
-            `${escapeHtml(siteNeeds.map((c) => NEEDS_WORD[c.key] || c.key)
-                 .join(', ').toLowerCase())}</span>`
+        // The count, and the all-clear. It does not name its members: each
+        // is named on the row that fixes it, and four names here would be a
+        // sentence nobody reads. This is also the only place the card can
+        // say the site is WELL — every other row speaks for its own subject.
+        row('Status', needs.length
+          ? `<span class="${blocking ? 'fault' : 'warn'}">` +
+            `${needs.length} to review</span>`
           : '<span class="ok">✓</span> healthy') +
         // The site itself, one click away and in its own tab: the fastest
         // answer to "did that publish land" is looking at it.
         row('Serving', siteData.domain
           ? `<a href="${escapeHtml('https://' + siteData.domain)}" target="_blank" ` +
             `rel="noopener">${escapeHtml('https://' + siteData.domain)}</a>`
-          : "this server's IP address (no domain set)") +
-        // A host-wide check's label carries a 'site · ' prefix for the
-        // terminal's flat list; on a card the site is the card, so the
-        // prefix is dropped.
-        others.map((c) => {
-          const cut = c.label.indexOf(' · ');
-          return factRow(cut < 0 ? c
-            : Object.assign({}, c, { label: c.label.slice(cut + 3) }));
-        }).join('');
+          : "this server's IP address (no domain set)");
 
+      // One marker per row, taken from the same list the count read, so a
+      // row and the count can never disagree about what is wrong.
       q('.cert-state').innerHTML = !certRow ? ''
         : certRow.ok ? escapeHtml(certRow.detail)
         : `<span class="${faultClass(certRow)}">${escapeHtml(certRow.detail)}</span>`;
+
+      const mine = needs.find((c) => c.key === 'password');
+      q('.auth-state').innerHTML = mine
+        ? `<span class="${faultClass(mine)}">${escapeHtml(mine.detail)}</span>`
+        // Going public needs nothing filled in, so it is a note, not a
+        // thing to review.
+        : (pending && !on)
+          ? '<span class="pending">not saved yet — becoming public</span>'
+          : (on ? 'private' : 'public');
+
+      // Dim rather than a refusal to print: what is missing is already on
+      // the access row and in the count, and a red paragraph saying it a
+      // third time is what made one problem look like three.
+      const saveBtn = q('.save-site');
+      saveBtn.disabled = authIncomplete();
+      saveBtn.title = saveBtn.disabled
+        ? 'Fill in the username and password above, or make the site public'
+        : 'Save the access settings for this site';
+    };
+
+    const renderInfo = () => {
+      const on = authOn();
+      const pending = authDesired !== null && authDesired !== !!siteData.username;
+
       // Naming and certifying are two acts on one card: the name saves
       // instantly, the certificate is asked for when you ask for it —
       // and the button says so while the site has no trusted one.
@@ -7588,12 +7672,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
       q('.auth-switch').checked = on;
       q('.auth-action').textContent = on ? 'Make public' : 'Make private';
-      q('.auth-state').innerHTML = pending
-        ? `<span class="pending">${on ? 'not saved yet — fill in the login below'
-                                      : 'not saved yet — becoming public'}</span>`
-        : (authRow && !authRow.ok)
-          ? `<span class="${faultClass(authRow)}">${escapeHtml(authRow.detail)}</span>`
-          : (on ? 'private' : 'public');
       q('.auth-fields').innerHTML = !on ? '' :
         field('username-' + idx, 'Username', siteData.username,
               { hint: 'Case-sensitive. Any characters except a colon.' }) +
@@ -7602,20 +7680,25 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
               '', { type: 'password',
                     hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
       q('.auth-save').classList.toggle('hidden', !(on || pending));
-      // Same reasoning for the fields themselves: filling in the username
-      // the refusal asked for should not leave the refusal on screen.
-      for (const el of q('.auth-fields').querySelectorAll('input'))
-        el.addEventListener('input', () => clearError(errEl));
       q('.auth-hint').textContent = on ? ''
         : (siteData.username
            ? 'Saving makes the site public: the login is removed and the stored password deleted.'
            : '');
+
+      // Typing changes whether the login is complete, so the count follows
+      // the keystroke — but only the attention half re-renders, or the
+      // fields would be rebuilt under the cursor.
+      for (const el of q('.auth-fields').querySelectorAll('input'))
+        el.addEventListener('input', () => { clearError(errEl); renderAttention(); });
 
       const outside = q('.outside');
       outside.disabled = !siteData.domain;
       outside.title = siteData.domain
         ? 'Opens the connection test on ' + siteData.domain
         : 'Needs a domain — a site without one has no public name to test';
+
+      // Last, because it reads the fields the block above just created.
+      renderAttention();
     };
     renderInfo();
 
@@ -7663,13 +7746,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       clearError(errEl);
       if (!authOn())
         return saveSettings({ username: '' }, cardIndex(card), badge, errEl);
+      // No refusal to print: Save is dim until the login is complete, and
+      // what is missing is already said on the access row and counted on
+      // the status line. A red paragraph here was a third register for a
+      // fact the card states twice.
       const username = q('#cfg-username-' + idx).value.trim();
       const pw = q('#cfg-password-' + idx).value;
-      if (!username)
-        return errAt(q('.auth-save'), 'A username is needed — or make the site public.');
-      if (!siteData.has_password && !pw)
-        return errAt(q('.auth-save'),
-                     'A password is needed the first time a site turns private.');
       saveSettings(Object.assign({ username }, pw ? { password: pw } : {}),
                    cardIndex(card), badge, errEl);
     });

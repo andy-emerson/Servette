@@ -15,7 +15,36 @@ command's output read as two programs talking.
 **Left alone:** `status`'s own headline, which is a display with its own
 layout rather than a line of command output. *(2026-08-24)*
 
-## A count, and one mark per problem where its fix is
+## Everything that wants attention: counted once, marked once, where the fix is
+
+**Ruled (Human).** One rule, no exceptions, applied to every state:
+
+- **The Status line counts, and says nothing else.** `N to review`, or
+  `✓ healthy`. It does not name its members — each is named on its own
+  row, and four names here would be a sentence nobody reads. This is the
+  only place a card can report itself *well*: every other row speaks for
+  its own subject.
+- **One mark per item, on the row that carries its fix.** Certificate on
+  the certificate row. Login on the access row. A missing folder on the
+  **Published** row, because publishing is what puts it back — it used to
+  sit in the facts block, nowhere near anything that would fix it.
+- **Nothing else.** No third register: no red paragraph restating what a
+  row already says. Where a form cannot be saved, **Save is dim** and the
+  row says what is missing — a refusal to print is the third register by
+  another name.
+
+**An unfinished edit is one of these items.** Flipping to private without
+a login is counted and marked, so the card cannot say "healthy" beside a
+form it is refusing. It was doing exactly that, which is the
+inconsistency that made this ruling necessary.
+**Severity by consequence, not by kind:** a stored username with no
+password locks every visitor out — red. The same login half-typed has
+changed nothing yet — amber. The row's words say which is missing ("a
+username is needed" / "a password is needed"), not both at once.
+**Verified across every state, in a browser**, because getting it right
+for the certificate and wrong for the others is what happened three
+times: nothing wrong, certificate, folder, login, and all three at once.
+*(2026-08-24)*
 
 **Ruled (Human):** two things, and only two.
 

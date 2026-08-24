@@ -6188,7 +6188,10 @@ def run_browser_tests(s, tmpdir):
                 # the folded card's Status line, so it must be hidden while
                 # this one is showing.
                 check("...a faulted card counts it once and marks it once",
-                      "1 to review" in info and "certificate" in info.lower()
+                      "1 to review" in info
+                      # The count does not name its members — each is named
+                      # on its own row, and four of them would be unreadable.
+                      and "certificate" not in info.lower()
                       and page.locator(".cert-state .warn, .cert-state .fault"
                                        ).count() == 1
                       and not page.locator(".badge.needs").first.is_visible())
@@ -6205,42 +6208,77 @@ def run_browser_tests(s, tmpdir):
                 page.click("#tab-sites")
                 page.wait_for_timeout(800)
 
-            # A refusal belongs beside the control that produced it, not at
-            # the far end of a very long card.
-            page.locator(".auth-switch").first.check()   # Save appears with it
-            page.wait_for_timeout(300)
-            page.locator("button.save-site").first.click()
-            page.wait_for_timeout(400)
-            # Both rectangles read in one evaluate, at one scroll position:
-            # bounding_box() is viewport-relative, and clicking a button
-            # scrolls it into view, so two Playwright calls either side of a
-            # click measure against different origins and disagree by the
-            # scroll distance. That is what the first version of this check
-            # actually caught — the page was right, the measurement was not.
-            gap = page.evaluate("""() => {
-              const sv = document.querySelector('button.save-site');
-              const er = document.querySelector('.site-card .error');
-              if (!sv || !er || er.classList.contains('hidden')) return null;
-              return Math.abs(er.getBoundingClientRect().top -
-                              sv.getBoundingClientRect().bottom);
-            }""")
-            check("...and a refusal lands next to the button that refused",
-                  gap is not None and gap < 120)
-            page.locator(".auth-switch").first.uncheck()
-            page.wait_for_timeout(300)
+            # An unfinished login is treated as exactly what every other
+            # thing to review is treated as: counted once, marked once on
+            # the row that fixes it, with no third register anywhere. The
+            # card said "healthy" beside a red refusal before this.
+            # Every fault state, walked in one place, because the model is
+            # only right if it is right for all of them: a count, and one
+            # mark on the row that fixes it. Nothing else, ever.
+            saved_state = (s.config.sites[0].cert_file,
+                           s.config.sites[0].serve_dir,
+                           s.config.sites[0].username,
+                           s.config.sites[0].password_hash)
+            def _card_marks():
+                page.reload(); page.wait_for_timeout(1400)
+                return page.evaluate("""() => {
+                  const c = document.querySelector('.site-card');
+                  const at = (sel) => !!c.querySelector(sel + ' .warn, ' + sel + ' .fault');
+                  return {status: c.querySelector('.info').innerText,
+                          cert: at('.cert-state'), access: at('.auth-state'),
+                          published: at('.ver-state')};
+                }""")
+            try:
+                site0 = s.config.sites[0]
+                site0.cert_file = ""
+                m = _card_marks()
+                check("...a certificate fault: counted once, marked on its own row",
+                      "1 to review" in m["status"] and m["cert"]
+                      and not m["access"] and not m["published"])
+                site0.cert_file = saved_state[0]
+                site0.serve_dir = "gone-xyz"
+                m = _card_marks()
+                check("...a missing folder: marked where publishing would fix it",
+                      "1 to review" in m["status"] and m["published"]
+                      and not m["cert"] and not m["access"])
+                site0.serve_dir = saved_state[1]
+                site0.username, site0.password_hash = "someone", ""
+                m = _card_marks()
+                check("...a half-authenticated site: marked on the access row",
+                      "1 to review" in m["status"] and m["access"]
+                      and not m["cert"] and not m["published"])
+                site0.cert_file = ""
+                site0.serve_dir = "gone-xyz"
+                m = _card_marks()
+                check("...and three at once count three and mark three",
+                      "3 to review" in m["status"]
+                      and m["cert"] and m["access"] and m["published"])
+            finally:
+                (site0.cert_file, site0.serve_dir,
+                 site0.username, site0.password_hash) = saved_state
+                page.reload(); page.wait_for_timeout(1400)
 
-            # A refusal describes the form as it stood; change the form and
-            # it must go, rather than sitting in red through every flip.
+            # The walk above reloaded the page, so the switch is back where
+            # it started; flip it again for the checks that follow.
             page.locator(".auth-switch").first.check()
-            page.wait_for_timeout(300)
-            page.locator("button.save-site").first.click()
             page.wait_for_timeout(400)
-            check("...saving private with no username is refused in words",
-                  page.locator(".site-card .error").first.is_visible())
+            info = page.locator(".info").first.inner_text()
+            check("...an unfinished login counts, and the card stops saying healthy",
+                  "1 to review" in info and "healthy" not in info
+                  and page.locator(".auth-state .warn, .auth-state .fault"
+                                   ).count() == 1)
+            check("...with Save dim rather than a refusal to print",
+                  page.locator("button.save-site").first.is_disabled()
+                  and not page.locator(".site-card .error").first.is_visible())
+            # Typing the login completes it, so the count follows.
+            page.locator("#cfg-username-0").fill("someone")
+            page.locator("#cfg-password-0").fill("a-password")
+            page.wait_for_timeout(300)
+            check("...and completing it clears the count and frees Save",
+                  "healthy" in page.locator(".info").first.inner_text()
+                  and not page.locator("button.save-site").first.is_disabled())
             page.locator(".auth-switch").first.uncheck()
             page.wait_for_timeout(300)
-            check("...and the refusal clears when the switch that caused it moves",
-                  not page.locator(".site-card .error").first.is_visible())
 
             # Preview: staged, framed, and its relative assets resolving —
             # the check that would have caught the token-in-the-query bug.

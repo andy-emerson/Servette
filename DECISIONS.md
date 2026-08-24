@@ -6,6 +6,35 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The card says what the site is, then what you do to it
+
+**Ruled (Human):** Status, Serving, Domain, Certificate and Access sit at
+the top of a site card. Publishing, versions, redirects and the
+connection test follow underneath.
+**Why:** the identity of the site answers the question a card is opened
+to answer; the actions are what you do once you know it. The publish
+strip led the card because publishing was the first thing the card could
+do, which is history rather than a reason.
+**And the remove panel is a popover under the button that opens it**,
+rather than a block at the far end of a long card — a question asked
+three hundred pixels from the thing you clicked is a question you have to
+go and find. The rule against borrowed voices was always about the
+browser's own dialogs (`alert`, `confirm`, `prompt`), never about panels
+the page draws itself; the suite now pins that by reading the page's
+JavaScript with comments stripped, since a prose mention of `confirm()`
+is not a call to it. *(2026-08-24)*
+
+## A redirect is any path you want to keep working
+
+**Ruled (Human):** the wording assumes nothing about why. A redirect is
+any path on this site sending visitors somewhere else — one that moved, a
+short link worth remembering, a name you want to keep working. The page
+labels them **Path** and **Sends visitors to**; the terminal spells the
+pair `redirect=/path,/where-it-goes`.
+**Why:** "old path" presumed the path used to exist and had been
+abandoned, which is one reason among several and quietly told an operator
+their other use was not what the feature was for. *(2026-08-24)*
+
 ## A fault has two severities, and an unsaved change is neither
 
 **Ruled (Human):** red where the site cannot be used as it is configured;

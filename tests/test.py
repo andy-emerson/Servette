@@ -1196,10 +1196,23 @@ def run_dispatch_tests(s):
           "op: 'name'" in s._UI_ADMIN_PAGE
           and "op: 'certificate'" in s._UI_ADMIN_PAGE
           and "Get certificate" in s._UI_ADMIN_PAGE)
+    # Read the code, not the page text. Prose about alert() is not a call
+    # to alert(), and a substring pin that cannot tell them apart fails on
+    # a comment while a real call would sail through a reworded one.
+    _admin_js = "\n".join(re.findall(r"<script>(.*?)</script>",
+                                     s._UI_ADMIN_PAGE, re.S))
+    _admin_js = re.sub(r"/\*.*?\*/", "", _admin_js, flags=re.S)
+    _admin_js = re.sub(r"//[^\n]*", "", _admin_js)
     check("...whose remove panel offers delete, deactivate, cancel — no browser popup",
           "do-delete" in s._UI_ADMIN_PAGE and "do-deactivate" in s._UI_ADMIN_PAGE
           and "do-reactivate" in s._UI_ADMIN_PAGE and "do-cancel" in s._UI_ADMIN_PAGE
-          and "confirm(" not in s._UI_ADMIN_PAGE)
+          and not re.search(r"\b(alert|confirm|prompt)\s*\(", _admin_js))
+    # ...and it opens where the button that opens it is, not at the far end
+    # of a long card.
+    check("...anchored under the button, drawn by the page",
+          ".site-card .confirm {" in s._UI_ADMIN_PAGE
+          and "position: absolute;" in s._UI_ADMIN_PAGE
+          and "q('.card-head').insertAdjacentHTML" in s._UI_ADMIN_PAGE)
     check("...as a public/private switch plus host basics — the advanced knobs stay in the terminal",
           "auth-switch" in s._UI_ADMIN_PAGE
           and "has_password" in s._UI_ADMIN_PAGE

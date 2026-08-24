@@ -135,9 +135,9 @@ def _redirect_toml(site):
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
     lines = "\n".join(f"{q(src)} = {q(dst)}"
                       for src, dst in sorted(site.redirects.items()))
-    return ("\n# Old path = where it goes now. A visitor asking for the left "
-            "side is sent\n# to the right side with a 301, before any file is "
-            "looked for.\n[site.redirects]\n" + lines + "\n")
+    return ("\n# A path on this site = where a visitor asking for it is sent.\n"
+            "# Answered with a 301, before any file is looked for.\n"
+            "[site.redirects]\n" + lines + "\n")
 
 
 class Site:

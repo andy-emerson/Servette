@@ -196,9 +196,9 @@ def _redirect_toml(site):
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
     lines = "\n".join(f"{q(src)} = {q(dst)}"
                       for src, dst in sorted(site.redirects.items()))
-    return ("\n# Old path = where it goes now. A visitor asking for the left "
-            "side is sent\n# to the right side with a 301, before any file is "
-            "looked for.\n[site.redirects]\n" + lines + "\n")
+    return ("\n# A path on this site = where a visitor asking for it is sent.\n"
+            "# Answered with a 301, before any file is looked for.\n"
+            "[site.redirects]\n" + lines + "\n")
 
 
 class Site:
@@ -6330,6 +6330,29 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     /* A deactivated site keeps its card and dims its name. */
     .site-card.inactive .card-title { opacity: 0.55; }
 
+    /* The remove panel is a popover under the button that opens it, not a
+       block at the far end of the card — a question asked three hundred
+       pixels from the thing you clicked is a question you have to go and
+       find. Drawn by the page, never by the browser: the rule against
+       borrowed voices is about alert() and confirm(), not about panels. */
+    .card-head { position: relative; }
+    .site-card .confirm {
+      position: absolute;
+      top: calc(100% + 0.4rem);
+      right: 0.75rem;
+      z-index: 20;
+      width: min(24rem, calc(100% - 1.5rem));
+      padding: 0.25rem 1rem 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.55);
+      cursor: default;
+      user-select: text;      /* the head sets none, for dragging */
+    }
+    /* The panel hangs below the head, so the card must not clip it. */
+    .site-card { overflow: visible; }
+
     /* The staged draft, in a frame that cannot reach back. The sandbox
        attribute deliberately withholds allow-same-origin: the draft runs on
        an opaque origin, so a script in someone's own content cannot read
@@ -6781,7 +6804,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   function attachCardDrag(head, el) {
     head.addEventListener('mousedown', (e) => {
-      if (e.button !== 0 || e.target.closest('button') || e.target.closest('a')) return;
+      if (e.button !== 0 || e.target.closest('button') || e.target.closest('a')
+          || e.target.closest('.confirm')) return;   // the panel is not a handle
       const startX = e.clientX, startY = e.clientY;
       const rect = el.getBoundingClientRect();
       const offY = e.clientY - rect.top;
@@ -6953,7 +6977,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // cancels — one bullet says exactly what each choice means. A card
     // that is already deactivated offers only the delete.
     const confirmHtml =
-      `<div class="confirm hidden"><div class="split"></div>` +
+      `<div class="confirm hidden">` +
       `<p class="hint"><b>Delete</b> removes this server's copies — the ` +
       `published files and their backup. Your originals in local storage ` +
       `are untouched; publishing again rebuilds the site.</p>` +
@@ -6973,8 +6997,38 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<div class="btn-row" style="margin-top:0.75rem">` +
          `<button class="action do-reactivate" type="button">Reactivate</button></div>`)
 
-      // ── Publish: the card's primary action, at the top of it.
-      : (`<div class="dropstrip"><span class="drop-lead">Drop this site's folder here</span>` +
+      // ── What this site IS, at the top: its state, the address it
+      // answers at, and the three things that decide both. What you DO to
+      // it — publish, preview, download, redirect — follows underneath.
+      : (`<div class="rows info"></div>` +
+
+         `<div class="switch-row"><span class="k">Domain</span>` +
+         `<span class="switch-value"><input class="dom-input" type="text" ` +
+         `placeholder="example.com" value="${escapeHtml(siteData.domain)}">` +
+         `<span class="switch-act"><button class="action tiny dom" type="button">` +
+         `Set</button></span></span></div>` +
+         `<div class="switch-row"><span class="k">Certificate</span>` +
+         `<span class="switch-value"><span class="cert-state"></span>` +
+         `<span class="switch-act"><button class="action tiny cert" type="button">` +
+         `Get certificate</button></span></span></div>` +
+
+         `<div class="switch-row">` +
+         `<label class="k auth-label">Access</label>` +
+         `<span class="switch-value"><span class="auth-state"></span>` +
+         `<span class="switch-act"><label class="auth-action"></label>` +
+         `<input class="switch auth-switch" type="checkbox"></span></span></div>` +
+         `<div class="auth-fields"></div>` +
+         `<div class="btn-row auth-save hidden" style="margin-top:0.9rem">` +
+         `<button class="action save-site" type="button">Save</button></div>` +
+         `<p class="hint auth-hint"></p>` +
+
+         `<p class="hint">A certificate is issued only for a name that ` +
+         `already points here — check that the domain's DNS has an A record ` +
+         `to this server's IP before requesting one.</p>` +
+
+         // ── Publishing: drop a folder, look at it, ship it.
+         `<div class="split"></div>` +
+         `<div class="dropstrip"><span class="drop-lead">Drop this site's folder here</span>` +
          `<span>or <a href="#">browse for it</a></span></div>` +
          `<input type="file" webkitdirectory multiple class="hidden">` +
          `<p class="hint summary">The folder to drop is the one holding the ` +
@@ -7019,8 +7073,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `</span></span></div>` +
          `<div class="rows versions"></div>` +
 
-         // ── Redirects: old path to new. A setting, so it lives with the
-         // site's other settings rather than as a file in the content.
+         // ── Redirects: one path on this site sends visitors to another
+         // place. A setting, so it lives with the site's other settings
+         // rather than as a file in the content.
          `<div class="split"></div>` +
          `<div class="switch-row"><span class="k">Redirects</span>` +
          `<span class="switch-value"><span class="redir-state"></span>` +
@@ -7028,12 +7083,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `type="button">Add</button></span></span></div>` +
          `<div class="rows redirects"></div>` +
          `<div class="redir-form hidden">` +
-           `<div class="cfg-field"><label>Old path</label>` +
-           `<input class="redir-from" type="text" placeholder="/old-page"></div>` +
-           `<div class="cfg-field"><label>Goes to</label>` +
-           `<input class="redir-to" type="text" placeholder="/new-page"></div>` +
-           `<p class="cfg-hint">A path on this site, or a full https:// address. ` +
-           `Visitors are sent on with a <b>permanent</b> redirect, which browsers ` +
+           `<div class="cfg-field"><label>Path</label>` +
+           `<input class="redir-from" type="text" placeholder="/talk"></div>` +
+           `<div class="cfg-field"><label>Sends visitors to</label>` +
+           `<input class="redir-to" type="text" placeholder="/2026/keynote"></div>` +
+           `<p class="cfg-hint">Any path on this site: one that moved, a short ` +
+           `link worth remembering, a name you want to keep working. It can ` +
+           `point at another path here or at a full https:// address. Visitors ` +
+           `are sent on with a <b>permanent</b> redirect, which browsers ` +
            `remember — so a wrong one outlives fixing it here.</p>` +
            `<div class="btn-row" style="margin-top:0.75rem">` +
            `<button class="action redir-save" type="button">Add redirect</button>` +
@@ -7041,39 +7098,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
            `</div>` +
          `</div>` +
 
-         // ── The site's facts, then the controls that change them.
-         `<div class="split"></div>` +
-         `<div class="rows info"></div>` +
-
-         `<div class="switch-row"><span class="k">Domain</span>` +
-         `<span class="switch-value"><input class="dom-input" type="text" ` +
-         `placeholder="example.com" value="${escapeHtml(siteData.domain)}">` +
-         `<span class="switch-act"><button class="action tiny dom" type="button">` +
-         `Set</button></span></span></div>` +
-         `<div class="switch-row"><span class="k">Certificate</span>` +
-         `<span class="switch-value"><span class="cert-state"></span>` +
-         `<span class="switch-act"><button class="action tiny cert" type="button">` +
-         `Get certificate</button></span></span></div>` +
-
-         `<div class="switch-row">` +
-         `<label class="k auth-label">Access</label>` +
-         `<span class="switch-value"><span class="auth-state"></span>` +
-         `<span class="switch-act"><label class="auth-action"></label>` +
-         `<input class="switch auth-switch" type="checkbox"></span></span></div>` +
-         `<div class="auth-fields"></div>` +
-         `<div class="btn-row auth-save hidden" style="margin-top:0.9rem">` +
-         `<button class="action save-site" type="button">Save</button></div>` +
-         `<p class="hint auth-hint"></p>` +
-
-         `<p class="hint">A certificate is issued only for a name that ` +
-         `already points here — check that the domain's DNS has an A record ` +
-         `to this server's IP before requesting one.</p>` +
-
          // ── The one view a page on the tunnel cannot compute for itself.
          `<div class="split"></div>` +
          `<div class="btn-row">` +
          `<button class="action outside" type="button" disabled>Test connection</button>` +
          `</div>`)
+
+    const q = (sel) => card.querySelector(sel);
 
     card.innerHTML =
       `<div class="card-head">` +
@@ -7100,11 +7131,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             `M5 4l0.6 9.5h4.8L11 4"></path></svg></button>` +
         `</span>` +
       `</div>` +
-      `<div class="card-body">` + bodyHtml + confirmHtml +
+      `<div class="card-body">` + bodyHtml +
         `<p class="error hidden"></p>` +
       `</div>`;
+    // Anchored to the head, so the panel opens where the trash button is
+    // rather than at the far end of a long card. Appended after innerHTML
+    // because it belongs to the head, not to the body's flow.
+    q('.card-head').insertAdjacentHTML('beforeend', confirmHtml);
 
-    const q = (sel) => card.querySelector(sel);
     const badge = q('.badge.state'), errEl = q('.error');
     let files = null, folderName = '';
     const mark = (cls, text) => setBadge(badge, cls, text);
@@ -7357,6 +7391,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             ? live.files + ' file' + (live.files === 1 ? '' : 's') + ', ' +
               fmtSize(live.bytes) + ' — ' + when(live.published)
             : 'nothing published yet';
+          // Nothing published is nothing to download, and offering it
+          // anyway made the card contradict itself in two adjacent words.
+          const dl = q('.dl');
+          dl.disabled = !live || !live.files;
+          dl.title = dl.disabled
+            ? 'Nothing published yet — there is nothing to download'
+            : 'Download the live content as a tar.gz';
           list.innerHTML = rows.length < 2 ? '' :
             rows.map((r) => row(escapeHtml(when(r.published)),
               `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
@@ -7422,12 +7463,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const to   = q('.redir-to').value.trim();
       clearError(errEl);
       if (!from || !to)
-        return showError(errEl, 'Both the old path and where it goes are needed.');
+        return showError(errEl, 'Both the path and where it sends visitors are needed.');
       // The pair travels as one value, so the comma is the separator on both
       // surfaces — which leaves it out of reach as a character in the old
       // path. Rare, and said plainly rather than mangled quietly.
       if (from.includes(','))
-        return showError(errEl, 'An old path containing a comma has to be set by ' +
+        return showError(errEl, 'A path containing a comma has to be set by ' +
                                 'editing servette.toml — the comma separates the pair here.');
       saveSettings({ redirect: from + ',' + to }, siteIndex(), badge, errEl);
     });
@@ -9004,14 +9045,15 @@ def _set_site_value(target, key, value):
             target.password_hash = ""
             target.password_salt = ""
     elif key == "redirect":
-        # One pair per token: 'redirect=/old,/new' adds or replaces,
-        # 'redirect=/old,' removes. The table is a mapping and `set` speaks
+        # One pair per token: 'redirect=/path,/target' adds or replaces,
+        # 'redirect=/path,' removes. The table is a mapping and `set` speaks
         # in scalars, so the comma is where the two grammars meet.
         # Validation is _clean_redirects — the same function the config load
         # runs, so a redirect the file would refuse the command refuses too.
         src, comma, dst = value.partition(",")
         if not comma:
-            return "a redirect is a pair: redirect=/old,/new (or /old, to remove)"
+            return ("a redirect is a pair: redirect=/path,/where-it-goes "
+                    "(or /path, to remove)")
         src, dst = src.strip(), dst.strip()
         table = dict(target.redirects)
         if not dst:
@@ -9054,8 +9096,8 @@ def _set_usage():
     print("  Usage: set [n] key=value ...")
     print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
     print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
-    print("  A redirect is a pair: redirect=/old,/new — and redirect=/old,")
-    print("  (nothing after the comma) removes it.")
+    print("  A redirect is a pair: redirect=/path,/where-it-goes — and")
+    print("  redirect=/path, (nothing after the comma) removes it.")
 
 
 # set

@@ -2906,14 +2906,15 @@ def _set_site_value(target, key, value):
             target.password_hash = ""
             target.password_salt = ""
     elif key == "redirect":
-        # One pair per token: 'redirect=/old,/new' adds or replaces,
-        # 'redirect=/old,' removes. The table is a mapping and `set` speaks
+        # One pair per token: 'redirect=/path,/target' adds or replaces,
+        # 'redirect=/path,' removes. The table is a mapping and `set` speaks
         # in scalars, so the comma is where the two grammars meet.
         # Validation is _clean_redirects — the same function the config load
         # runs, so a redirect the file would refuse the command refuses too.
         src, comma, dst = value.partition(",")
         if not comma:
-            return "a redirect is a pair: redirect=/old,/new (or /old, to remove)"
+            return ("a redirect is a pair: redirect=/path,/where-it-goes "
+                    "(or /path, to remove)")
         src, dst = src.strip(), dst.strip()
         table = dict(target.redirects)
         if not dst:
@@ -2961,8 +2962,8 @@ def _set_usage():
     print("  Usage: set [n] key=value ...")
     print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
     print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
-    print("  A redirect is a pair: redirect=/old,/new — and redirect=/old,")
-    print("  (nothing after the comma) removes it.")
+    print("  A redirect is a pair: redirect=/path,/where-it-goes — and")
+    print("  redirect=/path, (nothing after the comma) removes it.")
 
 
 ```

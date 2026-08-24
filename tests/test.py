@@ -1016,7 +1016,9 @@ def run_dispatch_tests(s):
             ui_started.append((site, page)) or (fake_ui, "abc123"))
         s._stop_ui  = lambda h: adm_calls.append(("stop", h))
         script = iter(["help", "back"])
-        builtins.input = lambda prompt="": next(script, "back")
+        prompts = []
+        builtins.input = lambda prompt="": (prompts.append(prompt)
+                                            or next(script, "back"))
         with contextlib.redirect_stdout(io.StringIO()) as adm_buf:
             s.cmd_admin()
 
@@ -1034,9 +1036,15 @@ def run_dispatch_tests(s):
           ui_started == [(s.config.sites[0], s._UI_ADMIN_PAGE)])
     check("...prints the stable link and this run's passcode side by side",
           f"http://localhost:{s._UI_PORT}/" in adm_out
-          and "passcode  abc123" in adm_out)
-    check("...keeps the happy path to one pointer line",
-          "page won't load? type 'help'" in adm_out)
+          and "passcode    abc123" in adm_out)
+    # Nothing between the two labelled lines and the prompt: the label says
+    # what the address is, so a header announcing the page adds nothing, and
+    # the two words worth typing are named in the prompt itself rather than
+    # on lines of their own above it.
+    check("...with nothing printed above them",
+          adm_out.startswith(f"  admin page  http://localhost:{s._UI_PORT}/\n"))
+    check("...and the words worth typing named in the prompt itself",
+          "'help'" in prompts[0] and "'back'" in prompts[0])
     check("...and 'help' summons the tunnel line and reprints the passcode",
           f"LocalForward {s._UI_PORT} 127.0.0.1:{s._UI_PORT}" in adm_out
           and "passcode: abc123" in adm_out)
@@ -2395,8 +2403,11 @@ def run_dispatch_tests(s):
               argv[0] == "sudo" and os.path.isabs(argv[argv.index("-m") - 1]))
         check("Elevation re-runs the same command as a module",
               argv[argv.index("-m") + 1:] == ["servette", "enable"])
-        check("Elevation says what it is doing before prompting",
-              "needs root" in buf.getvalue())
+        # sudo speaks for itself: it prompts when it wants a password and is
+        # silent when the timestamp is still warm. A line of ours ahead of it
+        # is noise in both cases.
+        check("Elevation announces nothing of its own on the way in",
+              buf.getvalue() == "")
 
         # sudo resets the environment. Losing SERVETTE_HOME would point the
         # elevated run at a different data directory than the operator is in —

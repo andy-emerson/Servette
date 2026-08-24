@@ -2197,18 +2197,21 @@ def cmd_admin():
         "content swapped in — restore-site undoes it.")
 
     try:
-        # Link and passcode, printed apart: the link is stable and worth a
-        # bookmark, the passcode is this run's — the login page marries the
-        # two. The troubleshooting lives behind 'help', summoned exactly
-        # when the page fails to load.
-        print("  The admin page is up:")
-        print(f"    link      http://localhost:{_UI_PORT}/")
-        print(f"    passcode  {code}")
-        print("    (page won't load? type 'help')")
+        # Two labelled lines and nothing above them. The address is stable
+        # and worth a bookmark, the passcode is this run's, and the login
+        # page marries the two — printing them apart keeps a bookmark free
+        # of the secret. Each label says what its line IS, which is why no
+        # header announces the page: it could only repeat the label.
+        print(f"  admin page  http://localhost:{_UI_PORT}/")
+        print(f"  passcode    {code}")
         print()
         while True:
             try:
-                raw = input("  admin — 'back' closes the page: ").strip().lower()
+                # The prompt is where a reader looks when wondering what to
+                # type, so the two things they might want are named there
+                # rather than on lines of their own above.
+                raw = input("  admin — 'help' if the page will not load, "
+                            "'back' to close: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -3170,15 +3173,18 @@ def _elevate(cmd, args):
     A child process rather than an exec, so the interactive shell survives the
     privileged command and returns to its prompt instead of vanishing.
 
-    The notices go to stderr: the child owns stdout, and `status --json` has to
-    stay parseable through an elevation."""
+    The one notice goes to stderr: the child owns stdout, and `status --json`
+    has to stay parseable through an elevation."""
     global _elevated_status
     if not shutil.which("sudo"):
         print(f"  '{cmd}' needs root, and sudo is not installed — re-run as root.",
               file=sys.stderr)
         _elevated_status = 1
         return True
-    print(f"  '{cmd}' needs root; asking sudo.", file=sys.stderr)
+    # Nothing is printed on the way in. sudo announces itself when it wants
+    # a password, and says nothing when it does not — which is the right
+    # amount either way. A line of ours ahead of it told an operator who
+    # just typed an admin command something they already knew.
     argv = ["sudo"]
     if "SERVETTE_HOME" in os.environ:
         argv.append("--preserve-env=SERVETTE_HOME")

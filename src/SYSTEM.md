@@ -2132,11 +2132,14 @@ def cmd_enable():
         updating = _write_unit_files()
 
         if updating:
+            # A refresh says what changed and stops. The watchdog was armed
+            # by the first enable and is still armed; repeating it on every
+            # re-run made a two-line result look like a four-line one.
             print("  Service file updated.")
         else:
             print("  Servette enabled as a system service.")
             print("  It will start automatically on boot and survive SSH disconnects.")
-        print("  Network watchdog timer enabled (recovers a dropped default route).")
+            print("  A watchdog timer recovers a dropped default route.")
         log.info("Enabled as systemd service")
 
         _ensure_swap()

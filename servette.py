@@ -845,7 +845,7 @@ def _security_headers(site):
 # was renamed, the address cannot be (DECISIONS.md, "It is a connection
 # test") — a published URL outlives the name someone gave the page.
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
-_CONNECTION_TEST_PATH    = "/.well-known/servette-check"
+_CONNECTION_PATH         = "/.well-known/servette-check"
 
 # The default 404 body (DECISIONS.md: "The error page is server-delivered,
 # client-executed"): authored as src/404.html and inlined by build.py, so it is
@@ -1182,12 +1182,12 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 """.encode()
 _NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
 
-# The connection test (src/connection-test.html), served on every site at a
+# The connection test (src/connection.html), served on every site at a
 # reserved path under /.well-known/ — the one namespace the hidden-path rule
 # already sets apart, so an operator's content never shadows the outside
 # vantage the way a custom 404.html takes over the miss body.
-_CONNECTION_TEST_PAGE = """<!DOCTYPE html>
-<!-- src/connection-test.html — inlined into the module by build.py and
+_CONNECTION_PAGE = """<!DOCTYPE html>
+<!-- src/connection.html — inlined into the module by build.py and
      served at the reserved path /.well-known/servette-check (DECISIONS.md,
      "The connection test has its own reserved page"). The URL keeps the
      older word on purpose: the page was renamed, the address cannot be.
@@ -1673,7 +1673,7 @@ _CONNECTION_TEST_PAGE = """<!DOCTYPE html>
 </body>
 </html>
 """.encode()
-_CONNECTION_TEST_ETAG = '"' + hashlib.sha256(_CONNECTION_TEST_PAGE).hexdigest()[:16] + '"'
+_CONNECTION_ETAG = '"' + hashlib.sha256(_CONNECTION_PAGE).hexdigest()[:16] + '"'
 
 
 # Log escaping
@@ -1812,21 +1812,21 @@ def _handle_request(method, url_path, headers, raw_ip):
     # the site's own auth like everything else, and carrying the same
     # revalidate-always caching contract as the 404 body, for the same
     # reason: the page's checks probe the URL it was served from.
-    if url_path.split("?", 1)[0] == _CONNECTION_TEST_PATH:
+    if url_path.split("?", 1)[0] == _CONNECTION_PATH:
         cache = _cache_control_header(site.username)
         if "max-age" in cache:
             cache = ("private" if site.username else "public") + ", no-cache"
-        if headers.get("If-None-Match", "") == _CONNECTION_TEST_ETAG:
+        if headers.get("If-None-Match", "") == _CONNECTION_ETAG:
             log.info("304 Not Modified %s to %s", log_path, ip)
-            return resp(304, [(b"etag", _CONNECTION_TEST_ETAG.encode()),
+            return resp(304, [(b"etag", _CONNECTION_ETAG.encode()),
                               (b"cache-control", cache.encode())])
         log.info("200 %s (connection test) to %s", log_path, ip)
         return resp(200, [
             (b"content-type",   b"text/html; charset=utf-8"),
-            (b"content-length", str(len(_CONNECTION_TEST_PAGE)).encode()),
-            (b"etag",           _CONNECTION_TEST_ETAG.encode()),
+            (b"content-length", str(len(_CONNECTION_PAGE)).encode()),
+            (b"etag",           _CONNECTION_ETAG.encode()),
             (b"cache-control",  cache.encode()),
-        ], _CONNECTION_TEST_PAGE)
+        ], _CONNECTION_PAGE)
 
     # Resolve request path to a file within the matched site's own serve_dir
     try:
@@ -6597,7 +6597,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
       // ── Publish: the card's primary action, at the top of it.
       : (`<div class="dropstrip"><span class="drop-lead">Drop this site's folder here</span>` +
-         `<span>or <a href="#">choose it</a></span></div>` +
+         `<span>or <a href="#">browse for it</a></span></div>` +
          `<input type="file" webkitdirectory multiple class="hidden">` +
          `<p class="hint summary">The folder to drop is the one holding the ` +
          `site's <b>index.html</b>.</p>` +

@@ -58,14 +58,14 @@ NOT_FOUND_SOURCE = "404.html"
 _NOT_FOUND_MARKER = "@@NOT_FOUND_HTML@@"
 ADMIN_SOURCE = "admin.html"
 _ADMIN_MARKER = "@@ADMIN_HTML@@"
-CONNECTION_TEST_SOURCE = "connection-test.html"
-_CONNECTION_TEST_MARKER = "@@CONNECTION_TEST_HTML@@"
+CONNECTION_SOURCE = "connection.html"
+_CONNECTION_MARKER = "@@CONNECTION_HTML@@"
 # Every page the module embeds: (source file, the marker it replaces). Each
 # marker sits inside a triple-quoted literal in the sources. Three pages:
 # the 404 body and the connection test on the public surface, the admin
 # page on the loopback surface.
 EMBEDDED_PAGES = [(NOT_FOUND_SOURCE, _NOT_FOUND_MARKER),
-                  (CONNECTION_TEST_SOURCE, _CONNECTION_TEST_MARKER),
+                  (CONNECTION_SOURCE, _CONNECTION_MARKER),
                   (ADMIN_SOURCE, _ADMIN_MARKER)]
 
 _FENCE_OPEN  = "```python"

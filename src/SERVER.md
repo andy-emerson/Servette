@@ -890,7 +890,7 @@ Three things precede the handler: version discovery at `/.well-known/servette`, 
 # was renamed, the address cannot be (DECISIONS.md, "It is a connection
 # test") — a published URL outlives the name someone gave the page.
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
-_CONNECTION_TEST_PATH    = "/.well-known/servette-check"
+_CONNECTION_PATH         = "/.well-known/servette-check"
 
 # The default 404 body (DECISIONS.md: "The error page is server-delivered,
 # client-executed"): authored as src/404.html and inlined by build.py, so it is
@@ -901,12 +901,12 @@ _CONNECTION_TEST_PATH    = "/.well-known/servette-check"
 _NOT_FOUND_PAGE = """@@NOT_FOUND_HTML@@""".encode()
 _NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
 
-# The connection test (src/connection-test.html), served on every site at a
+# The connection test (src/connection.html), served on every site at a
 # reserved path under /.well-known/ — the one namespace the hidden-path rule
 # already sets apart, so an operator's content never shadows the outside
 # vantage the way a custom 404.html takes over the miss body.
-_CONNECTION_TEST_PAGE = """@@CONNECTION_TEST_HTML@@""".encode()
-_CONNECTION_TEST_ETAG = '"' + hashlib.sha256(_CONNECTION_TEST_PAGE).hexdigest()[:16] + '"'
+_CONNECTION_PAGE = """@@CONNECTION_HTML@@""".encode()
+_CONNECTION_ETAG = '"' + hashlib.sha256(_CONNECTION_PAGE).hexdigest()[:16] + '"'
 
 
 ```
@@ -1055,21 +1055,21 @@ def _handle_request(method, url_path, headers, raw_ip):
     # the site's own auth like everything else, and carrying the same
     # revalidate-always caching contract as the 404 body, for the same
     # reason: the page's checks probe the URL it was served from.
-    if url_path.split("?", 1)[0] == _CONNECTION_TEST_PATH:
+    if url_path.split("?", 1)[0] == _CONNECTION_PATH:
         cache = _cache_control_header(site.username)
         if "max-age" in cache:
             cache = ("private" if site.username else "public") + ", no-cache"
-        if headers.get("If-None-Match", "") == _CONNECTION_TEST_ETAG:
+        if headers.get("If-None-Match", "") == _CONNECTION_ETAG:
             log.info("304 Not Modified %s to %s", log_path, ip)
-            return resp(304, [(b"etag", _CONNECTION_TEST_ETAG.encode()),
+            return resp(304, [(b"etag", _CONNECTION_ETAG.encode()),
                               (b"cache-control", cache.encode())])
         log.info("200 %s (connection test) to %s", log_path, ip)
         return resp(200, [
             (b"content-type",   b"text/html; charset=utf-8"),
-            (b"content-length", str(len(_CONNECTION_TEST_PAGE)).encode()),
-            (b"etag",           _CONNECTION_TEST_ETAG.encode()),
+            (b"content-length", str(len(_CONNECTION_PAGE)).encode()),
+            (b"etag",           _CONNECTION_ETAG.encode()),
             (b"cache-control",  cache.encode()),
-        ], _CONNECTION_TEST_PAGE)
+        ], _CONNECTION_PAGE)
 
     # Resolve request path to a file within the matched site's own serve_dir
     try:

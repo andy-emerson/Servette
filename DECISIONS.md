@@ -122,17 +122,21 @@ install` is the only installation path" below. *(2026-08-23)*
 **Ruled (Human):** the word is *test* — "test connection" is the idiom
 people expect on a button, and consistency across the documents was an
 argument against churn, not a reason the other word was better. Renamed
-in both pages, the admin button, and every document — and in the tree:
-the source is `src/connection-test.html`, with the build marker and the
-module's constants (`_CONNECTION_TEST_PAGE`, `_CONNECTION_TEST_PATH`)
-following it. The reserved path stays `/.well-known/servette-check`: it
-is a URL, and URLs that may be bookmarked or linked from an
-already-published site are not renamed over a word choice. The constant
-carries that note, so a reader meets the explanation where they meet the
-mismatch. The report leads with findings in the reader's language,
-each carrying its evidence beneath in a footnote's voice; a public site
-withholding its version reads as a pass, not a skip, because that is the
-design working. *(2026-08-23)*
+in both pages, the admin button, and every document. The source file is
+`src/connection.html` — singular, because there is only one test, and
+a connection-test spelling implied siblings that do not exist. The build
+marker and the module's constants (`_CONNECTION_PAGE`,
+`_CONNECTION_PATH`) follow the file. The reserved path stays
+`/.well-known/servette-check`: it is a URL, and URLs that may be
+bookmarked or linked from an already-published site are not renamed over
+a word choice. The constant carries that note, so a reader meets the
+explanation where they meet the mismatch.
+The report leads with findings in the reader's language, each carrying
+its evidence beneath in a footnote's voice; a public site withholding its
+version reads as a pass, not a skip, because that is the design working.
+**Rejected:** a bare test.html (reads as a developer's scratch page, and
+collides in conversation with the suite's `tests/test.py`).
+*(2026-08-23)*
 
 ## The front door is a login: link and passcode, printed apart
 
@@ -293,7 +297,7 @@ the service). *(2026-08-22)*
 body is a traditional error page — the path, the server-is-up sentence, a
 home link, and a link to the check — and an operator's `404.html` takes
 that role by simply existing. The connection test is its own embedded
-page (`src/connection-test.html`) at `/.well-known/servette-check`: code-first, so
+page (`src/connection.html`) at `/.well-known/servette-check`: code-first, so
 no site content ever shadows it; behind the site's own auth; answering
 200, because the page really is there; its report rendering every row
 upfront in a dimmed pending state and resolving each in place. The admin

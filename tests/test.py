@@ -212,6 +212,19 @@ def teardown(tmpdir, saved_config, config_path, servette):
     elif os.path.exists(config_path):
         os.remove(config_path)
     shutil.rmtree(tmpdir, ignore_errors=True)
+    # Sites added through the page's /sites door get a Servette-named folder
+    # under SERVETTE_HOME, which the suite points at the repository. Those
+    # folders were empty and so invisible to git; once publishing began
+    # keeping versions beside them they held files, and turned up in a
+    # commit. The suite cleans up what it caused, both the folder and any
+    # version trees the ring left next to it.
+    for name in os.listdir(SERVETTE_DIR):
+        if re.fullmatch(r"site-[0-9a-f]{6}(\.v\d+(\.\d+)?)?", name):
+            path = os.path.join(SERVETTE_DIR, name)
+            if os.path.islink(path):
+                os.remove(path)
+            else:
+                shutil.rmtree(path, ignore_errors=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

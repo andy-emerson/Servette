@@ -5,6 +5,7 @@
 # Python
 # Runtime config — contains password hashes and cert paths
 # SSL certificate, key, and release signature files
+# Site folders the suite creates through the page's add-site door
 # Viewer e2e harness (tests/viewer/)
 # macOS
 *.egg-info/
@@ -21,4 +22,5 @@ dist/
 node_modules/
 playwright-report/
 servette.toml
+site-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*/
 test-results/

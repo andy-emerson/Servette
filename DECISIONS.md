@@ -43,9 +43,15 @@ up on every migration from those platforms, so the reason is recorded
 rather than re-argued.
 **Rejected:** the `_redirects` file (above); wildcards and splats for now
 (exact paths first, which is where these systems stay simple).
-**Open, for the Human:** the status is **301**, permanent — what the
-feature is for, and what browsers cache hard, so a wrong one outlives
-fixing it. 302 while people learn is a one-word change if wanted.
+**Settled, not open — the Agent raised this as a question it should not
+have:** the status is **301**, permanent, which is what the feature is
+for and what carries a link's standing to the new path. The hazard of a
+301 is that browsers cache it hard, and a wrong one outlives fixing it —
+but the response is sent `Cache-Control: no-cache`, which overrides that
+default, so a browser re-asks and a corrected rule takes effect. 302 buys
+nothing that the header has not already bought, and costs the thing the
+feature exists for.
+**Rejected:** 302 as a safer default (it is not safer; it is weaker).
 *(2026-08-24)*
 
 ## A preview is content over the tunnel, not a deployment

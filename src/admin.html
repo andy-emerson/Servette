@@ -648,6 +648,23 @@
       </div>
     </div>
 
+    <!-- ══ Missing paths. Self-contained on purpose: this card, the block
+         that fills it in loadTraffic, and _parse_traffic's second bucket
+         are the whole feature, so it comes out in one piece if it earns
+         its removal. ══ -->
+    <div class="card" id="card-missing">
+      <div class="card-head">
+        <span class="card-title">Missing paths</span>
+      </div>
+      <div class="card-body">
+        <div class="rows" id="missing-rows"></div>
+        <p class="hint">Paths visitors asked for and did not find, over the
+        same window. A name you recognise is usually a broken link of your
+        own; one you do not is usually a scanner guessing, and needs
+        nothing from you.</p>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-head">
         <span class="card-title">Server load</span>
@@ -1880,6 +1897,12 @@
         ? row('Requests', 'none in this window — or no readable journal on this host')
         : named.map(([name, n]) => row(name, String(n))).join('') +
           row('Total requests', `<b>${total}</b>`, 'ledger');
+
+      // ── Missing paths (remove with the #card-missing block above) ──
+      const gone = t.missing_paths || [];
+      $('missing-rows').innerHTML = gone.length
+        ? gone.map(([path, n]) => row(escapeHtml(path), String(n))).join('')
+        : row('Nothing missed', 'every path asked for in this window was found');
     } catch (e) {
       showError($('traffic-error'), reason(e, 'Could not read traffic'));
     }

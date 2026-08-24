@@ -949,9 +949,10 @@ def _parse_traffic(lines, days=7):
     where the status was expected. Only response lines count — every
     served response logs as '<status> <path> … to <ip>' (or 'from' on
     refusals) — and systemd's own lines, carrying no level, are skipped.
-    Paths are tallied from content responses (200/206/304). IPs are never
-    carried into the result."""
-    per_day, statuses, paths = {}, {}, {}
+    Paths are tallied into two buckets: content responses (200/206/304) as
+    top_paths, and misses (404) as missing_paths. IPs are never carried into
+    the result."""
+    per_day, statuses, paths, missing = {}, {}, {}, {}
     stamp = (lambda p: p[:13].replace("T", " ")) if days <= 2 else (lambda p: p[:10])
     for line in lines:
         parts = line.split()
@@ -966,13 +967,19 @@ def _parse_traffic(lines, days=7):
             continue
         statuses[msg[0]] = statuses.get(msg[0], 0) + 1
         per_day[day] = per_day.get(day, 0) + 1
-        if msg[0] in ("200", "206", "304"):
+        if msg[0] in ("200", "206", "304", "404"):
             path = next((p for p in msg[1:] if p.startswith("/")), None)
             if path:
-                paths[path] = paths.get(path, 0) + 1
-    top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+                # Two buckets over one pass: what was found, and what was
+                # asked for and was not. The second is the actionable half —
+                # a broken link of the operator's own reads the same as a
+                # scanner's guess, and only the operator can tell them apart.
+                bucket = missing if msg[0] == "404" else paths
+                bucket[path] = bucket.get(path, 0) + 1
+    rank = lambda counts: sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
     return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
-            "top_paths": top, "window_days": days,
+            "top_paths": rank(paths), "missing_paths": rank(missing),
+            "window_days": days,
             "bucket": "hour" if days <= 2 else "day",
             "total": sum(statuses.values())}
 
@@ -997,6 +1004,10 @@ def cmd_traffic():
     print("  Top paths:")
     for path, n in t["top_paths"]:
         print(f"    {n:>6}  {path}")
+    if t["missing_paths"]:
+        print("  Missing paths (asked for, not found):")
+        for path, n in t["missing_paths"]:
+            print(f"    {n:>6}  {path}")
     print()
 
 

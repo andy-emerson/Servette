@@ -1144,6 +1144,8 @@ def run_dispatch_tests(s):
         _journal_line("2026-08-20", "200 /index.html to 1.2.3.4"),
         _journal_line("2026-08-20", "304 Not Modified /style.css to 1.2.3.4"),
         _journal_line("2026-08-21", "404 /nope from 5.6.7.8"),
+        _journal_line("2026-08-21", "404 /nope from 1.2.3.4"),
+        _journal_line("2026-08-21", "404 /wp-login.php from 5.6.7.8"),
         _journal_line("2026-08-21", "200 /index.html to 5.6.7.8"),
         _journal_line("2026-08-21", "Config reloaded from disk"),
         _journal_line("2026-08-21", "Rate limited 9.9.9.9"),
@@ -1154,14 +1156,19 @@ def run_dispatch_tests(s):
           "INFO" in tlines[0] and tlines[0].endswith("200 /index.html to 1.2.3.4"))
     tt = s._parse_traffic(tlines)
     check("Traffic tallies days, statuses, and top paths from response lines only",
-          tt["days"] == [("2026-08-20", 2), ("2026-08-21", 2)]
-          and tt["statuses"] == {"200": 2, "304": 1, "404": 1}
+          tt["days"] == [("2026-08-20", 2), ("2026-08-21", 4)]
+          and tt["statuses"] == {"200": 2, "304": 1, "404": 3}
           and tt["top_paths"][0] == ("/index.html", 2)
           and tt["bucket"] == "day")
+    # Misses go in their own bucket, ranked, and never mix with what was
+    # found — a 404 path is the actionable half of the same journal pass.
+    check("...and misses are tallied apart from hits, ranked by count",
+          tt["missing_paths"] == [("/nope", 2), ("/wp-login.php", 1)]
+          and all(p != "/nope" for p, _ in tt["top_paths"]))
     hourly = s._parse_traffic(tlines, days=1)
     check("...and buckets by hour on a short window, where a day is one point",
           hourly["bucket"] == "hour"
-          and hourly["days"] == [("2026-08-20 09", 2), ("2026-08-21 09", 2)])
+          and hourly["days"] == [("2026-08-20 09", 2), ("2026-08-21 09", 4)])
     check("...and never carries a visitor's IP",
           "1.2.3.4" not in json.dumps(tt) and "5.6.7.8" not in json.dumps(tt))
     saved_tl = s._traffic_lines
@@ -1170,7 +1177,9 @@ def run_dispatch_tests(s):
         s.cmd_traffic()
     s._traffic_lines = saved_tl
     check("The traffic command prints the same summary",
-          "Requests: 4" in tbuf.getvalue() and "/index.html" in tbuf.getvalue())
+          "Requests: 6" in tbuf.getvalue() and "/index.html" in tbuf.getvalue())
+    check("...including the misses, so both surfaces show the same window",
+          "Missing paths" in tbuf.getvalue() and "/wp-login.php" in tbuf.getvalue())
     check("...and the Publish tab as site cards, add/move/remove/domain wired to /sites",
           "site-cards" in s._UI_ADMIN_PAGE and "btn-add-site" in s._UI_ADMIN_PAGE
           and "post('/sites'" in s._UI_ADMIN_PAGE
@@ -3853,6 +3862,17 @@ def run_server_tests(s, serve_dir):
         st, loc = hop("/old")
         check("A redirected path answers 301 with the new location",
               st == 301 and loc == "/index.html")
+        # A 301 is cacheable by default and browsers hold it hard — which is
+        # what makes a wrong one frightening. Explicit no-cache overrides
+        # that default, so the browser re-asks and a corrected rule takes
+        # effect. This header is why 301 needs no 302 escape hatch.
+        try:
+            _r = _nofollow.open(BASE_URL + "/old")
+            _cache = _r.headers.get("Cache-Control")
+        except urllib.error.HTTPError as _e:
+            _cache = _e.headers.get("Cache-Control")
+        check("...and is sent no-cache, so a wrong redirect is recoverable",
+              _cache == "no-cache")
         check("...and one rule covers both /old and /old/",
               hop("/old/") == (301, "/index.html"))
         check("...a trailing slash in the rule is normalised the same way",

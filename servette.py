@@ -6081,21 +6081,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       background: rgba(90,132,102,0.15);
     }
 
-    /* A card action: an icon in the card head, quiet until hovered. */
-    button.ca {
-      font-family: inherit;
-      font-size: 0.8rem;
-      background: none;
-      border: none;
-      color: var(--muted);
-      cursor: pointer;
-      padding: 0.2rem 0.4rem;
-      border-radius: 4px;
-      line-height: 1;
-    }
-    button.ca:hover { color: var(--text); background: rgba(255,255,255,0.07); }
-    button.ca.del:hover { color: var(--red); background: rgba(248,113,113,0.12); }
-    button.ca svg { display: block; }
+    /* An icon button is still a button: the icon replaces the label, not
+       the border. */
+    button.action.tiny svg { display: block; }
+    button.action.tiny:has(svg) { padding: 0.3rem 0.4rem; }
 
     .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
     .add-zone { display: flex; justify-content: center; margin-bottom: 1.5rem; }
@@ -6329,6 +6318,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     /* A deactivated site keeps its card and dims its name. */
     .site-card.inactive .card-title { opacity: 0.55; }
+
+    /* Folded: the head stays, so the card still says which site it is and
+       whether it needs attention. Only the body goes. */
+    .site-card.folded .card-body { display: none; }
+    .site-card.folded .card-head { border-bottom: none; }
 
     /* The remove panel is a popover under the button that opens it, not a
        block at the far end of the card — a question asked three hundred
@@ -6764,6 +6758,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // A card's index is its position in the DOM, read at the moment it is
   // needed: adding, removing, or dragging a card renumbers its neighbours,
   // and a stale index would act on the wrong site.
+  // Which cards are folded shut. Kept here rather than on the card,
+  // because every op re-renders the list and a card that sprang open on
+  // each save would be worse than no fold at all. Keyed by domain where
+  // there is one, since dragging renumbers indexes.
+  const folded = new Set();
+  const foldKey = (siteData, idx) => siteData.domain || '#' + idx;
+
   const cardIndex = (el) =>
     [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
 
@@ -7125,8 +7126,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             : '') +
           `<span class="badge state badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
-          `<button class="ca del" type="button" title="Remove or deactivate">` +
-            `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" ` +
+          // Collapse, for a box serving more sites than fit on a screen.
+          // Chevrons toward each other close; away, open.
+          `<button class="action tiny fold" type="button" ` +
+            `title="Collapse this card"><svg viewBox="0 0 16 16" width="12" ` +
+            `height="12" fill="none" stroke="currentColor" stroke-width="1.6" ` +
+            `stroke-linecap="round"><path class="fold-a" d="M4 3l4 4 4-4"></path>` +
+            `<path class="fold-b" d="M4 13l4-4 4 4"></path></svg></button>` +
+          // Removing a site is destructive, so it wears the destructive
+          // colour all the time rather than only under the pointer — the
+          // same rule the stop button follows.
+          `<button class="action tiny danger del" type="button" ` +
+            `title="Remove or deactivate">` +
+            `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" ` +
             `stroke="currentColor" stroke-width="1.3"><path d="M3 4h10M6.5 4V2.5h3V4` +
             `M5 4l0.6 9.5h4.8L11 4"></path></svg></button>` +
         `</span>` +
@@ -7176,6 +7188,23 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     if (deact) deact.addEventListener('click', () => setActive(false));
     const react = q('.do-reactivate');
     if (react) react.addEventListener('click', () => setActive(true));
+
+    // ── Fold. The head keeps its title, its badges, and its controls, so
+    // a folded card still says which site it is and whether it needs
+    // attention — the reason to fold is length, not secrecy.
+    const key = foldKey(siteData, idx);
+    const applyFold = () => {
+      const shut = folded.has(key);
+      card.classList.toggle('folded', shut);
+      q('.fold').title = shut ? 'Expand this card' : 'Collapse this card';
+      q('.fold-a').setAttribute('d', shut ? 'M4 6l4-4 4 4' : 'M4 3l4 4 4-4');
+      q('.fold-b').setAttribute('d', shut ? 'M4 10l4 4 4-4' : 'M4 13l4-4 4 4');
+    };
+    q('.fold').addEventListener('click', () => {
+      if (folded.has(key)) folded.delete(key); else folded.add(key);
+      applyFold();
+    });
+    applyFold();
 
     attachCardDrag(q('.card-head'), card);
 
@@ -7543,6 +7572,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
               '', { type: 'password',
                     hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
       q('.auth-save').classList.toggle('hidden', !(on || pending));
+      // Same reasoning for the fields themselves: filling in the username
+      // the refusal asked for should not leave the refusal on screen.
+      for (const el of q('.auth-fields').querySelectorAll('input'))
+        el.addEventListener('input', () => clearError(errEl));
       q('.auth-hint').textContent = on ? ''
         : (siteData.username
            ? 'Saving makes the site public: the login is removed and the stored password deleted.'
@@ -7557,6 +7590,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     renderInfo();
 
     q('.auth-switch').addEventListener('change', (e) => {
+      // A refusal describes the form as it stood when Save was pressed.
+      // Move the switch and it is about a form that no longer exists, so it
+      // goes with the state that produced it — it used to sit there in red
+      // through every subsequent flip.
+      clearError(errEl);
       authDesired = e.target.checked;
       renderInfo();
     });

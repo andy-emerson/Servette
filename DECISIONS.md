@@ -6,6 +6,33 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A card folds, and destructive buttons look destructive
+
+**Ruled (Human):** the trash button carries a border and the destructive
+red at all times, not only under the pointer — the same shape every other
+button has, in the colour the stop button already wears. Beside it, a
+fold control (chevrons toward each other to close, away to open) hides
+the card's body for a box serving more sites than fit on a screen.
+**What folding keeps:** the head. A folded card still shows its name, its
+fault pill, and its controls, because the reason to fold is length, not
+secrecy — and a card that hid whether it needed attention would make
+folding cost something.
+**Fold state survives a re-render.** Every op re-renders the site list, so
+a fold held on the card element would spring open on each save; it is
+held by site instead, keyed on the domain where there is one, since
+dragging renumbers indexes. *(2026-08-24)*
+
+## A refusal describes the form as it stood
+
+**Ruled (Human):** a validation refusal clears when the thing it described
+changes — moving the access switch, or typing into the field it asked
+for. It used to sit in red through every subsequent flip, describing a
+form that no longer existed.
+**Not a fault, and not counted as one:** a refused save changes nothing,
+so the site gains no defect, and the pill and the review count are right
+to stay where they are. What was wrong was the message outliving its
+cause, not the count. *(2026-08-24)*
+
 ## The card says what the site is, then what you do to it
 
 **Ruled (Human):** Status, Serving, Domain, Certificate and Access sit at

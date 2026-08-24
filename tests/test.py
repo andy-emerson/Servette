@@ -6124,14 +6124,47 @@ def run_browser_tests(s, tmpdir):
                       page.is_visible(f"#panel-{tab if tab != 'sites' else 'sites'}"))
 
             # The remove panel: drawn by the page, and where the button is.
-            page.locator("button.ca.del").first.click()
+            page.locator("button.del").first.click()
             page.wait_for_timeout(300)
-            box_b = page.locator("button.ca.del").first.bounding_box()
+            box_b = page.locator("button.del").first.bounding_box()
             box_p = page.locator(".site-card .confirm").first.bounding_box()
             check("...the remove panel opens under the button that opens it",
                   box_p is not None
                   and 0 < box_p["y"] - (box_b["y"] + box_b["height"]) < 60)
             page.locator(".do-cancel").first.click()
+
+            # Folding: the body goes, the head stays — so a folded card
+            # still says which site it is and whether it needs attention.
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
+            check("...folding hides the body and keeps the head",
+                  not page.locator(".site-card .card-body").first.is_visible()
+                  and page.locator(".site-card .card-title").first.is_visible())
+            # It has to survive a re-render, or every save would spring it
+            # open again.
+            page.click("#tab-server")
+            page.wait_for_timeout(600)
+            page.click("#tab-sites")
+            page.wait_for_timeout(900)
+            check("...and survives the re-render that follows every op",
+                  not page.locator(".site-card .card-body").first.is_visible())
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
+            check("...unfolding brings it back",
+                  page.locator(".site-card .card-body").first.is_visible())
+
+            # A refusal describes the form as it stood; change the form and
+            # it must go, rather than sitting in red through every flip.
+            page.locator(".auth-switch").first.check()
+            page.wait_for_timeout(300)
+            page.locator("button.save-site").first.click()
+            page.wait_for_timeout(400)
+            check("...saving private with no username is refused in words",
+                  page.locator(".site-card .error").first.is_visible())
+            page.locator(".auth-switch").first.uncheck()
+            page.wait_for_timeout(300)
+            check("...and the refusal clears when the switch that caused it moves",
+                  not page.locator(".site-card .error").first.is_visible())
 
             # Preview: staged, framed, and its relative assets resolving —
             # the check that would have caught the token-in-the-query bug.

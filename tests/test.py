@@ -87,6 +87,14 @@ def section(title):
 # REQUEST HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _free_port():
+    """A port the OS says is free right now — the browser check runs a
+    loopback server and must not collide with a developer's own."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 class Response:
     def __init__(self, status, headers, body):
         self.status  = status
@@ -5999,6 +6007,166 @@ def run_doc_check_tests(tmpdir):
         print(out.getvalue())
 
 
+def run_browser_tests(s, tmpdir):
+    """Load the admin page in a real browser and drive it.
+
+    Every other check in this file reads the page as TEXT — that a tab
+    exists, that an endpoint is named, that no browser dialog is called.
+    None of them execute a line of its JavaScript, so a typo'd identifier,
+    a selector that no longer matches, or a token in the wrong half of a
+    URL passes every one of them and reaches an operator. Four such bugs
+    reached this branch and were caught by hand in a browser:
+
+      - cardIndex() answered -1 while a card was still being built, so the
+        first version fetch asked for site -1;
+      - the preview token sat in the query, where a draft's own relative
+        links drop it, so the page loaded and every stylesheet was refused;
+      - the running dot lost its styling when the status row moved, and was
+        present in the markup and invisible;
+      - a path and its count rendered with nothing between them.
+
+    This runs only where Playwright and a browser are installed. Absent
+    either, it reports itself skipped and the rest of the suite is
+    unaffected — the dependency is real and a contributor should not need
+    it to run the tests. CI installs it, so it gates there.
+    """
+    section("The admin page, in a browser (skipped without Playwright)")
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  ·  skipped: pip install playwright && playwright install chromium")
+        return
+
+    # The site the page will describe: a real published history, so the
+    # version list, the restore buttons, and the sizes all have something
+    # to render rather than an empty state that proves little.
+    site = s.config.sites[0]
+    saved = (site.serve_dir, site.domain, dict(site.redirects))
+    root = tempfile.mkdtemp(dir=tmpdir)
+    httpd = None
+    try:
+        site.domain = "browser-check.test"
+        site.serve_dir = os.path.join(root, "site")
+        for n, text in enumerate(["one", "two"], 1):
+            d = os.path.join(root, f"v{n}")
+            os.makedirs(d)
+            with open(os.path.join(d, "index.html"), "w") as f:
+                f.write(f"<h1 id=live>{text}</h1>")
+            s._swap_site_content(d, site.serve_dir)
+            time.sleep(1.05)      # distinct publish seconds, so the ring orders
+
+        port = _free_port()
+        httpd, code = s._start_ui(site, s._UI_ADMIN_PAGE, port=port)
+        base = f"http://127.0.0.1:{port}"
+
+        console = []
+        with sync_playwright() as pw:
+            # `playwright install chromium` puts the browser where launch()
+            # looks, which is what CI does. SERVETTE_TEST_BROWSER names one
+            # already on the box, for an environment that ships a browser
+            # but not the build this Playwright expects.
+            try:
+                browser = pw.chromium.launch()
+            except Exception as first:
+                alt = os.environ.get("SERVETTE_TEST_BROWSER", "")
+                if not alt:
+                    print("  ·  skipped: no browser available "
+                          f"({str(first).splitlines()[0][:60]})")
+                    return
+                try:
+                    browser = pw.chromium.launch(executable_path=alt)
+                except Exception as e:
+                    print(f"  ·  skipped: SERVETTE_TEST_BROWSER unusable ({e})")
+                    return
+            page = browser.new_page()
+            page.on("console", lambda m: console.append(m.text) if m.type == "error" else None)
+            page.on("pageerror", lambda e: console.append("pageerror: " + str(e)))
+            page.goto(f"{base}/?t={code}")
+            page.wait_for_timeout(1500)
+
+            check("The page runs: the app is visible and one card is rendered",
+                  page.is_visible("#app")
+                  and page.locator("#site-cards .site-card").count() == 1)
+
+            # The bug a text pin cannot see: a card asking for site -1.
+            check("...the version list rendered, so its site index resolved",
+                  "file" in page.locator(".ver-state").first.inner_text())
+            check("...with a Restore for the version that is not live",
+                  page.locator("button.restore").count() == 1)
+
+            # The dot is markup either way; only CSS decides it is a dot.
+            check("...and the running dot is a dot where the status row puts it",
+                  page.evaluate("""() => {
+                    const el = document.getElementById('status-state');
+                    el.innerHTML = '<span class=dot></span>running';
+                    const c = getComputedStyle(el.querySelector('.dot'));
+                    return c.width === '7px' && c.borderRadius === '50%';
+                  }"""))
+
+            for tab in ("server", "stats", "sites"):
+                page.click(f"#tab-{tab}")
+                page.wait_for_timeout(700)
+                check(f"...the {tab} tab renders",
+                      page.is_visible(f"#panel-{tab if tab != 'sites' else 'sites'}"))
+
+            # The remove panel: drawn by the page, and where the button is.
+            page.locator("button.ca.del").first.click()
+            page.wait_for_timeout(300)
+            box_b = page.locator("button.ca.del").first.bounding_box()
+            box_p = page.locator(".site-card .confirm").first.bounding_box()
+            check("...the remove panel opens under the button that opens it",
+                  box_p is not None
+                  and 0 < box_p["y"] - (box_b["y"] + box_b["height"]) < 60)
+            page.locator(".do-cancel").first.click()
+
+            # Preview: staged, framed, and its relative assets resolving —
+            # the check that would have caught the token-in-the-query bug.
+            draft = tempfile.mkdtemp(dir=tmpdir)
+            with open(os.path.join(draft, "index.html"), "w") as f:
+                f.write("<h1 id=d>DRAFT</h1><link rel=stylesheet href=s.css>")
+            with open(os.path.join(draft, "s.css"), "w") as f:
+                f.write("h1{color:rgb(1,2,3)}")
+            page.set_input_files('input[type="file"]', draft)
+            page.wait_for_timeout(600)
+            page.locator("button.prev").first.click()
+            page.wait_for_timeout(2000)
+            frame = page.frame_locator(".preview-frame")
+            check("...a preview renders the chosen draft",
+                  frame.locator("#d").inner_text() == "DRAFT")
+            check("...with its relative stylesheet resolving inside the frame",
+                  frame.locator("#d").evaluate(
+                      "e => getComputedStyle(e).color") == "rgb(1, 2, 3)")
+            check("...and the frame's URL carrying no admin passcode",
+                  code not in (page.locator(".preview-frame").get_attribute("src") or ""))
+
+            # A redirect, added and removed through the page's own form.
+            page.locator("button.redir-add").first.click()
+            page.wait_for_timeout(200)
+            page.locator(".redir-from").first.fill("/browser-check")
+            page.locator(".redir-to").first.fill("/index.html")
+            page.locator("button.redir-save").first.click()
+            page.wait_for_timeout(1500)
+            check("...a redirect added through the form reaches the config",
+                  "/browser-check" in s.config.sites[0].redirects)
+
+            browser.close()
+
+        # The console is a check in itself: every failure above is silent
+        # to a text pin, and most of them shout here.
+        noise = [m for m in console if "favicon" not in m.lower()
+                 and "404 (Not Found)" not in m]
+        check("The page ran with a clean console", not noise)
+        if noise:
+            for m in noise[:5]:
+                print(f"      {m}")
+    finally:
+        if httpd is not None:
+            s._stop_ui(httpd)
+        site.serve_dir, site.domain, site.redirects = saved
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("\n──────────────────────────────────────────────────────")
     print("  Servette Test Suite")
@@ -6015,6 +6183,7 @@ def main():
         run_platform_tests(s)
         run_invariant_tests(s, serve_dir, tmpdir)
         run_doc_check_tests(tmpdir)
+        run_browser_tests(s, tmpdir)
     finally:
         teardown(tmpdir, saved_config, config_path, s)
 

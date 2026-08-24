@@ -58,7 +58,7 @@ Servette is a security tool, so a claim about it may never sit above its evidenc
 - **CodeQL clean.** The code-scanning workflow shows no *new* alerts. Standing alerts are either fixed or dismissed with a recorded reason, so "clean" means clean, not "no new noise."
 - **Human read on security surfaces.** Any change touching auth, TLS, rate limiting, or path resolution gets read by a person for what it claims, not only what the tests assert.
 
-A second thing no gate covers: nothing in the suite *executes* the embedded pages. `tests/test.py` pins their text — that a tab exists, that an endpoint is called, that no key ceremony crept in — and `build.py --check` proves the module carries what `src/` holds, but a typo'd identifier or a null dereference during render would pass every gate and reach a browser. Page changes are therefore driven by hand in a real browser and cited as the one-off measurement they are; whether a headless-browser smoke check should join the suite (and bring its dependency with it) is an open decision ([#119](https://github.com/andy-emerson/servette/issues/119)).
+The suite also drives the admin page in a real browser (`run_browser_tests`), because pinning a page's text proves nothing about whether it runs: a typo'd identifier, a selector that stopped matching, or a token in the wrong half of a URL passes every string check and reaches an operator. Four bugs of exactly that shape reached this branch and were caught by hand before the check existed ([#119](https://github.com/andy-emerson/servette/issues/119)). It loads the page against a live loopback server, walks the three tabs, opens the remove panel, stages a preview and reads its framed stylesheet back, adds a redirect through the form, and fails on a dirty console. It runs only where Playwright and a browser are installed — absent either it reports itself skipped, so the dependency is CI's to carry and not a contributor's. Nothing in `src/` exists for it.
 
 What no gate covers is whether a true sentence is the right sentence. `--check-docs` resolves the names a document uses; it cannot tell that a paragraph describes behaviour the code no longer has, because prose that misdescribes working code reads the same to a regex. That failure has happened here — two durable documents once disagreed about whether a 404 at an unpublished root was a cost or a requirement — and the only thing standing against it is the documentation review AGENTS.md requires at merge. Recorded here rather than implied ([#93](https://github.com/andy-emerson/servette/issues/93)).
 
@@ -282,6 +282,12 @@ Two things this repository can no longer check, recorded rather than implied. Th
 ```bash
 python3 -m venv .venv && .venv/bin/pip install .   # once — the package brings cryptography
 .venv/bin/python3 tests/test.py
+```
+
+The browser section is skipped unless Playwright and a browser are present; to run it too:
+
+```bash
+.venv/bin/pip install playwright && .venv/bin/playwright install chromium
 ```
 
 Requires `openssl` on PATH (used only by test setup to generate a throwaway cert). The suite regenerates `servette.py` from `src/` before importing it — the same transform the package build runs, so what is tested is what ships — then starts a real server on a test port, runs checks, and tears down. It backs up and restores any existing `servette.toml`.

@@ -1074,6 +1074,17 @@ def run_dispatch_tests(s):
     check("...and the tab strip saying which tab is current",
           'aria-selected="true"' in s._UI_ADMIN_PAGE
           and "setAttribute('aria-selected'" in s._UI_ADMIN_PAGE)
+    # The ring on the page: a list that is present always, not only after a
+    # publish — "put yesterday's back" is wanted on a day you published
+    # nothing. Restore goes through the same /sites door every other site op
+    # uses, so it runs the terminal's core.
+    check("...carries the kept versions and a way back to any of them",
+          "getJSON('/versions'" in s._UI_ADMIN_PAGE
+          and "op: 'restore'" in s._UI_ADMIN_PAGE
+          and "loadVersions" in s._UI_ADMIN_PAGE
+          and "restore-site" not in s._UI_ADMIN_PAGE)
+    check("...and reads its site index at call time, not at build time",
+          "const siteIndex = () =>" in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
           "outside" in s._UI_ADMIN_PAGE
           and "servette-check" in s._UI_ADMIN_PAGE)
@@ -1438,8 +1449,11 @@ def run_dispatch_tests(s):
         check("A paired upload lands through the shared pipeline",
               st == 200 and b'"published"' in body
               and os.path.exists(os.path.join(ui_dir, "live", "new.html")))
-        check("...keeping the single-shot backup",
-              os.path.exists(os.path.join(ui_dir, "live.bak", "old.html")))
+        # The tree it replaced is kept — as a version in the ring now, not
+        # as a single .bak that the next publish would overwrite.
+        check("...keeping the tree it replaced as a version",
+              any(os.path.exists(os.path.join(path, "old.html"))
+                  for path, _stamp in s._version_dirs(os.path.join(ui_dir, "live"))))
 
         st, body = ui_req("POST", f"/upload?t={ui_code}",
                           body=_ui_tar([("../evil.html", "pwned")]))
@@ -3051,114 +3065,177 @@ def run_dispatch_tests(s):
         s._servette_gid = saved_gid
         shutil.rmtree(probe_dir, ignore_errors=True)
 
-    section("Atomic site-content swap and restore")
+    section("Atomic site-content swap and the version ring")
 
     saved_serve_dir = s.config.sites[0].serve_dir
     swap_root = tempfile.mkdtemp()
+
+    def _publish(root, name, text, link):
+        """Land one tree through the real swap, as a publish would."""
+        d = os.path.join(root, name)
+        os.makedirs(d)
+        with open(os.path.join(d, "marker.txt"), "w") as f:
+            f.write(text)
+        s._swap_site_content(d, link)
+
+    def _marker(path):
+        return open(os.path.join(path, "marker.txt")).read()
+
     try:
-        s.config.sites[0].serve_dir = os.path.join(swap_root, "site")  # does not exist yet
+        link = os.path.join(swap_root, "site")   # does not exist yet
+        s.config.sites[0].serve_dir = link
 
-        new1 = os.path.join(swap_root, "new1")
-        os.makedirs(new1)
-        with open(os.path.join(new1, "marker.txt"), "w") as f:
-            f.write("v1")
-        s._swap_site_content(new1, s.config.sites[0].serve_dir)
-        check("First swap: content is live",
-              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v1")
-        check("First swap: serve_dir is now a symlink into a slot",
-              os.path.islink(s.config.sites[0].serve_dir)
-              and os.path.realpath(s.config.sites[0].serve_dir)
-                  in [os.path.realpath(p) for p in s._content_slots(s.config.sites[0].serve_dir)])
-        check("First swap: no backup (nothing existed to back up)",
-              not os.path.isdir(s.config.sites[0].serve_dir + ".bak"))
+        _publish(swap_root, "new1", "v1", link)
+        check("First swap: content is live", _marker(link) == "v1")
+        check("First swap: serve_dir is a symlink into a dated version tree",
+              os.path.islink(link)
+              and os.path.realpath(link)
+                  in [os.path.realpath(p) for p, _ in s._version_dirs(link)])
+        check("First swap: one version, and it is the live one",
+              [r["live"] for r in s._site_versions(s.config.sites[0])] == [True])
 
-        new2 = os.path.join(swap_root, "new2")
-        os.makedirs(new2)
-        with open(os.path.join(new2, "marker.txt"), "w") as f:
-            f.write("v2")
-        link_before = os.path.realpath(s.config.sites[0].serve_dir)
-        s._swap_site_content(new2, s.config.sites[0].serve_dir)
-        check("Second swap: new content is live",
-              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
-        check("Second swap: the link flipped to the other slot — no rename gap",
-              os.path.islink(s.config.sites[0].serve_dir)
-              and os.path.realpath(s.config.sites[0].serve_dir) != link_before)
-        check("Second swap: previous content became the backup",
-              open(os.path.join(s.config.sites[0].serve_dir + ".bak", "marker.txt")).read() == "v1")
+        link_before = os.path.realpath(link)
+        _publish(swap_root, "new2", "v2", link)
+        check("Second swap: new content is live", _marker(link) == "v2")
+        check("Second swap: the link moved to a new tree — no rename gap",
+              os.path.islink(link) and os.path.realpath(link) != link_before)
+        check("Second swap: the tree it replaced is kept",
+              any(_marker(p) == "v1" for p, _ in s._version_dirs(link)))
 
-        new3 = os.path.join(swap_root, "new3")
-        os.makedirs(new3)
-        with open(os.path.join(new3, "marker.txt"), "w") as f:
-            f.write("v3")
-        s._swap_site_content(new3, s.config.sites[0].serve_dir)
-        check("Third swap: backup now holds v2, not v1 — single-shot, not a history",
-              open(os.path.join(s.config.sites[0].serve_dir + ".bak", "marker.txt")).read() == "v2")
+        _publish(swap_root, "new3", "v3", link)
+        # The whole point of the ring: v1 survives a second publish, where
+        # the single-shot backup it replaced would have dropped it.
+        markers = {_marker(p) for p, _ in s._version_dirs(link)}
+        check("Third swap: the ring is a history, not a single-shot backup",
+              markers == {"v1", "v2", "v3"})
+        check("...ordered newest first",
+              _marker(s._version_dirs(link)[0][0]) == "v3")
 
-        saved_input = builtins.input
+        rows = s._site_versions(s.config.sites[0])
+        check("Versions report their name, time, size, and which is live",
+              len(rows) == 3 and rows[0]["live"] and not rows[1]["live"]
+              and all(r["files"] == 1 and r["bytes"] == 2 for r in rows)
+              and all(isinstance(r["published"], int) for r in rows)
+              and all("/" not in r["name"] for r in rows))
+
+        # Restore through the core, then through the command.
         saved_chownop_r = s._chown_operator
         restore_chowns = []
         try:
-            builtins.input = lambda prompt="": "y"
             s._chown_operator = lambda path, strip_world=False: restore_chowns.append((path, strip_world))
-            with contextlib.redirect_stdout(io.StringIO()):
+            err = s._restore_site(s.config.sites[0], rows[2]["name"])
+        finally:
+            s._chown_operator = saved_chownop_r
+        check("Restore to a named version serves it", err == "" and _marker(link) == "v1")
+        check("...re-establishing operator ownership (a tree may have come from a pull)",
+              (os.path.realpath(link), True) in restore_chowns)
+        check("...and the version rolled away is NOT consumed — the ring keeps it",
+              {_marker(p) for p, _ in s._version_dirs(link)} == {"v1", "v2", "v3"})
+        check("...so restoring back again is possible",
+              s._restore_site(s.config.sites[0], rows[0]["name"]) == ""
+              and _marker(link) == "v3")
+
+        check("Restoring the live version is refused by name, not by silence",
+              "already the live one" in
+              s._restore_site(s.config.sites[0], s._version_dirs(link)[0][0].split("/")[-1]))
+        check("A version name the ring does not hold is refused",
+              "No kept version named" in s._restore_site(s.config.sites[0], "site.v1"))
+        # The name crosses the wire from the page, so it must never be taken
+        # as a path — only matched against what the ring actually holds.
+        check("...and a traversal dressed as a version name is refused too",
+              "No kept version named" in
+              s._restore_site(s.config.sites[0], "../../../etc"))
+
+        # No argument means the plain undo: the newest tree that is not live.
+        s._restore_site(s.config.sites[0], None)
+        check("Restore with no version named undoes the last publish", _marker(link) == "v2")
+
+        saved_input = builtins.input
+        try:
+            builtins.input = lambda prompt="": "1"
+            with contextlib.redirect_stdout(io.StringIO()) as rbuf:
                 s.cmd_restore_site(s.config.sites[0])
         finally:
             builtins.input = saved_input
-            s._chown_operator = saved_chownop_r
-        check("Restore re-establishes operator ownership (the backup came from a pull)",
-              (os.path.realpath(s.config.sites[0].serve_dir), True) in restore_chowns)
-        check("Restore: live content reverts to the backup (v2)",
-              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
-        check("Restore: backup is consumed",
-              not os.path.isdir(s.config.sites[0].serve_dir + ".bak"))
+        check("The command lists the kept versions and takes a number",
+              "1. " in rbuf.getvalue() and "(live)" not in rbuf.getvalue()
+              and _marker(link) == "v3" and "restored" in rbuf.getvalue())
 
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_restore_site(s.config.sites[0])
-        check("Restoring again with nothing to restore reports cleanly, does not raise",
-              "Nothing to restore" in buf.getvalue())
+        saved_input = builtins.input
+        try:
+            builtins.input = lambda prompt="": ""
+            with contextlib.redirect_stdout(io.StringIO()) as cbuf:
+                s.cmd_restore_site(s.config.sites[0])
+        finally:
+            builtins.input = saved_input
+        check("...and Enter cancels without touching the live content",
+              "cancelled" in cbuf.getvalue() and _marker(link) == "v3")
+
+        # Pruning: the ring has a depth, and the live tree is never swept.
+        for n in range(4, 4 + s._KEEP_VERSIONS):
+            _publish(swap_root, f"new{n}", f"v{n}", link)
+        check("The ring prunes to its depth",
+              len(s._version_dirs(link)) == s._KEEP_VERSIONS)
+        check("...dropping the oldest, keeping the newest",
+              _marker(s._version_dirs(link)[0][0]) == f"v{3 + s._KEEP_VERSIONS}")
+        s._restore_site(s.config.sites[0], s._site_versions(s.config.sites[0])[-1]["name"])
+        oldest_live = os.path.realpath(link)
+        _publish(swap_root, "newer", "vN", link)
+        check("A restored old version is never pruned while it is live",
+              os.path.isdir(oldest_live)
+              or os.path.realpath(link) == oldest_live)
 
         # A missing new tree must fail loudly BEFORE anything moves: the old
         # design raised on its second rename; a symlink flip would happily
         # "succeed" dangling and serve nothing.
         ghost = os.path.join(swap_root, "never-created")
+        live_before = _marker(link)
         raised_swap = False
         try:
-            s._swap_site_content(ghost, s.config.sites[0].serve_dir)
+            s._swap_site_content(ghost, link)
         except OSError:
             raised_swap = True
         check("A failed swap raises instead of passing as silence", raised_swap)
         check("...and the live content is untouched, not gone",
-              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
+              _marker(link) == live_before)
 
-        # Legacy conversion: a real directory (the pre-flip layout) becomes a
-        # linked site on its first swap, its old content the .bak directory —
-        # and a legacy backup restores the old way, un-converting cleanly.
+        # Legacy conversion, shape one: a real directory (the pre-flip
+        # layout) becomes a linked site on its first swap, its old content
+        # adopted into the ring rather than lost.
         legacy = os.path.join(swap_root, "legacy-site")
         os.makedirs(legacy)
-        with open(os.path.join(legacy, "old.txt"), "w") as f:
+        with open(os.path.join(legacy, "marker.txt"), "w") as f:
             f.write("pre-flip")
         s.config.sites[0].serve_dir = legacy
-        fresh = os.path.join(swap_root, "fresh")
-        os.makedirs(fresh)
-        with open(os.path.join(fresh, "new.txt"), "w") as f:
-            f.write("post-flip")
-        s._swap_site_content(fresh, legacy)
-        check("Legacy conversion: the site is a symlink and the new content live",
-              os.path.islink(legacy)
-              and open(os.path.join(legacy, "new.txt")).read() == "post-flip")
-        check("...its old content is the backup, as a real directory",
-              not os.path.islink(legacy + ".bak")
-              and open(os.path.join(legacy + ".bak", "old.txt")).read() == "pre-flip")
-        saved_input_lr = builtins.input
-        try:
-            builtins.input = lambda prompt="": "y"
-            with contextlib.redirect_stdout(io.StringIO()):
-                s.cmd_restore_site(s.config.sites[0])
-        finally:
-            builtins.input = saved_input_lr
-        check("A legacy backup restores and consumes, through the link",
-              open(os.path.join(legacy, "old.txt")).read() == "pre-flip"
-              and not os.path.isdir(legacy + ".bak"))
+        _publish(swap_root, "fresh", "post-flip", legacy)
+        check("Legacy real directory converts: symlink, new content live",
+              os.path.islink(legacy) and _marker(legacy) == "post-flip")
+        check("...and its old content is a version, not a lost directory",
+              any(_marker(p) == "pre-flip" for p, _ in s._version_dirs(legacy)))
+        check("...restorable like any other", s._restore_site(s.config.sites[0]) == ""
+              and _marker(legacy) == "pre-flip")
+
+        # Legacy conversion, shape two: the two-slot .a/.b layout with its
+        # single-shot .bak symlink. Both slots join the ring; the marker goes.
+        two = os.path.join(swap_root, "two-slot")
+        slot_a, slot_b = two + ".a", two + ".b"
+        for slot, text in ((slot_a, "slot-a"), (slot_b, "slot-b")):
+            os.makedirs(slot)
+            with open(os.path.join(slot, "marker.txt"), "w") as f:
+                f.write(text)
+        os.symlink(slot_a, two)
+        os.symlink(slot_b, two + ".bak")
+        s.config.sites[0].serve_dir = two
+        check("A two-slot site has no versions before its next publish",
+              s._version_dirs(two) == [])
+        _publish(swap_root, "afterslots", "post-slots", two)
+        check("Two-slot conversion: the new content is live",
+              _marker(two) == "post-slots")
+        check("...the idle slots are adopted into the ring",
+              {_marker(p) for p, _ in s._version_dirs(two)}
+              >= {"slot-a", "slot-b", "post-slots"})
+        check("...and the single-shot .bak marker is gone",
+              not os.path.lexists(two + ".bak"))
     finally:
         s.config.sites[0].serve_dir = saved_serve_dir
         shutil.rmtree(swap_root, ignore_errors=True)
@@ -5341,12 +5418,18 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # Site content: the publish pipeline, and nothing else. _land_bundle
         # is the shared landing every channel funnels through — pull after
         # its signature check, the loopback page after its pairing code —
-        # and _drop_backup retires the single-shot backup marker for both
-        # the flip era (a symlink) and the era before it (a directory).
-        # _remove_site deletes a removed site's server copies (derived from
-        # the operator's originals; deactivation is the keep-everything
+        # and _drop_backup retires the pre-ring backup marker for both the
+        # flip era (a symlink) and the era before it (a directory).
+        # _restore_site flips the link to a kept version and _prune_versions
+        # drops the trees past the ring's depth — the only writer that
+        # deletes content an operator might still want, which is why it
+        # never touches the live tree. _adopt_legacy_slots renames a
+        # two-slot site's idle trees into the ring rather than deleting
+        # them. _remove_site deletes a removed site's server copies (derived
+        # from the operator's originals; deactivation is the keep-everything
         # path), sparing folders another site still points at.
-        "_land_bundle", "_swap_site_content", "cmd_restore_site",
+        "_land_bundle", "_swap_site_content", "_restore_site",
+        "_prune_versions", "_adopt_legacy_slots",
         "_drop_backup", "_remove_site",
         # A site FOLDER, created empty — setup must never leave nothing to
         # serve, and a page-added site gets a Servette-named folder because
@@ -5377,8 +5460,8 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         print(f"      pinned writers that no longer write: {sorted(missing)}")
 
     # And of those, the ones that touch a site's content.
-    content_writers = {"_land_bundle", "_swap_site_content",
-                       "cmd_restore_site", "_drop_backup"}
+    content_writers = {"_land_bundle", "_swap_site_content", "_restore_site",
+                       "_prune_versions", "_adopt_legacy_slots", "_drop_backup"}
     check("Site content is written only by the publish channel",
           content_writers <= set(writers)
           and not (content_writers & {"cmd_setup"}))

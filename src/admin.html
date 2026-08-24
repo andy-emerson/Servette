@@ -897,7 +897,7 @@
     const sites = (cfgData && cfgData.sites) || [];
     // One site is a site; the plural is earned.
     $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
-    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx, sites.length)));
+    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx)));
   }
 
   /* ── Reordering, in the notebook's grammar: grab the header, a ghost
@@ -1067,7 +1067,7 @@
      domain, certificate, access, the outside test — so nothing on the card
      needs to say which site it means. ── */
 
-  function buildSiteCard(siteData, idx, total) {
+  function buildSiteCard(siteData, idx) {
     const label = siteData.domain || 'site ' + idx;
     const inactive = siteData.active === false;
     const siteNeeds = (((statusData || {}).checks) || [])
@@ -1110,9 +1110,17 @@
          `</div>` +
          `<div class="done hidden">` +
            `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
-           `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
-           `in the terminal is the one step back.</p>` +
          `</div>` +
+
+         // ── What this site has served, newest first. Present always, not
+         // only after a publish: "put yesterday's back" is a thing you
+         // want on the day you did not publish anything.
+         `<div class="split"></div>` +
+         `<div class="switch-row"><span class="k">Published</span>` +
+         `<span class="switch-value"><span class="ver-state">reading…</span>` +
+         `<span class="switch-act"><button class="action tiny ver-refresh" ` +
+         `type="button">Refresh</button></span></span></div>` +
+         `<div class="rows versions"></div>` +
 
          // ── The site's facts, then the controls that change them.
          `<div class="split"></div>` +
@@ -1335,6 +1343,7 @@
             `content kept as the one-step backup.`;
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');
+          loadVersions();          // the tree just replaced is now restorable
         } else if (resp.status === 403) {
           throw new Error('The server refused the passcode — close this page, ' +
                           'and open the fresh link the terminal prints for this run.');
@@ -1354,6 +1363,58 @@
       }
       pubBtn.disabled = !files;
     });
+
+    /* ── The version ring: what this site has served, and one click back
+       to any of it. The list is its own fetch because answering it walks
+       every kept tree on disk, and /status is polled every few seconds. ── */
+
+    // Every other control on this card reads its index at click time,
+    // because dragging renumbers the neighbours. The version list is the
+    // one that also runs while the card is still being built and is not in
+    // the DOM yet — where cardIndex answers -1. It falls back to the index
+    // the card was built for, which is right until the first drag.
+    const siteIndex = () => {
+      const i = cardIndex(card);
+      return i < 0 ? idx : i;
+    };
+
+    async function loadVersions() {
+        const state = q('.ver-state'), list = q('.versions');
+        try {
+          const v = await getJSON('/versions', { site: siteIndex() });
+          const rows = v.versions || [];
+          const live = rows.find((r) => r.live);
+          // The live version's own size is the answer to "did the right
+          // folder land" — a file count off by an order of magnitude is
+          // the wrong folder, however right the site looks.
+          state.textContent = live
+            ? live.files + ' file' + (live.files === 1 ? '' : 's') + ', ' +
+              fmtSize(live.bytes) + ' — ' + when(live.published)
+            : 'nothing published yet';
+          list.innerHTML = rows.length < 2 ? '' :
+            rows.map((r) => row(escapeHtml(when(r.published)),
+              `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
+              (r.live ? ' <span class="ok">· live</span>'
+                      : ` <button class="action tiny restore" type="button" ` +
+                        `data-v="${escapeHtml(r.name)}">Restore</button>`))).join('') +
+            `<p class="hint">The ${v.keep} most recent are kept. Restoring does ` +
+            `not consume one — you can restore back.</p>`;
+          for (const b of list.querySelectorAll('.restore'))
+            b.addEventListener('click', async () => {
+              b.disabled = true;
+              b.textContent = 'restoring…';
+              const ok = await siteOp({ op: 'restore', site: siteIndex(),
+                                        version: b.dataset.v }, errEl);
+              if (!ok) { b.disabled = false; b.textContent = 'Restore'; }
+            });
+        } catch (e) {
+          state.textContent = '';
+          showError(errEl, reason(e, 'Could not read the kept versions'));
+        }
+      }
+
+    q('.ver-refresh').addEventListener('click', loadVersions);
+    loadVersions();
 
     /* ── The site's facts and the controls that change them. ── */
 

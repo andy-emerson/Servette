@@ -5158,76 +5158,151 @@ def _extract_bundle(data, dest_dir):
             tf.extractall(dest_dir, members=members)
 
 
-# The content slots
+# The kept versions
+_KEEP_VERSIONS = 5   # trees kept per site, the live one included
+
+
 def _content_slots(serve_dir):
-    """The two sibling trees the serve_dir symlink flips between."""
+    """The two sibling trees the pre-ring design flipped between. Kept only
+    so a site published under it can be adopted into the ring."""
     base = _resolve(serve_dir).rstrip(os.sep)
     return base + ".a", base + ".b"
 
 
 def _drop_backup(bak):
-    """Remove the single-shot backup marker, whichever era made it: a symlink
-    from the flip design (the tree it names is handled by the caller), or a
-    real directory from before it."""
+    """Remove the single-shot backup marker the pre-ring design left: a
+    symlink from the flip era (the tree it names is adopted separately), or
+    a real directory from before that."""
     if os.path.islink(bak):
         os.remove(bak)
     elif os.path.isdir(bak):
         shutil.rmtree(bak, ignore_errors=True)
 
 
+def _version_dirs(serve_dir):
+    """Every kept tree for this site, newest first, as (path, epoch).
+
+    A name that does not parse is not a version and is left alone — the
+    scan is a filter over siblings, never a prefix match that could sweep
+    up a directory Servette did not create."""
+    base = _resolve(serve_dir).rstrip(os.sep)
+    head, tail = os.path.split(base)
+    try:
+        names = os.listdir(head or ".")
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if not name.startswith(tail + ".v"):
+            continue
+        stamp, _dot, extra = name[len(tail) + 2:].partition(".")
+        path = os.path.join(head, name)
+        if not (stamp.isdigit() and os.path.isdir(path) and not os.path.islink(path)):
+            continue
+        # Two publishes inside one second share an epoch and are told apart
+        # by the sequence suffix — which must sort with the clock, not
+        # against it, or the newer of the two would read as the older.
+        out.append((path, int(stamp), int(extra) if extra.isdigit() else 1))
+    out.sort(key=lambda r: (-r[1], -r[2]))
+    return [(path, stamp) for path, stamp, _seq in out]
+
+
+def _new_version_dir(serve_dir, when=None):
+    """An unused version-directory path for a tree published at `when`
+    (default now). Two publishes inside one second take '.2', '.3': the
+    name must be unique, or the second would land on top of the first."""
+    base  = _resolve(serve_dir).rstrip(os.sep)
+    stamp = int(when if when is not None else time.time())
+    path  = f"{base}.v{stamp}"
+    n = 2
+    while os.path.lexists(path):
+        path = f"{base}.v{stamp}.{n}"
+        n += 1
+    return path
+
+
+def _adopt_legacy_slots(serve_dir):
+    """Bring a two-slot site's trees into the ring, after the flip that made
+    them idle. Renaming a tree the live symlink points at would break the
+    link, so the live one is skipped — it is adopted on the publish after
+    this one, when it is no longer live. The `.bak` symlink goes: the ring
+    is the history now."""
+    base = _resolve(serve_dir).rstrip(os.sep)
+    _drop_backup(base + ".bak")
+    live = os.path.realpath(base)
+    for slot in _content_slots(serve_dir):
+        if not os.path.isdir(slot) or os.path.islink(slot):
+            continue
+        if os.path.realpath(slot) == live:
+            continue
+        try:
+            os.rename(slot, _new_version_dir(serve_dir, os.path.getmtime(slot)))
+        except OSError:
+            pass          # a slot that will not move is left, never deleted
+
+
+def _prune_versions(serve_dir, keep=None):
+    """Drop the oldest trees past the ring's depth. The live tree is never a
+    candidate however old it is: an operator who restored a year-old version
+    is serving it, and content being served is not garbage."""
+    keep = _KEEP_VERSIONS if keep is None else keep
+    live = os.path.realpath(_resolve(serve_dir).rstrip(os.sep))
+    for path, _stamp in _version_dirs(serve_dir)[keep:]:
+        if os.path.realpath(path) != live:
+            shutil.rmtree(path, ignore_errors=True)
+
+
 # The content swap
 def _swap_site_content(new_dir, serve_dir):
-    """Make new_dir the live content behind serve_dir, keeping the previous
-    tree as the single-shot backup that restore-site consumes.
+    """Make new_dir the live content behind serve_dir, keeping the trees
+    behind it as the ring `restore-site` chooses from.
 
-    serve_dir is a symlink into one of two sibling slots (.a/.b): new_dir's
-    tree moves into the idle slot and one atomic os.replace flips the link —
-    no window, crash-safe. `serve_dir.bak` then points at the previous slot.
+    new_dir's tree is renamed to a fresh `<link>.v<epoch>` sibling and one
+    atomic os.replace flips the link — no window, crash-safe. Pruning runs
+    after the flip, so a publish that fills the disk fails in staging with
+    every kept version still there.
+
     A legacy real directory at serve_dir is converted on its first swap: the
-    old content becomes the .bak directory and the link lands — the one swap
-    that still carries the old rename gap, once per site ever, with the same
-    rollback the old design had (a failed conversion must never leave NO live
-    directory — every request a 404 — while the caller reports merely
+    old content becomes a version and the link lands — the one swap that
+    still carries the old rename gap, once per site ever, with the same
+    rollback the old design had (a failed conversion must never leave NO
+    live directory — every request a 404 — while the caller reports merely
     'rejected')."""
     if not os.path.isdir(new_dir):
         # A dangling symlink would "succeed" — the old rename raised here,
         # and the flip must fail just as loudly rather than serve nothing.
         raise FileNotFoundError(f"new content tree missing: {new_dir}")
     live = _resolve(serve_dir).rstrip(os.sep)
-    bak  = live + ".bak"
-    a, b = _content_slots(serve_dir)
+    dest = _new_version_dir(serve_dir)
 
     if os.path.islink(live):
-        old_target = os.path.realpath(live)
-        dest = b if old_target == os.path.realpath(a) else a
-        if os.path.realpath(new_dir) != os.path.realpath(dest):
-            _drop_backup(bak)                    # single-shot: newest wins
-            shutil.rmtree(dest, ignore_errors=True)
-            os.rename(new_dir, dest)
+        os.rename(new_dir, dest)
         flip = live + ".flip"
         if os.path.lexists(flip):
             os.remove(flip)                      # a crash's leftover, harmless
         os.symlink(dest, flip)
         os.replace(flip, live)                   # the swap: one atomic syscall
-        _drop_backup(bak)
-        if os.path.isdir(old_target) and old_target != os.path.realpath(live):
-            os.symlink(old_target, bak)
+        _adopt_legacy_slots(serve_dir)
+        _prune_versions(serve_dir)
         return
 
     # Legacy: a real directory (or nothing yet) at serve_dir — convert.
     had_live = os.path.isdir(live)
-    if os.path.realpath(new_dir) != os.path.realpath(a):
-        shutil.rmtree(a, ignore_errors=True)
-        os.rename(new_dir, a)
+    os.rename(new_dir, dest)
+    kept = None
     if had_live:
-        _drop_backup(bak)
-        os.rename(live, bak)
+        # Dated by its own mtime, not by now: it is the older content, and
+        # the ring sorts on the name.
+        kept = _new_version_dir(serve_dir, os.path.getmtime(live))
+        os.rename(live, kept)
     try:
-        os.symlink(a, live)
+        os.symlink(dest, live)
     except OSError:
         if had_live:
-            os.rename(bak, live)
+            os.rename(kept, live)
         raise
+    _adopt_legacy_slots(serve_dir)
+    _prune_versions(serve_dir)
 
 
 _publish_lock = threading.Lock()  # serializes site-content mutation across every
@@ -5238,10 +5313,10 @@ _publish_lock = threading.Lock()  # serializes site-content mutation across ever
 
 # Landing a bundle
 def _land_bundle(site, bundle, source):
-    """Extract `bundle` into staging and swap it live for `site`, with the
-    single-shot backup and ownership repair — the shared tail of every content
-    channel. `source` is only for the log line. Returns "rejected" or
-    "published"."""
+    """Extract `bundle` into staging and swap it live for `site`, keeping the
+    previous trees in the ring, with ownership repair — the shared tail of
+    every content channel. `source` is only for the log line. Returns
+    "rejected" or "published"."""
     with _publish_lock:
         staging = _resolve(site.serve_dir).rstrip(os.sep) + ".new"
         shutil.rmtree(staging, ignore_errors=True)
@@ -5252,6 +5327,8 @@ def _land_bundle(site, bundle, source):
             # tree goes live: the operator owns their content, the service
             # reads through its group. strip_world because the extraction's
             # own 644/755 modes are Servette's writing, not the operator's,
+            # (kept versions need nothing: each was the live tree once and
+            # keeps the ownership it already has)
             # and must honour the never-world-bits promise. The backup needs
             # nothing: it was the live tree a moment ago and keeps the
             # ownership it already has. A failed extraction dies here, in
@@ -5340,52 +5417,121 @@ def cmd_pull(site):
     print(f"  {messages[result]}")
 
 
-def cmd_restore_site(site):
-    """Roll back to the content saved by the last successful publish. The
-    backup is single-shot: one is kept, and a successful restore consumes it.
-    On a converted site the restore is the same atomic flip as the publish —
-    instant, no window; the tree being rolled away is then removed. A legacy
-    real-directory backup restores the old way (its window rides along, once)."""
-    live_dir = _resolve(site.serve_dir).rstrip(os.sep)
-    bak_dir  = live_dir + ".bak"
+def _site_versions(site):
+    """The kept trees of one site as rows both surfaces render: the name to
+    restore by, when it was published, how many files and bytes it holds, and
+    which one is live.
 
-    if not os.path.isdir(bak_dir):
-        print("  Nothing to restore — no site backup. (Publishing saves one each time it swaps in new content.)")
-        return
+    Walking every tree is why this is its own call rather than part of the
+    status snapshot — it runs when an operator asks to see the history, not
+    on every poll of a page that refreshes itself."""
+    live = os.path.realpath(_resolve(site.serve_dir).rstrip(os.sep))
+    rows = []
+    for path, stamp in _version_dirs(site.serve_dir):
+        files = total = 0
+        for root, _dirs, names in os.walk(path):
+            for name in names:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                    files += 1
+                except OSError:
+                    pass          # a file that vanished mid-walk is not a failure
+        rows.append({"name": os.path.basename(path), "published": stamp,
+                     "files": files, "bytes": total,
+                     "live": os.path.realpath(path) == live})
+    return rows
 
-    if not _prompt("Restore site content from backup? The backup is then removed."):
-        print("  Restore cancelled.")
-        return
+
+def _restore_site(site, version=None):
+    """Serve a kept version again. `version` is a name as _site_versions
+    reports it; None means the newest tree that is not already live — plain
+    'undo the last publish'. Returns "" on success, or a sentence saying why
+    not.
+
+    The flip is the publish's flip, so a restore has no window either. The
+    tree is NOT consumed: it stays in the ring, so restoring the wrong one
+    is itself undoable. That is the whole difference from the single-shot
+    backup this replaced."""
+    live_path = _resolve(site.serve_dir).rstrip(os.sep)
+    versions  = _version_dirs(site.serve_dir)
+    if not versions:
+        return ("Nothing to restore — no kept versions yet. Publishing keeps "
+                "the previous content each time it swaps in new.")
+    if not os.path.islink(live_path):
+        return ("This site's folder is not yet behind the version link — "
+                "publish once, and the content it replaces joins the ring.")
+
+    live = os.path.realpath(live_path)
+    if version is None:
+        target = next((p for p, _ in versions if os.path.realpath(p) != live), None)
+        if target is None:
+            return "Nothing to restore — the only kept version is the live one."
+    else:
+        # Matched by base name against the ring, never taken as a path: the
+        # page's version name arrives over the wire, and a caller must not be
+        # able to name a directory the ring does not hold.
+        target = next((p for p, _ in versions
+                       if os.path.basename(p) == version), None)
+        if target is None:
+            return f"No kept version named {version}."
+        if os.path.realpath(target) == live:
+            return "That version is already the live one."
 
     with _publish_lock:
-        if not os.path.isdir(bak_dir):
-            print("  Nothing to restore — a publish ran while you were deciding and consumed the backup.")
+        if not os.path.isdir(target):
+            return "That version was removed while you were deciding."
+        flip = live_path + ".flip"
+        if os.path.lexists(flip):
+            os.remove(flip)
+        os.symlink(target, flip)
+        os.replace(flip, live_path)              # the restore: one atomic flip
+        # The tree may date from a pre-flip pull that extracted as root — the
+        # same ownership repair as a publish, for the same reason.
+        _chown_operator(os.path.realpath(live_path), strip_world=True)
+    log.info("Restored content for %s to %s",
+             site.domain or site.serve_dir, os.path.basename(target))
+    return ""
+
+
+def _version_line(row):
+    """One kept version as a line for the terminal: when, how big, and
+    whether it is the one being served."""
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["published"]))
+    size = (f"{row['bytes'] / (1024 * 1024):.1f} MB" if row["bytes"] >= 1024 * 1024
+            else f"{row['bytes'] / 1024:.0f} KB")
+    files = f"{row['files']} file" + ("" if row["files"] == 1 else "s")
+    return f"{when} — {files}, {size}" + ("  (live)" if row["live"] else "")
+
+
+def cmd_restore_site(site):
+    """Roll back to a kept version. One choice is a yes/no; several are a
+    numbered list, newest first. Nothing is consumed — the version being
+    rolled away stays in the ring, so this is undoable in its own terms."""
+    rows = _site_versions(site)
+    kept = [r for r in rows if not r["live"]]
+    if not kept:
+        print("  Nothing to restore — no kept versions yet.")
+        print("  (Publishing keeps the previous content each time it swaps in new.)")
+        return
+
+    if len(kept) == 1:
+        print(f"\n  Kept: {_version_line(kept[0])}")
+        if not _prompt("Restore this content?"):
+            print("  Restore cancelled.")
             return
-        if os.path.islink(live_dir) and os.path.islink(bak_dir):
-            bad    = os.path.realpath(live_dir)
-            target = os.path.realpath(bak_dir)
-            flip   = live_dir + ".flip"
-            if os.path.lexists(flip):
-                os.remove(flip)
-            os.symlink(target, flip)
-            os.replace(flip, live_dir)          # the restore: one atomic flip
-            os.remove(bak_dir)                  # consumed
-            if os.path.isdir(bad) and bad != target:
-                shutil.rmtree(bad, ignore_errors=True)
-        else:
-            # A legacy real-directory backup — possibly behind a converted
-            # site, so the link (or old directory) is cleared first.
-            if os.path.islink(live_dir):
-                bad = os.path.realpath(live_dir)
-                os.remove(live_dir)
-                shutil.rmtree(bad, ignore_errors=True)
-            elif os.path.isdir(live_dir):
-                shutil.rmtree(live_dir)
-            os.rename(bak_dir, live_dir)
-        # The restored tree may date from a pre-flip pull that extracted as
-        # root — the same ownership repair as a publish, for the same reason.
-        _chown_operator(os.path.realpath(live_dir), strip_world=True)
-    print("  Site content restored from backup.")
+        choice = kept[0]
+    else:
+        print()
+        for n, row in enumerate(kept, 1):
+            print(f"  {n}. {_version_line(row)}")
+        raw = _input("\n  Restore which? [number, Enter = cancel]: ").strip()
+        if not raw.isdigit() or not (1 <= int(raw) <= len(kept)):
+            print("  Restore cancelled.")
+            return
+        choice = kept[int(raw) - 1]
+
+    err = _restore_site(site, choice["name"])
+    print(f"  {err}" if err else "  Site content restored.")
 
 # The publish display
 def _publish_show():
@@ -6402,7 +6548,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const sites = (cfgData && cfgData.sites) || [];
     // One site is a site; the plural is earned.
     $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
-    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx, sites.length)));
+    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx)));
   }
 
   /* ── Reordering, in the notebook's grammar: grab the header, a ghost
@@ -6572,7 +6718,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
      domain, certificate, access, the outside test — so nothing on the card
      needs to say which site it means. ── */
 
-  function buildSiteCard(siteData, idx, total) {
+  function buildSiteCard(siteData, idx) {
     const label = siteData.domain || 'site ' + idx;
     const inactive = siteData.active === false;
     const siteNeeds = (((statusData || {}).checks) || [])
@@ -6615,9 +6761,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `</div>` +
          `<div class="done hidden">` +
            `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
-           `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
-           `in the terminal is the one step back.</p>` +
          `</div>` +
+
+         // ── What this site has served, newest first. Present always, not
+         // only after a publish: "put yesterday's back" is a thing you
+         // want on the day you did not publish anything.
+         `<div class="split"></div>` +
+         `<div class="switch-row"><span class="k">Published</span>` +
+         `<span class="switch-value"><span class="ver-state">reading…</span>` +
+         `<span class="switch-act"><button class="action tiny ver-refresh" ` +
+         `type="button">Refresh</button></span></span></div>` +
+         `<div class="rows versions"></div>` +
 
          // ── The site's facts, then the controls that change them.
          `<div class="split"></div>` +
@@ -6840,6 +6994,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             `content kept as the one-step backup.`;
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');
+          loadVersions();          // the tree just replaced is now restorable
         } else if (resp.status === 403) {
           throw new Error('The server refused the passcode — close this page, ' +
                           'and open the fresh link the terminal prints for this run.');
@@ -6859,6 +7014,58 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       }
       pubBtn.disabled = !files;
     });
+
+    /* ── The version ring: what this site has served, and one click back
+       to any of it. The list is its own fetch because answering it walks
+       every kept tree on disk, and /status is polled every few seconds. ── */
+
+    // Every other control on this card reads its index at click time,
+    // because dragging renumbers the neighbours. The version list is the
+    // one that also runs while the card is still being built and is not in
+    // the DOM yet — where cardIndex answers -1. It falls back to the index
+    // the card was built for, which is right until the first drag.
+    const siteIndex = () => {
+      const i = cardIndex(card);
+      return i < 0 ? idx : i;
+    };
+
+    async function loadVersions() {
+        const state = q('.ver-state'), list = q('.versions');
+        try {
+          const v = await getJSON('/versions', { site: siteIndex() });
+          const rows = v.versions || [];
+          const live = rows.find((r) => r.live);
+          // The live version's own size is the answer to "did the right
+          // folder land" — a file count off by an order of magnitude is
+          // the wrong folder, however right the site looks.
+          state.textContent = live
+            ? live.files + ' file' + (live.files === 1 ? '' : 's') + ', ' +
+              fmtSize(live.bytes) + ' — ' + when(live.published)
+            : 'nothing published yet';
+          list.innerHTML = rows.length < 2 ? '' :
+            rows.map((r) => row(escapeHtml(when(r.published)),
+              `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
+              (r.live ? ' <span class="ok">· live</span>'
+                      : ` <button class="action tiny restore" type="button" ` +
+                        `data-v="${escapeHtml(r.name)}">Restore</button>`))).join('') +
+            `<p class="hint">The ${v.keep} most recent are kept. Restoring does ` +
+            `not consume one — you can restore back.</p>`;
+          for (const b of list.querySelectorAll('.restore'))
+            b.addEventListener('click', async () => {
+              b.disabled = true;
+              b.textContent = 'restoring…';
+              const ok = await siteOp({ op: 'restore', site: siteIndex(),
+                                        version: b.dataset.v }, errEl);
+              if (!ok) { b.disabled = false; b.textContent = 'Restore'; }
+            });
+        } catch (e) {
+          state.textContent = '';
+          showError(errEl, reason(e, 'Could not read the kept versions'));
+        }
+      }
+
+    q('.ver-refresh').addEventListener('click', loadVersions);
+    loadVersions();
 
     /* ── The site's facts and the controls that change them. ── */
 
@@ -7334,7 +7541,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path not in ("/", "/status", "/config", "/traffic", "/update"):
+        if path not in ("/", "/status", "/config", "/traffic", "/update",
+                        "/versions"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -7368,6 +7576,22 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps({"latest": _upgrade_available()}),
                                  "application/json")
+
+        if path == "/versions":
+            # One site's kept trees. Its own endpoint rather than a field on
+            # /status because answering it walks every tree on disk, and
+            # /status is polled every few seconds while the page is open.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            try:
+                idx = int(parse_qs(urlsplit(self.path).query).get("site", ["0"])[0])
+            except ValueError:
+                return self._respond(400, "site must be a whole number.")
+            if not (0 <= idx < len(config.sites)):
+                return self._respond(404, "No such site.")
+            return self._respond(200, json.dumps(
+                {"versions": _site_versions(config.sites[idx]),
+                 "keep": _KEEP_VERSIONS}), "application/json")
 
         if path == "/traffic":
             # The Analytics tab's feed: the journal re-read as counts, and
@@ -7514,6 +7738,21 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                    "detail" if outcome == "refused" else
                                    "could not reach the certificate authority — "
                                    "try again in a moment")
+                elif op == "restore":
+                    # The same _restore_site the terminal's numbered list
+                    # runs. The version arrives as a name over the wire and
+                    # is matched against the ring inside the core, never
+                    # taken as a path.
+                    try:
+                        idx = int(body.get("site"))
+                    except (TypeError, ValueError):
+                        idx = -1
+                    if not (0 <= idx < len(config.sites)):
+                        err = f"no site {idx}"
+                    else:
+                        want = body.get("version")
+                        err = _restore_site(config.sites[idx],
+                                            str(want) if want else None)
                 else:
                     err = "unknown op"
             except PermissionError:

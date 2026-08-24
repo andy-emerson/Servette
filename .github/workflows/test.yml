@@ -53,14 +53,16 @@ jobs:
           .venv/bin/pip install --quiet .
       - name: Console script smoke test
         run: SERVETTE_HOME=. .venv/bin/servette status --json > /dev/null
-      - name: Run tests
-        run: .venv/bin/python3 tests/test.py
-            # The admin page's checks drive a real browser. Only one leg installs
+      # The admin page's checks drive a real browser. Only one leg installs
       # one — the suite skips itself where Playwright or a browser is
-      # missing, so the other four legs stay fast and still run everything
-      # else. Ubuntu only: the debian:12 container has no browser deps.
+      # missing, so the other four stay fast and still run everything else.
+      # Ubuntu only: the debian:12 container has no browser dependencies.
+      # It installs into .venv, because that is the interpreter the suite
+      # runs under; a system-level install would be invisible to it.
       - name: Install a browser for the admin page checks
         if: ${{ matrix.python-version == '3.13' }}
         run: |
           .venv/bin/pip install --quiet playwright
           .venv/bin/playwright install --with-deps chromium
+      - name: Run tests
+        run: .venv/bin/python3 tests/test.py

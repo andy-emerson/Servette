@@ -1122,6 +1122,28 @@
          `type="button">Refresh</button></span></span></div>` +
          `<div class="rows versions"></div>` +
 
+         // ── Redirects: old path to new. A setting, so it lives with the
+         // site's other settings rather than as a file in the content.
+         `<div class="split"></div>` +
+         `<div class="switch-row"><span class="k">Redirects</span>` +
+         `<span class="switch-value"><span class="redir-state"></span>` +
+         `<span class="switch-act"><button class="action tiny redir-add" ` +
+         `type="button">Add</button></span></span></div>` +
+         `<div class="rows redirects"></div>` +
+         `<div class="redir-form hidden">` +
+           `<div class="cfg-field"><label>Old path</label>` +
+           `<input class="redir-from" type="text" placeholder="/old-page"></div>` +
+           `<div class="cfg-field"><label>Goes to</label>` +
+           `<input class="redir-to" type="text" placeholder="/new-page"></div>` +
+           `<p class="cfg-hint">A path on this site, or a full https:// address. ` +
+           `Visitors are sent on with a <b>permanent</b> redirect, which browsers ` +
+           `remember — so a wrong one outlives fixing it here.</p>` +
+           `<div class="btn-row" style="margin-top:0.75rem">` +
+           `<button class="action redir-save" type="button">Add redirect</button>` +
+           `<button class="action redir-cancel" type="button">Cancel</button>` +
+           `</div>` +
+         `</div>` +
+
          // ── The site's facts, then the controls that change them.
          `<div class="split"></div>` +
          `<div class="rows info"></div>` +
@@ -1415,6 +1437,48 @@
 
     q('.ver-refresh').addEventListener('click', loadVersions);
     loadVersions();
+
+    /* ── Redirects. Both halves of the pair reach _set_site_value through
+       the same settings write, so a rule the terminal refuses the page
+       refuses with the same sentence. ── */
+
+    const renderRedirects = () => {
+      const table = siteData.redirects || {};
+      const keys = Object.keys(table).sort();
+      q('.redir-state').textContent = keys.length
+        ? keys.length + (keys.length === 1 ? ' rule' : ' rules') : 'none';
+      q('.redirects').innerHTML = keys.map((k) =>
+        row(escapeHtml(k),
+            `→ ${escapeHtml(table[k])} <button class="action tiny redir-del" ` +
+            `type="button" data-k="${escapeHtml(k)}">Remove</button>`)).join('');
+      for (const b of q('.redirects').querySelectorAll('.redir-del'))
+        b.addEventListener('click', () => {
+          b.disabled = true;
+          // Nothing after the comma is the removal, the same spelling the
+          // terminal takes.
+          saveSettings({ redirect: b.dataset.k + ',' }, siteIndex(), badge, errEl);
+        });
+    };
+    renderRedirects();
+
+    q('.redir-add').addEventListener('click', () =>
+      q('.redir-form').classList.toggle('hidden'));
+    q('.redir-cancel').addEventListener('click', () =>
+      q('.redir-form').classList.add('hidden'));
+    q('.redir-save').addEventListener('click', () => {
+      const from = q('.redir-from').value.trim();
+      const to   = q('.redir-to').value.trim();
+      clearError(errEl);
+      if (!from || !to)
+        return showError(errEl, 'Both the old path and where it goes are needed.');
+      // The pair travels as one value, so the comma is the separator on both
+      // surfaces — which leaves it out of reach as a character in the old
+      // path. Rare, and said plainly rather than mangled quietly.
+      if (from.includes(','))
+        return showError(errEl, 'An old path containing a comma has to be set by ' +
+                                'editing servette.toml — the comma separates the pair here.');
+      saveSettings({ redirect: from + ',' + to }, siteIndex(), badge, errEl);
+    });
 
     /* ── The site's facts and the controls that change them. ── */
 

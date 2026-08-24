@@ -133,6 +133,74 @@ def _check_password(submitted, stored_hash, stored_salt):
 
 
 # A site
+_MAX_REDIRECTS      = 200
+_MAX_REDIRECT_CHARS = 2000
+
+
+def _clean_redirects(raw):
+    """The site's redirect table, validated once at load so serving one is a
+    dict lookup and nothing else.
+
+    A source is a site-absolute path; a target is another site-absolute path
+    or an absolute http(s) URL. Anything else is dropped with a log line
+    rather than raised: one bad entry in a hand-edited table must not take a
+    whole site down, and a redirect that quietly did something other than
+    what it said would be worse than one that does nothing.
+
+    Two of the checks are load-bearing rather than tidy. A target is
+    narrowed to path-or-http(s) because a redirect is an open door by
+    nature, and `javascript:` or `data:` in a Location is a way to run
+    script on the operator's own origin. Control characters are refused on
+    both sides because a Location carrying CR or LF is response splitting —
+    the value reaches a header, and this is where that is stopped."""
+    out = {}
+    if not isinstance(raw, dict):
+        log.warning("redirects is not a table — ignoring it")
+        return out
+    if len(raw) > _MAX_REDIRECTS:
+        log.warning("more than %d redirects — only the first %d are loaded",
+                    _MAX_REDIRECTS, _MAX_REDIRECTS)
+    for key, target in list(raw.items())[:_MAX_REDIRECTS]:
+        src, dst = str(key).strip(), str(target).strip()
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in src + dst):
+            log.warning("redirect with a control character in it — ignored")
+            continue
+        if not src.startswith("/") or len(src) > _MAX_REDIRECT_CHARS:
+            log.warning("redirect source %r is not a site path — ignored", src[:80])
+            continue
+        if len(dst) > _MAX_REDIRECT_CHARS or not (
+                dst.startswith("/") or dst.startswith("http://")
+                or dst.startswith("https://")):
+            log.warning("redirect target %r is not a path or http(s) URL — ignored",
+                        dst[:80])
+            continue
+        # One rule covers /old and /old/, on both sides of the lookup.
+        norm = src.rstrip("/") or "/"
+        if norm == (dst.rstrip("/") or "/"):
+            log.warning("redirect %s points at itself — ignored", norm)
+            continue
+        out[norm] = dst
+    return out
+
+
+def _redirect_toml(site):
+    """The site's redirect table as TOML, or nothing at all when it is empty.
+
+    Written LAST inside each [[site]] block, because a TOML sub-table
+    swallows every key that follows it: a scalar written after
+    [site.redirects] would be read back as part of the table, not as a
+    field of the site."""
+    if not site.redirects:
+        return ""
+    def q(value):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    lines = "\n".join(f"{q(src)} = {q(dst)}"
+                      for src, dst in sorted(site.redirects.items()))
+    return ("\n# Old path = where it goes now. A visitor asking for the left "
+            "side is sent\n# to the right side with a 301, before any file is "
+            "looked for.\n[site.redirects]\n" + lines + "\n")
+
+
 class Site:
     """One `[[site]]` block: everything that varies per hosted domain — the domain
     itself, its folder, its own certificate, its visitor auth, its publish channel.
@@ -154,6 +222,11 @@ class Site:
         self.password_salt  = data.get("password_salt",  "")
         self.publish_url    = data.get("publish_url",    "")
         self.publish_key    = data.get("publish_key",    "")
+        # Old path -> new path, validated once here so the request path is a
+        # dict lookup and nothing more. A file in the site folder would be
+        # content, and content is read at request time — which is the whole
+        # reason this is a setting.
+        self.redirects      = _clean_redirects(data.get("redirects", {}))
         self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
@@ -403,7 +476,7 @@ publish_key = {s(site.publish_key)}
 # Machine-generated — do not edit by hand
 password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
-""" for site in self.sites)
+{_redirect_toml(site)}""" for site in self.sites)
 
         content = f"""\
 # Servette configuration — https://github.com/andy-emerson/servette
@@ -1827,6 +1900,25 @@ def _handle_request(method, url_path, headers, raw_ip):
             (b"etag",           _CONNECTION_ETAG.encode()),
             (b"cache-control",  cache.encode()),
         ], _CONNECTION_PAGE)
+
+    # Redirects, before the filesystem is touched at all. One dict lookup on
+    # a table loaded with the config — never a file read, which is what the
+    # _redirects-file convention other hosts use would cost at request time
+    # (DECISIONS.md, "Redirects are a setting, not a file in the site").
+    # Query strings ride along: a redirect names a path, and dropping the
+    # query would silently break every campaign link pointed at the old one.
+    if site.redirects:
+        bare, sep, query = url_path.partition("?")
+        target = site.redirects.get(bare.rstrip("/") or "/")
+        if target:
+            if sep and "?" not in target:
+                target += sep + query
+            log.info("301 %s to %s", log_path, ip)
+            return resp(301, [
+                (b"location",       target.encode("ascii", "ignore")),
+                (b"content-length", b"0"),
+                (b"cache-control",  b"no-cache"),
+            ])
 
     # Resolve request path to a file within the matched site's own serve_dir
     try:
@@ -6773,6 +6865,28 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `type="button">Refresh</button></span></span></div>` +
          `<div class="rows versions"></div>` +
 
+         // ── Redirects: old path to new. A setting, so it lives with the
+         // site's other settings rather than as a file in the content.
+         `<div class="split"></div>` +
+         `<div class="switch-row"><span class="k">Redirects</span>` +
+         `<span class="switch-value"><span class="redir-state"></span>` +
+         `<span class="switch-act"><button class="action tiny redir-add" ` +
+         `type="button">Add</button></span></span></div>` +
+         `<div class="rows redirects"></div>` +
+         `<div class="redir-form hidden">` +
+           `<div class="cfg-field"><label>Old path</label>` +
+           `<input class="redir-from" type="text" placeholder="/old-page"></div>` +
+           `<div class="cfg-field"><label>Goes to</label>` +
+           `<input class="redir-to" type="text" placeholder="/new-page"></div>` +
+           `<p class="cfg-hint">A path on this site, or a full https:// address. ` +
+           `Visitors are sent on with a <b>permanent</b> redirect, which browsers ` +
+           `remember — so a wrong one outlives fixing it here.</p>` +
+           `<div class="btn-row" style="margin-top:0.75rem">` +
+           `<button class="action redir-save" type="button">Add redirect</button>` +
+           `<button class="action redir-cancel" type="button">Cancel</button>` +
+           `</div>` +
+         `</div>` +
+
          // ── The site's facts, then the controls that change them.
          `<div class="split"></div>` +
          `<div class="rows info"></div>` +
@@ -7066,6 +7180,48 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     q('.ver-refresh').addEventListener('click', loadVersions);
     loadVersions();
+
+    /* ── Redirects. Both halves of the pair reach _set_site_value through
+       the same settings write, so a rule the terminal refuses the page
+       refuses with the same sentence. ── */
+
+    const renderRedirects = () => {
+      const table = siteData.redirects || {};
+      const keys = Object.keys(table).sort();
+      q('.redir-state').textContent = keys.length
+        ? keys.length + (keys.length === 1 ? ' rule' : ' rules') : 'none';
+      q('.redirects').innerHTML = keys.map((k) =>
+        row(escapeHtml(k),
+            `→ ${escapeHtml(table[k])} <button class="action tiny redir-del" ` +
+            `type="button" data-k="${escapeHtml(k)}">Remove</button>`)).join('');
+      for (const b of q('.redirects').querySelectorAll('.redir-del'))
+        b.addEventListener('click', () => {
+          b.disabled = true;
+          // Nothing after the comma is the removal, the same spelling the
+          // terminal takes.
+          saveSettings({ redirect: b.dataset.k + ',' }, siteIndex(), badge, errEl);
+        });
+    };
+    renderRedirects();
+
+    q('.redir-add').addEventListener('click', () =>
+      q('.redir-form').classList.toggle('hidden'));
+    q('.redir-cancel').addEventListener('click', () =>
+      q('.redir-form').classList.add('hidden'));
+    q('.redir-save').addEventListener('click', () => {
+      const from = q('.redir-from').value.trim();
+      const to   = q('.redir-to').value.trim();
+      clearError(errEl);
+      if (!from || !to)
+        return showError(errEl, 'Both the old path and where it goes are needed.');
+      // The pair travels as one value, so the comma is the separator on both
+      // surfaces — which leaves it out of reach as a character in the old
+      // path. Rare, and said plainly rather than mangled quietly.
+      if (from.includes(','))
+        return showError(errEl, 'An old path containing a comma has to be set by ' +
+                                'editing servette.toml — the comma separates the pair here.');
+      saveSettings({ redirect: from + ',' + to }, siteIndex(), badge, errEl);
+    });
 
     /* ── The site's facts and the controls that change them. ── */
 
@@ -7566,6 +7722,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                            "active": s.active,
                            "username": s.username, "publish_url": s.publish_url,
                            "publish_key": s.publish_key,
+                           "redirects": s.redirects,
                            "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
@@ -8509,6 +8666,27 @@ def _set_site_value(target, key, value):
         if not value:
             target.password_hash = ""
             target.password_salt = ""
+    elif key == "redirect":
+        # One pair per token: 'redirect=/old,/new' adds or replaces,
+        # 'redirect=/old,' removes. The table is a mapping and `set` speaks
+        # in scalars, so the comma is where the two grammars meet.
+        # Validation is _clean_redirects — the same function the config load
+        # runs, so a redirect the file would refuse the command refuses too.
+        src, comma, dst = value.partition(",")
+        if not comma:
+            return "a redirect is a pair: redirect=/old,/new (or /old, to remove)"
+        src, dst = src.strip(), dst.strip()
+        table = dict(target.redirects)
+        if not dst:
+            if not table.pop(src.rstrip("/") or "/", None):
+                return f"no redirect from {src}"
+        else:
+            checked = _clean_redirects({src: dst})
+            if not checked:
+                return ("a redirect goes from a site path to a site path or an "
+                        "http(s) URL, and may not point at itself")
+            table.update(checked)
+        target.redirects = table
     elif key == "publish_url":
         if value and not value.startswith("https://"):
             return "publish_url must be https:// (or empty to clear)"
@@ -8531,13 +8709,16 @@ def _set_site_value(target, key, value):
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
-_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key", "active")
+_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key", "active",
+                  "redirect")
 
 
 def _set_usage():
     print("  Usage: set [n] key=value ...")
     print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
     print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
+    print("  A redirect is a pair: redirect=/old,/new — and redirect=/old,")
+    print("  (nothing after the comma) removes it.")
 
 
 # set
@@ -8552,6 +8733,11 @@ def _apply_settings(site, pairs):
     class _ScratchHost:
         pass
     scratch_host, scratch_site = _ScratchHost(), Site()
+    # The scratch site starts blank for every scalar — each is simply
+    # overwritten — but the redirect table is edited rather than replaced,
+    # so validating a removal against an empty table would refuse a
+    # redirect that is really there.
+    scratch_site.redirects = dict(site.redirects)
     for key, value in pairs:
         if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
             return f"unknown setting: {key}"

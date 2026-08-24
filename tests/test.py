@@ -1085,6 +1085,12 @@ def run_dispatch_tests(s):
           and "restore-site" not in s._UI_ADMIN_PAGE)
     check("...and reads its site index at call time, not at build time",
           "const siteIndex = () =>" in s._UI_ADMIN_PAGE)
+    # Redirects are a setting, so the page edits them through the settings
+    # write both surfaces share — not through a door of their own.
+    check("...and edits redirects through the shared settings write",
+          "redir-save" in s._UI_ADMIN_PAGE
+          and "redirect: from + ',' + to" in s._UI_ADMIN_PAGE
+          and "_redirects" not in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
           "outside" in s._UI_ADMIN_PAGE
           and "servette-check" in s._UI_ADMIN_PAGE)
@@ -3755,6 +3761,114 @@ def run_server_tests(s, serve_dir):
     resp = req("GET", path="/app.js")
     check(".js returns application/javascript",
           resp.status == 200 and "javascript" in resp.headers.get("Content-Type", ""))
+
+    section("Redirects (#117) — a setting, never a file in the site")
+
+    class _NoFollow(urllib.request.HTTPRedirectHandler):
+        """urlopen follows a 301 by default; the 301 IS the thing under test."""
+        def redirect_request(self, *_a, **_kw):
+            return None
+
+    _nofollow = urllib.request.build_opener(
+        _NoFollow, urllib.request.HTTPSHandler(context=SSL_CTX))
+
+    def hop(path):
+        """(status, Location) for one request, without following it."""
+        try:
+            r = _nofollow.open(BASE_URL + path)
+            return r.getcode(), r.headers.get("Location")
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Location")
+
+    saved_redirects = s.config.sites[0].redirects
+    try:
+        s.config.sites[0].redirects = s._clean_redirects({
+            "/old": "/index.html",
+            "/blog/": "/writing",
+            "/gone": "https://example.com/moved",
+        })
+
+        st, loc = hop("/old")
+        check("A redirected path answers 301 with the new location",
+              st == 301 and loc == "/index.html")
+        check("...and one rule covers both /old and /old/",
+              hop("/old/") == (301, "/index.html"))
+        check("...a trailing slash in the rule is normalised the same way",
+              hop("/blog") == (301, "/writing") and hop("/blog/") == (301, "/writing"))
+        check("...an absolute http(s) target is sent as written",
+              hop("/gone") == (301, "https://example.com/moved"))
+        # A campaign link points at the OLD path with its query attached;
+        # dropping it would silently break every one of them.
+        check("...and the query string rides along",
+              hop("/old?utm=x") == (301, "/index.html?utm=x"))
+        check("A path with no rule is served, not redirected",
+              hop("/index.html")[0] == 200)
+        check("A missing path with no rule is still a 404",
+              hop("/nope-not-here")[0] == 404)
+
+        # The invariant this feature could have broken: a redirect is a dict
+        # lookup on the loaded config, never a read of anything on disk.
+        redirect_src = inspect.getsource(s._handle_request)
+        check("The lookup is a dict read, and runs before any path resolution",
+              "site.redirects.get(" in redirect_src
+              and redirect_src.index("site.redirects.get(")
+                  < redirect_src.index("_resolve_request_path("))
+
+        # Validation, at the one door both surfaces use.
+        check("A javascript: target is refused — a redirect is an open door",
+              s._clean_redirects({"/x": "javascript:alert(1)"}) == {})
+        check("A data: target is refused too",
+              s._clean_redirects({"/x": "data:text/html,<script>"}) == {})
+        check("A CR or LF in a target is refused — that is response splitting",
+              s._clean_redirects({"/x": "/y\r\nX-Evil: 1"}) == {})
+        check("...and one buried inside a source, where strip() cannot reach it",
+              s._clean_redirects({"/x\ny": "/z"}) == {})
+        check("...while a trailing newline is simply stripped away",
+              s._clean_redirects({"/x\n": "/y"}) == {"/x": "/y"})
+        check("A source that is not a site path is refused",
+              s._clean_redirects({"old": "/new"}) == {}
+              and s._clean_redirects({"https://elsewhere/x": "/new"}) == {})
+        check("A redirect pointing at itself is refused",
+              s._clean_redirects({"/loop": "/loop/"}) == {})
+        check("A non-table redirects value is ignored, not fatal",
+              s._clean_redirects("nonsense") == {})
+        check("The table is capped",
+              len(s._clean_redirects({f"/p{n}": "/q" for n in range(400)}))
+              == s._MAX_REDIRECTS)
+        check("...and one bad entry does not discard the good ones",
+              s._clean_redirects({"/good": "/fine", "/bad": "javascript:x"})
+              == {"/good": "/fine"})
+
+        # The terminal half of the pair: `set` speaks in scalars, so a pair
+        # is one token, and removal is the pair with nothing after the comma.
+        probe = s.Site()
+        check("set adds a redirect", s._set_site_value(probe, "redirect", "/a,/b") == ""
+              and probe.redirects == {"/a": "/b"})
+        check("...replaces one", s._set_site_value(probe, "redirect", "/a,/c") == ""
+              and probe.redirects == {"/a": "/c"})
+        check("...removes one", s._set_site_value(probe, "redirect", "/a,") == ""
+              and probe.redirects == {})
+        check("...reports a removal that removes nothing",
+              "no redirect from" in s._set_site_value(probe, "redirect", "/a,"))
+        check("...refuses a token that is not a pair",
+              "a pair" in s._set_site_value(probe, "redirect", "/a"))
+        check("...and refuses what the config load would refuse",
+              s._set_site_value(probe, "redirect", "/a,javascript:x") != "")
+
+        # Removing through _apply_settings must validate against the site's
+        # real table, not against a blank scratch object.
+        live_site = s.config.sites[0]
+        saved_live = dict(live_site.redirects)
+        try:
+            check("A removal through the shared settings path sees the real table",
+                  s._apply_settings(live_site, [("redirect", "/old,")]) == ""
+                  and "/old" not in live_site.redirects)
+        finally:
+            live_site.redirects = saved_live
+            s.config.save()
+    finally:
+        s.config.sites[0].redirects = saved_redirects
+        s.config.save()
 
     section("404 and custom 404.html")
 

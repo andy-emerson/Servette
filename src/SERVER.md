@@ -72,6 +72,74 @@ Everything that varies per hosted domain lives on a `Site`; everything host-leve
 
 ```python
 # A site
+_MAX_REDIRECTS      = 200
+_MAX_REDIRECT_CHARS = 2000
+
+
+def _clean_redirects(raw):
+    """The site's redirect table, validated once at load so serving one is a
+    dict lookup and nothing else.
+
+    A source is a site-absolute path; a target is another site-absolute path
+    or an absolute http(s) URL. Anything else is dropped with a log line
+    rather than raised: one bad entry in a hand-edited table must not take a
+    whole site down, and a redirect that quietly did something other than
+    what it said would be worse than one that does nothing.
+
+    Two of the checks are load-bearing rather than tidy. A target is
+    narrowed to path-or-http(s) because a redirect is an open door by
+    nature, and `javascript:` or `data:` in a Location is a way to run
+    script on the operator's own origin. Control characters are refused on
+    both sides because a Location carrying CR or LF is response splitting —
+    the value reaches a header, and this is where that is stopped."""
+    out = {}
+    if not isinstance(raw, dict):
+        log.warning("redirects is not a table — ignoring it")
+        return out
+    if len(raw) > _MAX_REDIRECTS:
+        log.warning("more than %d redirects — only the first %d are loaded",
+                    _MAX_REDIRECTS, _MAX_REDIRECTS)
+    for key, target in list(raw.items())[:_MAX_REDIRECTS]:
+        src, dst = str(key).strip(), str(target).strip()
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in src + dst):
+            log.warning("redirect with a control character in it — ignored")
+            continue
+        if not src.startswith("/") or len(src) > _MAX_REDIRECT_CHARS:
+            log.warning("redirect source %r is not a site path — ignored", src[:80])
+            continue
+        if len(dst) > _MAX_REDIRECT_CHARS or not (
+                dst.startswith("/") or dst.startswith("http://")
+                or dst.startswith("https://")):
+            log.warning("redirect target %r is not a path or http(s) URL — ignored",
+                        dst[:80])
+            continue
+        # One rule covers /old and /old/, on both sides of the lookup.
+        norm = src.rstrip("/") or "/"
+        if norm == (dst.rstrip("/") or "/"):
+            log.warning("redirect %s points at itself — ignored", norm)
+            continue
+        out[norm] = dst
+    return out
+
+
+def _redirect_toml(site):
+    """The site's redirect table as TOML, or nothing at all when it is empty.
+
+    Written LAST inside each [[site]] block, because a TOML sub-table
+    swallows every key that follows it: a scalar written after
+    [site.redirects] would be read back as part of the table, not as a
+    field of the site."""
+    if not site.redirects:
+        return ""
+    def q(value):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    lines = "\n".join(f"{q(src)} = {q(dst)}"
+                      for src, dst in sorted(site.redirects.items()))
+    return ("\n# Old path = where it goes now. A visitor asking for the left "
+            "side is sent\n# to the right side with a 301, before any file is "
+            "looked for.\n[site.redirects]\n" + lines + "\n")
+
+
 class Site:
     """One `[[site]]` block: everything that varies per hosted domain — the domain
     itself, its folder, its own certificate, its visitor auth, its publish channel.
@@ -93,6 +161,11 @@ class Site:
         self.password_salt  = data.get("password_salt",  "")
         self.publish_url    = data.get("publish_url",    "")
         self.publish_key    = data.get("publish_key",    "")
+        # Old path -> new path, validated once here so the request path is a
+        # dict lookup and nothing more. A file in the site folder would be
+        # content, and content is read at request time — which is the whole
+        # reason this is a setting.
+        self.redirects      = _clean_redirects(data.get("redirects", {}))
         self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
@@ -352,7 +425,7 @@ publish_key = {s(site.publish_key)}
 # Machine-generated — do not edit by hand
 password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
-""" for site in self.sites)
+{_redirect_toml(site)}""" for site in self.sites)
 
         content = f"""\
 # Servette configuration — https://github.com/andy-emerson/servette
@@ -1070,6 +1143,25 @@ def _handle_request(method, url_path, headers, raw_ip):
             (b"etag",           _CONNECTION_ETAG.encode()),
             (b"cache-control",  cache.encode()),
         ], _CONNECTION_PAGE)
+
+    # Redirects, before the filesystem is touched at all. One dict lookup on
+    # a table loaded with the config — never a file read, which is what the
+    # _redirects-file convention other hosts use would cost at request time
+    # (DECISIONS.md, "Redirects are a setting, not a file in the site").
+    # Query strings ride along: a redirect names a path, and dropping the
+    # query would silently break every campaign link pointed at the old one.
+    if site.redirects:
+        bare, sep, query = url_path.partition("?")
+        target = site.redirects.get(bare.rstrip("/") or "/")
+        if target:
+            if sep and "?" not in target:
+                target += sep + query
+            log.info("301 %s to %s", log_path, ip)
+            return resp(301, [
+                (b"location",       target.encode("ascii", "ignore")),
+                (b"content-length", b"0"),
+                (b"cache-control",  b"no-cache"),
+            ])
 
     # Resolve request path to a file within the matched site's own serve_dir
     try:

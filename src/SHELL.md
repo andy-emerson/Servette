@@ -1687,6 +1687,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                            "active": s.active,
                            "username": s.username, "publish_url": s.publish_url,
                            "publish_key": s.publish_key,
+                           "redirects": s.redirects,
                            "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
@@ -2690,6 +2691,27 @@ def _set_site_value(target, key, value):
         if not value:
             target.password_hash = ""
             target.password_salt = ""
+    elif key == "redirect":
+        # One pair per token: 'redirect=/old,/new' adds or replaces,
+        # 'redirect=/old,' removes. The table is a mapping and `set` speaks
+        # in scalars, so the comma is where the two grammars meet.
+        # Validation is _clean_redirects — the same function the config load
+        # runs, so a redirect the file would refuse the command refuses too.
+        src, comma, dst = value.partition(",")
+        if not comma:
+            return "a redirect is a pair: redirect=/old,/new (or /old, to remove)"
+        src, dst = src.strip(), dst.strip()
+        table = dict(target.redirects)
+        if not dst:
+            if not table.pop(src.rstrip("/") or "/", None):
+                return f"no redirect from {src}"
+        else:
+            checked = _clean_redirects({src: dst})
+            if not checked:
+                return ("a redirect goes from a site path to a site path or an "
+                        "http(s) URL, and may not point at itself")
+            table.update(checked)
+        target.redirects = table
     elif key == "publish_url":
         if value and not value.startswith("https://"):
             return "publish_url must be https:// (or empty to clear)"
@@ -2717,13 +2739,16 @@ The vocabulary `set` accepts, and its usage line.
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
-_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key", "active")
+_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key", "active",
+                  "redirect")
 
 
 def _set_usage():
     print("  Usage: set [n] key=value ...")
     print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
     print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
+    print("  A redirect is a pair: redirect=/old,/new — and redirect=/old,")
+    print("  (nothing after the comma) removes it.")
 
 
 ```
@@ -2743,6 +2768,11 @@ def _apply_settings(site, pairs):
     class _ScratchHost:
         pass
     scratch_host, scratch_site = _ScratchHost(), Site()
+    # The scratch site starts blank for every scalar — each is simply
+    # overwritten — but the redirect table is edited rather than replaced,
+    # so validating a removal against an empty table would refuse a
+    # redirect that is really there.
+    scratch_site.redirects = dict(site.redirects)
     for key, value in pairs:
         if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
             return f"unknown setting: {key}"

@@ -3,6 +3,9 @@
 # (fresh: the backend regenerates it during build_sdist), so an sdist reader
 # sees the module without running anything.
 graft src
+# The build reads the mark from here to inline it as the pages' favicon, so
+# an sdist without it cannot build.
+include assets/servette-mark.svg
 include MANIFEST.in
 recursive-exclude src __pycache__
 recursive-exclude src *.pyc

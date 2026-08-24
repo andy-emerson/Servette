@@ -937,7 +937,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='13' fill='%230e0e0e' stroke='%235A8466' stroke-width='4'/><text x='14' y='45' font-family='ui-monospace,Menlo,monospace' font-size='36' font-weight='600' fill='%235A8466'>S</text><rect x='35' y='39' width='16' height='6' rx='1.5' fill='%235A8466'/></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22 role=%22img%22 aria-label=%22Servette%22> <title>Servette</title> <rect x=%222%22 y=%222%22 width=%2260%22 height=%2260%22 rx=%2213%22 fill=%22%230e0e0e%22 stroke=%22%235A8466%22 stroke-width=%224%22/> <text x=%2214%22 y=%2245%22 font-family=%22ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace%22 font-size=%2236%22 font-weight=%22600%22 fill=%22%235A8466%22>S</text> <rect x=%2235%22 y=%2239%22 width=%2216%22 height=%226%22 rx=%221.5%22 fill=%22%235A8466%22/> </svg>">
   <title>404 — not found</title>
   <style>
     /* ── Theme and reset ─────────────────────────────────────────────── */
@@ -1281,7 +1281,7 @@ _CONNECTION_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='13' fill='%230e0e0e' stroke='%235A8466' stroke-width='4'/><text x='14' y='45' font-family='ui-monospace,Menlo,monospace' font-size='36' font-weight='600' fill='%235A8466'>S</text><rect x='35' y='39' width='16' height='6' rx='1.5' fill='%235A8466'/></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22 role=%22img%22 aria-label=%22Servette%22> <title>Servette</title> <rect x=%222%22 y=%222%22 width=%2260%22 height=%2260%22 rx=%2213%22 fill=%22%230e0e0e%22 stroke=%22%235A8466%22 stroke-width=%224%22/> <text x=%2214%22 y=%2245%22 font-family=%22ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace%22 font-size=%2236%22 font-weight=%22600%22 fill=%22%235A8466%22>S</text> <rect x=%2235%22 y=%2239%22 width=%2216%22 height=%226%22 rx=%221.5%22 fill=%22%235A8466%22/> </svg>">
   <title>Connection test</title>
   <style>
     /* ── Theme and reset ─────────────────────────────────────────────── */
@@ -5637,7 +5637,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='13' fill='%230e0e0e' stroke='%235A8466' stroke-width='4'/><text x='14' y='45' font-family='ui-monospace,Menlo,monospace' font-size='36' font-weight='600' fill='%235A8466'>S</text><rect x='35' y='39' width='16' height='6' rx='1.5' fill='%235A8466'/></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22 role=%22img%22 aria-label=%22Servette%22> <title>Servette</title> <rect x=%222%22 y=%222%22 width=%2260%22 height=%2260%22 rx=%2213%22 fill=%22%230e0e0e%22 stroke=%22%235A8466%22 stroke-width=%224%22/> <text x=%2214%22 y=%2245%22 font-family=%22ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace%22 font-size=%2236%22 font-weight=%22600%22 fill=%22%235A8466%22>S</text> <rect x=%2235%22 y=%2239%22 width=%2216%22 height=%226%22 rx=%221.5%22 fill=%22%235A8466%22/> </svg>">
   <title>Servette — Admin</title>
   <style>
     /* ═══════════════════════════════════════════════════════════════════

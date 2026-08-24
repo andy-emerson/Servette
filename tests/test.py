@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # test.py lives in tests/; the repo root is its parent. servette.py is
@@ -1116,13 +1117,36 @@ def run_dispatch_tests(s):
           and "not saved yet" in s._UI_ADMIN_PAGE)
     # A favicon in the page kills the /favicon.ico request every browser
     # makes unasked — the one console error every browser run reported.
+    _pages = (s._UI_ADMIN_PAGE, s._NOT_FOUND_PAGE.decode(),
+              s._CONNECTION_PAGE.decode())
     check("...and every page carries the mark, so no browser asks for one",
           all('rel="icon"' in page and "data:image/svg+xml," in page
-              for page in (s._UI_ADMIN_PAGE, s._NOT_FOUND_PAGE.decode(),
-                           s._CONNECTION_PAGE.decode()))
+              for page in _pages)
           # Inline, because a page that demonstrates a self-hosted server
           # has no business fetching its own icon from anywhere.
           and "servette-mark.svg" not in s._UI_ADMIN_PAGE)
+    # One drawing, one file. The pages name a marker the build fills from
+    # assets/servette-mark.svg, so a change to the mark cannot reach two
+    # pages and miss the third — which is what four hand-copied
+    # transcriptions of the same SVG invited.
+    _icons = {re.search(r'rel="icon" href="([^"]+)"', page).group(1)
+              for page in _pages}
+    check("...the same mark on all three, because there is one source for it",
+          len(_icons) == 1)
+    _built = io.open(os.path.abspath(s.__file__), encoding="utf-8").read()
+    check("...with the marker consumed, never shipped",
+          "@@MARK_ICON@@" not in _built)
+    # The encoding is the whole risk: '#' would truncate the SVG at its first
+    # colour and '"' would close the href, so the icon must decode back to
+    # exactly the file on disk.
+    _svg = re.sub(r"\s+", " ",
+                  io.open(os.path.join(os.path.dirname(os.path.abspath(s.__file__)),
+                                       "assets", "servette-mark.svg"),
+                          encoding="utf-8").read()).strip()
+    _decoded = urllib.parse.unquote(
+        _icons.pop()[len("data:image/svg+xml,"):])
+    check("...and it decodes back to the mark, closing tag and all",
+          _decoded == _svg and _decoded.endswith("</svg>"))
     check("...and the running dot is styled where it actually sits",
           ".rows .dot {" not in s._UI_ADMIN_PAGE
           and "\n    .dot {" in s._UI_ADMIN_PAGE)

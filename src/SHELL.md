@@ -969,7 +969,12 @@ def _parse_traffic(lines, days=7):
         per_day[day] = per_day.get(day, 0) + 1
         if msg[0] in ("200", "206", "304", "404"):
             path = next((p for p in msg[1:] if p.startswith("/")), None)
-            if path:
+            # Version discovery answers 404 on a public site BY DESIGN — the
+            # version is withheld, not absent — so counting it as a miss
+            # would list Servette's own working feature as something the
+            # operator should go and fix. Every connection-test run hits it.
+            if path and not (msg[0] == "404"
+                             and path.split("?")[0] == _WELL_KNOWN_VERSION_PATH):
                 # Two buckets over one pass: what was found, and what was
                 # asked for and was not. The second is the actionable half —
                 # a broken link of the operator's own reads the same as a
@@ -1435,28 +1440,53 @@ def _tar_live_site(site, cap=_MAX_BUNDLE_BYTES):
     return buf.getvalue()
 
 
+def _tree_size(path):
+    """(files, bytes) under path. A file that vanishes mid-walk is skipped,
+    not raised: this is a description, and a racing publish must not make
+    describing the site an error."""
+    files = total = 0
+    for root, _dirs, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+                files += 1
+            except OSError:
+                pass
+    return files, total
+
+
 def _site_versions(site):
     """The kept trees of one site as rows both surfaces render: the name to
     restore by, when it was published, how many files and bytes it holds, and
     which one is live.
 
+    The live tree is ALWAYS reported, ring member or not. A site published
+    before the ring existed serves a tree the ring does not hold — it joins
+    on its next publish — and reporting an empty list would tell an operator
+    with a live, working site that nothing is published, which is both false
+    and alarming. That tree carries its own mtime as its date and is never
+    offered for restore, because it is already live.
+
     Walking every tree is why this is its own call rather than part of the
     status snapshot — it runs when an operator asks to see the history, not
     on every poll of a page that refreshes itself."""
-    live = os.path.realpath(_resolve(site.serve_dir).rstrip(os.sep))
-    rows = []
+    live_link = _resolve(site.serve_dir).rstrip(os.sep)
+    live      = os.path.realpath(live_link)
+    rows, in_ring = [], False
     for path, stamp in _version_dirs(site.serve_dir):
-        files = total = 0
-        for root, _dirs, names in os.walk(path):
-            for name in names:
-                try:
-                    total += os.path.getsize(os.path.join(root, name))
-                    files += 1
-                except OSError:
-                    pass          # a file that vanished mid-walk is not a failure
+        files, total = _tree_size(path)
+        is_live = os.path.realpath(path) == live
+        in_ring = in_ring or is_live
         rows.append({"name": os.path.basename(path), "published": stamp,
-                     "files": files, "bytes": total,
-                     "live": os.path.realpath(path) == live})
+                     "files": files, "bytes": total, "live": is_live})
+    if not in_ring and os.path.isdir(live):
+        files, total = _tree_size(live)
+        try:
+            stamp = int(os.path.getmtime(live))
+        except OSError:
+            stamp = 0
+        rows.insert(0, {"name": os.path.basename(live), "published": stamp,
+                        "files": files, "bytes": total, "live": True})
     return rows
 
 

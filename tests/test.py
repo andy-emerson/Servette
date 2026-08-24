@@ -1099,8 +1099,14 @@ def run_dispatch_tests(s):
           and "api('/preview'" in s._UI_ADMIN_PAGE)
     check("...whose frame URL carries the preview token, never the passcode",
           "'/preview/' + encodeURIComponent(data.token)" in s._UI_ADMIN_PAGE)
-    check("...and a download beside publish, the same format in reverse",
+    check("...and a download on the line that reports what is live",
           "api('/download'" in s._UI_ADMIN_PAGE)
+    # The running dot lost its styling when the status row moved onto a
+    # switch-row and a `.rows .dot` rule stopped matching: still in the
+    # markup, simply invisible. The rule is unscoped now.
+    check("...and the running dot is styled where it actually sits",
+          ".rows .dot {" not in s._UI_ADMIN_PAGE
+          and "\n    .dot {" in s._UI_ADMIN_PAGE)
     check("...building one bundle for both, so they cannot diverge",
           s._UI_ADMIN_PAGE.count("gzipBytes(buildTar(") == 1)
     check("...and edits redirects through the shared settings write",
@@ -1165,6 +1171,15 @@ def run_dispatch_tests(s):
     check("...and misses are tallied apart from hits, ranked by count",
           tt["missing_paths"] == [("/nope", 2), ("/wp-login.php", 1)]
           and all(p != "/nope" for p, _ in tt["top_paths"]))
+    # Version discovery answers 404 on a public site by design — withheld,
+    # not absent — and every connection-test run hits it. Listing it would
+    # put Servette's own working feature on the operator's to-fix list.
+    vlines = tlines + [_journal_line("2026-08-21",
+                                     f"404 {s._WELL_KNOWN_VERSION_PATH} from 5.6.7.8")]
+    vt = s._parse_traffic(vlines)
+    check("...while the withheld version endpoint is not called a miss",
+          all(p != s._WELL_KNOWN_VERSION_PATH for p, _ in vt["missing_paths"])
+          and vt["statuses"]["404"] == 4)
     hourly = s._parse_traffic(tlines, days=1)
     check("...and buckets by hour on a short window, where a day is one point",
           hourly["bucket"] == "hour"
@@ -3284,6 +3299,14 @@ def run_dispatch_tests(s):
         with open(os.path.join(legacy, "marker.txt"), "w") as f:
             f.write("pre-flip")
         s.config.sites[0].serve_dir = legacy
+        # Before any swap it is the oldest shape of all: a plain directory
+        # that has never been through the ring — and still published content.
+        plain_rows = s._site_versions(s.config.sites[0])
+        check("A plain directory reports as published, not as nothing",
+              len(plain_rows) == 1 and plain_rows[0]["live"]
+              and plain_rows[0]["files"] == 1 and plain_rows[0]["bytes"] > 0)
+        check("...and offers no restore, being already what is live",
+              all(r["live"] for r in plain_rows))
         _publish(swap_root, "fresh", "post-flip", legacy)
         check("Legacy real directory converts: symlink, new content live",
               os.path.islink(legacy) and _marker(legacy) == "post-flip")
@@ -3305,6 +3328,12 @@ def run_dispatch_tests(s):
         s.config.sites[0].serve_dir = two
         check("A two-slot site has no versions before its next publish",
               s._version_dirs(two) == [])
+        # But it IS serving something, and saying otherwise told an operator
+        # with a live, working site that nothing was published.
+        two_rows = s._site_versions(s.config.sites[0])
+        check("...yet its live tree is still reported as live and sized",
+              len(two_rows) == 1 and two_rows[0]["live"]
+              and two_rows[0]["files"] == 1)
         _publish(swap_root, "afterslots", "post-slots", two)
         check("Two-slot conversion: the new content is live",
               _marker(two) == "post-slots")

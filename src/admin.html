@@ -270,7 +270,16 @@
     /* ── Fact rows: label left, value right, the shell's status in HTML ─ */
     .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
     .rows > div { padding: 0.18rem 0; }
-    .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
+    /* padding-right, not just min-width: a key longer than the column (a
+       long request path) would otherwise butt straight against its value
+       with nothing between them. border-box keeps the value column at 8rem
+       for every key short enough to fit. */
+    .rows .k {
+      color: var(--muted);
+      display: inline-block;
+      min-width: 8rem;
+      padding-right: 0.75rem;
+    }
     .rows a { color: var(--brand); text-decoration: none; }
     .rows a:hover { text-decoration: underline; }
     /* A ledger's total sits under a rule, at the foot of what it sums. */
@@ -281,7 +290,10 @@
     }
     .rows b { color: var(--text); font-weight: 500; }
     .rows .ok { color: var(--brand); }
-    .rows .dot {
+    /* Not scoped to .rows: the running dot moved onto the status switch-row
+       when the service controls joined it, and a `.rows .dot` rule stopped
+       matching — the dot was still in the markup and simply invisible. */
+    .dot {
       display: inline-block;
       width: 7px;
       height: 7px;
@@ -1135,14 +1147,17 @@
          `<input type="file" webkitdirectory multiple class="hidden">` +
          `<p class="hint summary">The folder to drop is the one holding the ` +
          `site's <b>index.html</b>.</p>` +
+         // Both of these act on the folder you chose, so both are dim until
+         // you have chosen one. Download is not here: it acts on what is
+         // live, and sits on the line that reports it.
          `<div class="btn-row" style="margin-top:0.75rem">` +
-           `<button class="action pub" type="button" disabled>Publish</button>` +
+           `<button class="action pub" type="button" disabled ` +
+           `title="Choose a folder first">Publish</button>` +
            // Look before you ship. Content only — the real domain, its
            // certificate, and its headers are not in scope here.
-           `<button class="action prev" type="button" disabled>Preview</button>` +
-           // The reverse of Publish: the live tree as the same tar.gz the
-           // publish door accepts, so what comes down can go back up.
-           `<button class="action dl" type="button">Download</button>` +
+           `<button class="action prev" type="button" disabled ` +
+           `title="Choose a folder first — this shows what you are about to ` +
+           `publish, not the live site">Preview</button>` +
          `</div>` +
          `<div class="preview hidden">` +
            `<p class="hint">This is the folder you chose, served over the ` +
@@ -1162,8 +1177,14 @@
          `<div class="split"></div>` +
          `<div class="switch-row"><span class="k">Published</span>` +
          `<span class="switch-value"><span class="ver-state">reading…</span>` +
-         `<span class="switch-act"><button class="action tiny ver-refresh" ` +
-         `type="button">Refresh</button></span></span></div>` +
+         `<span class="switch-act">` +
+         // The reverse of Publish, on the line that says what is live: the
+         // live tree as the same tar.gz the publish door accepts, so what
+         // comes down can go back up.
+         `<button class="action tiny dl" type="button" ` +
+         `title="Download the live content as a tar.gz">Download</button>` +
+         `<button class="action tiny ver-refresh" type="button">Refresh</button>` +
+         `</span></span></div>` +
          `<div class="rows versions"></div>` +
 
          // ── Redirects: old path to new. A setting, so it lives with the
@@ -1322,7 +1343,9 @@
       done.classList.add('hidden');
       q('.preview').classList.add('hidden');
       pubBtn.disabled = false;
+      pubBtn.title = 'Publish this folder as the live site';
       prevBtn.disabled = false;
+      prevBtn.title = 'Look at this folder before publishing it';
       mark('badge-green', '✓ folder read');
     }
 

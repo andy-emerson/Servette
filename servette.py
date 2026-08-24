@@ -5167,7 +5167,12 @@ def _parse_traffic(lines, days=7):
         per_day[day] = per_day.get(day, 0) + 1
         if msg[0] in ("200", "206", "304", "404"):
             path = next((p for p in msg[1:] if p.startswith("/")), None)
-            if path:
+            # Version discovery answers 404 on a public site BY DESIGN — the
+            # version is withheld, not absent — so counting it as a miss
+            # would list Servette's own working feature as something the
+            # operator should go and fix. Every connection-test run hits it.
+            if path and not (msg[0] == "404"
+                             and path.split("?")[0] == _WELL_KNOWN_VERSION_PATH):
                 # Two buckets over one pass: what was found, and what was
                 # asked for and was not. The second is the actionable half —
                 # a broken link of the operator's own reads the same as a
@@ -5587,28 +5592,53 @@ def _tar_live_site(site, cap=_MAX_BUNDLE_BYTES):
     return buf.getvalue()
 
 
+def _tree_size(path):
+    """(files, bytes) under path. A file that vanishes mid-walk is skipped,
+    not raised: this is a description, and a racing publish must not make
+    describing the site an error."""
+    files = total = 0
+    for root, _dirs, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+                files += 1
+            except OSError:
+                pass
+    return files, total
+
+
 def _site_versions(site):
     """The kept trees of one site as rows both surfaces render: the name to
     restore by, when it was published, how many files and bytes it holds, and
     which one is live.
 
+    The live tree is ALWAYS reported, ring member or not. A site published
+    before the ring existed serves a tree the ring does not hold — it joins
+    on its next publish — and reporting an empty list would tell an operator
+    with a live, working site that nothing is published, which is both false
+    and alarming. That tree carries its own mtime as its date and is never
+    offered for restore, because it is already live.
+
     Walking every tree is why this is its own call rather than part of the
     status snapshot — it runs when an operator asks to see the history, not
     on every poll of a page that refreshes itself."""
-    live = os.path.realpath(_resolve(site.serve_dir).rstrip(os.sep))
-    rows = []
+    live_link = _resolve(site.serve_dir).rstrip(os.sep)
+    live      = os.path.realpath(live_link)
+    rows, in_ring = [], False
     for path, stamp in _version_dirs(site.serve_dir):
-        files = total = 0
-        for root, _dirs, names in os.walk(path):
-            for name in names:
-                try:
-                    total += os.path.getsize(os.path.join(root, name))
-                    files += 1
-                except OSError:
-                    pass          # a file that vanished mid-walk is not a failure
+        files, total = _tree_size(path)
+        is_live = os.path.realpath(path) == live
+        in_ring = in_ring or is_live
         rows.append({"name": os.path.basename(path), "published": stamp,
-                     "files": files, "bytes": total,
-                     "live": os.path.realpath(path) == live})
+                     "files": files, "bytes": total, "live": is_live})
+    if not in_ring and os.path.isdir(live):
+        files, total = _tree_size(live)
+        try:
+            stamp = int(os.path.getmtime(live))
+        except OSError:
+            stamp = 0
+        rows.insert(0, {"name": os.path.basename(live), "published": stamp,
+                        "files": files, "bytes": total, "live": True})
     return rows
 
 
@@ -6091,7 +6121,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     /* ── Fact rows: label left, value right, the shell's status in HTML ─ */
     .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
     .rows > div { padding: 0.18rem 0; }
-    .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
+    /* padding-right, not just min-width: a key longer than the column (a
+       long request path) would otherwise butt straight against its value
+       with nothing between them. border-box keeps the value column at 8rem
+       for every key short enough to fit. */
+    .rows .k {
+      color: var(--muted);
+      display: inline-block;
+      min-width: 8rem;
+      padding-right: 0.75rem;
+    }
     .rows a { color: var(--brand); text-decoration: none; }
     .rows a:hover { text-decoration: underline; }
     /* A ledger's total sits under a rule, at the foot of what it sums. */
@@ -6102,7 +6141,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
     .rows b { color: var(--text); font-weight: 500; }
     .rows .ok { color: var(--brand); }
-    .rows .dot {
+    /* Not scoped to .rows: the running dot moved onto the status switch-row
+       when the service controls joined it, and a `.rows .dot` rule stopped
+       matching — the dot was still in the markup and simply invisible. */
+    .dot {
       display: inline-block;
       width: 7px;
       height: 7px;
@@ -6956,14 +6998,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<input type="file" webkitdirectory multiple class="hidden">` +
          `<p class="hint summary">The folder to drop is the one holding the ` +
          `site's <b>index.html</b>.</p>` +
+         // Both of these act on the folder you chose, so both are dim until
+         // you have chosen one. Download is not here: it acts on what is
+         // live, and sits on the line that reports it.
          `<div class="btn-row" style="margin-top:0.75rem">` +
-           `<button class="action pub" type="button" disabled>Publish</button>` +
+           `<button class="action pub" type="button" disabled ` +
+           `title="Choose a folder first">Publish</button>` +
            // Look before you ship. Content only — the real domain, its
            // certificate, and its headers are not in scope here.
-           `<button class="action prev" type="button" disabled>Preview</button>` +
-           // The reverse of Publish: the live tree as the same tar.gz the
-           // publish door accepts, so what comes down can go back up.
-           `<button class="action dl" type="button">Download</button>` +
+           `<button class="action prev" type="button" disabled ` +
+           `title="Choose a folder first — this shows what you are about to ` +
+           `publish, not the live site">Preview</button>` +
          `</div>` +
          `<div class="preview hidden">` +
            `<p class="hint">This is the folder you chose, served over the ` +
@@ -6983,8 +7028,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<div class="split"></div>` +
          `<div class="switch-row"><span class="k">Published</span>` +
          `<span class="switch-value"><span class="ver-state">reading…</span>` +
-         `<span class="switch-act"><button class="action tiny ver-refresh" ` +
-         `type="button">Refresh</button></span></span></div>` +
+         `<span class="switch-act">` +
+         // The reverse of Publish, on the line that says what is live: the
+         // live tree as the same tar.gz the publish door accepts, so what
+         // comes down can go back up.
+         `<button class="action tiny dl" type="button" ` +
+         `title="Download the live content as a tar.gz">Download</button>` +
+         `<button class="action tiny ver-refresh" type="button">Refresh</button>` +
+         `</span></span></div>` +
          `<div class="rows versions"></div>` +
 
          // ── Redirects: old path to new. A setting, so it lives with the
@@ -7143,7 +7194,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       done.classList.add('hidden');
       q('.preview').classList.add('hidden');
       pubBtn.disabled = false;
+      pubBtn.title = 'Publish this folder as the live site';
       prevBtn.disabled = false;
+      prevBtn.title = 'Look at this folder before publishing it';
       mark('badge-green', '✓ folder read');
     }
 

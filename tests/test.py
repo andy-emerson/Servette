@@ -1104,6 +1104,14 @@ def run_dispatch_tests(s):
     # The running dot lost its styling when the status row moved onto a
     # switch-row and a `.rows .dot` rule stopped matching: still in the
     # markup, simply invisible. The rule is unscoped now.
+    # A change typed and not saved used to borrow the fault colour, so an
+    # unsaved intention looked like something broken.
+    check("...telling a fault from an intention that is merely unsaved",
+          ".fault {" in s._UI_ADMIN_PAGE and ".pending {" in s._UI_ADMIN_PAGE
+          and "class=\"pending\"" in s._UI_ADMIN_PAGE
+          and "not saved yet" in s._UI_ADMIN_PAGE)
+    check("...and the review count names what it counts",
+          "} to review — ` +" in s._UI_ADMIN_PAGE)
     check("...and the running dot is styled where it actually sits",
           ".rows .dot {" not in s._UI_ADMIN_PAGE
           and "\n    .dot {" in s._UI_ADMIN_PAGE)
@@ -1166,20 +1174,6 @@ def run_dispatch_tests(s):
           and tt["statuses"] == {"200": 2, "304": 1, "404": 3}
           and tt["top_paths"][0] == ("/index.html", 2)
           and tt["bucket"] == "day")
-    # Misses go in their own bucket, ranked, and never mix with what was
-    # found — a 404 path is the actionable half of the same journal pass.
-    check("...and misses are tallied apart from hits, ranked by count",
-          tt["missing_paths"] == [("/nope", 2), ("/wp-login.php", 1)]
-          and all(p != "/nope" for p, _ in tt["top_paths"]))
-    # Version discovery answers 404 on a public site by design — withheld,
-    # not absent — and every connection-test run hits it. Listing it would
-    # put Servette's own working feature on the operator's to-fix list.
-    vlines = tlines + [_journal_line("2026-08-21",
-                                     f"404 {s._WELL_KNOWN_VERSION_PATH} from 5.6.7.8")]
-    vt = s._parse_traffic(vlines)
-    check("...while the withheld version endpoint is not called a miss",
-          all(p != s._WELL_KNOWN_VERSION_PATH for p, _ in vt["missing_paths"])
-          and vt["statuses"]["404"] == 4)
     hourly = s._parse_traffic(tlines, days=1)
     check("...and buckets by hour on a short window, where a day is one point",
           hourly["bucket"] == "hour"
@@ -1193,8 +1187,6 @@ def run_dispatch_tests(s):
     s._traffic_lines = saved_tl
     check("The traffic command prints the same summary",
           "Requests: 6" in tbuf.getvalue() and "/index.html" in tbuf.getvalue())
-    check("...including the misses, so both surfaces show the same window",
-          "Missing paths" in tbuf.getvalue() and "/wp-login.php" in tbuf.getvalue())
     check("...and the Publish tab as site cards, add/move/remove/domain wired to /sites",
           "site-cards" in s._UI_ADMIN_PAGE and "btn-add-site" in s._UI_ADMIN_PAGE
           and "post('/sites'" in s._UI_ADMIN_PAGE
@@ -1288,6 +1280,42 @@ def run_dispatch_tests(s):
               not s._disk_is_low({"free_mb": 50000.0, "total_mb": 200000.0}))
         check("...an unreadable disk is not reported as low",
               not s._disk_is_low({"free_mb": None, "total_mb": None}))
+        # Severity, not just fault: one colour cannot say both "visitors
+        # cannot use this site" and "it serves, and something wants doing".
+        rows = {r["key"]: r for r in s._health_checks()}
+        check("Every health row carries a severity, not only a verdict",
+              all("blocking" in r for r in s._health_checks()))
+        # The rule, not the mood of this particular run: a stopped service
+        # blocks precisely when it is stopped.
+        check("...a stopped service blocks, a running one does not",
+              rows["service"]["blocking"] == (not rows["service"]["ok"]))
+        saved_sd = s.config.sites[0].serve_dir
+        try:
+            s.config.sites[0].serve_dir = "no-such-folder-xyz"
+            dir_row = [r for r in s._health_checks() if r["key"] == "dir"][0]
+            check("...a missing folder blocks: nothing is served at all",
+                  dir_row["blocking"])
+        finally:
+            s.config.sites[0].serve_dir = saved_sd
+        check("...while swap, disk, and the watchdog do not",
+              not rows["swap"]["blocking"] and not rows["disk"]["blocking"]
+              and (s._IS_MACOS or not rows["netwatch"]["blocking"]))
+        # The certificate is the one row with two severities: an untrusted
+        # certificate is an interstitial for every visitor to a name the
+        # site advertises, and simply where a nameless site starts.
+        saved_dom = s.config.sites[0].domain
+        saved_cert = s.config.sites[0].cert_file
+        try:
+            s.config.sites[0].cert_file = ""      # nothing trusted to present
+            s.config.sites[0].domain = ""
+            check("An untrusted certificate on a nameless site does not block",
+                  not [r for r in s._health_checks() if r["key"] == "cert"][0]["blocking"])
+            s.config.sites[0].domain = "example.test"
+            check("...but does the moment the site advertises a name",
+                  [r for r in s._health_checks() if r["key"] == "cert"][0]["blocking"])
+        finally:
+            s.config.sites[0].domain = saved_dom
+            s.config.sites[0].cert_file = saved_cert
         check("The disk row is host-wide, not hung on a site",
               all(r["site"] is None for r in s._health_checks() if r["key"] == "disk"))
         # Both surfaces say the same thing: the page reads the health row,

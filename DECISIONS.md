@@ -6,6 +6,54 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A fault has two severities, and an unsaved change is neither
+
+**Ruled (Human):** red where the site cannot be used as it is configured;
+amber where it serves and something still wants doing. Red: nothing to
+serve, every visitor locked out by a username with no password, the
+service stopped, and an untrusted certificate on a site that advertises a
+domain — a full-page browser interstitial for everyone who visits by
+name. Amber: a self-signed certificate on a site with no domain (that is
+simply where every site starts), a half-built publish channel, low swap,
+low disk, a missing watchdog. Every health row carries the severity, so
+the card's pill, its Status line, and each row agree without deciding
+separately.
+**And a change typed but not saved is not a fault at all.** Flipping the
+access switch used to paint the row in the same amber as a real defect,
+which said "something is wrong here" about an intention the operator had
+just formed. It reads as muted, italic, and says it is not saved yet.
+**Why not all-red:** one colour cannot say both "visitors cannot use this
+site" and "this works, and something wants doing" — and a first site,
+freshly added and self-signed with no domain yet, would open in red on
+its normal starting state. Crying wolf there costs the colour its meaning
+where it matters.
+**Also:** the Status line names what it counts ("2 to review — needs
+certificate, needs password") rather than leaving a reader to work out
+which rows the number meant. *(2026-08-24)*
+
+## The 404 page leads with the connection, then the miss
+
+**Ruled (Human):** the connection card sits above the 404 card, and the
+404 card's thick left rule is gone.
+**Why:** whether the server answered and whether the wire is encrypted
+are true of the whole site and settle a visitor's first question; what is
+missing is the narrower fact and follows it. The left rule marked the 404
+card as the page's subject, which it no longer is. *(2026-08-24)*
+
+## Missing paths is not a card Servette keeps
+
+**Ruled (Human):** built to be looked at, looked at, and removed. The
+journal still tallies what was served (`top_paths`); it no longer tallies
+what was not.
+**Why:** on a real box the list was dominated by scanners guessing
+WordPress paths, one entry was Servette's own version endpoint answering
+404 by design, and the one genuinely useful line — the site root missing
+during an outage — is already visible as the outage itself. A card whose
+top entries need explaining away is not reporting, it is generating work.
+**Reopen if:** an operator asks which of their own links are broken,
+which is the question this was reaching for and did not answer.
+*(2026-08-24)*
+
 ## Publishing keeps a ring of versions, not a single-shot backup
 
 **Ruled (Human):** publishing keeps the content it replaced, five deep

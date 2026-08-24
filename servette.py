@@ -1040,7 +1040,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     /* ── The miss itself: code, path, and why you are seeing this ────── */
     .notfound {
       border: 1px solid var(--border);
-      border-left: 3px solid var(--muted);
       border-radius: 8px;
       background: var(--surface);
       padding: 1.25rem;
@@ -1183,6 +1182,23 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- The connection card leads: whether the server answered, and whether
+       the wire is encrypted, are true of the whole site and settle a
+       reader's first question. What is missing is the narrower fact, and
+       follows it. -->
+  <div class="verified">
+    <div class="verified-header">
+      <div>
+        <div class="verified-label">Connection</div>
+        <div class="verified-value" id="url">—</div>
+      </div>
+      <div class="badge" id="badge">—</div>
+    </div>
+    <div class="verified-links">
+      <a href="/.well-known/servette-check">run the connection test →</a>
+    </div>
+  </div>
+
   <!-- The server is up and answered — the path is what is missing — so this
        leads with the path rather than with blame. -->
   <div class="notfound">
@@ -1198,19 +1214,6 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     </p>
     <div class="notfound-links">
       <a href="/">← the site's home page</a>
-    </div>
-  </div>
-
-  <div class="verified">
-    <div class="verified-header">
-      <div>
-        <div class="verified-label">Connection</div>
-        <div class="verified-value" id="url">—</div>
-      </div>
-      <div class="badge" id="badge">—</div>
-    </div>
-    <div class="verified-links">
-      <a href="/.well-known/servette-check">run the connection test →</a>
     </div>
   </div>
 
@@ -5147,10 +5150,9 @@ def _parse_traffic(lines, days=7):
     where the status was expected. Only response lines count — every
     served response logs as '<status> <path> … to <ip>' (or 'from' on
     refusals) — and systemd's own lines, carrying no level, are skipped.
-    Paths are tallied into two buckets: content responses (200/206/304) as
-    top_paths, and misses (404) as missing_paths. IPs are never carried into
-    the result."""
-    per_day, statuses, paths, missing = {}, {}, {}, {}
+    Paths are tallied from content responses (200/206/304). IPs are never
+    carried into the result."""
+    per_day, statuses, paths = {}, {}, {}
     stamp = (lambda p: p[:13].replace("T", " ")) if days <= 2 else (lambda p: p[:10])
     for line in lines:
         parts = line.split()
@@ -5165,24 +5167,13 @@ def _parse_traffic(lines, days=7):
             continue
         statuses[msg[0]] = statuses.get(msg[0], 0) + 1
         per_day[day] = per_day.get(day, 0) + 1
-        if msg[0] in ("200", "206", "304", "404"):
+        if msg[0] in ("200", "206", "304"):
             path = next((p for p in msg[1:] if p.startswith("/")), None)
-            # Version discovery answers 404 on a public site BY DESIGN — the
-            # version is withheld, not absent — so counting it as a miss
-            # would list Servette's own working feature as something the
-            # operator should go and fix. Every connection-test run hits it.
-            if path and not (msg[0] == "404"
-                             and path.split("?")[0] == _WELL_KNOWN_VERSION_PATH):
-                # Two buckets over one pass: what was found, and what was
-                # asked for and was not. The second is the actionable half —
-                # a broken link of the operator's own reads the same as a
-                # scanner's guess, and only the operator can tell them apart.
-                bucket = missing if msg[0] == "404" else paths
-                bucket[path] = bucket.get(path, 0) + 1
-    rank = lambda counts: sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+            if path:
+                paths[path] = paths.get(path, 0) + 1
+    top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
     return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
-            "top_paths": rank(paths), "missing_paths": rank(missing),
-            "window_days": days,
+            "top_paths": top, "window_days": days,
             "bucket": "hour" if days <= 2 else "day",
             "total": sum(statuses.values())}
 
@@ -5207,10 +5198,6 @@ def cmd_traffic():
     print("  Top paths:")
     for path, n in t["top_paths"]:
         print(f"    {n:>6}  {path}")
-    if t["missing_paths"]:
-        print("  Missing paths (asked for, not found):")
-        for path, n in t["missing_paths"]:
-            print(f"    {n:>6}  {path}")
     print()
 
 
@@ -6163,6 +6150,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
     .hint b { color: var(--text); font-weight: 500; }
     .warn  { color: var(--amber); }
+    .fault { color: var(--red); }
+    /* Not a fault at all — a change typed and not yet saved. It used to
+       borrow .warn, which made an unsaved intention look like something
+       broken. */
+    .pending { color: var(--muted); font-style: italic; }
     .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
 
     /* What needs review, said in words and pointed at its fix. */
@@ -6511,23 +6503,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- ══ Missing paths. Self-contained on purpose: this card, the block
-         that fills it in loadTraffic, and _parse_traffic's second bucket
-         are the whole feature, so it comes out in one piece if it earns
-         its removal. ══ -->
-    <div class="card" id="card-missing">
-      <div class="card-head">
-        <span class="card-title">Missing paths</span>
-      </div>
-      <div class="card-body">
-        <div class="rows" id="missing-rows"></div>
-        <p class="hint">Paths visitors asked for and did not find, over the
-        same window. A name you recognise is usually a broken link of your
-        own; one you do not is usually a scanner guessing, and needs
-        nothing from you.</p>
-      </div>
-    </div>
-
     <div class="card">
       <div class="card-head">
         <span class="card-title">Server load</span>
@@ -6614,9 +6589,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   // A fact is not a victory: rows read like the shell's status — label and
   // value, plainly — and only a row that needs attention wears a mark.
+  // Two marks, because two things are true at once and one colour cannot
+  // say both: red where visitors cannot use the site as configured (nothing
+  // to serve, everyone locked out, the server stopped, an untrusted
+  // certificate on a site that advertises a name), amber where it serves
+  // and something still wants doing.
+  const faultClass = (c) => c.blocking ? 'fault' : 'warn';
   const factRow = (c) => row(escapeHtml(c.label),
     c.ok ? escapeHtml(c.detail)
-         : `<span class="warn">${escapeHtml(c.detail)}</span>`);
+         : `<span class="${faultClass(c)}">${escapeHtml(c.detail)}</span>`);
 
   // One labelled input. The hint is page-authored markup (several carry
   // <b>), never server text; the value is escaped because it is.
@@ -7104,7 +7085,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // are separate elements: overwriting the first would erase a
           // standing fault the moment a folder was read.
           (siteNeeds.length
-            ? `<span class="badge badge-warn needs" title="${escapeHtml(
+            ? `<span class="badge ${siteNeeds.some((c) => c.blocking)
+                 ? 'badge-red' : 'badge-warn'} needs" title="${escapeHtml(
                  siteNeeds.map((c) => c.detail).join(' · '))}">${
                  siteNeeds.length === 1
                    ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
@@ -7467,8 +7449,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const on = authOn();
       const pending = authDesired !== null && authDesired !== !!siteData.username;
       info.innerHTML =
+        // The count names what it counts, so a reader can check it against
+        // the rows below rather than wonder which ones it meant.
         row('Status', siteNeeds.length
-          ? `<span class="warn">${siteNeeds.length} to review</span>`
+          ? `<span class="${siteNeeds.some((c) => c.blocking) ? 'fault' : 'warn'}">` +
+            `${siteNeeds.length} to review — ` +
+            `${escapeHtml(siteNeeds.map((c) => NEEDS_WORD[c.key] || c.key)
+                 .join(', ').toLowerCase())}</span>`
           : '<span class="ok">✓</span> healthy') +
         // The site itself, one click away and in its own tab: the fastest
         // answer to "did that publish land" is looking at it.
@@ -7487,7 +7474,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
       q('.cert-state').innerHTML = !certRow ? ''
         : certRow.ok ? escapeHtml(certRow.detail)
-        : `<span class="warn">${escapeHtml(certRow.detail)}</span>`;
+        : `<span class="${faultClass(certRow)}">${escapeHtml(certRow.detail)}</span>`;
       // Naming and certifying are two acts on one card: the name saves
       // instantly, the certificate is asked for when you ask for it —
       // and the button says so while the site has no trusted one.
@@ -7502,10 +7489,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       q('.auth-switch').checked = on;
       q('.auth-action').textContent = on ? 'Make public' : 'Make private';
       q('.auth-state').innerHTML = pending
-        ? `<span class="warn">${on ? 'username and password required'
-                                   : 'becoming public when saved'}</span>`
+        ? `<span class="pending">${on ? 'not saved yet — fill in the login below'
+                                      : 'not saved yet — becoming public'}</span>`
         : (authRow && !authRow.ok)
-          ? `<span class="warn">${escapeHtml(authRow.detail)}</span>`
+          ? `<span class="${faultClass(authRow)}">${escapeHtml(authRow.detail)}</span>`
           : (on ? 'private' : 'public');
       q('.auth-fields').innerHTML = !on ? '' :
         field('username-' + idx, 'Username', siteData.username,
@@ -7772,11 +7759,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         : named.map(([name, n]) => row(name, String(n))).join('') +
           row('Total requests', `<b>${total}</b>`, 'ledger');
 
-      // ── Missing paths (remove with the #card-missing block above) ──
-      const gone = t.missing_paths || [];
-      $('missing-rows').innerHTML = gone.length
-        ? gone.map(([path, n]) => row(escapeHtml(path), String(n))).join('')
-        : row('Nothing missed', 'every path asked for in this window was found');
     } catch (e) {
       showError($('traffic-error'), reason(e, 'Could not read traffic'));
     }
@@ -8592,13 +8574,15 @@ def _health_checks():
     running        = service_active or _server_running()
     # Labeled Mode, because that is what its three answers describe — and
     # the page prints no second Mode row beside it.
-    rows.append({"key": "service", "site": None, "ok": running, "label": "Mode",
+    rows.append({"key": "service", "site": None, "ok": running,
+                 "blocking": not running, "label": "Mode",
                  "detail": "system service (survives reboots)" if service_active
                  else ("session only (stops when this terminal closes)" if running
                        else "stopped — 'start' brings it up")})
     if not _IS_MACOS:
         armed = os.path.exists(NETWATCH_PATH + ".timer")
-        rows.append({"key": "netwatch", "site": None, "ok": armed, "label": "Network watchdog",
+        rows.append({"key": "netwatch", "site": None, "ok": armed,
+                     "blocking": False, "label": "Network watchdog",
                      "detail": "armed (checks once per minute)" if armed
                      else "not installed — 'enable' provisions it"})
         mem_kb, _avail_kb, committed_kb = _meminfo()
@@ -8620,7 +8604,7 @@ def _health_checks():
         else:
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
         rows.append({"key": "swap", "site": None, "ok": offer is None,
-                     "label": "Swap file", "detail": detail})
+                     "blocking": False, "label": "Swap file", "detail": detail})
     # Disk is host-wide and platform-independent: a full disk is the outage
     # every other row assumes is not happening. A publish that cannot write
     # its tree fails in staging and leaves the live site alone, so this is a
@@ -8629,7 +8613,8 @@ def _health_checks():
     disk = _disk_snapshot()
     if disk["free_mb"] is not None:
         low = _disk_is_low(disk)
-        rows.append({"key": "disk", "site": None, "ok": not low, "label": "Disk",
+        rows.append({"key": "disk", "site": None, "ok": not low,
+                     "blocking": False, "label": "Disk",
                      "detail": f"{disk['free_mb']:,.0f} MB free of "
                                f"{disk['total_mb']:,.0f} MB"
                                + (" — publishing may fail" if low else "")})
@@ -8643,13 +8628,22 @@ def _health_checks():
         # operator must hear about.
         dir_ok = bool(site.serve_dir) and os.path.exists(_resolve(site.serve_dir))
         if not dir_ok:
-            rows.append({"key": "dir", "site": i, "ok": False, "label": tag + "Folder",
+            rows.append({"key": "dir", "site": i, "ok": False, "blocking": True,
+                         "label": tag + "Folder",
                          "detail": "missing — publish to recreate it"})
         days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
         covers = _domain_from_cert(_resolve(site.cert_file)) if site.cert_file else None
         mismatched = bool(site.domain) and bool(covers) and covers != site.domain
         cert_ok = days is not None and days > 0 and bool(site.domain) and not mismatched
-        rows.append({"key": "cert", "site": i, "ok": cert_ok, "label": tag + "Certificate",
+        # Severity turns on whether the site claims a public name. With a
+        # domain set, an untrusted certificate is a full-page browser
+        # interstitial for everyone who visits it — the site is unusable at
+        # the name it advertises. Without one, self-signed is simply where
+        # every site starts, and reporting it in the same red as a locked-out
+        # site would cry wolf on the normal case.
+        rows.append({"key": "cert", "site": i, "ok": cert_ok,
+                     "blocking": bool(site.domain) and not cert_ok,
+                     "label": tag + "Certificate",
                      "days": days,
                      "detail": (f"{days} days remaining (auto-renew enabled)" if cert_ok
                                 else f"issued for {covers} — get one for this name" if mismatched
@@ -8661,7 +8655,7 @@ def _health_checks():
         # to check against, which locks every visitor out.
         half_auth = bool(site.username) and not site.password_hash
         rows.append({"key": "password", "site": i, "ok": not half_auth,
-                     "label": tag + "Access",
+                     "blocking": half_auth, "label": tag + "Access",
                      "detail": ("private — visitors sign in" if site.username and site.password_hash
                                 else "a username with no stored password — set one below, or make the site public"
                                 if half_auth
@@ -8672,7 +8666,7 @@ def _health_checks():
         half = bool(site.publish_url) != bool(site.publish_key)
         if half or site.publish_url:
             rows.append({"key": "channel", "site": i, "ok": not half,
-                         "label": tag + "Publish channel",
+                         "blocking": False, "label": tag + "Publish channel",
                          "detail": ("partially configured — finish or clear it in the terminal: config publish"
                                     if half else "configured — 'pull' fetches from it")})
     return rows

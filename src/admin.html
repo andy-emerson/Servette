@@ -312,6 +312,11 @@
     .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
     .hint b { color: var(--text); font-weight: 500; }
     .warn  { color: var(--amber); }
+    .fault { color: var(--red); }
+    /* Not a fault at all — a change typed and not yet saved. It used to
+       borrow .warn, which made an unsaved intention look like something
+       broken. */
+    .pending { color: var(--muted); font-style: italic; }
     .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
 
     /* What needs review, said in words and pointed at its fix. */
@@ -660,23 +665,6 @@
       </div>
     </div>
 
-    <!-- ══ Missing paths. Self-contained on purpose: this card, the block
-         that fills it in loadTraffic, and _parse_traffic's second bucket
-         are the whole feature, so it comes out in one piece if it earns
-         its removal. ══ -->
-    <div class="card" id="card-missing">
-      <div class="card-head">
-        <span class="card-title">Missing paths</span>
-      </div>
-      <div class="card-body">
-        <div class="rows" id="missing-rows"></div>
-        <p class="hint">Paths visitors asked for and did not find, over the
-        same window. A name you recognise is usually a broken link of your
-        own; one you do not is usually a scanner guessing, and needs
-        nothing from you.</p>
-      </div>
-    </div>
-
     <div class="card">
       <div class="card-head">
         <span class="card-title">Server load</span>
@@ -763,9 +751,15 @@
 
   // A fact is not a victory: rows read like the shell's status — label and
   // value, plainly — and only a row that needs attention wears a mark.
+  // Two marks, because two things are true at once and one colour cannot
+  // say both: red where visitors cannot use the site as configured (nothing
+  // to serve, everyone locked out, the server stopped, an untrusted
+  // certificate on a site that advertises a name), amber where it serves
+  // and something still wants doing.
+  const faultClass = (c) => c.blocking ? 'fault' : 'warn';
   const factRow = (c) => row(escapeHtml(c.label),
     c.ok ? escapeHtml(c.detail)
-         : `<span class="warn">${escapeHtml(c.detail)}</span>`);
+         : `<span class="${faultClass(c)}">${escapeHtml(c.detail)}</span>`);
 
   // One labelled input. The hint is page-authored markup (several carry
   // <b>), never server text; the value is escaped because it is.
@@ -1253,7 +1247,8 @@
           // are separate elements: overwriting the first would erase a
           // standing fault the moment a folder was read.
           (siteNeeds.length
-            ? `<span class="badge badge-warn needs" title="${escapeHtml(
+            ? `<span class="badge ${siteNeeds.some((c) => c.blocking)
+                 ? 'badge-red' : 'badge-warn'} needs" title="${escapeHtml(
                  siteNeeds.map((c) => c.detail).join(' · '))}">${
                  siteNeeds.length === 1
                    ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
@@ -1616,8 +1611,13 @@
       const on = authOn();
       const pending = authDesired !== null && authDesired !== !!siteData.username;
       info.innerHTML =
+        // The count names what it counts, so a reader can check it against
+        // the rows below rather than wonder which ones it meant.
         row('Status', siteNeeds.length
-          ? `<span class="warn">${siteNeeds.length} to review</span>`
+          ? `<span class="${siteNeeds.some((c) => c.blocking) ? 'fault' : 'warn'}">` +
+            `${siteNeeds.length} to review — ` +
+            `${escapeHtml(siteNeeds.map((c) => NEEDS_WORD[c.key] || c.key)
+                 .join(', ').toLowerCase())}</span>`
           : '<span class="ok">✓</span> healthy') +
         // The site itself, one click away and in its own tab: the fastest
         // answer to "did that publish land" is looking at it.
@@ -1636,7 +1636,7 @@
 
       q('.cert-state').innerHTML = !certRow ? ''
         : certRow.ok ? escapeHtml(certRow.detail)
-        : `<span class="warn">${escapeHtml(certRow.detail)}</span>`;
+        : `<span class="${faultClass(certRow)}">${escapeHtml(certRow.detail)}</span>`;
       // Naming and certifying are two acts on one card: the name saves
       // instantly, the certificate is asked for when you ask for it —
       // and the button says so while the site has no trusted one.
@@ -1651,10 +1651,10 @@
       q('.auth-switch').checked = on;
       q('.auth-action').textContent = on ? 'Make public' : 'Make private';
       q('.auth-state').innerHTML = pending
-        ? `<span class="warn">${on ? 'username and password required'
-                                   : 'becoming public when saved'}</span>`
+        ? `<span class="pending">${on ? 'not saved yet — fill in the login below'
+                                      : 'not saved yet — becoming public'}</span>`
         : (authRow && !authRow.ok)
-          ? `<span class="warn">${escapeHtml(authRow.detail)}</span>`
+          ? `<span class="${faultClass(authRow)}">${escapeHtml(authRow.detail)}</span>`
           : (on ? 'private' : 'public');
       q('.auth-fields').innerHTML = !on ? '' :
         field('username-' + idx, 'Username', siteData.username,
@@ -1921,11 +1921,6 @@
         : named.map(([name, n]) => row(name, String(n))).join('') +
           row('Total requests', `<b>${total}</b>`, 'ledger');
 
-      // ── Missing paths (remove with the #card-missing block above) ──
-      const gone = t.missing_paths || [];
-      $('missing-rows').innerHTML = gone.length
-        ? gone.map(([path, n]) => row(escapeHtml(path), String(n))).join('')
-        : row('Nothing missed', 'every path asked for in this window was found');
     } catch (e) {
       showError($('traffic-error'), reason(e, 'Could not read traffic'));
     }

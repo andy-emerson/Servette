@@ -47,6 +47,8 @@ jobs:
       # nothing re-ran them. This is that run.
       - name: Verify the website's line counts match src/
         run: python3 src/build.py --check-counts
+      - name: Verify the documents name only things that exist
+        run: python3 src/build.py --check-docs
       - name: Install the package into a venv (exercises pyproject.toml)
         run: |
           python3 -m venv .venv

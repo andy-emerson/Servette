@@ -10,8 +10,10 @@
      never could: it checks the connection it was itself loaded over. It
      never enumerates the filesystem — no "did you mean" suggestions —
      because that would turn a public page into a file-discovery oracle for
-     strangers. The version-discovery row needs the operator's session (the
-     endpoint is auth-gated) and shows for a logged-in reader only. Because
+     strangers. It does not report the server's version: on a public site
+     that endpoint answers 404 by design, so the row could only ever say
+     "withheld" while costing a miss in the log on every run, and the
+     operator reads the version from `status` or the admin page. Because
      this file ships with the server, its checks can never drift from the
      features they check — and because its path is reserved, an operator's
      own content never takes it over, so the outside vantage survives a
@@ -407,22 +409,6 @@
                  ev: 'POST → ' + post + ' · unknown → ' + miss +
                      ' · traversal → ' + trav }; } },
 
-    // Version discovery — same-origin, auth-gated: the one check only this
-    // page can make. Servette serves it solely on a private site, so the
-    // exact version reaches a party that already signed in (this browser)
-    // and never an anonymous scanner. A public site withholding it is the
-    // design working, which is a pass, not a skip.
-    { name: 'Version', run: async () => {
-        const r = await fetch('/.well-known/servette', { cache: 'no-store' });
-        if (r.status === 404)
-          return { ok: true, obs: 'withheld — the site is public, so nobody is told',
-                   ev: 'GET /.well-known/servette → 404' };
-        if (r.status !== 200)
-          return { ok: null, obs: 'not answered (an older Servette, or not signed in)',
-                   ev: 'GET /.well-known/servette → ' + r.status };
-        const v = await r.json();
-        return { ok: true, obs: 'running v' + v.running + ', readable only once signed in',
-                 ev: 'GET /.well-known/servette → 200' }; } },
   ];
 
   // ── Rendering the report ──────────────────────────────────────────

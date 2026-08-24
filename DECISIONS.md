@@ -6,6 +6,39 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A fault is said once, on the row that fixes it
+
+**Ruled (Human):** one certificate problem was wearing three warnings —
+the head pill, a Status row counting them, and the certificate row
+itself — while a login problem wore one, at the far end of the card from
+the field that fixes it. The Status row is gone. A fault appears on the
+row that carries its fix, and on the head pill, which stays because it is
+the only thing a folded card shows and the only thing visible when
+scanning a list.
+**And a refusal moves to the control that refused.** The card's single
+error element is re-anchored beside whichever button produced it, rather
+than living at the foot of a very long card below Test connection.
+**What can actually raise the count, asked and answered honestly:** with
+the page as the only surface, essentially nothing but the certificate. A
+missing serve folder can, and a half-built pull channel can, but the
+channel is terminal-only and the half-authenticated state the access row
+would report is one the page's own guard prevents reaching. The count was
+summarising a set of size one. *(2026-08-24)*
+
+## The connection test does not report the version
+
+**Ruled (Human):** the Version row is dropped. `/.well-known/servette`
+stays — it is a published path and something outside Servette may use
+it — but nothing in the product asks for it any more.
+**Why:** on a public site the endpoint answers 404 by design, so the row
+could only ever say "withheld", and every run of the test cost a miss in
+the log for a sentence about Servette rather than about the connection.
+The operator reads the version from `status` and from the Server tab.
+**Worth recording, because it changes what the 404 buys:** the connection
+test itself answers 200 to anyone, so Servette's presence is already
+public. Withholding the version hides the version number, not the server.
+*(2026-08-24)*
+
 ## A card folds, and destructive buttons look destructive
 
 **Ruled (Human):** the trash button carries a border and the destructive
@@ -29,15 +62,17 @@ changes — moving the access switch, or typing into the field it asked
 for. It used to sit in red through every subsequent flip, describing a
 form that no longer existed.
 **Not a fault, and not counted as one:** a refused save changes nothing,
-so the site gains no defect, and the pill and the review count are right
-to stay where they are. What was wrong was the message outliving its
-cause, not the count. *(2026-08-24)*
+so the site gains no defect, and the head pill is right to stay where it
+is. What was wrong was the message outliving its cause — and, separately,
+where it appeared, which "A fault is said once" above closes.
+*(2026-08-24)*
 
 ## The card says what the site is, then what you do to it
 
-**Ruled (Human):** Status, Serving, Domain, Certificate and Access sit at
-the top of a site card. Publishing, versions, redirects and the
-connection test follow underneath.
+**Ruled (Human):** what the site is — Serving, Domain, Certificate,
+Access — sits at the top of a site card. Publishing, versions, redirects
+and the connection test follow underneath. (A Status row led that block
+for one round; "A fault is said once" above removed it.)
 **Why:** the identity of the site answers the question a card is opened
 to answer; the actions are what you do once you know it. The publish
 strip led the card because publishing was the first thing the card could
@@ -83,9 +118,10 @@ site" and "this works, and something wants doing" — and a first site,
 freshly added and self-signed with no domain yet, would open in red on
 its normal starting state. Crying wolf there costs the colour its meaning
 where it matters.
-**Also:** the Status line names what it counts ("2 to review — needs
-certificate, needs password") rather than leaving a reader to work out
-which rows the number meant. *(2026-08-24)*
+**Superseded in part** by "A fault is said once, on the row that fixes
+it" above: the Status line named what it counted for one round and is
+gone — the severity it carried lives on each row and on the head pill.
+*(2026-08-24)*
 
 ## The 404 page leads with the connection, then the miss
 

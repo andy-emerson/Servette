@@ -2645,16 +2645,29 @@ def _upgrade_available():
 
 
 def _swap_snapshot():
-    """Servette's own swapfile as numbers — what is active and what the
-    sizing recommends — for the page's field. None on a host with no swap
-    to speak of (macOS manages its own)."""
+    """Servette's own swapfile as numbers — what is allocated, what the
+    kernel reports active, and what the sizing recommends. None on a host
+    with no swap to speak of (macOS manages its own).
+
+    The two sizes differ by design and the difference matters. /proc/swaps
+    reports USABLE space, which is the file minus one page of header, so a
+    1100 MB swapfile reads as 1099 MB active. A field showing the active
+    number would invite an operator to type the recommended 1100, save, and
+    watch it come back 1099 — a resize that looks broken while working
+    perfectly. The field shows what was allocated; the status row keeps
+    reporting what is active, which is the honest thing for a status row."""
     if _IS_MACOS:
-        return {"active_mb": None, "recommended_mb": None}
+        return {"allocated_mb": None, "active_mb": None, "recommended_mb": None}
     mem_kb, _avail_kb, committed_kb = _meminfo()
     rec = _swap_recommendation(mem_kb, committed_kb,
                                _cache_headroom_mb(config.cache_size_mb))
     ours_mb, _foreign = _swap_sizes()
-    return {"active_mb": ours_mb,
+    allocated = None
+    try:
+        allocated = os.path.getsize(_SWAP_PATH) // (1024 * 1024)
+    except OSError:
+        pass                      # no swapfile of ours on this host
+    return {"allocated_mb": allocated, "active_mb": ours_mb,
             "recommended_mb": (rec // (1024 * 1024)) if rec else None}
 
 

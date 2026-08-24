@@ -1274,8 +1274,10 @@ _CONNECTION_PAGE = """<!DOCTYPE html>
      never could: it checks the connection it was itself loaded over. It
      never enumerates the filesystem — no "did you mean" suggestions —
      because that would turn a public page into a file-discovery oracle for
-     strangers. The version-discovery row needs the operator's session (the
-     endpoint is auth-gated) and shows for a logged-in reader only. Because
+     strangers. It does not report the server's version: on a public site
+     that endpoint answers 404 by design, so the row could only ever say
+     "withheld" while costing a miss in the log on every run, and the
+     operator reads the version from `status` or the admin page. Because
      this file ships with the server, its checks can never drift from the
      features they check — and because its path is reserved, an operator's
      own content never takes it over, so the outside vantage survives a
@@ -1671,22 +1673,6 @@ _CONNECTION_PAGE = """<!DOCTYPE html>
                  ev: 'POST → ' + post + ' · unknown → ' + miss +
                      ' · traversal → ' + trav }; } },
 
-    // Version discovery — same-origin, auth-gated: the one check only this
-    // page can make. Servette serves it solely on a private site, so the
-    // exact version reaches a party that already signed in (this browser)
-    // and never an anonymous scanner. A public site withholding it is the
-    // design working, which is a pass, not a skip.
-    { name: 'Version', run: async () => {
-        const r = await fetch('/.well-known/servette', { cache: 'no-store' });
-        if (r.status === 404)
-          return { ok: true, obs: 'withheld — the site is public, so nobody is told',
-                   ev: 'GET /.well-known/servette → 404' };
-        if (r.status !== 200)
-          return { ok: null, obs: 'not answered (an older Servette, or not signed in)',
-                   ev: 'GET /.well-known/servette → ' + r.status };
-        const v = await r.json();
-        return { ok: true, obs: 'running v' + v.running + ', readable only once signed in',
-                 ev: 'GET /.well-known/servette → 200' }; } },
   ];
 
   // ── Rendering the report ──────────────────────────────────────────
@@ -7070,7 +7056,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          // comes down can go back up.
          `<button class="action tiny dl" type="button" ` +
          `title="Download the live content as a tar.gz">Download</button>` +
-         `<button class="action tiny ver-refresh" type="button">Refresh</button>` +
+         `<button class="action tiny ver-refresh" type="button" ` +
+         `title="Re-read this list. The page updates it after a publish or ` +
+         `restore of its own — this is for one done in the terminal.">` +
+         `Refresh</button>` +
          `</span></span></div>` +
          `<div class="rows versions"></div>` +
 
@@ -7131,8 +7120,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           `<button class="action tiny fold" type="button" ` +
             `title="Collapse this card"><svg viewBox="0 0 16 16" width="12" ` +
             `height="12" fill="none" stroke="currentColor" stroke-width="1.6" ` +
-            `stroke-linecap="round"><path class="fold-a" d="M4 3l4 4 4-4"></path>` +
-            `<path class="fold-b" d="M4 13l4-4 4 4"></path></svg></button>` +
+            `stroke-linecap="round"><path class="fold-a" d="M4 2l4 2.5 4-2.5"></path>` +
+            `<path class="fold-b" d="M4 14l4-2.5 4 2.5"></path></svg></button>` +
           // Removing a site is destructive, so it wears the destructive
           // colour all the time rather than only under the pointer — the
           // same rule the stop button follows.
@@ -7152,6 +7141,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     q('.card-head').insertAdjacentHTML('beforeend', confirmHtml);
 
     const badge = q('.badge.state'), errEl = q('.error');
+    // One error element, moved to whichever control refused. A message
+    // about the login field is no use at the foot of the card, below Test
+    // connection — the reason to fix something and the thing that fixes it
+    // belong within a glance of each other.
+    const errAt = (anchor, msg) => {
+      if (anchor) anchor.insertAdjacentElement('afterend', errEl);
+      showError(errEl, msg);
+    };
     let files = null, folderName = '';
     const mark = (cls, text) => setBadge(badge, cls, text);
 
@@ -7197,8 +7194,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const shut = folded.has(key);
       card.classList.toggle('folded', shut);
       q('.fold').title = shut ? 'Expand this card' : 'Collapse this card';
-      q('.fold-a').setAttribute('d', shut ? 'M4 6l4-4 4 4' : 'M4 3l4 4 4-4');
-      q('.fold-b').setAttribute('d', shut ? 'M4 10l4 4 4-4' : 'M4 13l4-4 4 4');
+      // Shallow chevrons at the edges, with a clear gap between them.
+      // Drawn tall and meeting in the middle they read as an X, which sits
+      // beside a delete button and means the wrong thing entirely.
+      q('.fold-a').setAttribute('d', shut ? 'M4 5l4-2.5 4 2.5' : 'M4 2l4 2.5 4-2.5');
+      q('.fold-b').setAttribute('d', shut ? 'M4 11l4 2.5 4-2.5' : 'M4 14l4-2.5 4 2.5');
     };
     q('.fold').addEventListener('click', () => {
       if (folded.has(key)) folded.delete(key); else folded.add(key);
@@ -7492,13 +7492,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const to   = q('.redir-to').value.trim();
       clearError(errEl);
       if (!from || !to)
-        return showError(errEl, 'Both the path and where it sends visitors are needed.');
+        return errAt(q('.redir-form'),
+                     'Both the path and where it sends visitors are needed.');
       // The pair travels as one value, so the comma is the separator on both
       // surfaces — which leaves it out of reach as a character in the old
       // path. Rare, and said plainly rather than mangled quietly.
       if (from.includes(','))
-        return showError(errEl, 'A path containing a comma has to be set by ' +
-                                'editing servette.toml — the comma separates the pair here.');
+        return errAt(q('.redir-form'), 'A path containing a comma has to be set by ' +
+                     'editing servette.toml — the comma separates the pair here.');
       saveSettings({ redirect: from + ',' + to }, siteIndex(), badge, errEl);
     });
 
@@ -7519,14 +7520,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const on = authOn();
       const pending = authDesired !== null && authDesired !== !!siteData.username;
       info.innerHTML =
-        // The count names what it counts, so a reader can check it against
-        // the rows below rather than wonder which ones it meant.
-        row('Status', siteNeeds.length
-          ? `<span class="${siteNeeds.some((c) => c.blocking) ? 'fault' : 'warn'}">` +
-            `${siteNeeds.length} to review — ` +
-            `${escapeHtml(siteNeeds.map((c) => NEEDS_WORD[c.key] || c.key)
-                 .join(', ').toLowerCase())}</span>`
-          : '<span class="ok">✓</span> healthy') +
+        // No Status row. A fault is said ONCE, on the row that carries its
+        // fix — the certificate row for a certificate, the access row for a
+        // login. A count above them repeated what those rows already say in
+        // colour, and left the head pill saying it a third time: one
+        // certificate problem read as three problems. The pill stays,
+        // because it is the only thing a folded card shows and the only
+        // thing visible when scanning a list of them.
         // The site itself, one click away and in its own tab: the fastest
         // answer to "did that publish land" is looking at it.
         row('Serving', siteData.domain
@@ -7613,7 +7613,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     q('.dom').addEventListener('click', async () => {
       const domain = q('.dom-input').value.trim().toLowerCase();
       clearError(errEl);
-      if (!domain) return showError(errEl, 'Type the domain first.');
+      if (!domain) return errAt(q('.dom-input').closest('.switch-row'),
+                                'Type the domain first.');
       await siteOp({ op: 'name', site: cardIndex(card), domain }, errEl);
     });
 
@@ -7635,9 +7636,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const username = q('#cfg-username-' + idx).value.trim();
       const pw = q('#cfg-password-' + idx).value;
       if (!username)
-        return showError(errEl, 'A username is needed — or make the site public.');
+        return errAt(q('.auth-save'), 'A username is needed — or make the site public.');
       if (!siteData.has_password && !pw)
-        return showError(errEl, 'A password is needed the first time a site turns private.');
+        return errAt(q('.auth-save'),
+                     'A password is needed the first time a site turns private.');
       saveSettings(Object.assign({ username }, pw ? { password: pw } : {}),
                    cardIndex(card), badge, errEl);
     });
@@ -7715,9 +7717,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // Swap is a size the operator types — the terminal has always asked for
     // it that way — so it is a field among fields, saved by the same button.
     const sw = (statusData || {}).swap || {};
-    const swapField = (sw.active_mb == null && sw.recommended_mb == null) ? '' :
+    // Allocated, not active: the kernel reports usable space, a page short
+    // of the file, so a field showing 1099 for an 1100 MB file would make
+    // typing the recommended number look like a resize that did not take.
+    const swapField = (sw.allocated_mb == null && sw.recommended_mb == null) ? '' :
       field('swap_mb', 'Swap file (MB)',
-            sw.active_mb != null ? sw.active_mb : '',
+            sw.allocated_mb != null ? sw.allocated_mb : '',
             { hint: 'Disk that absorbs a memory spike, so a burst past free RAM ' +
                     'cannot take the host down.' +
                     (sw.recommended_mb
@@ -7787,8 +7792,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // untouched field must never swapoff anything.
     const swapEl = $('cfg-swap_mb');
     const want = swapEl ? parseInt(swapEl.value.trim(), 10) : NaN;
-    const active = ((statusData || {}).swap || {}).active_mb;
-    const resize = swapEl && want > 0 && want !== active;
+    const allocated = ((statusData || {}).swap || {}).allocated_mb;
+    const resize = swapEl && want > 0 && want !== allocated;
     if (swapEl && swapEl.value.trim() && !(want > 0))
       return showError(errEl, 'Swap file size must be a number of megabytes.');
 
@@ -8845,16 +8850,29 @@ def _upgrade_available():
 
 
 def _swap_snapshot():
-    """Servette's own swapfile as numbers — what is active and what the
-    sizing recommends — for the page's field. None on a host with no swap
-    to speak of (macOS manages its own)."""
+    """Servette's own swapfile as numbers — what is allocated, what the
+    kernel reports active, and what the sizing recommends. None on a host
+    with no swap to speak of (macOS manages its own).
+
+    The two sizes differ by design and the difference matters. /proc/swaps
+    reports USABLE space, which is the file minus one page of header, so a
+    1100 MB swapfile reads as 1099 MB active. A field showing the active
+    number would invite an operator to type the recommended 1100, save, and
+    watch it come back 1099 — a resize that looks broken while working
+    perfectly. The field shows what was allocated; the status row keeps
+    reporting what is active, which is the honest thing for a status row."""
     if _IS_MACOS:
-        return {"active_mb": None, "recommended_mb": None}
+        return {"allocated_mb": None, "active_mb": None, "recommended_mb": None}
     mem_kb, _avail_kb, committed_kb = _meminfo()
     rec = _swap_recommendation(mem_kb, committed_kb,
                                _cache_headroom_mb(config.cache_size_mb))
     ours_mb, _foreign = _swap_sizes()
-    return {"active_mb": ours_mb,
+    allocated = None
+    try:
+        allocated = os.path.getsize(_SWAP_PATH) // (1024 * 1024)
+    except OSError:
+        pass                      # no swapfile of ours on this host
+    return {"allocated_mb": allocated, "active_mb": ours_mb,
             "recommended_mb": (rec // (1024 * 1024)) if rec else None}
 
 

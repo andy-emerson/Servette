@@ -1131,8 +1131,6 @@ def run_dispatch_tests(s):
           ".fault {" in s._UI_ADMIN_PAGE and ".pending {" in s._UI_ADMIN_PAGE
           and "class=\"pending\"" in s._UI_ADMIN_PAGE
           and "not saved yet" in s._UI_ADMIN_PAGE)
-    check("...and the review count names what it counts",
-          "} to review — ` +" in s._UI_ADMIN_PAGE)
     check("...and the running dot is styled where it actually sits",
           ".rows .dot {" not in s._UI_ADMIN_PAGE
           and "\n    .dot {" in s._UI_ADMIN_PAGE)
@@ -1451,8 +1449,16 @@ def run_dispatch_tests(s):
 
         # The swap size the terminal has always asked for, asked for here —
         # the same core underneath, guarded before it can reach the disk.
-        check("The status snapshot carries the swap figures",
-              set(s._status_data()["swap"]) == {"active_mb", "recommended_mb"})
+        # Allocated and active are different numbers on purpose: /proc/swaps
+        # reports usable space, a page short of the file, so a field showing
+        # the active number would make typing the recommended size look like
+        # a resize that silently did not take.
+        check("The status snapshot carries the swap figures, allocated apart from active",
+              set(s._status_data()["swap"])
+              == {"allocated_mb", "active_mb", "recommended_mb"})
+        check("...and the page's field reads the allocated one",
+              "sw.allocated_mb != null ? sw.allocated_mb" in s._UI_ADMIN_PAGE
+              and "sw.active_mb" not in s._UI_ADMIN_PAGE)
         st, _ = ui_req("POST", "/swap", body=b'{"mb": 512}')
         check("The swap endpoint is code-gated like every other", st == 403)
         st, body = ui_req("POST", f"/swap?t={ui_code}", body=b'{"mb": "big"}')
@@ -6152,6 +6158,47 @@ def run_browser_tests(s, tmpdir):
             page.wait_for_timeout(300)
             check("...unfolding brings it back",
                   page.locator(".site-card .card-body").first.is_visible())
+
+            # A fault is said once, on the row that carries its fix, plus
+            # the head pill a folded card still shows. Counting them a third
+            # time above the rows made one certificate read as three
+            # problems. This needs a site that HAS a fault: asserting the
+            # absence of a count on a healthy card proves nothing, which is
+            # exactly how the first version of this check passed.
+            saved_cert = s.config.sites[0].cert_file
+            try:
+                s.config.sites[0].cert_file = ""      # nothing trusted to present
+                page.click("#tab-server")
+                page.wait_for_timeout(400)
+                page.click("#tab-sites")
+                page.wait_for_timeout(900)
+                info = page.locator(".info").first.inner_text()
+                check("...a faulted card wears the fault, and wears it once",
+                      page.locator(".badge.needs").count() == 1
+                      and "to review" not in info
+                      and "Status" not in info
+                      # The fault is on the row that carries its fix, in
+                      # colour, and nowhere else on the card.
+                      and page.locator(".cert-state .warn, .cert-state .fault"
+                                       ).count() == 1
+                      and page.locator(".info .warn, .info .fault").count() == 0)
+            finally:
+                s.config.sites[0].cert_file = saved_cert
+                page.click("#tab-sites")
+                page.wait_for_timeout(800)
+
+            # A refusal belongs beside the control that produced it, not at
+            # the far end of a very long card.
+            page.locator(".auth-switch").first.check()   # Save appears with it
+            page.wait_for_timeout(300)
+            _save = page.locator("button.save-site").first.bounding_box()
+            page.locator("button.save-site").first.click()
+            page.wait_for_timeout(400)
+            _err = page.locator(".site-card .error").first.bounding_box()
+            check("...and a refusal lands next to the button that refused",
+                  _err is not None and abs(_err["y"] - _save["y"]) < 200)
+            page.locator(".auth-switch").first.uncheck()
+            page.wait_for_timeout(300)
 
             # A refusal describes the form as it stood; change the form and
             # it must go, rather than sitting in red through every flip.

@@ -25,7 +25,7 @@ The tools closest in spirit are small and focused, like Servette. Here is how a 
 | **Built for** | static sites | dynamic web apps | static sites | static sites |
 | Automatic trusted HTTPS | ✓ | ✗ | ✓ | ✗ |
 | Hardened for production | ✓ | ✗ | ✗ | ~ |
-| Readable source | ~6,000 lines | ~4,600 lines | binary | binary |
+| Readable source | ~6,500 lines | ~4,600 lines | binary | binary |
 | Actively maintained | ✓ | ✓ | ✗ | ✓ |
 | Runs on a Raspberry Pi out of the box | ✓ | ✓ | ✗ | ✗ |
 
@@ -35,7 +35,7 @@ All of these are excellent at what they are built for. None of them do what Serv
 
 ## Who is Servette for?
 
-**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~6,000 lines of Python, no hidden machinery), sized and structured so that one person can fully understand all of it — a weekend's honest work, not an afternoon's skim, and not a career.
+**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~6,500 lines of Python, no hidden machinery), sized and structured so that one person can fully understand all of it — a weekend's honest work, not an afternoon's skim, and not a career.
 
 **People with a real site that needs a real server.** Development servers (like `http.server`) are perfect while you build, but they are not meant to face the internet (no trusted HTTPS, no auth, gone when you close the terminal). Servette is built to stay up: a trusted certificate that renews itself, and a hardened service that survives reboots.
 
@@ -57,7 +57,10 @@ All of these are excellent at what they are built for. None of them do what Serv
 | Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 | Automatic recovery | A dead server process is restarted by systemd within seconds; a watchdog timer recovers a dropped network route |
-| A browser admin page | `servette admin` serves an admin page to your browser over your own SSH tunnel — one card per site (publish, domain, certificate, access), the server's own status and settings, and traffic statistics read from its log. It never exists on the public internet, and your SSH key is the login |
+| A browser admin page | `servette admin` serves an admin page to your browser over your own SSH tunnel — one card per site (publish, preview, download, domain, certificate, access, redirects), the server's own status and settings, and traffic statistics read from its log. It never exists on the public internet, and your SSH key is the login |
+| Publishing keeps a history | Every publish keeps the content it replaced. The five most recent are held, and any of them goes live again in one click — or one `restore-site` — with the same atomic swap a publish uses, so a rollback has no window either |
+| Preview before you publish | Look at the folder you chose, served over your own tunnel and not published: links and stylesheets resolve, so you see what landed before anyone else does |
+| Redirects | Point an old path at a new one, per site, from either surface. Held as a setting rather than a file in your content, so serving one costs a request nothing but a table lookup |
 | A connection test built in | Every site serves a live check page at `/.well-known/servette-check`: the encryption, the security headers, and whether your site root is published at all, reported from a real browser's vantage. The default 404 page links it — and your own `404.html` can take the error page over without ever losing the check |
 
 **Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette), and that is by design, not a limitation to work around; see [Scope & non-goals](DESIGN.md#scope--non-goals) for what is out of scope and why.

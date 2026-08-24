@@ -6,6 +6,69 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## Publishing keeps a ring of versions, not a single-shot backup
+
+**Ruled (Human):** publishing keeps the content it replaced, five deep
+including the live one, and any of them goes live again from either
+surface. The single `.bak` it replaces held exactly one, and a second
+publish dropped it — so publishing twice on a bad day lost the good
+version for good.
+**Why not git**, which is what versioning is usually for: a `git checkout`
+mutates a working tree file by file, and the property Servette is
+proudest of is that a swap is one `os.replace` on a symlink with no
+window a visitor can land in. Keeping that would leave git providing only
+*storage* — a dependency to replace a directory rename, on content
+(images, fonts, video) that git stores as full blobs with no delta
+benefit and no bound on growth. It also does not preserve ownership, so
+`_chown_operator` still runs; and a `.git` under a served folder is a
+whole source history one hidden-path rule away from the internet.
+**Rejected:** dulwich or any embedded git (above); a retention count as a
+setting for now — five is a constant, and a setting is a decision of its
+own if disk pressure makes it one. **Reopen if:** operators ask for
+diffs between deploys, which is the one thing git would genuinely add —
+though a diff of two file listings (name, size, hash) gets most of it
+without the dependency. Git as an *input* (deploy on push) is a different
+feature and remains open. *(2026-08-24)*
+
+## Redirects are a setting, not a file in the site
+
+**Ruled (Human):** an old path goes somewhere new, held per site in
+config, validated at load, and served as a dict lookup before the
+filesystem is touched. Editable from both surfaces; the terminal spells a
+pair `set 0 redirect=/old,/new` and removes with nothing after the comma.
+**Why:** the `_redirects`-file convention Netlify and Cloudflare use puts
+the table in the site folder, where it is *content* — and content is read
+at request time, which the request-time invariant forbids. This will come
+up on every migration from those platforms, so the reason is recorded
+rather than re-argued.
+**Rejected:** the `_redirects` file (above); wildcards and splats for now
+(exact paths first, which is where these systems stay simple).
+**Open, for the Human:** the status is **301**, permanent — what the
+feature is for, and what browsers cache hard, so a wrong one outlives
+fixing it. 302 while people learn is a one-word change if wanted.
+*(2026-08-24)*
+
+## A preview is content over the tunnel, not a deployment
+
+**Ruled (Human):** Preview stages the chosen folder where only the admin
+page can see it and shows it in a frame — did the CSS land, is the image
+there, did the folder nest a level too deep. It is not HTTPS, not the
+real domain, not the site's headers, and the page says so beside it.
+**Why this shape:** real per-branch preview URLs need a wildcard
+certificate and a DNS-01 challenge — a large new surface on a security
+tool for a smaller benefit. Staging server-side rather than rendering the
+browser's own copy is what makes relative links resolve, which is most of
+what a preview is for.
+**Three boundaries, all load-bearing:** the preview carries its own token,
+never the run's passcode, because a previewed page can read its own URL
+and a script in the operator's draft must not learn the credential that
+publishes; that token sits in the URL *path*, because a draft's relative
+links drop a query string (found in a browser — the page loaded and every
+stylesheet was refused); and the frame withholds `allow-same-origin`, so
+the draft has an opaque origin and cannot reach the page that staged it.
+A preview belongs to one `admin` run and is cleared when it exits.
+*(2026-08-24)*
+
 ## The footer says where more is written down
 
 **Ruled (Human):** the admin page's footer ends with "More information is

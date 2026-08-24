@@ -3236,12 +3236,22 @@ def run_dispatch_tests(s):
               len(s._version_dirs(link)) == s._KEEP_VERSIONS)
         check("...dropping the oldest, keeping the newest",
               _marker(s._version_dirs(link)[0][0]) == f"v{3 + s._KEEP_VERSIONS}")
-        s._restore_site(s.config.sites[0], s._site_versions(s.config.sites[0])[-1]["name"])
-        oldest_live = os.path.realpath(link)
-        _publish(swap_root, "newer", "vN", link)
-        check("A restored old version is never pruned while it is live",
-              os.path.isdir(oldest_live)
-              or os.path.realpath(link) == oldest_live)
+        # The guarantee: a version that is LIVE is never pruned, however old
+        # it is — an operator serving a year-old version is serving it, and
+        # content being served is not garbage. Restore to the oldest, then
+        # prune to a depth that would otherwise sweep it away.
+        oldest = s._site_versions(s.config.sites[0])[-1]["name"]
+        s._restore_site(s.config.sites[0], oldest)
+        live_path, live_text = os.path.realpath(link), _marker(link)
+        s._prune_versions(link, keep=1)
+        kept = [os.path.realpath(p) for p, _ in s._version_dirs(link)]
+        check("A live version is never pruned, however old it is",
+              live_path in kept and os.path.isdir(live_path)
+              and _marker(link) == live_text)
+        # Two survive a keep=1 prune, and only two: the newest, which the
+        # depth keeps, and the live one, which the rule keeps.
+        check("...while everything past the depth beside it is gone",
+              len(kept) == 2)
 
         # A missing new tree must fail loudly BEFORE anything moves: the old
         # design raised on its second rename; a symlink flip would happily

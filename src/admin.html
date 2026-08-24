@@ -30,6 +30,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='13' fill='%230e0e0e' stroke='%235A8466' stroke-width='4'/><text x='14' y='45' font-family='ui-monospace,Menlo,monospace' font-size='36' font-weight='600' fill='%235A8466'>S</text><rect x='35' y='39' width='16' height='6' rx='1.5' fill='%235A8466'/></svg>">
   <title>Servette — Admin</title>
   <style>
     /* ═══════════════════════════════════════════════════════════════════
@@ -397,6 +398,9 @@
       color: var(--text);
     }
     .switch-act { display: flex; align-items: center; gap: 0.5rem; }
+    /* A value that needs two lines gets them, and the row keeps centring
+       its label and buttons against the pair. */
+    .ver-state span { display: block; }
     .switch-act label { color: var(--muted); cursor: pointer; }
 
     /* The public/private switch — a literal toggle: the knob's position
@@ -799,8 +803,15 @@
     : n < 1024 * 1024 ? (n / 1024).toFixed(1) + ' KB'
     : (n / (1024 * 1024)).toFixed(1) + ' MB';
 
-  const when = (epoch) => new Date(epoch * 1000).toLocaleString(undefined,
-    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  // dd Mmm yy, then the time. Day-first and a two-digit year keep every
+  // stamp the same width, so a column of them lines up.
+  const when = (epoch) => {
+    const d = new Date(epoch * 1000);
+    return String(d.getDate()).padStart(2, '0') + ' ' +
+           d.toLocaleString(undefined, { month: 'short' }) + ' ' +
+           String(d.getFullYear()).slice(-2) + ', ' +
+           d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit' });
+  };
 
   /* ── Badges and error lines: the two ways this page reports on itself. ── */
 
@@ -1301,8 +1312,8 @@
           `<button class="action tiny fold" type="button" ` +
             `title="Collapse this card"><svg viewBox="0 0 16 16" width="12" ` +
             `height="12" fill="none" stroke="currentColor" stroke-width="1.6" ` +
-            `stroke-linecap="round"><path class="fold-a" d="M4 2l4 2.5 4-2.5"></path>` +
-            `<path class="fold-b" d="M4 14l4-2.5 4 2.5"></path></svg></button>` +
+            `stroke-linecap="round"><path class="fold-a" d="M4 2.5l4 3.5 4-3.5"></path>` +
+            `<path class="fold-b" d="M4 13.5l4-3.5 4 3.5"></path></svg></button>` +
           // Removing a site is destructive, so it wears the destructive
           // colour all the time rather than only under the pointer — the
           // same rule the stop button follows.
@@ -1378,8 +1389,11 @@
       // Shallow chevrons at the edges, with a clear gap between them.
       // Drawn tall and meeting in the middle they read as an X, which sits
       // beside a delete button and means the wrong thing entirely.
-      q('.fold-a').setAttribute('d', shut ? 'M4 5l4-2.5 4 2.5' : 'M4 2l4 2.5 4-2.5');
-      q('.fold-b').setAttribute('d', shut ? 'M4 11l4 2.5 4-2.5' : 'M4 14l4-2.5 4 2.5');
+      // A caret needs its angle: rise about equal to half its width. The
+      // gap between the two is what stops them reading as an X, so the
+      // pair sit at the edges — apexes 4px apart in a 16px box.
+      q('.fold-a').setAttribute('d', shut ? 'M4 6l4-3.5 4 3.5' : 'M4 2.5l4 3.5 4-3.5');
+      q('.fold-b').setAttribute('d', shut ? 'M4 10l4 3.5 4-3.5' : 'M4 13.5l4-3.5 4 3.5');
     };
     q('.fold').addEventListener('click', () => {
       if (folded.has(key)) folded.delete(key); else folded.add(key);
@@ -1597,9 +1611,13 @@
           // The live version's own size is the answer to "did the right
           // folder land" — a file count off by an order of magnitude is
           // the wrong folder, however right the site looks.
-          state.textContent = live
-            ? live.files + ' file' + (live.files === 1 ? '' : 's') + ', ' +
-              fmtSize(live.bytes) + ' — ' + when(live.published)
+          // Two lines: what is there, then when it landed. One line ran to
+          // the buttons and wrapped mid-date; the switch-row still centres
+          // the label and the buttons against the pair.
+          state.innerHTML = live
+            ? `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
+              `${fmtSize(live.bytes)}</span>` +
+              `<span>${escapeHtml(when(live.published))}</span>`
             : 'nothing published yet';
           // Nothing published is nothing to download, and offering it
           // anyway made the card contradict itself in two adjacent words.

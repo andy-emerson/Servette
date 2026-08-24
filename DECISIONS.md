@@ -6,6 +6,15 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## Command output is indented, without exception
+
+**Ruled (Human):** a bug, not a style choice. Every line the shell prints
+carries the same two-space indent; 38 lines across `enable`, `disable`,
+`start`, `stop`, `log` and the certificate warnings did not, so one
+command's output read as two programs talking.
+**Left alone:** `status`'s own headline, which is a display with its own
+layout rather than a line of command output. *(2026-08-24)*
+
 ## A count, and one mark per problem where its fix is
 
 **Ruled (Human):** two things, and only two.

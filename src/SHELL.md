@@ -849,17 +849,17 @@ def cmd_start():
                 log.info("Service started")
                 cmd_status()
             except PermissionError:
-                print("Error: start needs root, and sudo is unavailable — re-run as root.")
+                print("  Error: start needs root, and sudo is unavailable — re-run as root.")
             except FileNotFoundError:
-                print("Error: start requires a Linux server with systemd.")
+                print("  Error: start requires a Linux server with systemd.")
             except subprocess.CalledProcessError as e:
-                print(f"Error starting service: {e}")
+                print(f"  Error starting service: {e}")
     else:
         start_server()
         if _server_running():
-            print("Running in session only — server will stop when you quit.")
+            print("  Running in session only — server will stop when you quit.")
             if _IS_MACOS:
-                print("Service install is Linux-only; keep this session alive (tmux/screen) to stay up.")
+                print("  Service install is Linux-only; keep this session alive (tmux/screen) to stay up.")
             elif _prompt("Install as a permanent service?"):
                 cmd_enable()
 
@@ -876,15 +876,15 @@ def cmd_stop():
     if _service_is_active():
         try:
             subprocess.run(["systemctl", "stop", "servette"], check=True, capture_output=True)
-            print("Service stopped.")
+            print("  Service stopped.")
             log.info("Service stopped")
             stopped = True
         except PermissionError:
-            print("Error: stop needs root, and sudo is unavailable — re-run as root.")
+            print("  Error: stop needs root, and sudo is unavailable — re-run as root.")
         except FileNotFoundError:
-            print("Error: stop requires a Linux server with systemd.")
+            print("  Error: stop requires a Linux server with systemd.")
         except subprocess.CalledProcessError as e:
-            print(f"Error stopping service: {e}")
+            print(f"  Error stopping service: {e}")
 
     if _server_running():
         stop_server()
@@ -910,9 +910,9 @@ def cmd_log(n=20):
         print(output, end="")
     except FileNotFoundError:
         if _IS_MACOS:
-            print("No journal on macOS — in session mode the log is this terminal's own output.")
+            print("  No journal on macOS — in session mode the log is this terminal's own output.")
         else:
-            print("journalctl not found. Is this a systemd system?")
+            print("  journalctl not found. Is this a systemd system?")
 
 
 ```
@@ -3242,7 +3242,7 @@ def run_command(cmd, args):
         try:
             cmd_log(int(args[0]) if args else 20)
         except ValueError:
-            print("Usage: log [number]")
+            print("  Usage: log [number]")
     elif cmd == "traffic":
         cmd_traffic()
     elif cmd == "admin":
@@ -3291,10 +3291,10 @@ def shell():
             print(HELP)
         elif cmd in ("quit", "exit"):
             stop_server()
-            print("Goodbye.")
+            print("  Goodbye.")
             break
         elif not run_command(cmd, args):
-            print(f"Unknown command: {cmd}. Type 'help' for a list of commands.")
+            print(f"  Unknown command: {cmd}. Type 'help' for a list of commands.")
 
 
 ```

@@ -118,19 +118,19 @@ def start_server():
         _https_server, _https_thread, _http_server
 
     if _server_running():
-        print("Server is already running.")
+        print("  Server is already running.")
         return
 
     for site in config.sites:
         for fname in [site.serve_dir, site.cert_file, site.key_file]:
             if not fname:
-                print("Not fully configured. Run 'config' to set up the server.")
+                print("  Not fully configured. Run 'config' to set up the server.")
                 if "--serve" in sys.argv:
                     sys.exit(1)
                 return
             full_path = _resolve(fname)
             if not os.path.exists(full_path):
-                print(f"File not found: {full_path}")
+                print(f"  File not found: {full_path}")
                 if "--serve" in sys.argv:
                     sys.exit(1)
                 return
@@ -140,7 +140,7 @@ def start_server():
         https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_site_ssl_contexts())
     except Exception as e:
         log.error("Server failed to start on port %d: %s", config.port, e)
-        print(f"Server failed to start on port {config.port}: {e}")
+        print(f"  Server failed to start on port {config.port}: {e}")
         if "--serve" in sys.argv:
             sys.exit(1)
         return
@@ -150,7 +150,7 @@ def start_server():
         redirect = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
     except OSError as e:
         log.warning("Could not bind to port 80: %s", e)
-        print("Note: could not bind to port 80. HTTP redirects unavailable.")
+        print("  Note: could not bind to port 80. HTTP redirects unavailable.")
         redirect = None
 
     _https_server = https
@@ -179,12 +179,12 @@ def start_server():
         if days is not None and days < 30:
             label = site.domain or "this site"
             if days <= 0:
-                print(f"Warning: SSL certificate for {label} has expired. Browsers will block visitors.")
-                print("Run 'config' then 'cert' to renew it.\n")
+                print(f"  Warning: SSL certificate for {label} has expired. Browsers will block visitors.")
+                print("  Run 'config' then 'cert' to renew it.\n")
                 log.warning("SSL certificate for %s has expired", label)
             else:
-                print(f"Warning: SSL certificate for {label} expires in {days} days.")
-                print("Run 'config' then 'cert' to renew it.\n")
+                print(f"  Warning: SSL certificate for {label} expires in {days} days.")
+                print("  Run 'config' then 'cert' to renew it.\n")
                 log.warning("SSL certificate for %s expires in %d days", label, days)
 
     for issue in _production_issues():
@@ -223,7 +223,7 @@ def stop_server():
         _sweep_thread.join(timeout=5)
         _sweep_thread = None
     log.info("Server stopped")
-    print("Session server stopped.")
+    print("  Session server stopped.")
 
 
 ```
@@ -648,7 +648,7 @@ def _obtain_trusted_cert(domain, site):
     challenge_dir    = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
 
     print(f"\nGetting a trusted SSL certificate for {domain}...")
-    print("Make sure your domain points to this server's IP first.\n")
+    print("  Make sure your domain points to this server's IP first.\n")
 
     os.makedirs(challenge_dir, exist_ok=True)
     os.makedirs(CERTS_DIR, exist_ok=True)
@@ -2042,7 +2042,7 @@ def _write_unit_files():
             ["useradd", "--system", "--no-create-home", "--shell", "/sbin/nologin", "servette"],
             check=True
         )
-        print("Created system user 'servette'.")
+        print("  Created system user 'servette'.")
 
     # The runtime is settled before the unit texts, which name what it decides —
     # and proved before it replaces anything, so a copy the service could not
@@ -2132,11 +2132,11 @@ def cmd_enable():
         updating = _write_unit_files()
 
         if updating:
-            print("Service file updated.")
+            print("  Service file updated.")
         else:
-            print("Servette enabled as a system service.")
-            print("It will start automatically on boot and survive SSH disconnects.")
-        print("Network watchdog timer enabled (recovers a dropped default route).")
+            print("  Servette enabled as a system service.")
+            print("  It will start automatically on boot and survive SSH disconnects.")
+        print("  Network watchdog timer enabled (recovers a dropped default route).")
         log.info("Enabled as systemd service")
 
         _ensure_swap()
@@ -2147,18 +2147,18 @@ def cmd_enable():
             if _prompt("Server is running in session only. Restart as a service now?"):
                 stop_server()
                 subprocess.run(["systemctl", "start", "servette"], check=True, capture_output=True)
-                print("Server started as a service.")
+                print("  Server started as a service.")
                 log.info("Service started after enable")
                 cmd_status()
 
     except ValueError:
         pass  # the writer already printed the path refusal
     except PermissionError:
-        print("Error: enable needs root, and sudo is unavailable — re-run as root.")
+        print("  Error: enable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
-        print("Error: enable requires a Linux server with systemd.")
+        print("  Error: enable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
-        print(f"Error during enable: {e}")
+        print(f"  Error during enable: {e}")
 
 
 ```
@@ -2188,14 +2188,14 @@ def cmd_disable():
         # second program sitting on the host with nothing running it.
         shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
         subprocess.run(["systemctl", "daemon-reload"], check=True)
-        print("Servette service disabled.")
+        print("  Servette service disabled.")
         log.info("Systemd service disabled")
     except PermissionError:
-        print("Error: disable needs root, and sudo is unavailable — re-run as root.")
+        print("  Error: disable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
-        print("Error: disable requires a Linux server with systemd.")
+        print("  Error: disable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
-        print(f"Error during disable: {e}")
+        print(f"  Error during disable: {e}")
 
 
 ```

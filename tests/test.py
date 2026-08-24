@@ -1131,6 +1131,15 @@ def run_dispatch_tests(s):
           ".fault {" in s._UI_ADMIN_PAGE and ".pending {" in s._UI_ADMIN_PAGE
           and "class=\"pending\"" in s._UI_ADMIN_PAGE
           and "not saved yet" in s._UI_ADMIN_PAGE)
+    # A favicon in the page kills the /favicon.ico request every browser
+    # makes unasked — the one console error every browser run reported.
+    check("...and every page carries the mark, so no browser asks for one",
+          all('rel="icon"' in page and "data:image/svg+xml," in page
+              for page in (s._UI_ADMIN_PAGE, s._NOT_FOUND_PAGE.decode(),
+                           s._CONNECTION_PAGE.decode()))
+          # Inline, because a page that demonstrates a self-hosted server
+          # has no business fetching its own icon from anywhere.
+          and "servette-mark.svg" not in s._UI_ADMIN_PAGE)
     check("...and the running dot is styled where it actually sits",
           ".rows .dot {" not in s._UI_ADMIN_PAGE
           and "\n    .dot {" in s._UI_ADMIN_PAGE)
@@ -6245,6 +6254,22 @@ def run_browser_tests(s, tmpdir):
             page.locator("button.prev").first.click()
             page.wait_for_timeout(2000)
             frame = page.frame_locator(".preview-frame")
+            # Two lines, and the row still centres its label and buttons
+            # against the pair: one line ran into the buttons and wrapped
+            # mid-date.
+            check("...the published line is two lines, centred against them",
+                  page.evaluate("""() => {
+                    const st = document.querySelector('.ver-state');
+                    const rows = st.querySelectorAll('span');
+                    if (rows.length !== 2) return false;
+                    const a = rows[0].getBoundingClientRect();
+                    const b = rows[1].getBoundingClientRect();
+                    const btn = document.querySelector('.switch-act button.dl')
+                                        .getBoundingClientRect();
+                    const mid = (a.top + b.bottom) / 2;
+                    return b.top >= a.bottom - 1 &&
+                           Math.abs((btn.top + btn.bottom) / 2 - mid) < 6;
+                  }"""))
             check("...a preview renders the chosen draft",
                   frame.locator("#d").inner_text() == "DRAFT")
             check("...with its relative stylesheet resolving inside the frame",

@@ -946,6 +946,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='13' fill='%230e0e0e' stroke='%235A8466' stroke-width='4'/><text x='14' y='45' font-family='ui-monospace,Menlo,monospace' font-size='36' font-weight='600' fill='%235A8466'>S</text><rect x='35' y='39' width='16' height='6' rx='1.5' fill='%235A8466'/></svg>">
   <title>404 — not found</title>
   <style>
     /* ── Theme and reset ─────────────────────────────────────────────── */
@@ -1289,6 +1290,7 @@ _CONNECTION_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='13' fill='%230e0e0e' stroke='%235A8466' stroke-width='4'/><text x='14' y='45' font-family='ui-monospace,Menlo,monospace' font-size='36' font-weight='600' fill='%235A8466'>S</text><rect x='35' y='39' width='16' height='6' rx='1.5' fill='%235A8466'/></svg>">
   <title>Connection test</title>
   <style>
     /* ── Theme and reset ─────────────────────────────────────────────── */
@@ -2430,19 +2432,19 @@ def start_server():
         _https_server, _https_thread, _http_server
 
     if _server_running():
-        print("Server is already running.")
+        print("  Server is already running.")
         return
 
     for site in config.sites:
         for fname in [site.serve_dir, site.cert_file, site.key_file]:
             if not fname:
-                print("Not fully configured. Run 'config' to set up the server.")
+                print("  Not fully configured. Run 'config' to set up the server.")
                 if "--serve" in sys.argv:
                     sys.exit(1)
                 return
             full_path = _resolve(fname)
             if not os.path.exists(full_path):
-                print(f"File not found: {full_path}")
+                print(f"  File not found: {full_path}")
                 if "--serve" in sys.argv:
                     sys.exit(1)
                 return
@@ -2452,7 +2454,7 @@ def start_server():
         https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_site_ssl_contexts())
     except Exception as e:
         log.error("Server failed to start on port %d: %s", config.port, e)
-        print(f"Server failed to start on port {config.port}: {e}")
+        print(f"  Server failed to start on port {config.port}: {e}")
         if "--serve" in sys.argv:
             sys.exit(1)
         return
@@ -2462,7 +2464,7 @@ def start_server():
         redirect = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
     except OSError as e:
         log.warning("Could not bind to port 80: %s", e)
-        print("Note: could not bind to port 80. HTTP redirects unavailable.")
+        print("  Note: could not bind to port 80. HTTP redirects unavailable.")
         redirect = None
 
     _https_server = https
@@ -2491,12 +2493,12 @@ def start_server():
         if days is not None and days < 30:
             label = site.domain or "this site"
             if days <= 0:
-                print(f"Warning: SSL certificate for {label} has expired. Browsers will block visitors.")
-                print("Run 'config' then 'cert' to renew it.\n")
+                print(f"  Warning: SSL certificate for {label} has expired. Browsers will block visitors.")
+                print("  Run 'config' then 'cert' to renew it.\n")
                 log.warning("SSL certificate for %s has expired", label)
             else:
-                print(f"Warning: SSL certificate for {label} expires in {days} days.")
-                print("Run 'config' then 'cert' to renew it.\n")
+                print(f"  Warning: SSL certificate for {label} expires in {days} days.")
+                print("  Run 'config' then 'cert' to renew it.\n")
                 log.warning("SSL certificate for %s expires in %d days", label, days)
 
     for issue in _production_issues():
@@ -2530,7 +2532,7 @@ def stop_server():
         _sweep_thread.join(timeout=5)
         _sweep_thread = None
     log.info("Server stopped")
-    print("Session server stopped.")
+    print("  Session server stopped.")
 
 
 # The service watch
@@ -2901,7 +2903,7 @@ def _obtain_trusted_cert(domain, site):
     challenge_dir    = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
 
     print(f"\nGetting a trusted SSL certificate for {domain}...")
-    print("Make sure your domain points to this server's IP first.\n")
+    print("  Make sure your domain points to this server's IP first.\n")
 
     os.makedirs(challenge_dir, exist_ok=True)
     os.makedirs(CERTS_DIR, exist_ok=True)
@@ -4171,7 +4173,7 @@ def _write_unit_files():
             ["useradd", "--system", "--no-create-home", "--shell", "/sbin/nologin", "servette"],
             check=True
         )
-        print("Created system user 'servette'.")
+        print("  Created system user 'servette'.")
 
     # The runtime is settled before the unit texts, which name what it decides —
     # and proved before it replaces anything, so a copy the service could not
@@ -4254,11 +4256,11 @@ def cmd_enable():
         updating = _write_unit_files()
 
         if updating:
-            print("Service file updated.")
+            print("  Service file updated.")
         else:
-            print("Servette enabled as a system service.")
-            print("It will start automatically on boot and survive SSH disconnects.")
-        print("Network watchdog timer enabled (recovers a dropped default route).")
+            print("  Servette enabled as a system service.")
+            print("  It will start automatically on boot and survive SSH disconnects.")
+        print("  Network watchdog timer enabled (recovers a dropped default route).")
         log.info("Enabled as systemd service")
 
         _ensure_swap()
@@ -4269,18 +4271,18 @@ def cmd_enable():
             if _prompt("Server is running in session only. Restart as a service now?"):
                 stop_server()
                 subprocess.run(["systemctl", "start", "servette"], check=True, capture_output=True)
-                print("Server started as a service.")
+                print("  Server started as a service.")
                 log.info("Service started after enable")
                 cmd_status()
 
     except ValueError:
         pass  # the writer already printed the path refusal
     except PermissionError:
-        print("Error: enable needs root, and sudo is unavailable — re-run as root.")
+        print("  Error: enable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
-        print("Error: enable requires a Linux server with systemd.")
+        print("  Error: enable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
-        print(f"Error during enable: {e}")
+        print(f"  Error during enable: {e}")
 
 
 # disable
@@ -4305,14 +4307,14 @@ def cmd_disable():
         # second program sitting on the host with nothing running it.
         shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
         subprocess.run(["systemctl", "daemon-reload"], check=True)
-        print("Servette service disabled.")
+        print("  Servette service disabled.")
         log.info("Systemd service disabled")
     except PermissionError:
-        print("Error: disable needs root, and sudo is unavailable — re-run as root.")
+        print("  Error: disable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
-        print("Error: disable requires a Linux server with systemd.")
+        print("  Error: disable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
-        print(f"Error during disable: {e}")
+        print(f"  Error during disable: {e}")
 
 
 # Menu metrics
@@ -5051,17 +5053,17 @@ def cmd_start():
                 log.info("Service started")
                 cmd_status()
             except PermissionError:
-                print("Error: start needs root, and sudo is unavailable — re-run as root.")
+                print("  Error: start needs root, and sudo is unavailable — re-run as root.")
             except FileNotFoundError:
-                print("Error: start requires a Linux server with systemd.")
+                print("  Error: start requires a Linux server with systemd.")
             except subprocess.CalledProcessError as e:
-                print(f"Error starting service: {e}")
+                print(f"  Error starting service: {e}")
     else:
         start_server()
         if _server_running():
-            print("Running in session only — server will stop when you quit.")
+            print("  Running in session only — server will stop when you quit.")
             if _IS_MACOS:
-                print("Service install is Linux-only; keep this session alive (tmux/screen) to stay up.")
+                print("  Service install is Linux-only; keep this session alive (tmux/screen) to stay up.")
             elif _prompt("Install as a permanent service?"):
                 cmd_enable()
 
@@ -5073,15 +5075,15 @@ def cmd_stop():
     if _service_is_active():
         try:
             subprocess.run(["systemctl", "stop", "servette"], check=True, capture_output=True)
-            print("Service stopped.")
+            print("  Service stopped.")
             log.info("Service stopped")
             stopped = True
         except PermissionError:
-            print("Error: stop needs root, and sudo is unavailable — re-run as root.")
+            print("  Error: stop needs root, and sudo is unavailable — re-run as root.")
         except FileNotFoundError:
-            print("Error: stop requires a Linux server with systemd.")
+            print("  Error: stop requires a Linux server with systemd.")
         except subprocess.CalledProcessError as e:
-            print(f"Error stopping service: {e}")
+            print(f"  Error stopping service: {e}")
 
     if _server_running():
         stop_server()
@@ -5102,9 +5104,9 @@ def cmd_log(n=20):
         print(output, end="")
     except FileNotFoundError:
         if _IS_MACOS:
-            print("No journal on macOS — in session mode the log is this terminal's own output.")
+            print("  No journal on macOS — in session mode the log is this terminal's own output.")
         else:
-            print("journalctl not found. Is this a systemd system?")
+            print("  journalctl not found. Is this a systemd system?")
 
 
 # Traffic
@@ -5854,6 +5856,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='2' y='2' width='60' height='60' rx='13' fill='%230e0e0e' stroke='%235A8466' stroke-width='4'/><text x='14' y='45' font-family='ui-monospace,Menlo,monospace' font-size='36' font-weight='600' fill='%235A8466'>S</text><rect x='35' y='39' width='16' height='6' rx='1.5' fill='%235A8466'/></svg>">
   <title>Servette — Admin</title>
   <style>
     /* ═══════════════════════════════════════════════════════════════════
@@ -6221,6 +6224,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       color: var(--text);
     }
     .switch-act { display: flex; align-items: center; gap: 0.5rem; }
+    /* A value that needs two lines gets them, and the row keeps centring
+       its label and buttons against the pair. */
+    .ver-state span { display: block; }
     .switch-act label { color: var(--muted); cursor: pointer; }
 
     /* The public/private switch — a literal toggle: the knob's position
@@ -6623,8 +6629,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     : n < 1024 * 1024 ? (n / 1024).toFixed(1) + ' KB'
     : (n / (1024 * 1024)).toFixed(1) + ' MB';
 
-  const when = (epoch) => new Date(epoch * 1000).toLocaleString(undefined,
-    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  // dd Mmm yy, then the time. Day-first and a two-digit year keep every
+  // stamp the same width, so a column of them lines up.
+  const when = (epoch) => {
+    const d = new Date(epoch * 1000);
+    return String(d.getDate()).padStart(2, '0') + ' ' +
+           d.toLocaleString(undefined, { month: 'short' }) + ' ' +
+           String(d.getFullYear()).slice(-2) + ', ' +
+           d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit' });
+  };
 
   /* ── Badges and error lines: the two ways this page reports on itself. ── */
 
@@ -7125,8 +7138,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           `<button class="action tiny fold" type="button" ` +
             `title="Collapse this card"><svg viewBox="0 0 16 16" width="12" ` +
             `height="12" fill="none" stroke="currentColor" stroke-width="1.6" ` +
-            `stroke-linecap="round"><path class="fold-a" d="M4 2l4 2.5 4-2.5"></path>` +
-            `<path class="fold-b" d="M4 14l4-2.5 4 2.5"></path></svg></button>` +
+            `stroke-linecap="round"><path class="fold-a" d="M4 2.5l4 3.5 4-3.5"></path>` +
+            `<path class="fold-b" d="M4 13.5l4-3.5 4 3.5"></path></svg></button>` +
           // Removing a site is destructive, so it wears the destructive
           // colour all the time rather than only under the pointer — the
           // same rule the stop button follows.
@@ -7202,8 +7215,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       // Shallow chevrons at the edges, with a clear gap between them.
       // Drawn tall and meeting in the middle they read as an X, which sits
       // beside a delete button and means the wrong thing entirely.
-      q('.fold-a').setAttribute('d', shut ? 'M4 5l4-2.5 4 2.5' : 'M4 2l4 2.5 4-2.5');
-      q('.fold-b').setAttribute('d', shut ? 'M4 11l4 2.5 4-2.5' : 'M4 14l4-2.5 4 2.5');
+      // A caret needs its angle: rise about equal to half its width. The
+      // gap between the two is what stops them reading as an X, so the
+      // pair sit at the edges — apexes 4px apart in a 16px box.
+      q('.fold-a').setAttribute('d', shut ? 'M4 6l4-3.5 4 3.5' : 'M4 2.5l4 3.5 4-3.5');
+      q('.fold-b').setAttribute('d', shut ? 'M4 10l4 3.5 4-3.5' : 'M4 13.5l4-3.5 4 3.5');
     };
     q('.fold').addEventListener('click', () => {
       if (folded.has(key)) folded.delete(key); else folded.add(key);
@@ -7421,9 +7437,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // The live version's own size is the answer to "did the right
           // folder land" — a file count off by an order of magnitude is
           // the wrong folder, however right the site looks.
-          state.textContent = live
-            ? live.files + ' file' + (live.files === 1 ? '' : 's') + ', ' +
-              fmtSize(live.bytes) + ' — ' + when(live.published)
+          // Two lines: what is there, then when it landed. One line ran to
+          // the buttons and wrapped mid-date; the switch-row still centres
+          // the label and the buttons against the pair.
+          state.innerHTML = live
+            ? `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
+              `${fmtSize(live.bytes)}</span>` +
+              `<span>${escapeHtml(when(live.published))}</span>`
             : 'nothing published yet';
           // Nothing published is nothing to download, and offering it
           // anyway made the card contradict itself in two adjacent words.
@@ -9407,7 +9427,7 @@ def run_command(cmd, args):
         try:
             cmd_log(int(args[0]) if args else 20)
         except ValueError:
-            print("Usage: log [number]")
+            print("  Usage: log [number]")
     elif cmd == "traffic":
         cmd_traffic()
     elif cmd == "admin":
@@ -9451,10 +9471,10 @@ def shell():
             print(HELP)
         elif cmd in ("quit", "exit"):
             stop_server()
-            print("Goodbye.")
+            print("  Goodbye.")
             break
         elif not run_command(cmd, args):
-            print(f"Unknown command: {cmd}. Type 'help' for a list of commands.")
+            print(f"  Unknown command: {cmd}. Type 'help' for a list of commands.")
 
 
 # Config is a module-level singleton, instantiated here (not at its class

@@ -58,9 +58,8 @@ _COMMANDS = [
     ("log [n]",          "show the last n log entries"),
     ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
-    ("publish",          "one guided flow for site content: pull, roll back, channel"),
-    ("pull [n]",         "check a site's publish channel and pull new content now"),
-    ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
+    ("publish",          "one guided flow for site content"),
+    ("restore-site [n]", "roll back a site's content to a kept version"),
     ("help",             "show this message"),
     ("quit",             "exit"),
 ]
@@ -68,7 +67,7 @@ HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d i
 
 ```
 
-The config sub-shell's commands, ordered: sites first (list/add/remove/move — the multi-site entry points), then how a site is reached (port/cert/email — email is the ACME registration address, grouped with the certificate it belongs to), then access control, then traffic shaping, then advanced security tuning, then meta. `cert`/`publish`/`username`/`password` take an optional site index (default 0) — the same `[n]` convention as the top-level `log [n]`.
+The config sub-shell's commands, ordered: sites first (list/add/remove/move — the multi-site entry points), then how a site is reached (port/cert/email — email is the ACME registration address, grouped with the certificate it belongs to), then access control, then traffic shaping, then advanced security tuning, then meta. `cert`/`username`/`password` take an optional site index (default 0) — the same `[n]` convention as the top-level `log [n]`.
 
 Absent by ruling: the folder. Where a site's content lives is Servette-assigned, not a question with a wrong answer for the operator to get wrong ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-is-retiring-from-the-vocabulary)). `show` and `sites` still report the path — knowing where the files are is not the same as choosing it.
 
@@ -76,13 +75,12 @@ Absent by ruling: the folder. Where a site's content lives is Servette-assigned,
 # The config commands
 _CONFIG_COMMANDS = [
     ("sites",           "list configured sites"),
-    ("add-site",        "add a new site (domain, password, publish channel)"),
+    ("add-site",        "add a new site (domain and password)"),
     ("remove-site <n>", "remove a site"),
     ("move-site <n> <to>", "reorder sites (the first domainless one answers unmatched Hosts)"),
     ("port",            "HTTPS port"),
     ("cert [n]",        "SSL certificate and key"),
     ("email",           "email address"),
-    ("publish [n]",     "site publish channel (watch URL and signing key)"),
     ("username [n]",    "login username"),
     ("password [n]",    "login password"),
     ("limits",          "rate limits"),
@@ -99,15 +97,13 @@ CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for
 
 ```
 
-The publish sub-shell gathers the content channel's scattered verbs — pull, roll back, and the channel's settings — into one guided place, shaped like `config`: day-to-day verbs first, then settings, then meta.
+The publish sub-shell gathers the content verbs into one guided place, shaped like `config`. With the pull channel removed it holds one verb over the version ring; the browser page is where content lands.
 
 ```python
 # The publish commands
 _PUBLISH_COMMANDS = [
-    ("pull [n]",         "fetch and swap in new content from the site's channel"),
-    ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
-    ("channel [n]",      "view or edit the publish channel (watch URL and key)"),
-    ("show",             "show each site's channel and backup"),
+    ("restore-site [n]", "roll back a site's content to a kept version"),
+    ("show",             "show each site's kept versions"),
     ("back",             "return to main shell"),
 ]
 PUBLISH_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _PUBLISH_COMMANDS)
@@ -174,8 +170,6 @@ def _config_show():
             ("Directory",   val(site.serve_dir)),
             ("Certificate", val(site.cert_file)),
             ("Key",         val(site.key_file)),
-            ("Publish URL", val(site.publish_url)),
-            ("Publish key", val(site.publish_key)),
             ("Username",    val(site.username)),
             ("Password",    "(set)" if site.password_hash else "(not set)"),
         ]
@@ -191,7 +185,7 @@ def _config_sites():
         state = "" if site.active else ", DEACTIVATED (set active=yes to serve)"
         print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}{state}")
     print()
-    print("  Edit one with e.g. 'dir 1', 'cert 1', 'publish 1' (index defaults to 0).")
+    print("  Edit one with e.g. 'cert 1', 'username 1' (index defaults to 0).")
     print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
 
 
@@ -620,40 +614,6 @@ def _config_trusted_proxy():
 
 ```
 
-The publish channel's two halves: the watch URL (https only) and the Ed25519 public key that verifies what it serves.
-
-```python
-# publish
-def _config_publish(site):
-    print(f"\n  Current watch URL: {site.publish_url or '(not set)'}")
-    print("  Where signed content bundles (a .tar.gz plus its .sig) are pulled from —")
-    print("  typically a GitHub release. Leave blank to disable publishing.\n")
-    url = _input("  publish_url: ").strip()
-    if url and not url.startswith("https://"):
-        print("  → must be an https:// URL, unchanged")
-    elif url != site.publish_url:
-        site.publish_url = url
-        config.save()
-        print("  → saved" if url else "  → cleared, publishing disabled")
-    else:
-        print("  → unchanged")
-
-    print(f"\n  Current signing key: {site.publish_key or '(not set)'}")
-    print("  The public half of the content-signing keypair generated by the publish")
-    print("  tool — 64 hex characters (a 32-byte Ed25519 public key). Leave blank to clear.\n")
-    key = _input("  publish_key: ").strip().lower()
-    if key and not re.fullmatch(r"[0-9a-f]{64}", key):
-        print("  → not a 64-character hex string, unchanged")
-    elif key != site.publish_key:
-        site.publish_key = key
-        config.save()
-        print("  → saved" if key else "  → cleared")
-    else:
-        print("  → unchanged")
-
-
-```
-
 TLS floor and optional cipher override; both take effect on the next server start.
 
 ```python
@@ -758,10 +718,6 @@ def cmd_config():
                 _config_password(site)
         elif cmd == "email":
             _config_set("email", "email")
-        elif cmd == "publish":
-            site = _config_site_arg(args)
-            if site is not None:
-                _config_publish(site)
         elif cmd == "limits":
             _config_limits()
         elif cmd == "cache":
@@ -959,12 +915,13 @@ def cmd_traffic():
 
 ## Site content publishing
 
-> The update channel for a site's *content*: a signed tar.gz bundle, pulled
-> from publish_url, verified against publish_key, and swapped into serve_dir
-> with a single-shot .bak — 'restore-site' rolls back to it, and a successful
-> restore consumes it. Pull-only — this box never accepts an inbound push of
-> content, only fetches from a URL it already trusts. (Servette's own code
-> updates travel through the package manager, not through Servette.)
+> The update channel for a site's *content*: a tar.gz bundle the operator
+> uploads over their own SSH tunnel, extracted into a staging tree and made
+> live with one atomic link flip, the tree it replaces kept in the ring for
+> 'restore-site' to flip back to. Nothing arrives from the network unasked —
+> the door is the loopback page, reachable only through the operator's
+> tunnel. (Servette's own code updates travel through the package manager,
+> not through Servette.)
 
 ```python
 # The bundle ceiling
@@ -994,9 +951,9 @@ def _extract_bundle(data, dest_dir):
         # gzip stream decompresses it, so getmembers() paid the FULL
         # decompression cost before the size cap ever ran — the cap bounded
         # what was written, not the CPU a bomb burns. next() lets the walk
-        # abort at the ceiling. (Only a signed bundle gets here at all, so
-        # this bounds a compromised or buggy publisher, not the anonymous
-        # internet.)
+        # abort at the ceiling. (Only a bundle the operator uploaded over
+        # their own tunnel gets here at all, so this bounds a buggy build of
+        # their own site, not the anonymous internet.)
         members = []
         total   = 0
         while (m := tf.next()) is not None:
@@ -1181,14 +1138,14 @@ The lock that serializes every content mutation.
 
 ```python
 _publish_lock = threading.Lock()  # serializes site-content mutation across every
-                                   # site: 'pull' and 'restore-site' can run from
-                                   # two shell sessions at once, and the swap is
-                                   # multiple unguarded filesystem ops, not one.
+                                   # site: a page publish and 'restore-site' can
+                                   # run from two sessions at once, and the swap
+                                   # is several unguarded filesystem ops, not one.
 
 
 ```
 
-The landing every content channel shares — validated extraction into staging, atomic swap, ownership repair, under the publish lock. Pull hands it a bundle fetched and signature-checked from the shelf; the loopback page hands it one the operator uploaded over their SSH tunnel, which carries no signature: the transport already proved the identity (the DECISIONS record "Tunnel uploads are authenticated by SSH").
+Every publish lands here — validated extraction into staging, atomic swap, ownership repair, under the publish lock. The bundle arrives one way: the loopback page hands it over the operator's own SSH tunnel, carrying no signature, because the transport already proved the identity ([tunnel uploads are authenticated by SSH](../DECISIONS.md#tunnel-uploads-are-authenticated-by-ssh-the-pull-channel-is-slated-for-removal)). `source` names the door in the log line.
 
 ```python
 # Landing a bundle
@@ -1226,92 +1183,10 @@ def _land_bundle(site, bundle, source):
 
 ```
 
-The `.sig` companion is appended to the URL's path, not the whole URL, so a query string survives.
+`_restore_site` is the core both surfaces run — the terminal's numbered list and the page's Restore button reach the same flip, so the two cannot disagree about what restoring means.
 
 ```python
-# The .sig companion
-def _publish_sig_url(url):
-    """url's own '.sig' companion, with '.sig' appended to the path rather than
-    the whole URL — naive string concatenation breaks for a publish_url that
-    carries a query string (e.g. a pre-signed download link), landing '.sig'
-    after the query instead of after the file extension."""
-    parts = urlsplit(url)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path + ".sig",
-                       parts.query, parts.fragment))
-
-
-```
-
-The pull pipeline: capped fetch and signature check, then the landing every channel shares — each failure mapped to a status string the command turns into one printed line.
-
-```python
-# Checking the channel
-def _check_for_content_update(site):
-    """Pull, verify, and swap in a new site bundle for `site` if its publish
-    channel is configured. No-ops silently (not an error) if publish_url/
-    publish_key aren't both set on it — publishing is opt-in, per site. Called
-    by the interactive 'pull' command, which turns the returned status into a
-    printed line.
-
-    Returns a short status string: "not-configured", "invalid-key",
-    "fetch-failed", "too-large", "bad-signature", "rejected", or "published"."""
-    if not (site.publish_url and site.publish_key):
-        return "not-configured"
-
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    from cryptography.exceptions import InvalidSignature
-
-    try:
-        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(site.publish_key))
-    except ValueError:
-        log.error("publish_key is not a valid Ed25519 public key — publishing disabled")
-        return "invalid-key"
-
-    try:
-        # Capped read: bounds memory to _MAX_BUNDLE_BYTES regardless of what
-        # the response claims or how much data is actually sent.
-        bundle = urllib.request.urlopen(site.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
-        if len(bundle) > _MAX_BUNDLE_BYTES:
-            log.error("Publish bundle exceeds %d bytes — rejecting before signature check", _MAX_BUNDLE_BYTES)
-            return "too-large"
-        signature = urllib.request.urlopen(_publish_sig_url(site.publish_url), timeout=15).read(4096)
-    except Exception as e:
-        log.warning("Could not fetch publish bundle: %s", e)
-        return "fetch-failed"
-
-    try:
-        pub_key.verify(signature, bundle)
-    except InvalidSignature:
-        log.error("Publish bundle signature verification failed — rejecting")
-        return "bad-signature"
-
-    return _land_bundle(site, bundle, site.publish_url)
-
-
-```
-
-The two commands over that pipeline: pull now, and roll back to a kept version. `_restore_site` is the core both surfaces run — the terminal's numbered list and the page's Restore button reach the same flip, so the two cannot disagree about what restoring means.
-
-```python
-# pull
-def cmd_pull(site):
-    """Manually check the publish channel for new site content and pull it in."""
-    if not (site.publish_url and site.publish_key):
-        print("  No publish channel configured — run 'config publish' first.")
-        return
-    with _spinner("Checking for new site content..."):
-        result = _check_for_content_update(site)
-    messages = {
-        "invalid-key":   "Pull failed: publish_key is not a valid Ed25519 public key.",
-        "fetch-failed":  "Pull failed: could not fetch the publish bundle. See 'log' for details.",
-        "too-large":     f"Pull failed: bundle exceeds {_MAX_BUNDLE_BYTES} bytes.",
-        "bad-signature": "Pull failed: bundle signature verification failed — rejecting.",
-        "rejected":      "Pull failed: bundle was rejected. See 'log' for details.",
-        "published":     "New site content published.",
-    }
-    print(f"  {messages[result]}")
-
-
+# preview
 def _preview_dir(site):
     """Where a staged preview lives: a sibling of the site's tree, never
     inside it. Inside, the public server would serve the unpublished draft
@@ -1472,8 +1347,8 @@ def _restore_site(site, version=None):
             os.remove(flip)
         os.symlink(target, flip)
         os.replace(flip, live_path)              # the restore: one atomic flip
-        # The tree may date from a pre-flip pull that extracted as root — the
-        # same ownership repair as a publish, for the same reason.
+        # The tree may date from a publish that extracted as root — the same
+        # ownership repair as a publish, for the same reason.
         _chown_operator(os.path.realpath(live_path), strip_world=True)
     log.info("Restored content for %s to %s",
              site.domain or site.serve_dir, os.path.basename(target))
@@ -1527,17 +1402,23 @@ def cmd_restore_site(site):
 
 ## Publish sub-shell
 
-One guided place for site content, shaped like `config`: show each site's channel and backup, then dispatch until `back`. Every verb delegates to the command it gathers — `channel` reuses the config sub-shell's own prompt — so the two surfaces cannot drift.
+One guided place for site content, shaped like `config`: show what each site is serving and what it can roll back to, then dispatch until `back`. Every verb delegates to the command it gathers, so the two surfaces cannot drift.
 
 ```python
 # The publish display
 def _publish_show():
     _section("Publish")
     for i, site in enumerate(config.sites):
-        backup = os.path.isdir(_resolve(site.serve_dir).rstrip(os.sep) + ".bak")
+        rows = _site_versions(site)
         print(f"  [{i}] {site.domain or site.serve_dir}")
-        print(f"      channel: {site.publish_url if site.publish_url and site.publish_key else '(not set)'}")
-        print(f"      backup:  {'present — restore-site undoes the last pull' if backup else 'none'}")
+        if not rows:
+            print("      nothing published yet")
+            continue
+        # Newest first, live one marked by _version_line — the same ordering
+        # and the same line the restore prompt lists, so a version reads
+        # identically wherever the operator meets it.
+        for row in rows:
+            print(f"      {_version_line(row)}")
     print()
 
 
@@ -1573,18 +1454,10 @@ def cmd_publish():
 
         if cmd == "show":
             _publish_show()
-        elif cmd == "pull":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_pull(site)
         elif cmd == "restore-site":
             site = _config_site_arg(args)
             if site is not None:
                 cmd_restore_site(site)
-        elif cmd == "channel":
-            site = _config_site_arg(args)
-            if site is not None:
-                _config_publish(site)
         elif cmd in ("back", "done", "exit", "quit"):
             break
         elif cmd in ("help", "?"):
@@ -1806,8 +1679,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
                            "active": s.active,
-                           "username": s.username, "publish_url": s.publish_url,
-                           "publish_key": s.publish_key,
+                           "username": s.username,
                            "redirects": s.redirects,
                            "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
@@ -2251,8 +2123,6 @@ def _production_issues():
         # username with nothing stored to check locks every visitor out.
         if site.username and not site.password_hash:
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
-        if bool(site.publish_url) != bool(site.publish_key):
-            issues.append(f"publish channel partially configured{tag} — run 'config publish' to finish setup")
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
                                    _cache_headroom_mb(config.cache_size_mb))
@@ -2406,7 +2276,6 @@ def _site_rows():
         "serve_dir": site.serve_dir,
         "auth":      bool(site.username),
         "cert_days": _cert_days_remaining(_resolve(site.cert_file)),
-        "publish":   bool(site.publish_url and site.publish_key),
     } for i, site in enumerate(config.sites)]
 
 
@@ -2508,15 +2377,6 @@ def _health_checks():
                                 else "a username with no stored password — set one below, or make the site public"
                                 if half_auth
                                 else "public — anyone can view it (the form below makes it private)")})
-        # The pull channel reports only when it exists or is half-built. Its
-        # absence is the normal case — the admin page publishes directly —
-        # and a row saying so on every site is noise, not news.
-        half = bool(site.publish_url) != bool(site.publish_key)
-        if half or site.publish_url:
-            rows.append({"key": "channel", "site": i, "ok": not half,
-                         "blocking": False, "label": tag + "Publish channel",
-                         "detail": ("partially configured — finish or clear it in the terminal: config publish"
-                                    if half else "configured — 'pull' fetches from it")})
     return rows
 
 
@@ -2898,15 +2758,6 @@ def _set_site_value(target, key, value):
                         "http(s) URL, and may not point at itself")
             table.update(checked)
         target.redirects = table
-    elif key == "publish_url":
-        if value and not value.startswith("https://"):
-            return "publish_url must be https:// (or empty to clear)"
-        target.publish_url = value
-    elif key == "publish_key":
-        v = value.strip().lower()
-        if v and not (len(v) == 64 and all(c in "0123456789abcdef" for c in v)):
-            return "publish_key must be 64 hex characters (a 32-byte Ed25519 public key)"
-        target.publish_key = v
     elif key == "active":
         # The pause between serving and deleting: a deactivated site keeps
         # its config and files but is invisible to request routing.
@@ -2925,8 +2776,7 @@ The vocabulary `set` accepts, and its usage line.
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
-_SET_SITE_KEYS = ("username", "publish_url", "publish_key", "active",
-                  "redirect")
+_SET_SITE_KEYS = ("username", "active", "redirect")
 
 
 def _set_usage():
@@ -3070,7 +2920,7 @@ Servette needs root for a handful of things — the systemd unit, the service us
 # owns. Read-only ones (status, sites, log) are absent deliberately — they must
 # keep working without a password prompt.
 _ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "admin",
-                  "publish", "pull", "restore-site")
+                  "publish", "restore-site")
 
 # What sudo made of the last elevated command. The one-shot `servette <command>`
 # form exits with it, so tooling driving Servette over SSH sees a refused
@@ -3210,10 +3060,6 @@ def run_command(cmd, args):
         cmd_admin()
     elif cmd == "publish":
         cmd_publish()
-    elif cmd == "pull":
-        site = _config_site_arg(args)
-        if site is not None:
-            cmd_pull(site)
     elif cmd == "restore-site":
         site = _config_site_arg(args)
         if site is not None:

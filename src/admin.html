@@ -929,7 +929,6 @@
     cert:     'Needs certificate',
     password: 'Needs password',
     dir:      'Folder missing',
-    channel:  'Channel unfinished',
   };
 
   // A card's index is its position in the DOM, read at the moment it is
@@ -1937,10 +1936,9 @@
      What the box is doing, and how it is set. The settings forms run over
      the same validators the `set` command runs, so a value the terminal
      refuses the page refuses with the same sentence. Deliberately absent
-     (the terminal keeps them): the serve folder (publishing manages it),
-     port and trusted proxy (behind-a-balancer deployments), the pull
-     channel's URL/key pair, and every lifecycle verb. The domain is not a
-     form either — naming a site belongs on that site's card. ══ */
+     (the terminal keeps them): port and trusted proxy (behind-a-balancer
+     deployments) and every lifecycle verb. The domain is not a form either
+     — naming a site belongs on that site's card. ══ */
 
   const HOST_FIELDS = [
     ['email', 'Email',

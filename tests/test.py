@@ -291,10 +291,18 @@ publish_key = "aa"
         check("Migrated site's domain is backfilled from its existing cert",
               c.sites[0].domain == "legacy.example.com")
         check("Migrated site keeps its serve_dir", c.sites[0].serve_dir == "myserve")
-        check("Migrated site keeps its publish channel", c.sites[0].publish_url == "https://example.com/site.tar.gz")
+        # The retired pull-channel keys are in the fixture on purpose: an
+        # operator upgrading has them in their file. They must be ignored
+        # rather than carried onto the Site or written back out.
+        check("The retired channel keys are dropped, not migrated",
+              not hasattr(c.sites[0], "publish_url")
+              and not hasattr(c.sites[0], "publish_key"))
         check("Plaintext password is hashed on migration", c.sites[0].password_hash != "")
         check("Hashed password verifies", s._check_password("hunter2", c.sites[0].password_hash, c.sites[0].password_salt))
-        check("Migration rewrites the file in [[site]] form", "[[site]]" in open(s.Config.CONFIG_FILE).read())
+        migrated_text = open(s.Config.CONFIG_FILE).read()
+        check("Migration rewrites the file in [[site]] form", "[[site]]" in migrated_text)
+        check("...and the rewrite does not carry the retired channel keys forward",
+              "publish_url" not in migrated_text and "publish_key" not in migrated_text)
 
         # Reloading the now-migrated file must not re-migrate or re-derive anything —
         # it should load the [[site]] table(s) as-is.
@@ -899,7 +907,7 @@ def run_dispatch_tests(s):
 
     # Routing is under test here, not elevation policy (which has its own
     # section). Dispatch is exercised as root, because as an unprivileged user
-    # run_command correctly elevates pull/restore-site instead of dispatching —
+    # run_command correctly elevates restore-site instead of dispatching —
     # and on CI runners, whose sudo is passwordless, that spawned REAL elevated
     # children while the stubs sat unused. Caught by CI's non-root run; the
     # suite had only ever been run as root locally.
@@ -911,7 +919,7 @@ def run_dispatch_tests(s):
     # live test server up for the integration tests that follow.
     calls       = []
     saved       = {n: getattr(s, n) for n in
-                   ("cmd_status", "cmd_start", "stop_server", "cmd_pull",
+                   ("cmd_status", "cmd_start", "stop_server",
                     "cmd_restore_site", "cmd_publish", "cmd_admin",
                     "_startup_refresh")}
     saved_input = builtins.input
@@ -919,13 +927,12 @@ def run_dispatch_tests(s):
         s.cmd_status       = lambda json_mode=False: calls.append("status")
         s.cmd_start        = lambda: calls.append("start")
         s.stop_server      = lambda: calls.append("stop")
-        s.cmd_pull         = lambda site: calls.append(("pull", site))
         s.cmd_restore_site = lambda site: calls.append(("restore-site", site))
         s.cmd_publish      = lambda: calls.append("publish")
         s.cmd_admin        = lambda: calls.append("admin")
         s._startup_refresh = lambda: print("STARTUP-NOTICE-MARKER")
-        script = iter(["status", "start", "pull 0", "restore-site 0", "publish",
-                       "admin", "pull 99", "bogus", "quit"])
+        script = iter(["status", "start", "restore-site 0", "publish",
+                       "admin", "restore-site 99", "pull 0", "bogus", "quit"])
         builtins.input = lambda prompt="": next(script, "quit")
         with contextlib.redirect_stdout(io.StringIO()) as launch_buf:
             s.shell()
@@ -941,14 +948,17 @@ def run_dispatch_tests(s):
 
     check("'status' routed to cmd_status", "status" in calls)
     check("'start' routed to cmd_start",   "start" in calls)
-    check("'pull 0' routes to cmd_pull with site 0",
-          ("pull", s.config.sites[0]) in calls)
     check("'restore-site 0' routes to cmd_restore_site with site 0",
           ("restore-site", s.config.sites[0]) in calls)
     check("'publish' routed to cmd_publish", "publish" in calls)
     check("'admin' routed to cmd_admin", "admin" in calls)
-    pull_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "pull"]
-    check("'pull 99' (bad site index) does not call cmd_pull", len(pull_calls) == 1)
+    restore_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "restore-site"]
+    check("'restore-site 99' (bad site index) does not call the command",
+          len(restore_calls) == 1)
+    # The pull channel is retired: 'pull' is now an unknown word, and the
+    # shell must say so rather than silently accepting a verb it dropped.
+    check("'pull' is not a command any more",
+          "pull" not in [c.split()[0] for c, _ in s._COMMANDS])
     check("'quit' stops server and exits", calls[-1] == "stop")
 
 
@@ -957,15 +967,12 @@ def run_dispatch_tests(s):
     # Routing only, like the dispatch test above: every verb must delegate to
     # the command it gathers, with the same [n] convention and bad-index guard.
     sub_calls   = []
-    saved_sub   = {n: getattr(s, n) for n in
-                   ("cmd_pull", "cmd_restore_site", "_config_publish")}
+    saved_sub   = {n: getattr(s, n) for n in ("cmd_restore_site",)}
     saved_input = builtins.input
     try:
-        s.cmd_pull         = lambda site: sub_calls.append(("pull", site))
         s.cmd_restore_site = lambda site: sub_calls.append(("restore", site))
-        s._config_publish  = lambda site: sub_calls.append(("channel", site))
-        script = iter(["pull 0", "restore-site 0", "channel 0",
-                       "pull 99", "bogus", "back"])
+        script = iter(["restore-site 0", "restore-site 99", "pull", "channel",
+                       "bogus", "back"])
         builtins.input = lambda prompt="": next(script, "back")
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_publish()
@@ -975,19 +982,24 @@ def run_dispatch_tests(s):
             setattr(s, n, fn)
 
     sub_out = buf.getvalue()
-    check("'pull 0' delegates to cmd_pull with site 0",
-          ("pull", s.config.sites[0]) in sub_calls)
     check("'restore-site 0' delegates to cmd_restore_site with site 0",
           ("restore", s.config.sites[0]) in sub_calls)
-    check("'channel 0' delegates to the config sub-shell's publish prompt",
-          ("channel", s.config.sites[0]) in sub_calls)
-    check("'pull 99' (bad site index) is refused with the sites hint",
-          len([c for c in sub_calls if c[0] == "pull"]) == 1
+    check("'restore-site 99' (bad site index) is refused with the sites hint",
+          len([c for c in sub_calls if c[0] == "restore"]) == 1
           and "No site 99" in sub_out)
     check("unknown input reprints the publish help",
           "Unknown command: bogus" in sub_out)
-    check("the display shows each site's channel and backup state",
-          "channel:" in sub_out and "backup:" in sub_out)
+    # The two retired verbs must be unknown here too, not quietly accepted
+    # by a dispatch branch left behind.
+    check("the retired 'pull' and 'channel' verbs are gone from the sub-shell",
+          "Unknown command: pull" in sub_out
+          and "Unknown command: channel" in sub_out
+          and not any(c[0] in ("pull", "channel") for c in sub_calls))
+    # The display is the version ring now, which is what there is to roll
+    # back to — the channel it used to show does not exist.
+    check("the display shows what each site is serving, not a channel",
+          "channel:" not in sub_out
+          and ("(live)" in sub_out or "nothing published yet" in sub_out))
 
     # publish and admin elevate like config: their verbs write site content
     # and the config file, so an unprivileged shell must hand them to root.
@@ -1401,17 +1413,12 @@ def run_dispatch_tests(s):
                             "started_at", "cpu_ns", "sampled_at"}
               and load["sampled_at"] > 0)
 
-        # The pull channel reports only when it exists or is half-built:
-        # its absence is the normal case, not news.
-        saved_chan = (s.config.sites[0].publish_url, s.config.sites[0].publish_key)
-        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
-        check("An absent publish channel is not a row",
+        # The pull channel is retired, so it can no longer be a row at all —
+        # and no site row may carry a stale key the page still has a word for.
+        check("The retired publish channel is not a health row",
               not any(r["key"] == "channel" for r in s._health_checks()))
-        s.config.sites[0].publish_url = "https://example.com/b.tar.gz"
-        rows_half = [r for r in s._health_checks() if r["key"] == "channel"]
-        check("...a half-built one is a row that needs review",
-              len(rows_half) == 1 and not rows_half[0]["ok"])
-        (s.config.sites[0].publish_url, s.config.sites[0].publish_key) = saved_chan
+        check("...and no site row carries the channel's old fields",
+              not any("publish" in r for r in s._site_rows()))
 
         saved_hc = (s.config.sites[0].username, s.config.sites[0].password_hash)
         s.config.sites[0].username, s.config.sites[0].password_hash = "", ""
@@ -1843,7 +1850,8 @@ def run_dispatch_tests(s):
     sites = json.loads(buf.getvalue())
     check("sites --json lists every site with its shape",
           len(sites) == len(s.config.sites)
-          and {"index", "domain", "serve_dir", "auth", "cert_days", "publish"} <= set(sites[0]))
+          and {"index", "domain", "active", "serve_dir",
+               "auth", "cert_days"} == set(sites[0]))
     saved_walkers = (s._cache_warnings, s._service_is_active)
     walked = []
     try:
@@ -1863,18 +1871,16 @@ def run_dispatch_tests(s):
 
     # The write half: set validates every pair before applying any.
     saved_set   = {n: getattr(s.config, n) for n in ("port", "trusted_proxy")}
-    saved_site  = (s.config.sites[0].publish_url, s.config.sites[0].publish_key)
     saved_save  = s.Config.save
     save_count  = []
     try:
         s.Config.save = lambda self: save_count.append(1)
-        good_key = "ab" * 32
+        # One site pair and one host pair in a single call: the point is that
+        # both levels apply from one validated batch.
         with contextlib.redirect_stdout(io.StringIO()):
-            s.cmd_set(["0", "publish_url=https://cdn.example/bundle.tar.gz",
-                       f"publish_key={good_key}", "port=8444"])
+            s.cmd_set(["0", "username=batched", "port=8444"])
         check("set applies validated site and host pairs",
-              s.config.sites[0].publish_url == "https://cdn.example/bundle.tar.gz"
-              and s.config.sites[0].publish_key == good_key
+              s.config.sites[0].username == "batched"
               and s.config.port == 8444)
         check("set saves once per successful call", save_count == [1])
 
@@ -1885,10 +1891,15 @@ def run_dispatch_tests(s):
               and s.config.trusted_proxy == saved_set["trusted_proxy"]
               and save_count == [1])
 
+        # The retired channel's two keys must be refused like any other word
+        # the vocabulary does not hold — not accepted onto a Site that has
+        # nowhere to put them.
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_set(["publish_key=nothex"])
-        check("set rejects a malformed publish key",
-              "64 hex" in buf.getvalue() and s.config.sites[0].publish_key == good_key)
+            s.cmd_set(["publish_url=https://cdn.example/b.tar.gz", "publish_key=" + "ab" * 32])
+        check("the retired channel's keys are refused, not stored",
+              "Unknown or malformed" in buf.getvalue()
+              and not hasattr(s.config.sites[0], "publish_url")
+              and not hasattr(s.config.sites[0], "publish_key"))
 
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["password=hunter2"])
@@ -1949,7 +1960,6 @@ def run_dispatch_tests(s):
         s.Config.save = saved_save
         for n, v in saved_set.items():
             setattr(s.config, n, v)
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_site
 
     # Every save restores the config's ownership — a root-owned 0600 config from
     # `sudo servette set` would otherwise kill the running service and send the
@@ -2160,7 +2170,7 @@ def run_dispatch_tests(s):
           not any(s._needs_root(c) for c in ("status", "sites", "log")))
     check("Privileged commands do",
           all(s._needs_root(c) for c in
-              ("setup", "config", "enable", "disable", "set", "pull", "restore-site")))
+              ("setup", "config", "enable", "disable", "set", "publish", "restore-site")))
 
     # start and stop are the conditional pair: root for the systemd path, but a
     # session server lives in *this* process, where an elevated child could
@@ -3291,7 +3301,7 @@ def run_dispatch_tests(s):
         finally:
             s._chown_operator = saved_chownop_r
         check("Restore to a named version serves it", err == "" and _marker(link) == "v1")
-        check("...re-establishing operator ownership (a tree may have come from a pull)",
+        check("...re-establishing operator ownership (a tree was extracted as root)",
               (os.path.realpath(link), True) in restore_chowns)
         check("...and the version rolled away is NOT consumed — the ring keeps it",
               {_marker(p) for p, _ in s._version_dirs(link)} == {"v1", "v2", "v3"})
@@ -3428,129 +3438,62 @@ def run_dispatch_tests(s):
         s.config.sites[0].serve_dir = saved_serve_dir
         shutil.rmtree(swap_root, ignore_errors=True)
 
-    section("Content update pipeline")
+    section("Landing a bundle — the tail every content channel shares")
 
-    saved_url, saved_key = s.config.sites[0].publish_url, s.config.sites[0].publish_key
-    try:
-        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
-        try:
-            s._check_for_content_update(s.config.sites[0])
-            check("Neither publish_url nor publish_key set: no-ops cleanly", True)
-        except Exception as e:
-            check(f"Neither set: no-ops cleanly (raised {e})", False)
-
-        s.config.sites[0].publish_url = "https://example.com/site.tar.gz"
-        s.config.sites[0].publish_key = "not-valid-hex"
-        logging.disable(logging.CRITICAL)
-        try:
-            s._check_for_content_update(s.config.sites[0])
-            check("Invalid publish_key rejected before any network call", True)
-        except Exception as e:
-            check(f"Invalid publish_key rejected cleanly (raised {e})", False)
-        finally:
-            logging.disable(logging.NOTSET)
-    finally:
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_url, saved_key
-
-    section("Content update pipeline: full pull/verify/swap (network mocked)")
-
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives import serialization as _ser2
-
-    priv_key = Ed25519PrivateKey.generate()
-    pub_hex  = priv_key.public_key().public_bytes(
-        _ser2.Encoding.Raw, _ser2.PublicFormat.Raw).hex()
+    # These checks used to drive the pull channel's fetch-and-verify pipeline.
+    # The channel is retired; what it shared with the page — extraction into
+    # staging, ownership repair before the flip, the swap under one lock — is
+    # what actually guards a publish, so the coverage moves onto _land_bundle
+    # directly. The door in front of it (upload size cap, tunnel
+    # authentication) is checked in the page's own section.
     bundle_bytes = make_tar_gz([("index.html", "published content")])
-    signature    = priv_key.sign(bundle_bytes)
 
-    class _FakeResp:
-        def __init__(self, data):
-            self._data = data
-        def read(self, size=None):
-            return self._data if size is None else self._data[:size]
-
-    saved_urlopen    = urllib.request.urlopen
     saved_serve_dir2 = s.config.sites[0].serve_dir
-    saved_url2, saved_key2 = s.config.sites[0].publish_url, s.config.sites[0].publish_key
     swap_root2 = tempfile.mkdtemp()
     try:
-        s.config.sites[0].serve_dir   = os.path.join(swap_root2, "site")
-        s.config.sites[0].publish_url = "https://example.com/site.tar.gz"
-        s.config.sites[0].publish_key = pub_hex
+        s.config.sites[0].serve_dir = os.path.join(swap_root2, "site")
 
-        urllib.request.urlopen = lambda url, timeout=None: (
-            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        # The tree a pull swaps in was extracted by this process — root, when
-        # the command elevated — so the pull must re-establish operator
-        # ownership itself, with world bits stripped: without it every pull
-        # left the site root-owned and world-readable.
+        # The staged tree was extracted by this process — root, when the
+        # command elevated — so landing must re-establish operator ownership
+        # itself, with world bits stripped, BEFORE the tree goes live.
         saved_chownop = s._chown_operator
         chown_calls = []
         s._chown_operator = lambda path, strip_world=False: chown_calls.append((path, strip_world))
         try:
-            result = s._check_for_content_update(s.config.sites[0])
+            result = s._land_bundle(s.config.sites[0], bundle_bytes, "test")
         finally:
             s._chown_operator = saved_chownop
-        check("Correctly signed bundle is published",
+        check("A landed bundle is live",
               open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
         check("Returns 'published'", result == "published")
         live2 = s._resolve(s.config.sites[0].serve_dir).rstrip(os.sep)
-        check("Pull re-establishes operator ownership BEFORE the tree goes live",
+        check("Landing re-establishes operator ownership BEFORE the tree goes live",
               (live2 + ".new", True) in chown_calls)
-        check("...and leaves the backup alone — it was the live tree a moment ago",
-              not any(p == live2 + ".bak" for p, _ in chown_calls))
+        check("...and leaves the trees it replaces alone — they were live a moment ago",
+              not any(p != live2 + ".new" for p, _ in chown_calls))
 
-        other_key = Ed25519PrivateKey.generate()
-        bad_sig   = other_key.sign(bundle_bytes)
-        urllib.request.urlopen = lambda url, timeout=None: (
-            _FakeResp(bad_sig) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        with open(os.path.join(s.config.sites[0].serve_dir, "index.html"), "w") as f:
-            f.write("unchanged")
+        # A bundle the extractor refuses must change nothing: no ownership
+        # call, no staging left behind, the live tree untouched.
         chown_calls.clear()
         s._chown_operator = lambda path, strip_world=False: chown_calls.append((path, strip_world))
         logging.disable(logging.CRITICAL)
         try:
-            result = s._check_for_content_update(s.config.sites[0])
+            result = s._land_bundle(s.config.sites[0], b"not a tar.gz at all", "test")
         finally:
             s._chown_operator = saved_chownop
-        logging.disable(logging.NOTSET)
+            logging.disable(logging.NOTSET)
         check("A rejected bundle re-establishes nothing (nothing changed)",
               chown_calls == [])
-        check("Bundle signed by the wrong key is rejected, content unchanged",
-              open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "unchanged")
-        check("Returns 'bad-signature'", result == "bad-signature")
+        check("...leaves the live content exactly as it was",
+              open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
+        check("...returns 'rejected'", result == "rejected")
+        check("...and leaves no staging tree behind",
+              not os.path.exists(live2 + ".new"))
 
-        section("Publish pipeline: size cap and sig-URL query handling")
+        section("Publish serialization")
 
-        saved_max2 = s._MAX_BUNDLE_BYTES
-        try:
-            s._MAX_BUNDLE_BYTES = 10  # smaller than bundle_bytes
-            urllib.request.urlopen = lambda url, timeout=None: (
-                _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-            logging.disable(logging.CRITICAL)
-            result = s._check_for_content_update(s.config.sites[0])
-            logging.disable(logging.NOTSET)
-            check("Oversized bundle rejected as 'too-large' before signature check",
-                  result == "too-large")
-        finally:
-            s._MAX_BUNDLE_BYTES = saved_max2
-
-        seen_urls = []
-        def _record(url, timeout=None):
-            seen_urls.append(url)
-            return _FakeResp(signature) if ".sig" in url else _FakeResp(bundle_bytes)
-        s.config.sites[0].publish_url = "https://example.com/site.tar.gz?token=abc123"
-        urllib.request.urlopen = _record
-        s._check_for_content_update(s.config.sites[0])
-        sig_url = next(u for u in seen_urls if u != s.config.sites[0].publish_url)
-        check("'.sig' is appended to the path, not after the query string",
-              sig_url == "https://example.com/site.tar.gz.sig?token=abc123")
-        s.config.sites[0].publish_url = "https://example.com/site.tar.gz"
-
-        section("Publish pipeline serialization")
-
-        urllib.request.urlopen = lambda url, timeout=None: (
-            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+        # One lock across every content mutation: two sessions landing into
+        # the same site must not overlap inside the swap.
         saved_swap = s._swap_site_content
         in_critical, max_concurrent = [], []
         def _slow_swap(new_dir, serve_dir):
@@ -3561,38 +3504,42 @@ def run_dispatch_tests(s):
             in_critical.pop()
         s._swap_site_content = _slow_swap
         try:
-            threads = [threading.Thread(target=s._check_for_content_update, args=(s.config.sites[0],))
+            threads = [threading.Thread(target=s._land_bundle,
+                                        args=(s.config.sites[0], bundle_bytes, "test"))
                        for _ in range(3)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-            check("Concurrent triggers never overlap inside the swap (max concurrent == 1)",
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+            check("Concurrent publishes never overlap inside the swap (max concurrent == 1)",
                   max(max_concurrent) == 1)
         finally:
             s._swap_site_content = saved_swap
 
-        section("Manual pull command (cmd_pull)")
+        section("The retired pull channel leaves nothing behind")
 
-        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_pull(s.config.sites[0])
-        check("No publish channel configured: reports cleanly, doesn't touch the network",
-              "No publish channel configured" in buf.getvalue())
-
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "https://example.com/site.tar.gz", pub_hex
-        urllib.request.urlopen = lambda url, timeout=None: (
-            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_pull(s.config.sites[0])
-        check("Successful pull prints a confirmation",
-              "New site content published" in buf.getvalue())
-        check("Successful pull actually swapped in the content",
-              open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
+        # A removal is only done when the names are gone from the program, not
+        # merely unreachable from a menu.
+        gone = ("cmd_pull", "_check_for_content_update", "_publish_sig_url",
+                "_config_publish")
+        check("The channel's functions are gone from the program",
+              not any(hasattr(s, n) for n in gone))
+        check("...its two settings are gone from a Site",
+              not hasattr(s.Site(), "publish_url")
+              and not hasattr(s.Site(), "publish_key"))
+        check("...neither the shell nor the publish sub-shell offers 'pull'",
+              "pull" not in [c.split()[0] for c, _ in s._COMMANDS]
+              and "pull" not in [c.split()[0] for c, _ in s._PUBLISH_COMMANDS])
+        check("...the config sub-shell offers no 'channel' or 'publish' verb",
+              not any(c.split()[0] in ("channel", "publish")
+                      for c, _ in s._CONFIG_COMMANDS))
+        # Signature verification was this channel's trust mechanism and had no
+        # other caller: nothing in the program should still reach for Ed25519.
+        check("...and no Ed25519 verification is left in the program",
+              "Ed25519" not in io.open(os.path.abspath(s.__file__),
+                                       encoding="utf-8").read())
     finally:
-        urllib.request.urlopen = saved_urlopen
         s.config.sites[0].serve_dir = saved_serve_dir2
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_url2, saved_key2
         shutil.rmtree(swap_root2, ignore_errors=True)
 
 
@@ -5274,24 +5221,11 @@ def run_install_tests(s, tmpdir):
         s._swap_sizes    = saved_sizes
         s.os.path.exists = saved_exists_hh
 
-    section("Publish channel config")
-
-    saved_url, saved_key = s.config.sites[0].publish_url, s.config.sites[0].publish_key
-    try:
-        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
-        check("Neither set → not flagged",
-              not any("publish channel" in issue for issue in s._production_issues()))
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "https://example.com/site.tar.gz", "a" * 64
-        check("Both set → not flagged",
-              not any("publish channel" in issue for issue in s._production_issues()))
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "https://example.com/site.tar.gz", ""
-        check("URL only → flagged as partial",
-              any("publish channel" in issue for issue in s._production_issues()))
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "", "a" * 64
-        check("Key only → flagged as partial",
-              any("publish channel" in issue for issue in s._production_issues()))
-    finally:
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_url, saved_key
+    # The half-built pull channel used to be one of the conditions this
+    # function reported. With the channel retired there is no half-state to
+    # report, and a stale sentence about one would be worse than silence.
+    check("No issue mentions the retired publish channel",
+          not any("publish channel" in issue for issue in s._production_issues()))
 
     section("Server watch (--serve supervision)")
 

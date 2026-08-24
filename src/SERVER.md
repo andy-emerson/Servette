@@ -142,7 +142,8 @@ def _redirect_toml(site):
 
 class Site:
     """One `[[site]]` block: everything that varies per hosted domain — the domain
-    itself, its folder, its own certificate, its visitor auth, its publish channel.
+    itself, whether it is served, its folder, its own certificate, its visitor
+    auth, its redirects.
     Host-level settings (port, TLS, rate limits, cache, ACME email, security headers,
     ...) live once on Config, not here: every field lives at exactly one level, no
     fallback lookup between them."""
@@ -159,8 +160,6 @@ class Site:
         self.username       = data.get("username",       "")
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
-        self.publish_url    = data.get("publish_url",    "")
-        self.publish_key    = data.get("publish_key",    "")
         # Old path -> new path, validated once here so the request path is a
         # dict lookup and nothing more. A file in the site folder would be
         # content, and content is read at request time — which is the whole
@@ -272,8 +271,6 @@ class Config:
                 "username":      data.get("username",      ""),
                 "password_hash": data.get("password_hash", ""),
                 "password_salt": data.get("password_salt", ""),
-                "publish_url":   data.get("publish_url",   ""),
-                "publish_key":   data.get("publish_key",   ""),
             })
             if data.get("password") and not legacy.password_hash:
                 legacy.password_hash, legacy.password_salt = _hash_password(data["password"])
@@ -415,12 +412,6 @@ key_file = {s(site.key_file)}
 
 # Leave username blank to disable password protection
 username = {s(site.username)}
-
-# Site publish channel: where signed content bundles are pulled from, and the
-# public key (distinct from Servette's own release-signing key) that verifies
-# them. Leave blank to disable — no polling happens without both set.
-publish_url = {s(site.publish_url)}
-publish_key = {s(site.publish_key)}
 
 # Machine-generated — do not edit by hand
 password_hash = {s(site.password_hash)}

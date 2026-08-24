@@ -857,9 +857,12 @@ def cmd_start():
     else:
         start_server()
         if _server_running():
+            # The macOS line carries only what the line above does not: there
+            # is no service to install here, and tmux is the substitute. It
+            # does not restate that quitting stops the server.
             print("  Running in session only — server will stop when you quit.")
             if _IS_MACOS:
-                print("  Service install is Linux-only; keep this session alive (tmux/screen) to stay up.")
+                print("  A permanent service needs Linux; here, run it under tmux or screen.")
             elif _prompt("Install as a permanent service?"):
                 cmd_enable()
 
@@ -1487,8 +1490,8 @@ def _restore_site(site, version=None):
     live_path = _resolve(site.serve_dir).rstrip(os.sep)
     versions  = _version_dirs(site.serve_dir)
     if not versions:
-        return ("Nothing to restore — no kept versions yet. Publishing keeps "
-                "the previous content each time it swaps in new.")
+        return ("Nothing to restore — a kept version appears the first time "
+                "new content replaces old.")
     if not os.path.islink(live_path):
         return ("This site's folder is not yet behind the version link — "
                 "publish once, and the content it replaces joins the ring.")
@@ -1542,8 +1545,11 @@ def cmd_restore_site(site):
     rows = _site_versions(site)
     kept = [r for r in rows if not r["live"]]
     if not kept:
-        print("  Nothing to restore — no kept versions yet.")
-        print("  (Publishing keeps the previous content each time it swaps in new.)")
+        # One line, and it says when that changes rather than explaining the
+        # ring: "no kept versions yet" alone leaves a reader wondering what
+        # would make one.
+        print("  Nothing to restore — a kept version appears the first time")
+        print("  new content replaces old.")
         return
 
     if len(kept) == 1:
@@ -1591,8 +1597,13 @@ The loop itself: show the state, then dispatch until `back`. Pure terminal — t
 # publish
 def cmd_publish():
     _publish_show()
-    print("  Prefer a browser? 'admin' opens the publish page over your SSH tunnel.")
+    # The commands come first, unbroken: they are what the operator came for
+    # and there is no guessing them. The browser pointer follows rather than
+    # interrupts, and drops the tunnel detail — 'admin' explains its own
+    # tunnel when it runs.
     print(PUBLISH_HELP)
+    print("  Prefer a browser? 'admin' opens these jobs as a page.")
+    print()
 
     while True:
         try:
@@ -2209,9 +2220,12 @@ def cmd_admin():
             try:
                 # The prompt is where a reader looks when wondering what to
                 # type, so the two things they might want are named there
-                # rather than on lines of their own above.
-                raw = input("  admin — 'help' if the page will not load, "
-                            "'back' to close: ").strip().lower()
+                # rather than on lines of their own above. 'close the page'
+                # names what 'back' actually ends — the page server this
+                # command started — and matches the line printed on the way
+                # out; the browser tab is the operator's to close.
+                raw = input("  type 'help' if the page will not load, "
+                            "'back' to close the page: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -2220,8 +2234,8 @@ def cmd_admin():
                 print("  the tunnel. Add this line once to ~/.ssh/config on the computer")
                 print("  you ssh FROM, inside this server's entry, then reconnect:")
                 print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
-                print(f"  The link is worth a bookmark — the login page it opens")
-                print(f"  asks for this run's passcode: {code}")
+                print(f"  The address is worth a bookmark — the login page it")
+                print(f"  opens asks for this run's passcode: {code}")
                 continue
             if raw in ("back", "done", "exit", "quit", "q"):
                 break

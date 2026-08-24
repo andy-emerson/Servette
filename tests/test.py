@@ -994,8 +994,11 @@ def run_dispatch_tests(s):
     check("publish and admin are in the elevation set",
           (s._needs_root("publish") and s._needs_root("admin")) or s._IS_MACOS)
 
+    # The commands come first, unbroken; the pointer follows them rather than
+    # standing between the display and the list the operator came for.
     check("publish is pure terminal, with one hint at the browser door",
-          "'admin' opens the publish page" in sub_out
+          "'admin' opens these jobs as a page" in sub_out
+          and sub_out.index("Commands") < sub_out.index("Prefer a browser")
           and "http://localhost" not in sub_out)
 
     section("Admin command")
@@ -5634,7 +5637,12 @@ def run_platform_tests(s):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 s.cmd_start()
-            check("cmd_start explains session mode on macOS", "Linux-only" in buf.getvalue())
+            # Two lines, and the second says only what the first does not:
+            # there is no service to install here, and tmux is the substitute.
+            out = buf.getvalue()
+            check("cmd_start explains session mode on macOS",
+                  "session only" in out and "needs Linux" in out
+                  and "tmux" in out and out.count("when you quit") == 1)
         finally:
             s._service_file_exists, s.start_server, s._server_running, s._prompt = saved
 

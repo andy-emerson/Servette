@@ -920,19 +920,17 @@ def run_dispatch_tests(s):
     calls       = []
     saved       = {n: getattr(s, n) for n in
                    ("cmd_status", "cmd_start", "stop_server",
-                    "cmd_restore_site", "cmd_publish", "cmd_admin",
-                    "_startup_refresh")}
+                    "cmd_restore_site", "cmd_admin", "_startup_refresh")}
     saved_input = builtins.input
     try:
         s.cmd_status       = lambda json_mode=False: calls.append("status")
         s.cmd_start        = lambda: calls.append("start")
         s.stop_server      = lambda: calls.append("stop")
         s.cmd_restore_site = lambda site: calls.append(("restore-site", site))
-        s.cmd_publish      = lambda: calls.append("publish")
         s.cmd_admin        = lambda: calls.append("admin")
         s._startup_refresh = lambda: print("STARTUP-NOTICE-MARKER")
-        script = iter(["status", "start", "restore-site 0", "publish",
-                       "admin", "restore-site 99", "pull 0", "bogus", "quit"])
+        script = iter(["status", "start", "restore-site 0", "admin",
+                       "restore-site 99", "pull 0", "publish", "bogus", "quit"])
         builtins.input = lambda prompt="": next(script, "quit")
         with contextlib.redirect_stdout(io.StringIO()) as launch_buf:
             s.shell()
@@ -950,68 +948,30 @@ def run_dispatch_tests(s):
     check("'start' routed to cmd_start",   "start" in calls)
     check("'restore-site 0' routes to cmd_restore_site with site 0",
           ("restore-site", s.config.sites[0]) in calls)
-    check("'publish' routed to cmd_publish", "publish" in calls)
     check("'admin' routed to cmd_admin", "admin" in calls)
     restore_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "restore-site"]
     check("'restore-site 99' (bad site index) does not call the command",
           len(restore_calls) == 1)
-    # The pull channel is retired: 'pull' is now an unknown word, and the
-    # shell must say so rather than silently accepting a verb it dropped.
-    check("'pull' is not a command any more",
-          "pull" not in [c.split()[0] for c, _ in s._COMMANDS])
+    # Both are retired words now. The shell must say so rather than
+    # silently accepting a verb it dropped — 'publish' especially, since it
+    # was a real command until the sub-shell it opened was removed.
+    check("neither 'pull' nor 'publish' is a command any more",
+          not {"pull", "publish"} & {c.split()[0] for c, _ in s._COMMANDS})
+    check("...and neither is in the elevation set",
+          not any(s._needs_root(c) for c in ("pull", "publish")))
     check("'quit' stops server and exits", calls[-1] == "stop")
 
 
-    section("Publish sub-shell")
-
-    # Routing only, like the dispatch test above: every verb must delegate to
-    # the command it gathers, with the same [n] convention and bad-index guard.
-    sub_calls   = []
-    saved_sub   = {n: getattr(s, n) for n in ("cmd_restore_site",)}
-    saved_input = builtins.input
-    try:
-        s.cmd_restore_site = lambda site: sub_calls.append(("restore", site))
-        script = iter(["restore-site 0", "restore-site 99", "pull", "channel",
-                       "bogus", "back"])
-        builtins.input = lambda prompt="": next(script, "back")
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_publish()
-    finally:
-        builtins.input = saved_input
-        for n, fn in saved_sub.items():
-            setattr(s, n, fn)
-
-    sub_out = buf.getvalue()
-    check("'restore-site 0' delegates to cmd_restore_site with site 0",
-          ("restore", s.config.sites[0]) in sub_calls)
-    check("'restore-site 99' (bad site index) is refused with the sites hint",
-          len([c for c in sub_calls if c[0] == "restore"]) == 1
-          and "No site 99" in sub_out)
-    check("unknown input reprints the publish help",
-          "Unknown command: bogus" in sub_out)
-    # The two retired verbs must be unknown here too, not quietly accepted
-    # by a dispatch branch left behind.
-    check("the retired 'pull' and 'channel' verbs are gone from the sub-shell",
-          "Unknown command: pull" in sub_out
-          and "Unknown command: channel" in sub_out
-          and not any(c[0] in ("pull", "channel") for c in sub_calls))
-    # The display is the version ring now, which is what there is to roll
-    # back to — the channel it used to show does not exist.
-    check("the display shows what each site is serving, not a channel",
-          "channel:" not in sub_out
-          and ("(live)" in sub_out or "nothing published yet" in sub_out))
-
-    # publish and admin elevate like config: their verbs write site content
-    # and the config file, so an unprivileged shell must hand them to root.
-    check("publish and admin are in the elevation set",
-          (s._needs_root("publish") and s._needs_root("admin")) or s._IS_MACOS)
-
-    # The commands come first, unbroken; the pointer follows them rather than
-    # standing between the display and the list the operator came for.
-    check("publish is pure terminal, with one hint at the browser door",
-          "'admin' opens these jobs as a page" in sub_out
-          and sub_out.index("Commands") < sub_out.index("Prefer a browser")
-          and "http://localhost" not in sub_out)
+    # The publish sub-shell is gone. It existed to gather the content
+    # channel's scattered verbs; the pull channel's removal left it holding
+    # one verb that was already a top-level command, so the wrapper went too.
+    # Everything it did now has exactly one home.
+    check("The publish sub-shell is gone from the program",
+          not any(hasattr(s, n) for n in
+                  ("cmd_publish", "_publish_show", "_PUBLISH_COMMANDS", "PUBLISH_HELP")))
+    check("...and its one verb kept its top-level home",
+          "restore-site" in [c.split()[0] for c, _ in s._COMMANDS]
+          and s._needs_root("restore-site"))
 
     section("Admin command")
 
@@ -2170,7 +2130,7 @@ def run_dispatch_tests(s):
           not any(s._needs_root(c) for c in ("status", "sites", "log")))
     check("Privileged commands do",
           all(s._needs_root(c) for c in
-              ("setup", "config", "enable", "disable", "set", "publish", "restore-site")))
+              ("setup", "config", "enable", "disable", "set", "admin", "restore-site")))
 
     # start and stop are the conditional pair: root for the systemd path, but a
     # session server lives in *this* process, where an elevated child could
@@ -2483,7 +2443,6 @@ def run_dispatch_tests(s):
     saved_reload  = s._reload_server
     saved_ssrv    = s._server_running
     saved_sact    = s._service_is_active
-    site_test_dir = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site now requires serve_dir under BASE_DIR
     new_site_cert_files = []  # populated below once add-site picks its (randomized) names
     try:
         s._server_running    = lambda: False
@@ -2563,7 +2522,6 @@ def run_dispatch_tests(s):
         s._server_running    = saved_ssrv
         s._service_is_active = saved_sact
         s.config.sites       = saved_sites7
-        shutil.rmtree(site_test_dir, ignore_errors=True)
 
     section("_domain_in_use")
 
@@ -2593,7 +2551,6 @@ def run_dispatch_tests(s):
     saved_sact2   = s._service_is_active
     saved_chown   = s._chown_servette
     saved_obtain  = s._obtain_trusted_cert
-    dirs2 = [tempfile.mkdtemp(dir=s.BASE_DIR) for _ in range(3)]  # add-site requires serve_dir under BASE_DIR
     generated_files = []
     try:
         s._server_running    = lambda: True
@@ -2606,7 +2563,7 @@ def run_dispatch_tests(s):
         saved_input2 = builtins.input
         try:
             # Two self-signed sites added back to back must not collide.
-            script = iter([dirs2[0], "", "", dirs2[1], "", ""])
+            script = iter(["", "", "", ""])
             builtins.input = lambda prompt="": next(script, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -2632,7 +2589,7 @@ def run_dispatch_tests(s):
             check("Survivor kept its own cert file across the removal",
                   s.config.sites[1].cert_file == survivor_cert)
 
-            script2 = iter([dirs2[2], "", ""])
+            script2 = iter(["", ""])
             builtins.input = lambda prompt="": next(script2, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -2651,16 +2608,14 @@ def run_dispatch_tests(s):
             site.domain = domain  # only happens on the real success path
         s._obtain_trusted_cert = _fake_obtain_success
         reload_calls.clear()
-        dir6 = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input3 = builtins.input
         try:
-            script3 = iter([dir6, "domain-test.example.com", ""])
+            script3 = iter(["domain-test.example.com", ""])
             builtins.input = lambda prompt="": next(script3, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
         finally:
             builtins.input = saved_input3
-            shutil.rmtree(dir6, ignore_errors=True)
         check("add-site's own reload doesn't double up on the domain branch's",
               reload_calls.count(1) == 0 and reload_calls.count("obtain-reloaded") == 1)
         generated_files.extend([s.config.sites[-1].cert_file, s.config.sites[-1].key_file])
@@ -2680,16 +2635,14 @@ def run_dispatch_tests(s):
             site.domain    = domain   # only happens on the real success path
         s._obtain_trusted_cert = _fake_obtain_repoints
         placeholders_before = {f for f in os.listdir(s.BASE_DIR) if f.startswith(("cert-", "key-"))}
-        dir6c = tempfile.mkdtemp(dir=s.BASE_DIR)
         saved_input3c = builtins.input
         try:
-            script3c = iter([dir6c, "issued.example.com", ""])
+            script3c = iter(["issued.example.com", ""])
             builtins.input = lambda prompt="": next(script3c, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
         finally:
             builtins.input = saved_input3c
-            shutil.rmtree(dir6c, ignore_errors=True)
         placeholders_after = {f for f in os.listdir(s.BASE_DIR) if f.startswith(("cert-", "key-"))}
         check("Issuance repointed the site away from its placeholder",
               s._resolve(s.config.sites[-1].cert_file) == os.path.join(acme_dir, "fullchain.pem"))
@@ -2704,16 +2657,14 @@ def run_dispatch_tests(s):
         # happened inside the failed _obtain_trusted_cert call.
         s._obtain_trusted_cert = lambda domain, site: None  # simulates ACME failure: no site.domain assignment
         reload_calls.clear()
-        dir6b = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input3b = builtins.input
         try:
-            script3b = iter([dir6b, "unreachable.example.com", ""])
+            script3b = iter(["unreachable.example.com", ""])
             builtins.input = lambda prompt="": next(script3b, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
         finally:
             builtins.input = saved_input3b
-            shutil.rmtree(dir6b, ignore_errors=True)
         failed_site = s.config.sites[-1]
         check("A failed ACME attempt leaves the site with a real, generated self-signed cert",
               os.path.exists(s._resolve(failed_site.cert_file)) and os.path.exists(s._resolve(failed_site.key_file)))
@@ -2777,8 +2728,6 @@ def run_dispatch_tests(s):
             p = os.path.join(s.BASE_DIR, fname)
             if os.path.exists(p):
                 os.remove(p)
-        for d in dirs2:
-            shutil.rmtree(d, ignore_errors=True)
         s._reload_server     = saved_reload2
         s._server_running    = saved_ssrv2
         s._service_is_active = saved_sact2
@@ -3527,9 +3476,8 @@ def run_dispatch_tests(s):
         check("...its two settings are gone from a Site",
               not hasattr(s.Site(), "publish_url")
               and not hasattr(s.Site(), "publish_key"))
-        check("...neither the shell nor the publish sub-shell offers 'pull'",
-              "pull" not in [c.split()[0] for c, _ in s._COMMANDS]
-              and "pull" not in [c.split()[0] for c, _ in s._PUBLISH_COMMANDS])
+        check("...the shell offers no 'pull'",
+              "pull" not in [c.split()[0] for c, _ in s._COMMANDS])
         check("...the config sub-shell offers no 'channel' or 'publish' verb",
               not any(c.split()[0] in ("channel", "publish")
                       for c, _ in s._CONFIG_COMMANDS))

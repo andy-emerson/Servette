@@ -58,7 +58,6 @@ _COMMANDS = [
     ("log [n]",          "show the last n log entries"),
     ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
-    ("publish",          "one guided flow for site content"),
     ("restore-site [n]", "roll back a site's content to a kept version"),
     ("help",             "show this message"),
     ("quit",             "exit"),
@@ -93,20 +92,6 @@ _CONFIG_COMMANDS = [
     ("back",            "return to main shell"),
 ]
 CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
-
-
-```
-
-The publish sub-shell gathers the content verbs into one guided place, shaped like `config`. With the pull channel removed it holds one verb over the version ring; the browser page is where content lands.
-
-```python
-# The publish commands
-_PUBLISH_COMMANDS = [
-    ("restore-site [n]", "roll back a site's content to a kept version"),
-    ("show",             "show each site's kept versions"),
-    ("back",             "return to main shell"),
-]
-PUBLISH_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _PUBLISH_COMMANDS)
 
 
 ```
@@ -1397,75 +1382,6 @@ def cmd_restore_site(site):
 
     err = _restore_site(site, choice["name"])
     print(f"  {err}" if err else "  Site content restored.")
-
-```
-
-## Publish sub-shell
-
-One guided place for site content, shaped like `config`: show what each site is serving and what it can roll back to, then dispatch until `back`. Every verb delegates to the command it gathers, so the two surfaces cannot drift.
-
-```python
-# The publish display
-def _publish_show():
-    _section("Publish")
-    for i, site in enumerate(config.sites):
-        rows = _site_versions(site)
-        print(f"  [{i}] {site.domain or site.serve_dir}")
-        if not rows:
-            print("      nothing published yet")
-            continue
-        # Newest first, live one marked by _version_line — the same ordering
-        # and the same line the restore prompt lists, so a version reads
-        # identically wherever the operator meets it.
-        for row in rows:
-            print(f"      {_version_line(row)}")
-    print()
-
-
-```
-
-The loop itself: show the state, then dispatch until `back`. Pure terminal — the browser door is the `admin` command's job, and one hint line points there.
-
-```python
-# publish
-def cmd_publish():
-    _publish_show()
-    # The commands come first, unbroken: they are what the operator came for
-    # and there is no guessing them. The browser pointer follows rather than
-    # interrupts, and drops the tunnel detail — 'admin' explains its own
-    # tunnel when it runs.
-    print(PUBLISH_HELP)
-    print("  Prefer a browser? 'admin' opens these jobs as a page.")
-    print()
-
-    while True:
-        try:
-            raw = input("  publish> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-
-        if not raw:
-            continue
-
-        parts = raw.split()
-        cmd   = parts[0].lower()
-        args  = parts[1:]
-
-        if cmd == "show":
-            _publish_show()
-        elif cmd == "restore-site":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_restore_site(site)
-        elif cmd in ("back", "done", "exit", "quit"):
-            break
-        elif cmd in ("help", "?"):
-            print(PUBLISH_HELP)
-        else:
-            print(f"  Unknown command: {cmd}")
-            print(PUBLISH_HELP)
-
 
 ```
 
@@ -2920,7 +2836,7 @@ Servette needs root for a handful of things — the systemd unit, the service us
 # owns. Read-only ones (status, sites, log) are absent deliberately — they must
 # keep working without a password prompt.
 _ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "admin",
-                  "publish", "restore-site")
+                  "restore-site")
 
 # What sudo made of the last elevated command. The one-shot `servette <command>`
 # form exits with it, so tooling driving Servette over SSH sees a refused
@@ -3058,8 +2974,6 @@ def run_command(cmd, args):
         cmd_traffic()
     elif cmd == "admin":
         cmd_admin()
-    elif cmd == "publish":
-        cmd_publish()
     elif cmd == "restore-site":
         site = _config_site_arg(args)
         if site is not None:

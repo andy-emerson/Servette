@@ -6,6 +6,60 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A printed line earns its place only if the reader cannot already see it
+
+**Ruled (Human):** one rule over every command's output, arrived at by
+walking `enable` and `admin` line by line. A line stays if it tells the
+reader something the surrounding lines, the labels, or the program's own
+behaviour do not already say. It goes if it announces what the next line
+names, restates what the line above stated, or reports a step the
+operator can see happening.
+
+Applied, with what each line was judged against:
+
+- `'<cmd>' needs root; asking sudo.` — **gone.** sudo prompts when it
+  wants a password and is silent when it does not, so the notice was
+  either redundant or noise. The sudo-is-missing line stays: it is the
+  only account of why nothing happened.
+- `The admin page is up:` — **gone**, and `link` became `admin page`.
+  Killing a header only works if the label carries the meaning; `link`
+  named a protocol, not a destination.
+- `admin`'s three pointer lines — **folded into the prompt**, which is
+  where a reader looks when wondering what to type. Seven lines to four.
+- `enable`'s watchdog line — **first enable only.** A refresh re-writes
+  the unit and stops; the watchdog was armed by the first enable and is
+  still armed, so on a re-run the line is not news.
+- `restore-site`'s parenthetical explaining the version ring —
+  **replaced** by one sentence saying when a kept version appears.
+- `start`'s macOS line — **rewritten** to carry only what the line above
+  does not: a permanent service needs Linux.
+
+**Why (user pov):** the operator reads the terminal to find one thing;
+every line that says nothing is a line between them and it. **(developer
+pov):** a rule settles a family of these, where line-by-line taste
+re-argues each one and drifts.
+**Reviewed and left alone:** `disable`, `stop`, `status`, `log`,
+`traffic`, `set`, `config` — one line per outcome, or structured output.
+`setup` is a first-run walkthrough, where explaining is the job.
+*(2026-08-24)*
+
+## The publish sub-shell goes; its one verb keeps its own front door
+
+**Ruled (Human):** the sub-shell existed to gather the content channel's
+scattered verbs — `pull`, `restore-site`, `channel`. The pull channel's
+removal left it wrapping a single verb that was already a top-level
+command, so it is removed rather than kept as a menu of one.
+`restore-site` is unchanged and still elevates.
+**Why (user pov):** one door per job; a menu holding one item is a step
+that teaches nothing. **(developer pov):** a wrapper with one call is
+the shape a reader has to read twice to learn it does nothing.
+**Went with it, not replaced:** the display that listed every site's
+kept versions side by side (nothing shows that now — `restore-site`
+lists one site's, and only when a rollback is available), and the one
+line pointing at the browser page. Adding a command is not part of a
+removal; either can come back if it is missed.
+*(2026-08-24)*
+
 ## Command output is indented, without exception
 
 **Ruled (Human):** a bug, not a style choice. Every line the shell prints
@@ -491,7 +545,7 @@ how many rows need review.
 selector cannot scope the box); a third Status tab kept for the glance
 alone (two renderings of the same rows, drifting). *(2026-08-22)*
 
-## The folder is not a setting: serve_dir is retiring from the vocabulary
+## The folder is not a setting: serve_dir has left the vocabulary
 
 **Ruled (Human):** where a site's content lives is Servette's business,
 not a question an operator answers. Content arrives only by publishing —
@@ -508,8 +562,11 @@ outlive the setting only where paths still enter from config files
 written by hand.
 **Rejected:** keeping `dir` as an advanced terminal knob (the knob is
 the footgun, not the surface it sits on).
-**First slice already in:** a page-added site is born with a
-Servette-invented folder (`_invent_site_dir`). *(2026-08-22)*
+**Built:** `_invent_site_dir` is the one folder-naming core, used by the
+page's add-card and the terminal's `add-site` alike; `set dir=`, the
+config sub-shell's `dir`, and setup's folder question are gone. The
+containment guard the setting carried has no caller left, which is the
+open question the ruling's developer-pov note anticipated. *(2026-08-22)*
 
 ## The Publish tab is the site list: cards add, move, and remove sites
 
@@ -713,7 +770,7 @@ software to build, distribute, and maintain — reopen if the one click per
 publish session grates in practice, or a real browser-less-over-SSH need
 appears). *(#108, 2026-08-22)*
 
-## Tunnel uploads are authenticated by SSH; the pull channel is slated for removal
+## Tunnel uploads are authenticated by SSH; the pull channel is removed
 
 **Ruled (Human):** content arriving through the loopback page carries no
 signature — every hop is the operator's machine or their SSH connection,
@@ -734,7 +791,14 @@ concepts from another world: signing keys, signatures, a hosted shelf.
 cron-driven deploys are capability-shaped justifications, not
 principle-shaped); removing it now, before its successor has served a
 single real publish. **Reopen:** a real operator need to publish with no
-SSH access at all. *(#108, 2026-08-22)*
+SSH access at all.
+**Built:** confirmed and removed on 2026-08-24 — the fetch, the
+signature check, `config publish`, the two per-site settings, and the
+`publish` sub-shell that had gathered the channel's verbs. What the two
+channels shared (`_land_bundle`, the extraction guards, the version
+ring, the publish lock) is untouched. The signing half of the pub tool
+lives in the website repository and goes with its next pass.
+*(#108, 2026-08-22)*
 
 ## The readability claim is "understood by one person," not "read in an afternoon"
 

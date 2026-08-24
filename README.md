@@ -1,8 +1,10 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/servette-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="assets/servette-light.svg">
-  <img alt="Servette" src="assets/servette-light.svg" width="300">
-</picture>
+<p>
+  <img alt="" src="assets/servette-mark.svg" width="64">&nbsp;&nbsp;<picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/servette-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/servette-light.svg">
+    <img alt="Servette" src="assets/servette-light.svg" width="300">
+  </picture>
+</p>
 
 ### The Simple, Secure, Static-Site Server
 

@@ -68,7 +68,7 @@ HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d i
 
 The config sub-shell's commands, ordered: sites first (list/add/remove/move — the multi-site entry points), then how a site is reached (port/cert/email — email is the ACME registration address, grouped with the certificate it belongs to), then access control, then traffic shaping, then advanced security tuning, then meta. `cert`/`username`/`password` take an optional site index (default 0) — the same `[n]` convention as the top-level `log [n]`.
 
-Absent by ruling: the folder. Where a site's content lives is Servette-assigned, not a question with a wrong answer for the operator to get wrong ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-is-retiring-from-the-vocabulary)). `show` and `sites` still report the path — knowing where the files are is not the same as choosing it.
+Absent by ruling: the folder. Where a site's content lives is Servette-assigned, not a question with a wrong answer for the operator to get wrong ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-has-left-the-vocabulary)). `show` and `sites` still report the path — knowing where the files are is not the same as choosing it.
 
 ```python
 # The config commands
@@ -216,7 +216,7 @@ Adding a site asks the same questions setup asks for the first one — and its i
 def _invent_site_dir():
     """Create and own an empty folder for a new site. Servette names it: the
     folder is where publishes land, not a question an operator answers
-    ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-is-retiring-from-the-vocabulary)).
+    ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-has-left-the-vocabulary)).
     Both doors — the page's add-card and the terminal's add-site — come
     here, so neither can invent a folder the other would not."""
     name = f"site-{os.urandom(3).hex()}"
@@ -1130,7 +1130,7 @@ _publish_lock = threading.Lock()  # serializes site-content mutation across ever
 
 ```
 
-Every publish lands here — validated extraction into staging, atomic swap, ownership repair, under the publish lock. The bundle arrives one way: the loopback page hands it over the operator's own SSH tunnel, carrying no signature, because the transport already proved the identity ([tunnel uploads are authenticated by SSH](../DECISIONS.md#tunnel-uploads-are-authenticated-by-ssh-the-pull-channel-is-slated-for-removal)). `source` names the door in the log line.
+Every publish lands here — validated extraction into staging, atomic swap, ownership repair, under the publish lock. The bundle arrives one way: the loopback page hands it over the operator's own SSH tunnel, carrying no signature, because the transport already proved the identity ([tunnel uploads are authenticated by SSH](../DECISIONS.md#tunnel-uploads-are-authenticated-by-ssh-the-pull-channel-is-removed)). `source` names the door in the log line.
 
 ```python
 # Landing a bundle

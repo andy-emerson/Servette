@@ -4484,7 +4484,7 @@ def _serve_dir_exposes_secrets(path):
 def _invent_site_dir():
     """Create and own an empty folder for a new site. Servette names it: the
     folder is where publishes land, not a question an operator answers
-    ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-is-retiring-from-the-vocabulary)).
+    ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-has-left-the-vocabulary)).
     Both doors — the page's add-card and the terminal's add-site — come
     here, so neither can invent a folder the other would not."""
     name = f"site-{os.urandom(3).hex()}"

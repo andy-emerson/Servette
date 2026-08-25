@@ -2759,7 +2759,9 @@ def _set_site_value(target, key, value):
         src, dst = src.strip(), dst.strip()
         table = dict(target.redirects)
         if not dst:
-            if not table.pop(src.rstrip("/") or "/", None):
+            # Decoded, because the table's keys are stored decoded — the
+            # same spelling rule the add path and the lookup follow.
+            if not table.pop(unquote(src).rstrip("/") or "/", None):
                 return f"no redirect from {src}"
         else:
             checked = _clean_redirects({src: dst})
@@ -2767,11 +2769,17 @@ def _set_site_value(target, key, value):
                 return ("a redirect goes from a site path to a site path or an "
                         "http(s) URL, and may not point at itself")
             table.update(checked)
-            # The pair is valid alone, but it can close a ring with rules
-            # already in the table (/a→/b saved earlier, /b→/a now) —
-            # which the load-time validator would drop on the next reload.
-            # Judged here instead, so the answer is a refusal now rather
-            # than a rule that silently vanishes later.
+            # Two refusals the pair only earns in company. The cap first:
+            # past it, the load-time validator would truncate — and its
+            # shrinkage must not be misread as a ring below.
+            if len(table) > _MAX_REDIRECTS:
+                return (f"the redirect table is full ({_MAX_REDIRECTS} rules) "
+                        "— remove one first")
+            # And the ring: each pair is valid alone (/a→/b saved earlier,
+            # /b→/a now), and the load-time validator would silently drop
+            # the ring on the next reload. Judged here instead, so the
+            # answer is a refusal now rather than a rule that vanishes
+            # later.
             if len(_clean_redirects(table)) != len(table):
                 return ("that redirect closes a ring — the chain of rules "
                         "would send a visitor in a circle")

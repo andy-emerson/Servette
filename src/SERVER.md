@@ -76,6 +76,18 @@ _MAX_REDIRECTS      = 200
 _MAX_REDIRECT_CHARS = 2000
 
 
+def _redirect_next(dst):
+    """Where an internal redirect target lands as a LOOKUP key, or None for
+    an external one: the query dropped (the next request's path carries none
+    of it), the path decoded and slash-normalized — exactly how the
+    serve-time match reads the request. The loop checks below must follow
+    the same road the visitor's browser will, or a ring spelled /%62 or
+    /b?x=1 walks free while the browser bounces."""
+    if not dst.startswith("/"):
+        return None
+    return unquote(dst.partition("?")[0]).rstrip("/") or "/"
+
+
 def _clean_redirects(raw):
     """The site's redirect table, validated once at load so serving one is a
     dict lookup and nothing else.
@@ -117,9 +129,14 @@ def _clean_redirects(raw):
             log.warning("redirect target %r is not a path or http(s) URL — ignored",
                         dst[:80])
             continue
-        # One rule covers /old and /old/, on both sides of the lookup.
-        norm = src.rstrip("/") or "/"
-        if norm == (dst.rstrip("/") or "/"):
+        # One rule covers /old and /old/, on both sides of the lookup —
+        # and the source is stored DECODED, because the lookup decodes the
+        # request path before matching (exactly as file resolution does):
+        # a rule written /my%20page must fire for the wire's /my%20page,
+        # and /caf%C3%A9 is how an ASCII-only table spells a non-ASCII
+        # source.
+        norm = unquote(src).rstrip("/") or "/"
+        if norm == _redirect_next(dst):
             log.warning("redirect %s points at itself — ignored", norm)
             continue
         out[norm] = dst
@@ -135,8 +152,7 @@ def _clean_redirects(raw):
         seen, cur = set(), src
         while cur is not None and cur in out and cur not in seen:
             seen.add(cur)
-            dst = out[cur]
-            cur = (dst.rstrip("/") or "/") if dst.startswith("/") else None
+            cur = _redirect_next(out[cur])
         if cur is not None and cur in seen:
             doomed.add(src)
     for src in doomed:

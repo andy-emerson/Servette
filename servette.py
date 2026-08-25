@@ -137,6 +137,18 @@ _MAX_REDIRECTS      = 200
 _MAX_REDIRECT_CHARS = 2000
 
 
+def _redirect_next(dst):
+    """Where an internal redirect target lands as a LOOKUP key, or None for
+    an external one: the query dropped (the next request's path carries none
+    of it), the path decoded and slash-normalized — exactly how the
+    serve-time match reads the request. The loop checks below must follow
+    the same road the visitor's browser will, or a ring spelled /%62 or
+    /b?x=1 walks free while the browser bounces."""
+    if not dst.startswith("/"):
+        return None
+    return unquote(dst.partition("?")[0]).rstrip("/") or "/"
+
+
 def _clean_redirects(raw):
     """The site's redirect table, validated once at load so serving one is a
     dict lookup and nothing else.
@@ -178,9 +190,14 @@ def _clean_redirects(raw):
             log.warning("redirect target %r is not a path or http(s) URL — ignored",
                         dst[:80])
             continue
-        # One rule covers /old and /old/, on both sides of the lookup.
-        norm = src.rstrip("/") or "/"
-        if norm == (dst.rstrip("/") or "/"):
+        # One rule covers /old and /old/, on both sides of the lookup —
+        # and the source is stored DECODED, because the lookup decodes the
+        # request path before matching (exactly as file resolution does):
+        # a rule written /my%20page must fire for the wire's /my%20page,
+        # and /caf%C3%A9 is how an ASCII-only table spells a non-ASCII
+        # source.
+        norm = unquote(src).rstrip("/") or "/"
+        if norm == _redirect_next(dst):
             log.warning("redirect %s points at itself — ignored", norm)
             continue
         out[norm] = dst
@@ -196,8 +213,7 @@ def _clean_redirects(raw):
         seen, cur = set(), src
         while cur is not None and cur in out and cur not in seen:
             seen.add(cur)
-            dst = out[cur]
-            cur = (dst.rstrip("/") or "/") if dst.startswith("/") else None
+            cur = _redirect_next(out[cur])
         if cur is not None and cur in seen:
             doomed.add(src)
     for src in doomed:
@@ -9206,7 +9222,9 @@ def _set_site_value(target, key, value):
         src, dst = src.strip(), dst.strip()
         table = dict(target.redirects)
         if not dst:
-            if not table.pop(src.rstrip("/") or "/", None):
+            # Decoded, because the table's keys are stored decoded — the
+            # same spelling rule the add path and the lookup follow.
+            if not table.pop(unquote(src).rstrip("/") or "/", None):
                 return f"no redirect from {src}"
         else:
             checked = _clean_redirects({src: dst})
@@ -9214,11 +9232,17 @@ def _set_site_value(target, key, value):
                 return ("a redirect goes from a site path to a site path or an "
                         "http(s) URL, and may not point at itself")
             table.update(checked)
-            # The pair is valid alone, but it can close a ring with rules
-            # already in the table (/a→/b saved earlier, /b→/a now) —
-            # which the load-time validator would drop on the next reload.
-            # Judged here instead, so the answer is a refusal now rather
-            # than a rule that silently vanishes later.
+            # Two refusals the pair only earns in company. The cap first:
+            # past it, the load-time validator would truncate — and its
+            # shrinkage must not be misread as a ring below.
+            if len(table) > _MAX_REDIRECTS:
+                return (f"the redirect table is full ({_MAX_REDIRECTS} rules) "
+                        "— remove one first")
+            # And the ring: each pair is valid alone (/a→/b saved earlier,
+            # /b→/a now), and the load-time validator would silently drop
+            # the ring on the next reload. Judged here instead, so the
+            # answer is a refusal now rather than a rule that vanishes
+            # later.
             if len(_clean_redirects(table)) != len(table):
                 return ("that redirect closes a ring — the chain of rules "
                         "would send a visitor in a circle")

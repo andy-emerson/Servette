@@ -4213,6 +4213,7 @@ def run_server_tests(s, serve_dir):
             "/old": "/index.html",
             "/blog/": "/writing",
             "/gone": "https://example.com/moved",
+            "/my%20page": "/index.html",
         })
 
         st, loc = hop("/old")
@@ -4241,6 +4242,8 @@ def run_server_tests(s, serve_dir):
         check("...a rule fires for the percent-encoded form of its source",
               hop("/old/") == (301, "/index.html")
               and hop("/%6fld") == (301, "/index.html"))
+        check("...and a rule WRITTEN percent-encoded fires for its wire form",
+              hop("/my%20page") == (301, "/index.html"))
         # A campaign link points at the OLD path with its query attached;
         # dropping it would silently break every one of them.
         check("...and the query string rides along",
@@ -4274,6 +4277,12 @@ def run_server_tests(s, serve_dir):
               and s._clean_redirects({"/x": "/caf%C3%A9"}) == {"/x": "/caf%C3%A9"})
         check("...and one in a source is refused the same way",
               s._clean_redirects({"/café": "/x"}) == {})
+        # Sources are stored decoded, matching the decoded lookup: a rule
+        # written /my%20page fires for the wire's /my%20page, and
+        # /caf%C3%A9 is how an ASCII-only table spells a non-ASCII source.
+        check("A percent-escaped source is stored decoded, so its rule fires",
+              s._clean_redirects({"/my%20page": "/x"}) == {"/my page": "/x"}
+              and s._clean_redirects({"/caf%C3%A9": "/x"}) == {"/café": "/x"})
         check("...and one buried inside a source, where strip() cannot reach it",
               s._clean_redirects({"/x\ny": "/z"}) == {})
         check("...while a trailing newline is simply stripped away",
@@ -4287,6 +4296,14 @@ def run_server_tests(s, serve_dir):
         # one hop per request, so a ring is a browser bouncing to its cap.
         check("A ring of redirects is refused whole, like the self-loop it is",
               s._clean_redirects({"/a": "/b", "/b": "/a"}) == {})
+        # The walk follows targets the way the browser will — decoded, query
+        # dropped — or a ring spelled /%62 or /b?x=1 walks free while the
+        # visitor bounces.
+        check("...a ring spelled with a percent-escape is still a ring",
+              s._clean_redirects({"/a": "/%62", "/b": "/a"}) == {}
+              and s._clean_redirects({"/x": "/%78"}) == {})
+        check("...and one whose target carries a query string",
+              s._clean_redirects({"/a": "/b?x=1", "/b": "/a"}) == {})
         check("...however many hops the ring takes",
               s._clean_redirects({"/a": "/b", "/b": "/c", "/c": "/a"}) == {})
         check("...and a rule that leads into a ring goes with it",
@@ -4324,6 +4341,14 @@ def run_server_tests(s, serve_dir):
               s._set_site_value(probe, "redirect", "/r1,/r2") == ""
               and "closes a ring" in s._set_site_value(probe, "redirect", "/r2,/r1")
               and probe.redirects == {"/r1": "/r2"})
+        # At the cap, the refusal names the cap — the load validator's
+        # truncation shrinks the table too, and that is not a ring.
+        full_probe = s.Site()
+        full_probe.redirects = s._clean_redirects(
+            {f"/p{n}": "/q" for n in range(s._MAX_REDIRECTS)})
+        check("...and a table at the cap refuses with the cap's own sentence",
+              "full" in s._set_site_value(full_probe, "redirect", "/p-extra,/q")
+              and len(full_probe.redirects) == s._MAX_REDIRECTS)
 
         # Removing through _apply_settings must validate against the site's
         # real table, not against a blank scratch object.

@@ -89,9 +89,13 @@ def _clean_redirects(raw):
     Two of the checks are load-bearing rather than tidy. A target is
     narrowed to path-or-http(s) because a redirect is an open door by
     nature, and `javascript:` or `data:` in a Location is a way to run
-    script on the operator's own origin. Control characters are refused on
-    both sides because a Location carrying CR or LF is response splitting —
-    the value reaches a header, and this is where that is stopped."""
+    script on the operator's own origin. Anything outside printable ASCII
+    is refused on both sides: CR or LF in a Location is response splitting
+    (the value reaches a header, and this is where that is stopped), and a
+    non-ASCII byte would be dropped by the ASCII-only Location encoding at
+    serve time — silently sending the visitor somewhere the operator did
+    not write. An operator who wants a non-ASCII destination percent-encodes
+    the path (or punycodes the host) themselves, which is ASCII and exact."""
     out = {}
     if not isinstance(raw, dict):
         log.warning("redirects is not a table — ignoring it")
@@ -101,8 +105,8 @@ def _clean_redirects(raw):
                     _MAX_REDIRECTS, _MAX_REDIRECTS)
     for key, target in list(raw.items())[:_MAX_REDIRECTS]:
         src, dst = str(key).strip(), str(target).strip()
-        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in src + dst):
-            log.warning("redirect with a control character in it — ignored")
+        if any(not (0x20 <= ord(c) <= 0x7E) for c in src + dst):
+            log.warning("redirect with a control or non-ASCII character in it — ignored")
             continue
         if not src.startswith("/") or len(src) > _MAX_REDIRECT_CHARS:
             log.warning("redirect source %r is not a site path — ignored", src[:80])
@@ -1143,7 +1147,12 @@ def _handle_request(method, url_path, headers, raw_ip):
     # query would silently break every campaign link pointed at the old one.
     if site.redirects:
         bare, sep, query = url_path.partition("?")
-        target = site.redirects.get(bare.rstrip("/") or "/")
+        # Match the decoded path, exactly as _resolve_request_path does below:
+        # a source like '/my page' arrives as '/my%20page', and a rule on
+        # '/old' must also catch an encoded '/%6fld' that resolves to the same
+        # file — otherwise the redirect silently fails to fire, or is skipped
+        # by anyone who percent-encodes a letter of the path.
+        target = site.redirects.get(unquote(bare).rstrip("/") or "/")
         if target:
             if sep and "?" not in target:
                 target += sep + query

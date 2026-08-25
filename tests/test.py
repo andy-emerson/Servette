@@ -4091,6 +4091,12 @@ def run_server_tests(s, serve_dir):
               hop("/blog") == (301, "/writing") and hop("/blog/") == (301, "/writing"))
         check("...an absolute http(s) target is sent as written",
               hop("/gone") == (301, "https://example.com/moved"))
+        # The lookup matches the DECODED path, the same one file resolution
+        # sees — so a source with a space fires when the browser sends it
+        # percent-encoded, and a rule cannot be skipped by encoding a letter.
+        check("...a rule fires for the percent-encoded form of its source",
+              hop("/old/") == (301, "/index.html")
+              and hop("/%6fld") == (301, "/index.html"))
         # A campaign link points at the OLD path with its query attached;
         # dropping it would silently break every one of them.
         check("...and the query string rides along",
@@ -4115,6 +4121,15 @@ def run_server_tests(s, serve_dir):
               s._clean_redirects({"/x": "data:text/html,<script>"}) == {})
         check("A CR or LF in a target is refused — that is response splitting",
               s._clean_redirects({"/x": "/y\r\nX-Evil: 1"}) == {})
+        # A non-ASCII target would be dropped byte-by-byte by the ASCII-only
+        # Location encoding at serve time, sending the visitor to a mangled
+        # path. Refused at the one validating door, so `set` and the page
+        # refuse it too; the operator percent-encodes it themselves.
+        check("A non-ASCII character in a target is refused, not silently mangled",
+              s._clean_redirects({"/x": "/café"}) == {}
+              and s._clean_redirects({"/x": "/caf%C3%A9"}) == {"/x": "/caf%C3%A9"})
+        check("...and one in a source is refused the same way",
+              s._clean_redirects({"/café": "/x"}) == {})
         check("...and one buried inside a source, where strip() cannot reach it",
               s._clean_redirects({"/x\ny": "/z"}) == {})
         check("...while a trailing newline is simply stripped away",

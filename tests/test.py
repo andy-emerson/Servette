@@ -1064,8 +1064,13 @@ def run_dispatch_tests(s):
     check("...sized and clickable as a drop target, not a caption",
           "drop-lead" in s._UI_ADMIN_PAGE
           and "q('.dropstrip').addEventListener" in s._UI_ADMIN_PAGE)
+    # The host is compared exactly, not searched for. A substring test would
+    # also pass on evil-servette.org.example, which is both a weaker
+    # assertion and the shape CodeQL flags as incomplete URL sanitization.
+    _footer_hosts = {urllib.parse.urlsplit(u).netloc for u in
+                     re.findall(r'<a href="(https://[^"]+)"', s._UI_ADMIN_PAGE)}
     check("...and the footer saying where more is written down",
-          '<a href="https://servette.org"' in s._UI_ADMIN_PAGE)
+          "servette.org" in _footer_hosts)
     # A card can wear two badges at once: the fault it has, and what
     # publishing is doing. They are separate elements because writing the
     # second over the first would erase a standing fault the moment a

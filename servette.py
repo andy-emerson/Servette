@@ -4584,14 +4584,14 @@ def _config_add_site():
 
 # remove-site
 def _remove_site(idx):
-    """Drop site `idx` and delete its server copies — the content tree, the
-    publish slots, and the one-step backup. The operator's originals live in
-    their own local storage; everything here is a derived copy, which is what
-    makes deletion the honest meaning of 'remove' (deactivation is the
-    keep-everything alternative). The site's certificate files are kept, and
-    a folder another site still points at is left alone. Returns an error
-    sentence, empty on success. Shared by the terminal's remove-site and the
-    page's cards."""
+    """Drop site `idx` and delete its server copies — the live tree, every
+    kept version in its ring, a staged preview, and the shapes that predate
+    the ring. The operator's originals live in their own local storage;
+    everything here is a derived copy, which is what makes deletion the
+    honest meaning of 'remove' (deactivation is the keep-everything
+    alternative). The site's certificate files are kept, and a folder another
+    site still points at is left alone. Returns an error sentence, empty on
+    success. Shared by the terminal's remove-site and the page's cards."""
     if not (0 <= idx < len(config.sites)):
         return f"no site {idx}"
     if len(config.sites) == 1:
@@ -4603,8 +4603,17 @@ def _remove_site(idx):
     shared = any(os.path.realpath(_resolve(s.serve_dir)) == os.path.realpath(base)
                  for s in config.sites)
     if not shared and _is_within_base_dir(base):
-        for suffix in ("", ".a", ".b", ".bak", ".new"):
-            path = base + suffix
+        # Every derived tree, named by the same functions that create them
+        # rather than by a prefix sweep over the directory: a sweep is
+        # shorter and would also delete a neighbouring site whose folder
+        # name happens to start with this one's. _version_dirs is the ring
+        # (a filter, not a prefix match), _content_slots and .bak are the
+        # pre-ring shapes a legacy site may still hold, .new is an
+        # abandoned staging tree, and _preview_dir is an unpublished draft.
+        doomed = [p for p, _stamp in _version_dirs(victim.serve_dir)]
+        doomed += list(_content_slots(victim.serve_dir))
+        doomed += [base + ".bak", base + ".new", _preview_dir(victim), base]
+        for path in doomed:
             try:
                 if os.path.islink(path):
                     os.unlink(path)

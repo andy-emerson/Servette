@@ -1745,6 +1745,80 @@ def run_dispatch_tests(s):
             s.config.save()
             shutil.rmtree(s._resolve(twin_dir), ignore_errors=True)
 
+            # Removal must reclaim EVERY derived tree, not just the shapes
+            # that predate the version ring. The ring shipped without this
+            # function being updated, so a removed site left its whole kept
+            # history on disk — which is the compounding-folders trap the
+            # remove ruling exists to prevent.
+            saved_chown_rm = s._chown_operator
+            s._chown_operator = lambda path, strip_world=False: None
+
+            def _one_file_bundle(body):
+                buf = io.BytesIO()
+                with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+                    data = body.encode()
+                    info = tarfile.TarInfo(name="index.html")
+                    info.size = len(data)
+                    tf.addfile(info, io.BytesIO(data))
+                return buf.getvalue()
+
+            try:
+                doomed_dir = s._invent_site_dir()
+                di = s._append_site(doomed_dir)
+                dsite = s.config.sites[di]
+                for body in ("one", "two", "three"):
+                    s._land_bundle(dsite, _one_file_bundle(body), "test")
+                dbase = s._resolve(doomed_dir).rstrip(os.sep)
+                # A legacy slot, a pre-ring backup marker, an abandoned
+                # staging tree, and a staged preview: every shape removal
+                # is supposed to reclaim.
+                for extra in (".a", ".bak", ".new"):
+                    os.makedirs(dbase + extra, exist_ok=True)
+                s._stage_preview(dsite, _one_file_bundle("draft"))
+
+                # A neighbour whose folder name starts with the victim's: a
+                # prefix sweep would take it too.
+                near_dir = doomed_dir + "-extra"
+                os.makedirs(s._resolve(near_dir), exist_ok=True)
+                ni = s._append_site(near_dir)
+                s._land_bundle(s.config.sites[ni], _one_file_bundle("near"), "test")
+                near_cert = s.config.sites[ni].cert_file
+                near_key  = s.config.sites[ni].key_file
+                near_versions_before = {p for p, _ in s._version_dirs(near_dir)}
+
+                ring_before = len(s._version_dirs(doomed_dir))
+                check("A published site has a ring to reclaim",
+                      ring_before >= 3 and os.path.isdir(dbase + ".preview"))
+
+                err_rm = s._remove_site(di)
+                leftovers = sorted(f for f in os.listdir(s.BASE_DIR)
+                                   if f.startswith(os.path.basename(dbase))
+                                   and not f.startswith(os.path.basename(dbase) + "-"))
+                check("remove-site reclaims every tree in the ring",
+                      err_rm == "" and leftovers == [])
+                check("...the preview, the legacy slot, the backup and the staging tree with it",
+                      not any(os.path.lexists(dbase + suf)
+                              for suf in (".preview", ".a", ".b", ".bak", ".new")))
+                check("...and a neighbour whose name merely starts the same is untouched",
+                      {p for p, _ in s._version_dirs(near_dir)} == near_versions_before
+                      and near_versions_before)
+                for stray in (near_cert, near_key):
+                    sp = os.path.join(s.BASE_DIR, stray)
+                    if os.path.exists(sp):
+                        os.remove(sp)
+                for leftover in [f for f in os.listdir(s.BASE_DIR)
+                                 if f.startswith(os.path.basename(dbase))]:
+                    lp = os.path.join(s.BASE_DIR, leftover)
+                    if os.path.islink(lp):
+                        os.unlink(lp)
+                    else:
+                        shutil.rmtree(lp, ignore_errors=True)
+                s.config.sites = [x for x in s.config.sites
+                                  if x.serve_dir not in (doomed_dir, near_dir)]
+                s.config.save()
+            finally:
+                s._chown_operator = saved_chown_rm
+
             # Deactivation: invisible to routing on every matching path —
             # exact domain, the www pairing, and the domainless catch-all.
             saved_sites_all = s.config.sites

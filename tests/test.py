@@ -2020,6 +2020,18 @@ def run_dispatch_tests(s):
         check("Five wrong guesses end the run's authentication — even for the right code",
               st == 403 and st2 == 403
               and not os.path.exists(os.path.join(ui_dir, "live", "late.html")))
+
+        # A predecessor killed without _stop_ui never swept its drafts; the
+        # next run's door reclaims them on the way in.
+        stale_pv = s._preview_dir(s.config.sites[0])
+        os.makedirs(stale_pv, exist_ok=True)
+        httpd2, _code2 = s._start_ui(s.config.sites[0], "x", port=0)
+        try:
+            check("Starting the page sweeps a dead run's staged previews",
+                  not os.path.exists(stale_pv))
+        finally:
+            httpd2.shutdown()
+            httpd2.server_close()
     finally:
         s._stop_ui(httpd)
         s.config.sites[0].serve_dir = saved_ui_serve
@@ -3639,9 +3651,91 @@ def run_dispatch_tests(s):
               >= {"slot-a", "slot-b", "post-slots"})
         check("...and the single-shot .bak marker is gone",
               not os.path.lexists(two + ".bak"))
+
+        # A failed flip hands the staged tree back: it was already renamed
+        # into the ring, and without the hand-back a publish the caller
+        # reports 'rejected' would leave never-published content for
+        # restore-site to offer as the newest version.
+        s.config.sites[0].serve_dir = link
+        ring_before = [p for p, _ in s._version_dirs(link)]
+        live_before = os.path.realpath(link)
+        stage = os.path.join(swap_root, "doomed")
+        os.makedirs(stage)
+        with open(os.path.join(stage, "marker.txt"), "w") as f:
+            f.write("never-live")
+        real_replace = os.replace
+        def _failing_replace(a, b, *args, **kw):
+            if os.path.abspath(b) == os.path.abspath(link):
+                raise OSError(28, "No space left on device")
+            return real_replace(a, b, *args, **kw)
+        os.replace = _failing_replace
+        try:
+            flip_raised = False
+            try:
+                s._swap_site_content(stage, link)
+            except OSError:
+                flip_raised = True
+        finally:
+            os.replace = real_replace
+        check("A failed flip raises instead of reporting success", flip_raised)
+        check("...leaves the old content live",
+              os.path.realpath(link) == live_before
+              and _marker(link) != "never-live")
+        check("...and hands the staged tree back — the ring gained nothing",
+              [p for p, _ in s._version_dirs(link)] == ring_before
+              and os.path.isdir(stage) and _marker(stage) == "never-live")
+
+        # Legacy conversion where the old tree's mtime sits in the new
+        # publish's own second (or later — a skewed clock): the kept tree's
+        # stamp is clamped strictly below the new one's, or the ring would
+        # read the OLD content as the newest version.
+        same = os.path.join(swap_root, "same-second")
+        os.makedirs(same)
+        with open(os.path.join(same, "marker.txt"), "w") as f:
+            f.write("old-now")
+        ahead = time.time() + 5
+        os.utime(same, (ahead, ahead))
+        s.config.sites[0].serve_dir = same
+        _publish(swap_root, "new-now", "new-now", same)
+        vd_same = s._version_dirs(same)
+        check("Same-second legacy conversion keeps the new tree newest in the ring",
+              len(vd_same) == 2
+              and os.path.realpath(same) == os.path.realpath(vd_same[0][0])
+              and _marker(vd_same[1][0]) == "old-now")
     finally:
         s.config.sites[0].serve_dir = saved_serve_dir
         shutil.rmtree(swap_root, ignore_errors=True)
+
+    section("remove-site reclaims the trees behind a trailing-slash serve_dir")
+
+    # The derived-tree helpers all rstrip serve_dir; the removal's own base
+    # must too, or a hand-edited 'site/' aims the .bak/.new/base deletions
+    # at names that do not exist and leaves the trees behind.
+    ts_base = os.path.join(s.BASE_DIR, "slash-probe")
+    os.makedirs(ts_base)
+    os.makedirs(ts_base + ".bak")
+    os.makedirs(ts_base + ".new")
+    probe_site = s.Site()
+    probe_site.serve_dir = "slash-probe/"          # the hand-edited shape
+    s.config.sites.append(probe_site)
+    saved_run_ts, saved_act_ts = s._server_running, s._service_is_active
+    s._server_running = s._service_is_active = lambda: False
+    try:
+        ts_err  = s._remove_site(len(s.config.sites) - 1)
+        # Judged before the belt-cleanup below, which would otherwise make
+        # these checks pass vacuously.
+        ts_gone = (not os.path.exists(ts_base),
+                   not os.path.exists(ts_base + ".bak"),
+                   not os.path.exists(ts_base + ".new"))
+    finally:
+        s._server_running, s._service_is_active = saved_run_ts, saved_act_ts
+        shutil.rmtree(ts_base, ignore_errors=True)      # belt, if a check fails
+        shutil.rmtree(ts_base + ".bak", ignore_errors=True)
+        shutil.rmtree(ts_base + ".new", ignore_errors=True)
+    check("The removal deletes the base tree despite the trailing slash",
+          ts_err == "" and ts_gone[0])
+    check("...and its .bak and .new siblings with it",
+          ts_gone[1] and ts_gone[2])
 
     section("Landing a bundle — the tail every content channel shares")
 
@@ -4189,6 +4283,17 @@ def run_server_tests(s, serve_dir):
               and s._clean_redirects({"https://elsewhere/x": "/new"}) == {})
         check("A redirect pointing at itself is refused",
               s._clean_redirects({"/loop": "/loop/"}) == {})
+        # A ring of rules is the self-loop one hop longer: the server serves
+        # one hop per request, so a ring is a browser bouncing to its cap.
+        check("A ring of redirects is refused whole, like the self-loop it is",
+              s._clean_redirects({"/a": "/b", "/b": "/a"}) == {})
+        check("...however many hops the ring takes",
+              s._clean_redirects({"/a": "/b", "/b": "/c", "/c": "/a"}) == {})
+        check("...and a rule that leads into a ring goes with it",
+              s._clean_redirects({"/x": "/a", "/a": "/b", "/b": "/a"}) == {})
+        check("...while a chain that ends somewhere real is kept whole",
+              s._clean_redirects({"/a": "/b", "/b": "/c"})
+              == {"/a": "/b", "/b": "/c"})
         check("A non-table redirects value is ignored, not fatal",
               s._clean_redirects("nonsense") == {})
         check("The table is capped",
@@ -4213,6 +4318,12 @@ def run_server_tests(s, serve_dir):
               "a pair" in s._set_site_value(probe, "redirect", "/a"))
         check("...and refuses what the config load would refuse",
               s._set_site_value(probe, "redirect", "/a,javascript:x") != "")
+        # Each pair is valid alone; only the table shows the ring. Refused
+        # at set time, not silently dropped at the next config load.
+        check("...and refuses the pair that closes a ring with a saved rule",
+              s._set_site_value(probe, "redirect", "/r1,/r2") == ""
+              and "closes a ring" in s._set_site_value(probe, "redirect", "/r2,/r1")
+              and probe.redirects == {"/r1": "/r2"})
 
         # Removing through _apply_settings must validate against the site's
         # real table, not against a blank scratch object.

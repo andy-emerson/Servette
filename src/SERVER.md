@@ -123,6 +123,26 @@ def _clean_redirects(raw):
             log.warning("redirect %s points at itself — ignored", norm)
             continue
         out[norm] = dst
+    # A rule pointing at itself is refused above; a ring of rules
+    # (/a→/b, /b→/a) is the same trap one hop longer, and a rule that
+    # leads INTO a ring strands the visitor just as surely. The server
+    # serves one hop per request, so a ring is a browser bouncing until
+    # its redirect cap — refused here, at the same door. Only internal
+    # targets can chain; an http(s) target leaves the site and ends the
+    # walk.
+    doomed = set()
+    for src in out:
+        seen, cur = set(), src
+        while cur is not None and cur in out and cur not in seen:
+            seen.add(cur)
+            dst = out[cur]
+            cur = (dst.rstrip("/") or "/") if dst.startswith("/") else None
+        if cur is not None and cur in seen:
+            doomed.add(src)
+    for src in doomed:
+        log.warning("redirect %s is part of, or leads into, a ring of "
+                    "redirects — ignored", src)
+        del out[src]
     return out
 
 

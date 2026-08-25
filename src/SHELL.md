@@ -334,7 +334,10 @@ def _remove_site(idx):
     if len(config.sites) == 1:
         return "can't remove the only site — a box needs at least one"
     victim = config.sites[idx]
-    base   = _resolve(victim.serve_dir)
+    # rstrip, exactly as every derived-tree helper does: a hand-edited
+    # trailing slash in serve_dir would otherwise aim the .bak/.new/base
+    # deletions at names that do not exist and leave the trees behind.
+    base   = _resolve(victim.serve_dir).rstrip(os.sep)
     del config.sites[idx]
     config.save()
     shared = any(os.path.realpath(_resolve(s.serve_dir)) == os.path.realpath(base)
@@ -1117,15 +1120,24 @@ def _swap_site_content(new_dir, serve_dir):
         # and the flip must fail just as loudly rather than serve nothing.
         raise FileNotFoundError(f"new content tree missing: {new_dir}")
     live = _resolve(serve_dir).rstrip(os.sep)
-    dest = _new_version_dir(serve_dir)
+    now  = int(time.time())
+    dest = _new_version_dir(serve_dir, now)
 
     if os.path.islink(live):
         os.rename(new_dir, dest)
-        flip = live + ".flip"
-        if os.path.lexists(flip):
-            os.remove(flip)                      # a crash's leftover, harmless
-        os.symlink(dest, flip)
-        os.replace(flip, live)                   # the swap: one atomic syscall
+        try:
+            flip = live + ".flip"
+            if os.path.lexists(flip):
+                os.remove(flip)                  # a crash's leftover, harmless
+            os.symlink(dest, flip)
+            os.replace(flip, live)               # the swap: one atomic syscall
+        except OSError:
+            # The tree was already renamed into the ring; a failed flip
+            # hands it back to staging, so a publish the caller reports
+            # 'rejected' leaves no never-published "version" behind for
+            # restore-site to offer.
+            os.rename(dest, new_dir)
+            raise
         _adopt_legacy_slots(serve_dir)
         _prune_versions(serve_dir)
         return
@@ -1135,15 +1147,19 @@ def _swap_site_content(new_dir, serve_dir):
     os.rename(new_dir, dest)
     kept = None
     if had_live:
-        # Dated by its own mtime, not by now: it is the older content, and
-        # the ring sorts on the name.
-        kept = _new_version_dir(serve_dir, os.path.getmtime(live))
+        # Dated by its own mtime, not by now — it is the older content, and
+        # the ring sorts on the name — but clamped strictly below dest's
+        # stamp: an mtime in dest's own second would collide into a higher
+        # sequence suffix, and the ring would read the OLD tree as newer.
+        kept = _new_version_dir(serve_dir,
+                                min(int(os.path.getmtime(live)), now - 1))
         os.rename(live, kept)
     try:
         os.symlink(dest, live)
     except OSError:
         if had_live:
             os.rename(kept, live)
+        os.rename(dest, new_dir)   # same hand-back as the flip above
         raise
     _adopt_legacy_slots(serve_dir)
     _prune_versions(serve_dir)
@@ -1964,6 +1980,11 @@ def _start_ui(site, page, port=_UI_PORT):
     prints the URL and later hands httpd back to _stop_ui. A port already in
     use raises OSError for the caller to report."""
     httpd = http.server.ThreadingHTTPServer((_UI_HOST, port), _UIHandler)
+    # A predecessor killed without _stop_ui (kill -9, a dropped box) never
+    # swept its drafts; the next run's door reclaims them. After the bind,
+    # deliberately: a second admin refused for the busy port must not
+    # delete the live run's staged previews on its way out.
+    _clear_previews()
     httpd.site, httpd.page = site, page
     httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
     httpd.preview_code = ""      # minted by the first staging, not before
@@ -2746,6 +2767,14 @@ def _set_site_value(target, key, value):
                 return ("a redirect goes from a site path to a site path or an "
                         "http(s) URL, and may not point at itself")
             table.update(checked)
+            # The pair is valid alone, but it can close a ring with rules
+            # already in the table (/a→/b saved earlier, /b→/a now) —
+            # which the load-time validator would drop on the next reload.
+            # Judged here instead, so the answer is a refusal now rather
+            # than a rule that silently vanishes later.
+            if len(_clean_redirects(table)) != len(table):
+                return ("that redirect closes a ring — the chain of rules "
+                        "would send a visitor in a circle")
         target.redirects = table
     elif key == "active":
         # The pause between serving and deleting: a deactivated site keeps

@@ -64,7 +64,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 ```
 

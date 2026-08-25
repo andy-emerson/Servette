@@ -947,6 +947,11 @@
   // a positional key would hand one site's state (or its picked folder,
   // below) to a different site's card.
   const folded = new Set();
+  // The folder, not the domain and not the position: naming a site changes
+  // its domain (and must not orphan a folder picked for it), and every
+  // structural op renumbers positions. The one shape this key cannot tell
+  // apart is two sites deliberately sharing one folder — those share fold
+  // and pending state too, a confusion the shared content already invites.
   const foldKey = (siteData, idx) => siteData.dir || siteData.domain || '#' + idx;
 
   // What the operator has read into a card but the server has not been
@@ -1260,7 +1265,9 @@
          // The reverse of Publish, on the line that says what is live: the
          // live tree as the same tar.gz the publish door accepts, so what
          // comes down can go back up.
-         `<button class="action tiny dl" type="button" ` +
+         // Born disabled: the size guard below needs the /versions answer,
+         // and a click before (or without) it must not navigate blind.
+         `<button class="action tiny dl" type="button" disabled ` +
          `title="Download the live content as a tar.gz">Download</button>` +
          `<button class="action tiny ver-refresh" type="button" ` +
          `title="Re-read this list. The page updates it after a publish or ` +
@@ -1718,6 +1725,12 @@
     // the size the version row already fetched.
     q('.dl').addEventListener('click', () => {
       clearError(errEl);
+      // Raw bytes are the only number the page holds; the server judges
+      // the gzipped tar, so a compressible over-500 MB site is refused
+      // here that the server might have managed. Accepted: scp still
+      // works either way, and navigating the page into a JSON refusal
+      // blob is worse. The button is born disabled, so liveBytes is set
+      // by the /versions fetch before any click can land.
       if (liveBytes != null && liveBytes > MAX_BUNDLE_BYTES)
         return showError(errEl,
           `This site is larger than ${fmtSize(MAX_BUNDLE_BYTES)} — ` +

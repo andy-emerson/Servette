@@ -76,16 +76,32 @@ _MAX_REDIRECTS      = 200
 _MAX_REDIRECT_CHARS = 2000
 
 
+def _canonical_source(path):
+    """A redirect source in its one canonical spelling: decoded once, then
+    re-encoded with a fixed rule, trailing slash dropped. The stored key
+    and the serve-time lookup both pass through here, so every spelling of
+    one path — /my%20page, a literal space, mixed hex case — is one rule.
+
+    quote-after-unquote, not bare unquote, for two load-bearing reasons.
+    The canonical form is always printable ASCII, so a source written
+    /a%0d can never plant a raw control character in the config file
+    (tomllib refuses a literal CR — the next restart would find the file
+    unparseable). And it is a fixed point — canonical in, canonical out —
+    where a bare-decoded key was not: a stored space re-decoded, a %2520
+    drifted one escape per save/load cycle, and the ring check misread its
+    own shrinking output as a ring."""
+    return quote(unquote(path), safe="/").rstrip("/") or "/"
+
+
 def _redirect_next(dst):
     """Where an internal redirect target lands as a LOOKUP key, or None for
     an external one: the query dropped (the next request's path carries none
-    of it), the path decoded and slash-normalized — exactly how the
-    serve-time match reads the request. The loop checks below must follow
-    the same road the visitor's browser will, or a ring spelled /%62 or
-    /b?x=1 walks free while the browser bounces."""
+    of it), then the same canonical spelling the lookup uses. The loop
+    checks below must follow the same road the visitor's browser will, or a
+    ring spelled /%62 or /b?x=1 walks free while the browser bounces."""
     if not dst.startswith("/"):
         return None
-    return unquote(dst.partition("?")[0]).rstrip("/") or "/"
+    return _canonical_source(dst.partition("?")[0])
 
 
 def _clean_redirects(raw):
@@ -129,13 +145,15 @@ def _clean_redirects(raw):
             log.warning("redirect target %r is not a path or http(s) URL — ignored",
                         dst[:80])
             continue
-        # One rule covers /old and /old/, on both sides of the lookup —
-        # and the source is stored DECODED, because the lookup decodes the
-        # request path before matching (exactly as file resolution does):
-        # a rule written /my%20page must fire for the wire's /my%20page,
-        # and /caf%C3%A9 is how an ASCII-only table spells a non-ASCII
-        # source.
-        norm = unquote(src).rstrip("/") or "/"
+        # One rule covers /old and /old/ and every percent-spelling of the
+        # same path, on both sides of the lookup: the key is the canonical
+        # form, so a rule written /my%20page fires for the wire's
+        # /my%20page, and /caf%C3%A9 is how an ASCII-only table spells a
+        # non-ASCII source.
+        norm = _canonical_source(src)
+        if norm in out:
+            log.warning("redirect %s is written twice (two spellings of one "
+                        "path) — the last one wins", norm)
         if norm == _redirect_next(dst):
             log.warning("redirect %s points at itself — ignored", norm)
             continue
@@ -1055,6 +1073,15 @@ def _handle_request(method, url_path, headers, raw_ip):
             # print the IP field as-is. Junk keeps the proxy's own address:
             # shared limiting beats no limiting under a misconfigured proxy.
             forwarded = xff.split(",")[-1].strip()
+            # Some stock proxies append the client as ip:port (Azure's
+            # gateway does by default) or [v6]:port — the port is theirs
+            # to add and ours to drop, or every visitor behind such a
+            # proxy would collapse into the proxy's one bucket below.
+            m = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\](?::\d+)?", forwarded)
+            if m:
+                forwarded = m.group(1)
+            elif re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}:\d+", forwarded):
+                forwarded = forwarded.rsplit(":", 1)[0]
             try:
                 ipaddress.ip_address(forwarded)
             except ValueError:
@@ -1195,12 +1222,12 @@ def _handle_request(method, url_path, headers, raw_ip):
     # query would silently break every campaign link pointed at the old one.
     if site.redirects:
         bare, sep, query = url_path.partition("?")
-        # Match the decoded path, exactly as _resolve_request_path does below:
-        # a source like '/my page' arrives as '/my%20page', and a rule on
-        # '/old' must also catch an encoded '/%6fld' that resolves to the same
-        # file — otherwise the redirect silently fails to fire, or is skipped
-        # by anyone who percent-encodes a letter of the path.
-        target = site.redirects.get(unquote(bare).rstrip("/") or "/")
+        # Match the canonical spelling the table's keys are stored in: a
+        # source like '/my page' arrives as '/my%20page', and a rule on
+        # '/old' must also catch an encoded '/%6fld' that resolves to the
+        # same file — otherwise the redirect silently fails to fire, or is
+        # skipped by anyone who percent-encodes a letter of the path.
+        target = site.redirects.get(_canonical_source(bare))
         if target:
             if sep and "?" not in target:
                 target += sep + query

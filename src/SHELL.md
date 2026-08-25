@@ -2771,9 +2771,10 @@ def _set_site_value(target, key, value):
         src, dst = src.strip(), dst.strip()
         table = dict(target.redirects)
         if not dst:
-            # Decoded, because the table's keys are stored decoded — the
-            # same spelling rule the add path and the lookup follow.
-            if not table.pop(unquote(src).rstrip("/") or "/", None):
+            # The canonical spelling, because that is what the table's keys
+            # are stored in — the same rule the add path and the lookup
+            # follow, so the page can hand back a stored key verbatim.
+            if not table.pop(_canonical_source(src), None):
                 return f"no redirect from {src}"
         else:
             checked = _clean_redirects({src: dst})

@@ -4327,12 +4327,29 @@ def run_server_tests(s, serve_dir):
               and s._clean_redirects({"/x": "/caf%C3%A9"}) == {"/x": "/caf%C3%A9"})
         check("...and one in a source is refused the same way",
               s._clean_redirects({"/café": "/x"}) == {})
-        # Sources are stored decoded, matching the decoded lookup: a rule
-        # written /my%20page fires for the wire's /my%20page, and
-        # /caf%C3%A9 is how an ASCII-only table spells a non-ASCII source.
-        check("A percent-escaped source is stored decoded, so its rule fires",
-              s._clean_redirects({"/my%20page": "/x"}) == {"/my page": "/x"}
-              and s._clean_redirects({"/caf%C3%A9": "/x"}) == {"/café": "/x"})
+        # Sources are stored in ONE canonical percent-encoded spelling, the
+        # same one the lookup computes from the wire: a rule written
+        # /my%20page (or with a literal space, or lowercase hex) is one
+        # rule, and /caf%C3%A9 is how an ASCII-only table spells a
+        # non-ASCII source.
+        check("Every spelling of a source canonicalizes to one stored key",
+              s._clean_redirects({"/my%20page": "/x"}) == {"/my%20page": "/x"}
+              and s._clean_redirects({"/my page": "/x"}) == {"/my%20page": "/x"}
+              and s._clean_redirects({"/caf%c3%a9": "/x"}) == {"/caf%C3%A9": "/x"})
+        # The canonical form is a fixed point. Bare decoding was not: a
+        # stored space re-decoded on the next load, a %2520 drifted one
+        # escape per save/load cycle, the ring check misread its own
+        # shrinking output as a ring, and /a%0d planted a literal CR in
+        # the TOML file — unparseable on the next restart.
+        once = s._clean_redirects({"/my%20page": "/x", "/x%2520y": "/q",
+                                   "/caf%C3%A9": "/z"})
+        check("The table is a fixed point of its own validator",
+              s._clean_redirects(once) == once)
+        cr = s._clean_redirects({"/a%0d": "/x"})
+        check("An encoded control character stays encoded — no raw CR ever "
+              "reaches the config file",
+              cr == {"/a%0D": "/x"}
+              and not any(ord(c) < 0x20 for k in cr for c in k))
         check("...and one buried inside a source, where strip() cannot reach it",
               s._clean_redirects({"/x\ny": "/z"}) == {})
         check("...while a trailing newline is simply stripped away",
@@ -4391,6 +4408,15 @@ def run_server_tests(s, serve_dir):
               s._set_site_value(probe, "redirect", "/r1,/r2") == ""
               and "closes a ring" in s._set_site_value(probe, "redirect", "/r2,/r1")
               and probe.redirects == {"/r1": "/r2"})
+        # A percent-spelled source through the set door: accepted, no false
+        # ring from re-validating its own stored form, removable by its
+        # stored key or any spelling of it, and later rules unaffected.
+        check("...accepts a percent-spelled source and stays self-consistent",
+              s._set_site_value(probe, "redirect", "/caf%C3%A9,/x") == ""
+              and s._set_site_value(probe, "redirect", "/plain,/y") == ""
+              and s._set_site_value(probe, "redirect", "/caf%c3%a9,") == ""
+              and "/caf%C3%A9" not in probe.redirects
+              and s._set_site_value(probe, "redirect", "/plain,") == "")
         # At the cap, the refusal names the cap — the load validator's
         # truncation shrinks the table too, and that is not a ring.
         full_probe = s.Site()
@@ -4742,6 +4768,15 @@ def run_server_tests(s, serve_dir):
     req("GET", headers={"X-Forwarded-For": "5.6.7.8"})
     check("...while real addresses are still adopted, each with its own bucket",
           req("GET", headers={"X-Forwarded-For": "9.10.11.12"}).status != 429)
+
+    # Stock proxies (Azure's gateway among them) append the client as
+    # ip:port or [v6]:port; the port is theirs to add and ours to drop —
+    # or every visitor behind such a proxy would share the proxy's bucket.
+    s._request_times.clear()
+    req("GET", headers={"X-Forwarded-For": "1.2.3.4:1111"})
+    req("GET", headers={"X-Forwarded-For": "5.6.7.8:2222"})
+    check("An ip:port XFF is adopted as its address, not lumped as junk",
+          req("GET", headers={"X-Forwarded-For": "[2001:db8::7]:443"}).status != 429)
 
     s.config.rate_limit    = 200
     s.config.trusted_proxy = ""

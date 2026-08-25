@@ -1544,9 +1544,19 @@ def run_dispatch_tests(s):
         # The page may move the service toward serving and no further.
         st, _ = ui_req("POST", "/service", body=b"{}")
         check("The service endpoint is code-gated like every other", st == 403)
+        # A lifecycle request must say which transition it means: a garbled
+        # request defaulting to 'start' was the fail-open bug — a truncated
+        # stop performing the opposite transition with a 200.
+        st, _ = ui_req("POST", f"/service?t={ui_code}", body=b"not json{")
+        check("...refuses a body it cannot parse instead of defaulting", st == 400)
+        st, body = ui_req("POST", f"/service?t={ui_code}", body=b'{"op": "stopp"}')
+        check("...and an op it does not know",
+              st == 422 and b"start, restart or stop" in body)
+        st, _ = ui_req("POST", f"/service?t={ui_code}", body=b"{}")
+        check("...and a body naming no op at all", st == 422)
         saved_unit = s._service_file_exists
         s._service_file_exists = lambda: False
-        st, body = ui_req("POST", f"/service?t={ui_code}", body=b"{}")
+        st, body = ui_req("POST", f"/service?t={ui_code}", body=b'{"op": "start"}')
         check("...and refuses to start a service that was never installed",
               st == 422 and b"enable" in body)
         s._service_file_exists = saved_unit
@@ -1562,6 +1572,18 @@ def run_dispatch_tests(s):
                                         "values": {"username": "cfg-probe"}}).encode())
         check("POST /config applies through the same path as `set`",
               st == 200 and s.config.sites[0].username == "cfg-probe")
+        # Sign-in joins user:password and the server splits at the first
+        # colon, so a stored username containing one locks every visitor
+        # out while the health row still reads private-and-healthy.
+        st, body = ui_req("POST", f"/config?t={ui_code}",
+                          body=json.dumps({"site": 0,
+                                           "values": {"username": "team:alpha"}}).encode())
+        check("...refuses a colon in a username — sign-in could never match it",
+              st == 422 and b"colon" in body
+              and s.config.sites[0].username == "cfg-probe")
+        check("...with the same judgment on every surface that writes one",
+              s._set_site_value(s.Site(), "username", "a:b") != ""
+              and s._set_site_value(s.Site(), "username", "alpha") == "")
         st, body = ui_req("POST", f"/config?t={ui_code}",
                           body=json.dumps({"values": {"port": "99999"}}).encode())
         check("...refuses what `set` refuses, with `set`'s own sentence",
@@ -1733,6 +1755,17 @@ def run_dispatch_tests(s):
                                             "domain": "card.example"}).encode())
             check("op=name is a config write, no authority involved",
                   st == 200 and s.config.sites[n0].domain == "card.example")
+            # The one door where a domain enters config without an issuance
+            # to vet it, so syntax is judged there — locally, no DNS asked.
+            bad_names = ["https://card.example", "card example.com",
+                         "card.example.", "-card.example", "a" * 254 + ".com"]
+            bad_results = [ui_req("POST", f"/sites?t={ui_code}",
+                                  body=json.dumps({"op": "name", "site": n0,
+                                                   "domain": bad}).encode())
+                           for bad in bad_names]
+            check("...refusing a string that could never route or be issued for",
+                  all(st == 422 for st, _ in bad_results)
+                  and s.config.sites[n0].domain == "card.example")
             st, body = ui_req("POST", f"/sites?t={ui_code}",
                               body=json.dumps({"op": "name", "site": 0,
                                                "domain": "card.example"}).encode())

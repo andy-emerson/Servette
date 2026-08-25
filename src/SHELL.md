@@ -497,18 +497,19 @@ Clearing the username clears the password with it — auth is one switch, not tw
 def _config_username(site):
     current   = site.username
     new_value = _input(f"  username [{current}]: ").strip()
-    if new_value == "" and current != "":
-        site.username      = ""
-        site.password_hash = ""
-        site.password_salt = ""
-        config.save()
-        print("  → auth disabled, password cleared")
-    elif new_value and new_value != current:
-        site.username = new_value
-        config.save()
-        print("  → saved")
-    else:
+    if new_value == current:
         print("  → unchanged")
+        return
+    # Through the shared validator, so the prompt refuses exactly what
+    # `set` and the page refuse — clearing included: an emptied username
+    # takes the stored password with it there, on every surface.
+    err = _set_site_value(site, "username", new_value)
+    if err:
+        print(f"  → {err}")
+        return
+    config.save()
+    print("  → auth disabled, password cleared" if new_value == ""
+          else "  → saved")
 
 
 def _config_password(site):
@@ -1700,15 +1701,22 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             # back with it.
             if length > 512:
                 return self._respond(413, "Body too large.")
+            # A lifecycle request must say which transition it means: a
+            # garbled or unknown op is refused, never defaulted — a
+            # truncated stop must not become a start.
             try:
-                body_op = json.loads(self.rfile.read(length)).get("op", "start")
+                body_op = str(json.loads(self.rfile.read(length)).get("op") or "")
             except (ValueError, TypeError):
-                body_op = "start"
+                return self._respond(400, "Malformed body.")
+            if body_op not in ("start", "restart", "stop"):
+                return self._respond(422, json.dumps(
+                    {"error": "op must be start, restart or stop"}),
+                    "application/json")
             if not _service_file_exists():
                 return self._respond(422, json.dumps(
                     {"error": "no system service installed — run 'enable' in the terminal"}),
                     "application/json")
-            verb = str(body_op) if str(body_op) in ("start", "restart", "stop") else "start"
+            verb = body_op
             try:
                 subprocess.run(["systemctl", verb, "servette"],
                                check=True, capture_output=True)
@@ -1781,9 +1789,15 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                     if not (0 <= idx < len(config.sites)):
                         err = f"no site {idx}"
                     elif op == "name":
+                        # The one door where a domain enters config without
+                        # an issuance to vet it (the terminal assigns only on
+                        # ACME success), so syntax is judged here — locally,
+                        # keeping the name-write instant.
                         domain = str(body.get("domain") or "").strip().lower()
-                        if not domain:
-                            err = "a domain is needed"
+                        problem = ("a domain is needed" if not domain
+                                   else _domain_problem(domain))
+                        if problem:
+                            err = problem
                         elif _domain_in_use(domain, excluding=config.sites[idx]):
                             err = f"{domain} is already used by another site on this box"
                         else:
@@ -2653,10 +2667,17 @@ def _set_site_value(target, key, value):
     a scratch Site during the validation pass). Returns an error string,
     empty on success."""
     if key == "username":
+        # A colon can never reach the server in a username: sign-in joins
+        # user:password into one credential and _handle_request splits it at
+        # the first colon, so a stored username containing one locks every
+        # visitor out while the health row still reads private-and-healthy.
+        # Refused here — the one write path — so `set`, the page, and the
+        # interactive prompt judge it with the same sentence.
+        if ":" in value:
+            return "a username cannot contain a colon — sign-in splits user:password at the first one"
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
-        # (`set` and the page alike, since both land here) — the same rule
-        # the interactive prompt has always kept.
+        # (`set`, the page, and the prompt alike, since all land here).
         target.username = value
         if not value:
             target.password_hash = ""

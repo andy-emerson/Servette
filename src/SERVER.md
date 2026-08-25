@@ -1327,6 +1327,24 @@ def _domain_in_use(domain, excluding=None):
     return any(s is not excluding and s.domain and s.domain.lower() == domain for s in config.sites)
 
 
+def _domain_problem(domain):
+    """Why this string cannot be a site's domain, as one sentence — empty
+    when it can be. Syntax only, judged locally: naming a site is instant
+    and must never depend on anyone's DNS (the naming/certifying split), so
+    this refuses only what could never route or be issued for — a scheme, a
+    path, a port, spaces, a label DNS itself would reject. Host matching
+    and the SNI table compare this string against what browsers send, which
+    is why a value like 'https://example.com' can never match anything."""
+    if len(domain) > 253:
+        return "that is longer than a domain can be (253 characters)"
+    if any(not label or len(label) > 63 or label != label.strip("-")
+           or not all(c.isascii() and (c.isalnum() or c == "-") for c in label)
+           for label in domain.split(".")):
+        return ("a domain is dot-separated labels of letters, digits and "
+                "hyphens — no scheme, path, port or spaces (example.com)")
+    return ""
+
+
 ```
 
 One certificate, one TLS context — minimum version enforced, ALPN pinned to HTTP/1.1, unreadable material raising so startup fails closed.

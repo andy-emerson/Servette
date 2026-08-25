@@ -2958,6 +2958,16 @@ def _obtain_trusted_cert(domain, site):
     Returns None on success, else the failure's class for the watchdog's
     backoff: "refused" (the CA answered no — retrying soon just burns its
     rate limits) or "transient" (the network ate a request — retry freely)."""
+    # Judged before the domain becomes anything else, because two lines
+    # below it becomes a PATH component (certs/<domain>): the admin page's
+    # name op refuses these shapes before issuance can run, but the
+    # terminal's prompts land here directly, and 'a/b' typed at a prompt
+    # must not mkdir its way into the tree before ACME ever answers.
+    problem = _domain_problem(domain)
+    if problem:
+        print(f"  → {problem}")
+        return "refused"
+
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
@@ -8663,6 +8673,11 @@ def _production_issues(running=None):
         # username with nothing stored to check locks every visitor out.
         if site.username and not site.password_hash:
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
+        # Every write surface refuses a colon, but a hand-edited config
+        # file loads one — and sign-in splits the credential at the first
+        # colon, so this locks every visitor out just as surely.
+        elif ":" in site.username:
+            issues.append(f"the username contains a colon{tag} — sign-in can never match it; run 'config' to change it")
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
                                    _cache_headroom_mb(config.cache_size_mb, running))
@@ -8899,13 +8914,20 @@ def _health_checks(service_active=None):
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored
-        # to check against, which locks every visitor out.
+        # to check against — and the colon-username a hand-edited config
+        # file can load past the write surfaces' refusal: sign-in splits
+        # the credential at the first colon, so either locks every visitor
+        # out.
         half_auth = bool(site.username) and not site.password_hash
-        rows.append({"key": "password", "site": i, "ok": not half_auth,
-                     "blocking": half_auth, "label": tag + "Access",
-                     "detail": ("private — visitors sign in" if site.username and site.password_hash
-                                else "a username with no stored password — set one below, or make the site public"
+        bad_user  = ":" in site.username
+        rows.append({"key": "password", "site": i,
+                     "ok": not (half_auth or bad_user),
+                     "blocking": half_auth or bad_user, "label": tag + "Access",
+                     "detail": ("a username with no stored password — set one below, or make the site public"
                                 if half_auth
+                                else "the username contains a colon — sign-in can never match it; change it below"
+                                if bad_user
+                                else "private — visitors sign in" if site.username
                                 else "public — anyone can view it (the form below makes it private)")})
     return rows
 
@@ -9402,13 +9424,23 @@ def _startup_refresh():
     data directory or interpreter differs from this shell's is reported and
     left alone — rewriting it would repoint a live service at this shell's
     environment, which only an explicit 'enable' may do."""
-    if _stale_units():
+    stale = _stale_units()
+    # _stale_units answers empty when this environment can name no
+    # interpreter to write into a unit — but an installed service in that
+    # state is exactly the one whose pinned interpreter may have vanished
+    # (a 203/EXEC crash-loop with only the journal as a symptom), so the
+    # drift report is still owed a look.
+    orphaned = (not stale and _service_file_exists()
+                and not _unsafe_unit_path() and _unit_python_path() is None)
+    if stale or orphaned:
         drift = _service_env_drift()
         if drift:
             print("  The enabled service was set up from a different environment:")
             for d in drift:
                 print(f"    - {d}")
             print("  Leaving it untouched — run 'enable' to re-provision from this shell.")
+        elif orphaned:
+            pass   # nothing stale to rewrite and nothing drifted to report
         else:
             try:
                 _write_unit_files()

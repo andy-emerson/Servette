@@ -637,6 +637,16 @@ def _obtain_trusted_cert(domain, site):
     Returns None on success, else the failure's class for the watchdog's
     backoff: "refused" (the CA answered no — retrying soon just burns its
     rate limits) or "transient" (the network ate a request — retry freely)."""
+    # Judged before the domain becomes anything else, because two lines
+    # below it becomes a PATH component (certs/<domain>): the admin page's
+    # name op refuses these shapes before issuance can run, but the
+    # terminal's prompts land here directly, and 'a/b' typed at a prompt
+    # must not mkdir its way into the tree before ACME ever answers.
+    problem = _domain_problem(domain)
+    if problem:
+        print(f"  → {problem}")
+        return "refused"
+
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa

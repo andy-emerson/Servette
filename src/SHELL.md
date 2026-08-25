@@ -1197,12 +1197,10 @@ def _land_bundle(site, bundle, source):
             # tree goes live: the operator owns their content, the service
             # reads through its group. strip_world because the extraction's
             # own 644/755 modes are Servette's writing, not the operator's,
-            # (kept versions need nothing: each was the live tree once and
-            # keeps the ownership it already has)
-            # and must honour the never-world-bits promise. The backup needs
-            # nothing: it was the live tree a moment ago and keeps the
+            # and must honour the never-world-bits promise. Kept versions
+            # need nothing: each was the live tree once and keeps the
             # ownership it already has. A failed extraction dies here, in
-            # staging, with the live content and its backup untouched.
+            # staging, with the live content and the ring untouched.
             _chown_operator(staging, strip_world=True)
             _swap_site_content(staging, site.serve_dir)
         except Exception as e:
@@ -1506,7 +1504,7 @@ _UI_LOGIN_PAGE = """<!doctype html>
 
 ```
 
-The admin page is inlined by the build exactly as the 404 page is — authored as `src/admin.html`, counted apart from the Python figures. One page, tabs per feature (Status, Publish; Config when it earns its forms), so every feature shares one scaffold, one bookmark, one code. The publish tab is the pub tool's bundle builder with every trace of key custody removed: on this page, being here is the authentication.
+The admin page is inlined by the build exactly as the 404 page is — authored as `src/admin.html`, counted apart from the Python figures. One page, three tabs — Sites (one card per site: publish, preview, download, domain, certificate, access, redirects, history), Server, Statistics — so everything shares one scaffold, one bookmark, one code. Publishing is the pub tool's bundle builder with every trace of key custody removed: on this page, being here is the authentication.
 
 ```python
 # The admin page

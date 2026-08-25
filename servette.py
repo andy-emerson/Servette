@@ -3109,7 +3109,14 @@ def _is_real_domain(s):
 def _domain_from_cert(cert_path):
     if not cert_path:
         return None
-    cert = _load_cert(cert_path)
+    return _cert_covered_domain(_load_cert(cert_path))
+
+
+def _cert_covered_domain(cert):
+    """The domain a loaded certificate names, or None — the parsed half of
+    _domain_from_cert, split out so a caller already holding the parsed
+    certificate (the health rows read two facts from one) need not load
+    and parse the PEM a second time."""
     if cert is None:
         return None
     try:
@@ -3132,7 +3139,12 @@ def _domain_from_cert(cert_path):
 
 # Days to expiry
 def _cert_days_remaining(cert_path):
-    cert = _load_cert(cert_path)
+    return _cert_days(_load_cert(cert_path))
+
+
+def _cert_days(cert):
+    """Days to a loaded certificate's expiry, or None — the parsed half of
+    _cert_days_remaining, for callers already holding the certificate."""
     if cert is None:
         return None
     try:
@@ -3498,7 +3510,7 @@ def _round_up_2sig(n):
 
 
 # The cache's share of demand
-def _cache_headroom_mb(cache_mb):
+def _cache_headroom_mb(cache_mb, running=None):
     """How much of the configured file cache is NOT already in Committed_AS.
 
     The cache holds file bytes on the Python heap, so a warm cache is
@@ -3516,8 +3528,14 @@ def _cache_headroom_mb(cache_mb):
     in the signal), so a host that accepts the offer is never afterwards told
     to resize. The old formula had this backwards: the cache entered the
     measurement between setup and status, so the check drifted upward past
-    the size the operator had just chosen, and nagged forever."""
-    return 0 if (_server_running() or _service_is_active()) else cache_mb
+    the size the operator had just chosen, and nagged forever.
+
+    `running` lets a caller hand in a fact it already holds — _status_data
+    asks systemd once and threads the answer through everything the
+    snapshot computes; None asks here."""
+    if running is None:
+        running = _server_running() or _service_is_active()
+    return 0 if running else cache_mb
 
 
 # The recommendation
@@ -5058,10 +5076,13 @@ def _traffic_lines(days=7):
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
-def _parse_traffic(lines, days=7):
+def _parse_traffic(lines, days=7, now=None):
     """Tally journal lines into the traffic summary: requests per day,
     status counts, top paths. Pure, so the suite can feed it real log
-    lines. Each line carries two prefixes — the journal's own
+    lines (`now` pins the window's end for it; None means now). Every
+    bucket in the window is present, zeroes included — the chart's x-axis
+    is time, and a quiet day left out made two busy endpoints read as a
+    steady week. Each line carries two prefixes — the journal's own
     ('<iso> <host> servette[pid]:') and then setup_logging's format
     ('<date> <time>  LEVEL  <message>') — so the level name is the anchor
     the message begins after. Anchoring on the unit token instead was the
@@ -5090,6 +5111,15 @@ def _parse_traffic(lines, days=7):
             path = next((p for p in msg[1:] if p.startswith("/")), None)
             if path:
                 paths[path] = paths.get(path, 0) + 1
+    # The zero-fill: journalctl's -Nd window is N*24 hours ending now, so
+    # it can touch N+1 calendar days — every bucket it covers gets a row.
+    # Line-made buckets just outside the fill (clock skew, a test's fixed
+    # dates) are kept: counted traffic is never dropped over its stamp.
+    end  = now or datetime.datetime.now()
+    step = datetime.timedelta(hours=1) if days <= 2 else datetime.timedelta(days=1)
+    fmt  = "%Y-%m-%d %H" if days <= 2 else "%Y-%m-%d"
+    for i in range((days * 24 if days <= 2 else days) + 1):
+        per_day.setdefault((end - i * step).strftime(fmt), 0)
     top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
     return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
             "top_paths": top, "window_days": days,
@@ -5106,7 +5136,7 @@ def cmd_traffic():
     read from the journal. The page's Traffic tab renders this same
     summary; the raw log (IPs included) stays with `log`."""
     t = _traffic_summary()
-    if not t["days"]:
+    if not t["total"]:
         print("  No traffic in the window — or no readable journal on this host.")
         return
     _section("Traffic — last 7 days")
@@ -8415,11 +8445,13 @@ def _format_uptime(seconds):
 
 
 # Production issues
-def _production_issues():
+def _production_issues(running=None):
     """Return a list of strings describing conditions that prevent production
     readiness, across every configured site. Single-site installs (still the
     common case) see exactly today's unlabeled messages; a labeled site name
-    is added only once there's more than one to tell apart."""
+    is added only once there's more than one to tell apart. `running` rides
+    to the swap check for a caller that already knows it (_status_data asks
+    systemd once for the whole snapshot); None lets the check ask itself."""
     issues  = []
     labeled = len(config.sites) > 1
     for site in config.sites:
@@ -8441,7 +8473,7 @@ def _production_issues():
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
-                                   _cache_headroom_mb(config.cache_size_mb))
+                                   _cache_headroom_mb(config.cache_size_mb, running))
     ours_mb, foreign_mb = _swap_sizes()
     offer   = _swap_offer(rec // (1024 * 1024) if rec else None,
                           os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
@@ -8580,16 +8612,19 @@ def _site_rows():
     } for i, site in enumerate(config.sites)]
 
 
-def _health_checks():
+def _health_checks(service_active=None):
     """Every health fact as a row, green included — the admin page's Health
     checks card. The same ground _production_issues walks, saying what passes
     as plainly as what needs attention: ok True is healthy, False needs it.
     `key` is stable for consumers; `site` carries the index where the row is
     site-scoped, None where it is host-wide — the admin page splits its
-    Settings cards (This site / This server) on exactly that."""
+    Settings cards (This site / This server) on exactly that.
+    `service_active` lets _status_data hand in the one systemd probe it
+    already ran; None asks here."""
     rows = []
-    service_active = _service_is_active()
-    running        = service_active or _server_running()
+    if service_active is None:
+        service_active = _service_is_active()
+    running = service_active or _server_running()
     # Labeled Mode, because that is what its three answers describe — and
     # the page prints no second Mode row beside it.
     rows.append({"key": "service", "site": None, "ok": running,
@@ -8605,7 +8640,7 @@ def _health_checks():
                      else "not installed — 'enable' provisions it"})
         mem_kb, _avail_kb, committed_kb = _meminfo()
         rec = _swap_recommendation(mem_kb, committed_kb,
-                                   _cache_headroom_mb(config.cache_size_mb))
+                                   _cache_headroom_mb(config.cache_size_mb, running))
         ours_mb, foreign_mb = _swap_sizes()
         rec_mb = (rec // (1024 * 1024)) if rec else None
         offer  = _swap_offer(rec_mb, os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
@@ -8649,8 +8684,10 @@ def _health_checks():
             rows.append({"key": "dir", "site": i, "ok": False, "blocking": True,
                          "label": tag + "Folder",
                          "detail": "missing — publish to recreate it"})
-        days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
-        covers = _domain_from_cert(_resolve(site.cert_file)) if site.cert_file else None
+        # One PEM load answers both certificate facts for the row.
+        cert   = _load_cert(_resolve(site.cert_file)) if site.cert_file else None
+        days   = _cert_days(cert)
+        covers = _cert_covered_domain(cert)
         mismatched = bool(site.domain) and bool(covers) and covers != site.domain
         cert_ok = days is not None and days > 0 and bool(site.domain) and not mismatched
         # Severity turns on whether the site claims a public name. With a
@@ -8681,15 +8718,19 @@ def _health_checks():
     return rows
 
 
-def _load_snapshot():
+def _load_snapshot(service_active=None):
     """Average CPU for this run and current memory, as numbers — the same
     facts _status_rows prints for the terminal, in the form the page
     renders. An average, not a live meter: cumulative CPU time over the
     time the server has been up, so a spike that has passed is diluted by
-    every quiet second since. None for any figure that cannot be read."""
+    every quiet second since. None for any figure that cannot be read.
+    `service_active` lets _status_data hand in the one systemd probe it
+    already ran; None asks here."""
     out = {"cpu_percent": None, "memory_mb": None, "uptime_s": None,
            "started_at": None, "cpu_ns": None, "sampled_at": time.time()}
-    if _service_is_active():
+    if service_active is None:
+        service_active = _service_is_active()
+    if service_active:
         try:
             result = subprocess.run(
                 ["systemctl", "show", "servette",
@@ -8774,10 +8815,11 @@ def _upgrade_available():
     return None
 
 
-def _swap_snapshot():
+def _swap_snapshot(running=None):
     """Servette's own swapfile as numbers — what is allocated, what the
     kernel reports active, and what the sizing recommends. None on a host
-    with no swap to speak of (macOS manages its own).
+    with no swap to speak of (macOS manages its own). `running` rides
+    through to the headroom charge, for a caller that already knows it.
 
     The two sizes differ by design and the difference matters. /proc/swaps
     reports USABLE space, which is the file minus one page of header, so a
@@ -8790,7 +8832,7 @@ def _swap_snapshot():
         return {"allocated_mb": None, "active_mb": None, "recommended_mb": None}
     mem_kb, _avail_kb, committed_kb = _meminfo()
     rec = _swap_recommendation(mem_kb, committed_kb,
-                               _cache_headroom_mb(config.cache_size_mb))
+                               _cache_headroom_mb(config.cache_size_mb, running))
     ours_mb, _foreign = _swap_sizes()
     allocated = None
     try:
@@ -8828,7 +8870,11 @@ def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
     external tooling. cert_days is None when no certificate is readable;
     `checks` is the health-row form of the same facts, `load` the
-    utilization figures, and `disk` the space left where content lands."""
+    utilization figures, and `disk` the space left where content lands.
+
+    The page's live meter polls this every few seconds, so the snapshot
+    asks systemd exactly once and hands the answer to everything below —
+    each subprocess spawn saved here is saved on every meter tick."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
     return {
@@ -8836,11 +8882,11 @@ def _status_data():
         "running":  running,
         "mode":     "service" if service_active else ("session" if running else None),
         "sites":    _site_rows(),
-        "issues":   _production_issues(),
+        "issues":   _production_issues(running),
         "warnings": _cache_warnings(),
-        "checks":   _health_checks(),
-        "load":     _load_snapshot(),
-        "swap":     _swap_snapshot(),
+        "checks":   _health_checks(service_active),
+        "load":     _load_snapshot(service_active),
+        "swap":     _swap_snapshot(running),
         "disk":     _disk_snapshot(),
     }
 

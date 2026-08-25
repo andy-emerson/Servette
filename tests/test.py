@@ -9,6 +9,7 @@ Run with any Python 3.11+ that has the one dependency:
 
 import base64
 import contextlib
+import datetime
 import gzip
 import http.client
 import http.server
@@ -1252,16 +1253,23 @@ def run_dispatch_tests(s):
     ]
     check("A real log line carries the formatter's timestamp and level",
           "INFO" in tlines[0] and tlines[0].endswith("200 /index.html to 1.2.3.4"))
-    tt = s._parse_traffic(tlines)
+    tt = s._parse_traffic(tlines, now=datetime.datetime(2026, 8, 21, 12, 0))
     check("Traffic tallies days, statuses, and top paths from response lines only",
-          tt["days"] == [("2026-08-20", 2), ("2026-08-21", 4)]
+          tt["days"][-2:] == [("2026-08-20", 2), ("2026-08-21", 4)]
           and tt["statuses"] == {"200": 2, "304": 1, "404": 3}
           and tt["top_paths"][0] == ("/index.html", 2)
           and tt["bucket"] == "day")
-    hourly = s._parse_traffic(tlines, days=1)
-    check("...and buckets by hour on a short window, where a day is one point",
+    check("...zero-filling the window's quiet days, so the x-axis is real time",
+          len(tt["days"]) == 8
+          and all(n == 0 for _, n in tt["days"][:-2]))
+    hourly = s._parse_traffic(tlines, days=1,
+                              now=datetime.datetime(2026, 8, 21, 12, 0))
+    hd = dict(hourly["days"])
+    check("...and buckets by hour on a short window, quiet hours included",
           hourly["bucket"] == "hour"
-          and hourly["days"] == [("2026-08-20 09", 2), ("2026-08-21 09", 4)])
+          and hd["2026-08-20 09"] == 2 and hd["2026-08-21 09"] == 4
+          and len(hourly["days"]) >= 25
+          and sum(hd.values()) == 6)
     check("...and never carries a visitor's IP",
           "1.2.3.4" not in json.dumps(tt) and "5.6.7.8" not in json.dumps(tt))
     saved_tl = s._traffic_lines
@@ -1448,6 +1456,21 @@ def run_dispatch_tests(s):
               set(load) == {"cpu_percent", "memory_mb", "uptime_s",
                             "started_at", "cpu_ns", "sampled_at"}
               and load["sampled_at"] > 0)
+
+        # The page's live meter polls the snapshot every few seconds, so
+        # what it costs is paid on every tick: systemd is asked once, and
+        # each site's certificate is parsed at most twice (rows + health),
+        # not once per fact.
+        saved_probe, saved_load_cert = s._service_is_active, s._load_cert
+        probe_calls, cert_loads = [], []
+        s._service_is_active = lambda: (probe_calls.append(1), False)[1]
+        s._load_cert = lambda p: (cert_loads.append(p), saved_load_cert(p))[1]
+        s._status_data()
+        s._service_is_active, s._load_cert = saved_probe, saved_load_cert
+        check("One snapshot asks systemd exactly once, however many rows it feeds",
+              len(probe_calls) == 1)
+        check("...and parses a site's certificate at most twice, not once per fact",
+              len(cert_loads) <= 2 * len(s.config.sites))
 
         # The pull channel is retired, so it can no longer be a row at all —
         # and no site row may carry a stale key the page still has a word for.

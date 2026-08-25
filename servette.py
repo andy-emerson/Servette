@@ -6606,6 +6606,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   const folded = new Set();
   const foldKey = (siteData, idx) => siteData.domain || '#' + idx;
 
+  // What the operator has read into a card but the server has not been
+  // given: the picked folder (and, once sent, the publish note). Kept
+  // here for the same reason as the fold set, under the same keys —
+  // every op re-renders the cards, and a re-render must never cost a
+  // folder that took a drag to pick.
+  const pendingFolders = new Map();
+
   const cardIndex = (el) =>
     [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
 
@@ -7086,6 +7093,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       }
       files = kept;
       folderName = name;
+      pendingFolders.set(foldKey(siteData, idx), { files: kept, name });
       const totalBytes = kept.reduce((n, en) => n + en.file.size, 0);
       const hasIndex = kept.some((en) => en.path === 'index.html');
       summary.innerHTML =
@@ -7174,13 +7182,21 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         try { result = (await resp.json()).result; } catch (e) { result = ''; }
 
         if (resp.ok && result === 'published') {
-          q('.note-done').innerHTML = `<b>${escapeHtml(folderName)}/</b> is live — ` +
+          const note = `<b>${escapeHtml(folderName)}/</b> is live — ` +
             `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
             `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
             `content kept as the one-step backup.`;
+          q('.note-done').innerHTML = note;
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');
-          loadVersions();          // the tree just replaced is now restorable
+          const entry = pendingFolders.get(foldKey(siteData, idx));
+          if (entry) entry.doneNote = note;
+          // The card's facts moved with the publish — a folder-missing or
+          // stale status row must not outlive the content that cures it.
+          // refresh() rebuilds the card (versions list included, so the
+          // tree just replaced shows as restorable); the map brings the
+          // folder and this note back.
+          await refresh();
         } else if (resp.status === 403) {
           throw new Error('The server refused the passcode — close this page, ' +
                           'and open the fresh link the terminal prints for this run.');
@@ -7594,6 +7610,21 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                    cardIndex(card), badge, errEl);
     });
 
+    // A re-render never costs the operator a picked folder: the card is
+    // fresh DOM, but what was read for it waits in pendingFolders — the
+    // summary, the Publish button, and the sent note come back as they
+    // were.
+    const kept = pendingFolders.get(foldKey(siteData, idx));
+    if (kept) {
+      useFolder(kept.files, kept.name);
+      if (kept.doneNote) {
+        q('.note-done').innerHTML = kept.doneNote;
+        done.classList.remove('hidden');
+        mark('badge-green', '✓ published');
+        pendingFolders.set(foldKey(siteData, idx), kept);
+      }
+    }
+
     return card;
   }
 
@@ -7678,8 +7709,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                       ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
                       : '') });
     // Re-rendering the form under a cursor would discard what is being
-    // typed, and the meter refreshes this tab every few seconds.
-    if (document.activeElement && document.activeElement.id === 'cfg-swap_mb') return;
+    // typed — and refresh() and the upgrade check (up to four seconds
+    // after the page opens) both land here. The guard covers the whole
+    // form, email as much as the swap size: no rewrite while focus is
+    // anywhere inside it.
+    const focused = document.activeElement;
+    if (focused && focused.closest && focused.closest('#cfg-host-fields')) return;
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, ((cfgData || {}).host || {})[k], { hint: h }))
         .join('') + swapField;
@@ -7717,16 +7752,25 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   /* ── Saving settings. One Save covers every field on a form. ── */
 
-  async function saveSettings(values, siteIdx, badge, errEl) {
+  // The one save protocol for every settings form: POST, judge, badge,
+  // report — so the site cards and the host form cannot drift on any of
+  // it. `deferDone` is for a caller whose Save carries a follow-up step
+  // (the swapfile resize): success is left unannounced for it to finish;
+  // failure reports here either way. Returns whether it saved.
+  async function saveSettings(values, siteIdx, badge, errEl, deferDone) {
     clearError(errEl);
     setBadge(badge, 'badge-dim', 'saving…');
     try {
       await post('/config', { site: siteIdx, values }, 'saved');
-      setBadge(badge, 'badge-green', '✓ saved');
-      refresh();
+      if (!deferDone) {
+        setBadge(badge, 'badge-green', '✓ saved');
+        refresh();
+      }
+      return true;
     } catch (e) {
       setBadge(badge, 'badge-red', '✕ not saved');
       showError(errEl, reason(e) + ' Nothing was changed.');
+      return false;
     }
   }
 
@@ -7746,18 +7790,23 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     if (swapEl && swapEl.value.trim() && !(want > 0))
       return showError(errEl, 'Swap file size must be a number of megabytes.');
 
-    setBadge(badge, 'badge-dim', 'saving…');
-    try {
-      await post('/config', { site: 0, values }, 'saved');
-      if (resize) {
-        setBadge(badge, 'badge-dim', 'resizing the swapfile…');
+    // The settings ride the same save path every form uses; only the
+    // resize is this button's own follow-up.
+    if (!await saveSettings(values, 0, badge, errEl, resize)) return;
+    if (resize) {
+      setBadge(badge, 'badge-dim', 'resizing the swapfile…');
+      try {
         await post('/swap', { mb: want }, 'ok');
+      } catch (e) {
+        // The settings above did save — say exactly which half failed
+        // rather than implying the whole Save was a no-op.
+        setBadge(badge, 'badge-red', '✕ swapfile not resized');
+        showError(errEl, 'The settings saved, but the swapfile was not resized: ' +
+          reason(e));
+        return;
       }
       setBadge(badge, 'badge-green', '✓ saved');
       refresh();
-    } catch (e) {
-      setBadge(badge, 'badge-red', '✕ not saved');
-      showError(errEl, reason(e));
     }
   });
 

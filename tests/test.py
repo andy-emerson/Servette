@@ -6424,6 +6424,35 @@ def run_browser_tests(s, tmpdir):
             check("...a redirect added through the form reaches the config",
                   "/browser-check" in s.config.sites[0].redirects)
 
+            # A picked folder must survive the re-render that follows
+            # every op. The redirect save above just re-rendered the
+            # cards, and the draft was picked before it — losing it here
+            # was the regression: summary reset, Publish dim, the drag to
+            # be done again.
+            check("...and the folder picked before that save is still read in",
+                  not page.locator("button.pub").first.is_disabled()
+                  and "2 files" in page.locator(".summary").first.inner_text())
+            page.click("#tab-server")
+            page.wait_for_timeout(500)
+            page.click("#tab-sites")
+            page.wait_for_timeout(900)
+            check("...and it survives a tab round-trip, ready to publish",
+                  not page.locator("button.pub").first.is_disabled()
+                  and "2 files" in page.locator(".summary").first.inner_text())
+
+            # The host form is never rewritten under the operator's
+            # fingers: a refresh landing mid-edit must not discard typed
+            # text or focus — for any field, not only the swap size.
+            page.click("#tab-server")
+            page.wait_for_timeout(600)
+            page.locator("#cfg-email").click()
+            page.locator("#cfg-email").fill("half-typed@exam")
+            page.evaluate("() => renderHostFields()")
+            check("...typing in any host field holds off the form rewrite",
+                  page.locator("#cfg-email").input_value() == "half-typed@exam"
+                  and page.evaluate(
+                      "() => document.activeElement.id === 'cfg-email'"))
+
             browser.close()
 
         # The console is a check in itself: every failure above is silent

@@ -1392,8 +1392,12 @@ def run_dispatch_tests(s):
         check("The status snapshot carries free and total disk",
               set(disk) == {"free_mb", "total_mb"}
               and disk["free_mb"] is not None and disk["total_mb"] > 0)
-        check("...low by the absolute floor",
-              s._disk_is_low({"free_mb": 100.0, "total_mb": 100000.0}))
+        # Each clause isolated: this case is low ONLY by the floor (400 MB
+        # is 40% of a 1 GB disk, well above the fraction), so deleting the
+        # floor clause would fail it — the old case (100 MB of 100 GB) was
+        # under both and proved neither alone.
+        check("...low by the absolute floor, on a small disk with headroom by fraction",
+              s._disk_is_low({"free_mb": 400.0, "total_mb": 1000.0}))
         check("...low by the fraction, on a disk with plenty left in MB",
               s._disk_is_low({"free_mb": 5000.0, "total_mb": 200000.0}))
         check("...and roomy is not low",
@@ -1544,6 +1548,22 @@ def run_dispatch_tests(s):
         st, _ = ui_req("GET", "/update")
         check("...and is code-gated like every other route", st == 403)
         s._latest_release = saved_latest
+
+        # /download hands the live site back as the same tar.gz the publish
+        # door takes, so what comes down can go back up.
+        st, _ = ui_req("GET", "/download?site=0")
+        check("GET /download is code-gated like every other route", st == 403)
+        st, _ = ui_req("GET", f"/download?t={ui_code}&site=abc")
+        check("...refusing a site index that is not a number", st == 400)
+        st, _ = ui_req("GET", f"/download?t={ui_code}&site=99")
+        check("...and one off the end of the list", st == 404)
+        st, blob = ui_req("GET", f"/download?t={ui_code}&site=0")
+        dl_dest = os.path.join(ui_dir, "roundtrip")
+        s._extract_bundle(blob, dl_dest)
+        check("...and the downloaded bundle round-trips back through extraction",
+              st == 200
+              and os.path.isfile(os.path.join(dl_dest, "old.html"))
+              and open(os.path.join(dl_dest, "old.html")).read() == "old")
 
         # The swap size the terminal has always asked for, asked for here —
         # the same core underneath, guarded before it can reach the disk.

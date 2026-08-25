@@ -1,15 +1,19 @@
 <!DOCTYPE html>
-<!-- src/check.html — the connection test, inlined into the module by
-     build.py and served at the reserved path /.well-known/servette-check
-     (DECISIONS.md, "The connection test has its own reserved page").
-     Linked from the default 404 body and from the admin page's Status tab.
+<!-- src/connection.html — inlined into the module by build.py and
+     served at the reserved path /.well-known/servette-check (DECISIONS.md,
+     "The connection test has its own reserved page"). The URL keeps the
+     older word on purpose: the page was renamed, the address cannot be.
+     Linked from the default 404 body, and from each site's card on the
+     admin page.
 
      Same-origin by construction, so it can read what a cross-origin probe
      never could: it checks the connection it was itself loaded over. It
      never enumerates the filesystem — no "did you mean" suggestions —
      because that would turn a public page into a file-discovery oracle for
-     strangers. The version-discovery row needs the operator's session (the
-     endpoint is auth-gated) and shows for a logged-in reader only. Because
+     strangers. It does not report the server's version: on a public site
+     that endpoint answers 404 by design, so the row could only ever say
+     "withheld" while costing a miss in the log on every run, and the
+     operator reads the version from `status` or the admin page. Because
      this file ships with the server, its checks can never drift from the
      features they check — and because its path is reserved, an operator's
      own content never takes it over, so the outside vantage survives a
@@ -21,8 +25,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="@@MARK_ICON@@">
   <title>Connection test</title>
   <style>
+    /* ── Theme and reset ─────────────────────────────────────────────── */
     :root {
       --bg:      #0e0e0e;
       --surface: #161616;
@@ -39,6 +45,7 @@
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ── Page frame: centred column over a faint noise wash ──────────── */
     body {
       background: var(--bg);
       color: var(--text);
@@ -68,6 +75,7 @@
       width: 100%;
     }
 
+    /* ── Wordmark and tagline ────────────────────────────────────────── */
     .header {
       margin-bottom: 3rem;
     }
@@ -109,7 +117,7 @@
 
     .dot.red { background: var(--red); animation: none; }
 
-    /* ── Connection card ── */
+    /* ── Connection card: the headline verdict ───────────────────────── */
     .verified {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -149,7 +157,7 @@
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
 
-    /* ── The report ── */
+    /* ── The report: one row per finding, evidence underneath ────────── */
     .checks {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -228,9 +236,8 @@
       color: var(--muted);
       line-height: 1.7;
     }
-    .note a { color: #60a5fa; text-decoration: none; }
+    .note a { color: #5A8466; text-decoration: none; }
     .note a:hover { text-decoration: underline; }
-    .note a.brand { color: #5A8466; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -248,7 +255,7 @@
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline" id="tagline">
+    <div class="tagline">
       <span class="dot" id="dot"></span><span id="tagline-text">checking...</span>
     </div>
   </div>
@@ -274,7 +281,7 @@
 
   <div class="note">
     Served by
-    <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
+    <a href="https://servette.org">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
 
@@ -324,8 +331,8 @@
     { name: 'Encrypted', run: async () => {
         const r = await fetch(here, { cache: 'no-store' });
         const ct = r.headers.get('Content-Type') || '(absent)';
-        return { ok: location.protocol === 'https:' && r.status === 200,
-                 obs: location.protocol === 'https:'
+        return { ok: isHttps && r.status === 200,
+                 obs: isHttps
                    ? 'HTTPS, and this browser accepted the certificate'
                    : 'served over plain HTTP — visitors are unprotected',
                  ev: 'GET ' + P + ' → ' + r.status + ', ' + ct }; } },
@@ -403,24 +410,9 @@
                  ev: 'POST → ' + post + ' · unknown → ' + miss +
                      ' · traversal → ' + trav }; } },
 
-    // Version discovery — same-origin, auth-gated: the one check only this
-    // page can make. Servette serves it solely on a private site, so the
-    // exact version reaches a party that already signed in (this browser)
-    // and never an anonymous scanner. A public site withholding it is the
-    // design working, which is a pass, not a skip.
-    { name: 'Version', run: async () => {
-        const r = await fetch('/.well-known/servette', { cache: 'no-store' });
-        if (r.status === 404)
-          return { ok: true, obs: 'withheld — the site is public, so nobody is told',
-                   ev: 'GET /.well-known/servette → 404' };
-        if (r.status !== 200)
-          return { ok: null, obs: 'not answered (an older Servette, or not signed in)',
-                   ev: 'GET /.well-known/servette → ' + r.status };
-        const v = await r.json();
-        return { ok: true, obs: 'running v' + v.running + ', readable only once signed in',
-                 ev: 'GET /.well-known/servette → 200' }; } },
   ];
 
+  // ── Rendering the report ──────────────────────────────────────────
   const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };
   const logEl = $('t-log');
 
@@ -453,8 +445,11 @@
     const rows = checks.map((c) => ({ c, el: addRow(c.name) }));
     for (const { c, el } of rows) {
       let r;
+      // A check that throws is a skip, not a failure — the request never
+      // completed, so nothing was observed. What went wrong becomes the
+      // evidence, the same as for a check that did complete.
       try { r = await c.run(); }
-      catch (e) { r = { ok: null, obs: 'could not run' }; }
+      catch (e) { r = { ok: null, obs: 'could not run', ev: String(e) }; }
       el.obs.textContent = r.obs;
       el.ev.textContent = r.ev || '';
       if (r.ok === true)       { paint(el.row, el.st, 'pass'); pass++; }

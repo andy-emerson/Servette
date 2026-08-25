@@ -24,10 +24,12 @@ import ssl
 import subprocess
 import sys
 import tarfile
+import html.parser
 import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # test.py lives in tests/; the repo root is its parent. servette.py is
@@ -86,6 +88,58 @@ def section(title):
 # ─────────────────────────────────────────────────────────────────────────────
 # REQUEST HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
+
+class _PageBits(html.parser.HTMLParser):
+    """Read a page the way a browser does, instead of with a regex.
+
+    The suite needs two things out of the admin page: where its links point,
+    and what its script says. A regex over tags gets both wrong in ways that
+    pass silently rather than fail — `<SCRIPT>` or `<script type="module">`
+    matches nothing, and every check reading the extraction then succeeds
+    without having seen a line of the page. This suite shipped exactly that
+    defect, and CodeQL found it before a person did.
+
+    A parser also removes the shape those alerts were about: nothing here
+    searches a URL for a substring, so a host is compared as a host."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links, self._script, self._in_script = [], [], False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self.links += [v for k, v in attrs if k == "href" and v]
+        elif tag == "script":
+            self._in_script = True
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self._in_script = False
+
+    def handle_data(self, data):
+        if self._in_script:
+            self._script.append(data)
+
+    @property
+    def script(self):
+        return "\n".join(self._script)
+
+
+def page_bits(page):
+    """(links, script text) for one HTML page."""
+    parser = _PageBits()
+    parser.feed(page)
+    parser.close()
+    return parser.links, parser.script
+
+
+def _free_port():
+    """A port the OS says is free right now — the browser check runs a
+    loopback server and must not collide with a developer's own."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
 
 class Response:
     def __init__(self, status, headers, body):
@@ -204,6 +258,19 @@ def teardown(tmpdir, saved_config, config_path, servette):
     elif os.path.exists(config_path):
         os.remove(config_path)
     shutil.rmtree(tmpdir, ignore_errors=True)
+    # Sites added through the page's /sites door get a Servette-named folder
+    # under SERVETTE_HOME, which the suite points at the repository. Those
+    # folders were empty and so invisible to git; once publishing began
+    # keeping versions beside them they held files, and turned up in a
+    # commit. The suite cleans up what it caused, both the folder and any
+    # version trees the ring left next to it.
+    for name in os.listdir(SERVETTE_DIR):
+        if re.fullmatch(r"site-[0-9a-f]{6}(\.v\d+(\.\d+)?)?", name):
+            path = os.path.join(SERVETTE_DIR, name)
+            if os.path.islink(path):
+                os.remove(path)
+            else:
+                shutil.rmtree(path, ignore_errors=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,10 +337,18 @@ publish_key = "aa"
         check("Migrated site's domain is backfilled from its existing cert",
               c.sites[0].domain == "legacy.example.com")
         check("Migrated site keeps its serve_dir", c.sites[0].serve_dir == "myserve")
-        check("Migrated site keeps its publish channel", c.sites[0].publish_url == "https://example.com/site.tar.gz")
+        # The retired pull-channel keys are in the fixture on purpose: an
+        # operator upgrading has them in their file. They must be ignored
+        # rather than carried onto the Site or written back out.
+        check("The retired channel keys are dropped, not migrated",
+              not hasattr(c.sites[0], "publish_url")
+              and not hasattr(c.sites[0], "publish_key"))
         check("Plaintext password is hashed on migration", c.sites[0].password_hash != "")
         check("Hashed password verifies", s._check_password("hunter2", c.sites[0].password_hash, c.sites[0].password_salt))
-        check("Migration rewrites the file in [[site]] form", "[[site]]" in open(s.Config.CONFIG_FILE).read())
+        migrated_text = open(s.Config.CONFIG_FILE).read()
+        check("Migration rewrites the file in [[site]] form", "[[site]]" in migrated_text)
+        check("...and the rewrite does not carry the retired channel keys forward",
+              "publish_url" not in migrated_text and "publish_key" not in migrated_text)
 
         # Reloading the now-migrated file must not re-migrate or re-derive anything —
         # it should load the [[site]] table(s) as-is.
@@ -878,7 +953,7 @@ def run_dispatch_tests(s):
 
     # Routing is under test here, not elevation policy (which has its own
     # section). Dispatch is exercised as root, because as an unprivileged user
-    # run_command correctly elevates pull/restore-site instead of dispatching —
+    # run_command correctly elevates restore-site instead of dispatching —
     # and on CI runners, whose sudo is passwordless, that spawned REAL elevated
     # children while the stubs sat unused. Caught by CI's non-root run; the
     # suite had only ever been run as root locally.
@@ -890,21 +965,18 @@ def run_dispatch_tests(s):
     # live test server up for the integration tests that follow.
     calls       = []
     saved       = {n: getattr(s, n) for n in
-                   ("cmd_status", "cmd_start", "stop_server", "cmd_pull",
-                    "cmd_restore_site", "cmd_publish", "cmd_admin",
-                    "_startup_refresh")}
+                   ("cmd_status", "cmd_start", "stop_server",
+                    "cmd_restore_site", "cmd_admin", "_startup_refresh")}
     saved_input = builtins.input
     try:
         s.cmd_status       = lambda json_mode=False: calls.append("status")
         s.cmd_start        = lambda: calls.append("start")
         s.stop_server      = lambda: calls.append("stop")
-        s.cmd_pull         = lambda site: calls.append(("pull", site))
         s.cmd_restore_site = lambda site: calls.append(("restore-site", site))
-        s.cmd_publish      = lambda: calls.append("publish")
         s.cmd_admin        = lambda: calls.append("admin")
         s._startup_refresh = lambda: print("STARTUP-NOTICE-MARKER")
-        script = iter(["status", "start", "pull 0", "restore-site 0", "publish",
-                       "admin", "pull 99", "bogus", "quit"])
+        script = iter(["status", "start", "restore-site 0", "admin",
+                       "restore-site 99", "pull 0", "publish", "bogus", "quit"])
         builtins.input = lambda prompt="": next(script, "quit")
         with contextlib.redirect_stdout(io.StringIO()) as launch_buf:
             s.shell()
@@ -920,62 +992,32 @@ def run_dispatch_tests(s):
 
     check("'status' routed to cmd_status", "status" in calls)
     check("'start' routed to cmd_start",   "start" in calls)
-    check("'pull 0' routes to cmd_pull with site 0",
-          ("pull", s.config.sites[0]) in calls)
     check("'restore-site 0' routes to cmd_restore_site with site 0",
           ("restore-site", s.config.sites[0]) in calls)
-    check("'publish' routed to cmd_publish", "publish" in calls)
     check("'admin' routed to cmd_admin", "admin" in calls)
-    pull_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "pull"]
-    check("'pull 99' (bad site index) does not call cmd_pull", len(pull_calls) == 1)
+    restore_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "restore-site"]
+    check("'restore-site 99' (bad site index) does not call the command",
+          len(restore_calls) == 1)
+    # Both are retired words now. The shell must say so rather than
+    # silently accepting a verb it dropped — 'publish' especially, since it
+    # was a real command until the sub-shell it opened was removed.
+    check("neither 'pull' nor 'publish' is a command any more",
+          not {"pull", "publish"} & {c.split()[0] for c, _ in s._COMMANDS})
+    check("...and neither is in the elevation set",
+          not any(s._needs_root(c) for c in ("pull", "publish")))
     check("'quit' stops server and exits", calls[-1] == "stop")
 
 
-    section("Publish sub-shell")
-
-    # Routing only, like the dispatch test above: every verb must delegate to
-    # the command it gathers, with the same [n] convention and bad-index guard.
-    sub_calls   = []
-    saved_sub   = {n: getattr(s, n) for n in
-                   ("cmd_pull", "cmd_restore_site", "_config_publish")}
-    saved_input = builtins.input
-    try:
-        s.cmd_pull         = lambda site: sub_calls.append(("pull", site))
-        s.cmd_restore_site = lambda site: sub_calls.append(("restore", site))
-        s._config_publish  = lambda site: sub_calls.append(("channel", site))
-        script = iter(["pull 0", "restore-site 0", "channel 0",
-                       "pull 99", "bogus", "back"])
-        builtins.input = lambda prompt="": next(script, "back")
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_publish()
-    finally:
-        builtins.input = saved_input
-        for n, fn in saved_sub.items():
-            setattr(s, n, fn)
-
-    sub_out = buf.getvalue()
-    check("'pull 0' delegates to cmd_pull with site 0",
-          ("pull", s.config.sites[0]) in sub_calls)
-    check("'restore-site 0' delegates to cmd_restore_site with site 0",
-          ("restore", s.config.sites[0]) in sub_calls)
-    check("'channel 0' delegates to the config sub-shell's publish prompt",
-          ("channel", s.config.sites[0]) in sub_calls)
-    check("'pull 99' (bad site index) is refused with the sites hint",
-          len([c for c in sub_calls if c[0] == "pull"]) == 1
-          and "No site 99" in sub_out)
-    check("unknown input reprints the publish help",
-          "Unknown command: bogus" in sub_out)
-    check("the display shows each site's channel and backup state",
-          "channel:" in sub_out and "backup:" in sub_out)
-
-    # publish and admin elevate like config: their verbs write site content
-    # and the config file, so an unprivileged shell must hand them to root.
-    check("publish and admin are in the elevation set",
-          (s._needs_root("publish") and s._needs_root("admin")) or s._IS_MACOS)
-
-    check("publish is pure terminal, with one hint at the browser door",
-          "'admin' opens the publish page" in sub_out
-          and "http://localhost" not in sub_out)
+    # The publish sub-shell is gone. It existed to gather the content
+    # channel's scattered verbs; the pull channel's removal left it holding
+    # one verb that was already a top-level command, so the wrapper went too.
+    # Everything it did now has exactly one home.
+    check("The publish sub-shell is gone from the program",
+          not any(hasattr(s, n) for n in
+                  ("cmd_publish", "_publish_show", "_PUBLISH_COMMANDS", "PUBLISH_HELP")))
+    check("...and its one verb kept its top-level home",
+          "restore-site" in [c.split()[0] for c, _ in s._COMMANDS]
+          and s._needs_root("restore-site"))
 
     section("Admin command")
 
@@ -995,7 +1037,9 @@ def run_dispatch_tests(s):
             ui_started.append((site, page)) or (fake_ui, "abc123"))
         s._stop_ui  = lambda h: adm_calls.append(("stop", h))
         script = iter(["help", "back"])
-        builtins.input = lambda prompt="": next(script, "back")
+        prompts = []
+        builtins.input = lambda prompt="": (prompts.append(prompt)
+                                            or next(script, "back"))
         with contextlib.redirect_stdout(io.StringIO()) as adm_buf:
             s.cmd_admin()
 
@@ -1013,9 +1057,15 @@ def run_dispatch_tests(s):
           ui_started == [(s.config.sites[0], s._UI_ADMIN_PAGE)])
     check("...prints the stable link and this run's passcode side by side",
           f"http://localhost:{s._UI_PORT}/" in adm_out
-          and "passcode  abc123" in adm_out)
-    check("...keeps the happy path to one pointer line",
-          "page won't load? type 'help'" in adm_out)
+          and "passcode    abc123" in adm_out)
+    # Nothing between the two labelled lines and the prompt: the label says
+    # what the address is, so a header announcing the page adds nothing, and
+    # the two words worth typing are named in the prompt itself rather than
+    # on lines of their own above it.
+    check("...with nothing printed above them",
+          adm_out.startswith(f"  admin page  http://localhost:{s._UI_PORT}/\n"))
+    check("...and the words worth typing named in the prompt itself",
+          "'help'" in prompts[0] and "'back'" in prompts[0])
     check("...and 'help' summons the tunnel line and reprints the passcode",
           f"LocalForward {s._UI_PORT} 127.0.0.1:{s._UI_PORT}" in adm_out
           and "passcode: abc123" in adm_out)
@@ -1035,9 +1085,15 @@ def run_dispatch_tests(s):
     check("...carries the Sites, Server, and Statistics tabs, reading the status feed",
           "tab-sites" in s._UI_ADMIN_PAGE and "tab-server" in s._UI_ADMIN_PAGE
           and "tab-stats" in s._UI_ADMIN_PAGE
-          and "/status?t=" in s._UI_ADMIN_PAGE)
+          and "getJSON('/status')" in s._UI_ADMIN_PAGE)
     check("...posts to the upload endpoint with the run's code",
-          "/upload?t=" in s._UI_ADMIN_PAGE)
+          "api('/upload'" in s._UI_ADMIN_PAGE)
+    # The passcode is attached in one place rather than at each call site,
+    # so no request can be written that forgets it.
+    check("...with every request's passcode attached by one helper",
+          "const api = (path, params)" in s._UI_ADMIN_PAGE
+          and "{ t: CODE }" in s._UI_ADMIN_PAGE
+          and "?t=" not in s._UI_ADMIN_PAGE)
     check("...and carries no key ceremony — SSH is the authentication",
           "Ed25519" not in s._UI_ADMIN_PAGE
           and "indexedDB" not in s._UI_ADMIN_PAGE)
@@ -1047,17 +1103,121 @@ def run_dispatch_tests(s):
           and "useFolder" in s._UI_ADMIN_PAGE)
     check("...with a drop strip visible before anything is dragged",
           "dropstrip" in s._UI_ADMIN_PAGE)
+    # A drop target the size of one line of text is a target you have to aim
+    # at. The strip carries its own lead line and takes the click itself, so
+    # the picker is not reachable only through four exact words.
+    check("...sized and clickable as a drop target, not a caption",
+          "drop-lead" in s._UI_ADMIN_PAGE
+          and "q('.dropstrip').addEventListener" in s._UI_ADMIN_PAGE)
+    # Links come from the parser, and the host is compared as a host. A
+    # substring test would also pass on evil-servette.org.example.
+    _admin_links, _admin_js = page_bits(s._UI_ADMIN_PAGE)
+    check("...and the footer saying where more is written down",
+          any(urllib.parse.urlsplit(u).netloc == "servette.org"
+              for u in _admin_links))
+    # A card can wear two badges at once: the fault it has, and what
+    # publishing is doing. They are separate elements because writing the
+    # second over the first would erase a standing fault the moment a
+    # folder was read.
+    check("...with a card's fault badge and its publish badge kept apart",
+          "badge state badge-dim" in s._UI_ADMIN_PAGE
+          and "q('.badge.state')" in s._UI_ADMIN_PAGE
+          and "BADGE_VARIANTS" in s._UI_ADMIN_PAGE)
+    # role="tab" without aria-selected announces a tab strip and then never
+    # says which tab is current.
+    check("...and the tab strip saying which tab is current",
+          'aria-selected="true"' in s._UI_ADMIN_PAGE
+          and "setAttribute('aria-selected'" in s._UI_ADMIN_PAGE)
+    # The ring on the page: a list that is present always, not only after a
+    # publish — "put yesterday's back" is wanted on a day you published
+    # nothing. Restore goes through the same /sites door every other site op
+    # uses, so it runs the terminal's core.
+    check("...carries the kept versions and a way back to any of them",
+          "getJSON('/versions'" in s._UI_ADMIN_PAGE
+          and "op: 'restore'" in s._UI_ADMIN_PAGE
+          and "loadVersions" in s._UI_ADMIN_PAGE
+          and "restore-site" not in s._UI_ADMIN_PAGE)
+    check("...and reads its site index at call time, not at build time",
+          "const siteIndex = () =>" in s._UI_ADMIN_PAGE)
+    # Redirects are a setting, so the page edits them through the settings
+    # write both surfaces share — not through a door of their own.
+    # Preview and download on the page. The frame withholds
+    # allow-same-origin deliberately: a draft runs on an opaque origin and
+    # cannot read the page that staged it.
+    # Read the attribute itself, not the page text: prose about the sandbox
+    # is not the sandbox, and an assertion that cannot tell them apart would
+    # pass on a comment while the frame ran wide open.
+    sandboxes = re.findall(r'sandbox="([^"]*)"', s._UI_ADMIN_PAGE)
+    check("...offers a preview in a frame that cannot reach back",
+          sandboxes == ["allow-scripts allow-forms"]
+          and "api('/preview'" in s._UI_ADMIN_PAGE)
+    check("...whose frame URL carries the preview token, never the passcode",
+          "'/preview/' + encodeURIComponent(data.token)" in s._UI_ADMIN_PAGE)
+    check("...and a download on the line that reports what is live",
+          "api('/download'" in s._UI_ADMIN_PAGE)
+    # The running dot lost its styling when the status row moved onto a
+    # switch-row and a `.rows .dot` rule stopped matching: still in the
+    # markup, simply invisible. The rule is unscoped now.
+    # A change typed and not saved used to borrow the fault colour, so an
+    # unsaved intention looked like something broken.
+    check("...telling a fault from an intention that is merely unsaved",
+          ".fault {" in s._UI_ADMIN_PAGE and ".pending {" in s._UI_ADMIN_PAGE
+          and "class=\"pending\"" in s._UI_ADMIN_PAGE
+          and "not saved yet" in s._UI_ADMIN_PAGE)
+    # A favicon in the page kills the /favicon.ico request every browser
+    # makes unasked — the one console error every browser run reported.
+    _pages = (s._UI_ADMIN_PAGE, s._NOT_FOUND_PAGE.decode(),
+              s._CONNECTION_PAGE.decode())
+    check("...and every page carries the mark, so no browser asks for one",
+          all('rel="icon"' in page and "data:image/svg+xml," in page
+              for page in _pages)
+          # Inline, because a page that demonstrates a self-hosted server
+          # has no business fetching its own icon from anywhere.
+          and "servette-mark.svg" not in s._UI_ADMIN_PAGE)
+    # One drawing, one file. The pages name a marker the build fills from
+    # assets/servette-mark.svg, so a change to the mark cannot reach two
+    # pages and miss the third — which is what four hand-copied
+    # transcriptions of the same SVG invited.
+    _icons = {re.search(r'rel="icon" href="([^"]+)"', page).group(1)
+              for page in _pages}
+    check("...the same mark on all three, because there is one source for it",
+          len(_icons) == 1)
+    _built = io.open(os.path.abspath(s.__file__), encoding="utf-8").read()
+    check("...with the marker consumed, never shipped",
+          "@@MARK_ICON@@" not in _built)
+    # The encoding is the whole risk: '#' would truncate the SVG at its first
+    # colour and '"' would close the href, so the icon must decode back to
+    # exactly the file on disk.
+    _svg = re.sub(r"\s+", " ",
+                  io.open(os.path.join(os.path.dirname(os.path.abspath(s.__file__)),
+                                       "assets", "servette-mark.svg"),
+                          encoding="utf-8").read()).strip()
+    _decoded = urllib.parse.unquote(
+        _icons.pop()[len("data:image/svg+xml,"):])
+    check("...and it decodes back to the mark, closing tag and all",
+          _decoded == _svg and _decoded.endswith("</svg>"))
+    check("...and the running dot is styled where it actually sits",
+          ".rows .dot {" not in s._UI_ADMIN_PAGE
+          and "\n    .dot {" in s._UI_ADMIN_PAGE)
+    check("...building one bundle for both, so they cannot diverge",
+          s._UI_ADMIN_PAGE.count("gzipBytes(buildTar(") == 1)
+    check("...and edits redirects through the shared settings write",
+          "redir-save" in s._UI_ADMIN_PAGE
+          and "redirect: from + ',' + to" in s._UI_ADMIN_PAGE
+          and "_redirects" not in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
           "outside" in s._UI_ADMIN_PAGE
           and "servette-check" in s._UI_ADMIN_PAGE)
     check("...and the Server panel wired to the set vocabulary",
-          "panel-server" in s._UI_ADMIN_PAGE and "/config?t=" in s._UI_ADMIN_PAGE)
+          "panel-server" in s._UI_ADMIN_PAGE
+          and "getJSON('/config')" in s._UI_ADMIN_PAGE
+          and "post('/config'" in s._UI_ADMIN_PAGE)
     check("...with every site's facts on its own card and the server's on the server tab",
           "auth-switch" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
           and "attention" in s._UI_ADMIN_PAGE
           and "cfg-site-select" not in s._UI_ADMIN_PAGE)
     check("...and the server tab reading the journal summary, charted with a scale",
-          "/traffic?t=" in s._UI_ADMIN_PAGE
+          "getJSON('/traffic'" in s._UI_ADMIN_PAGE
           and "lineSVG" in s._UI_ADMIN_PAGE and "chart-y" in s._UI_ADMIN_PAGE)
 
     # Traffic: the journal re-read as counts. The lines are built through
@@ -1082,6 +1242,8 @@ def run_dispatch_tests(s):
         _journal_line("2026-08-20", "200 /index.html to 1.2.3.4"),
         _journal_line("2026-08-20", "304 Not Modified /style.css to 1.2.3.4"),
         _journal_line("2026-08-21", "404 /nope from 5.6.7.8"),
+        _journal_line("2026-08-21", "404 /nope from 1.2.3.4"),
+        _journal_line("2026-08-21", "404 /wp-login.php from 5.6.7.8"),
         _journal_line("2026-08-21", "200 /index.html to 5.6.7.8"),
         _journal_line("2026-08-21", "Config reloaded from disk"),
         _journal_line("2026-08-21", "Rate limited 9.9.9.9"),
@@ -1092,14 +1254,14 @@ def run_dispatch_tests(s):
           "INFO" in tlines[0] and tlines[0].endswith("200 /index.html to 1.2.3.4"))
     tt = s._parse_traffic(tlines)
     check("Traffic tallies days, statuses, and top paths from response lines only",
-          tt["days"] == [("2026-08-20", 2), ("2026-08-21", 2)]
-          and tt["statuses"] == {"200": 2, "304": 1, "404": 1}
+          tt["days"] == [("2026-08-20", 2), ("2026-08-21", 4)]
+          and tt["statuses"] == {"200": 2, "304": 1, "404": 3}
           and tt["top_paths"][0] == ("/index.html", 2)
           and tt["bucket"] == "day")
     hourly = s._parse_traffic(tlines, days=1)
     check("...and buckets by hour on a short window, where a day is one point",
           hourly["bucket"] == "hour"
-          and hourly["days"] == [("2026-08-20 09", 2), ("2026-08-21 09", 2)])
+          and hourly["days"] == [("2026-08-20 09", 2), ("2026-08-21 09", 4)])
     check("...and never carries a visitor's IP",
           "1.2.3.4" not in json.dumps(tt) and "5.6.7.8" not in json.dumps(tt))
     saved_tl = s._traffic_lines
@@ -1108,20 +1270,36 @@ def run_dispatch_tests(s):
         s.cmd_traffic()
     s._traffic_lines = saved_tl
     check("The traffic command prints the same summary",
-          "Requests: 4" in tbuf.getvalue() and "/index.html" in tbuf.getvalue())
+          "Requests: 6" in tbuf.getvalue() and "/index.html" in tbuf.getvalue())
     check("...and the Publish tab as site cards, add/move/remove/domain wired to /sites",
           "site-cards" in s._UI_ADMIN_PAGE and "btn-add-site" in s._UI_ADMIN_PAGE
-          and "/sites?t=" in s._UI_ADMIN_PAGE
+          and "post('/sites'" in s._UI_ADMIN_PAGE
           and "attachCardDrag" in s._UI_ADMIN_PAGE
           and "dom-input" in s._UI_ADMIN_PAGE)
     check("...naming and certifying stay two acts, two ops",
           "op: 'name'" in s._UI_ADMIN_PAGE
           and "op: 'certificate'" in s._UI_ADMIN_PAGE
           and "Get certificate" in s._UI_ADMIN_PAGE)
+    # Read the code, not the page text. Prose about alert() is not a call
+    # to alert(), and a substring pin that cannot tell them apart fails on
+    # a comment while a real call would sail through a reworded one.
+    # _admin_js came from the parser above; an empty extraction would make
+    # every check below pass without reading a line of the page, so it is
+    # an assertion rather than a hope.
+    check("The admin page's script is extracted before anything reads it",
+          len(_admin_js) > 10000)
+    _admin_js = re.sub(r"/\*.*?\*/", "", _admin_js, flags=re.S)  # comments, not tags
+    _admin_js = re.sub(r"//[^\n]*", "", _admin_js)
     check("...whose remove panel offers delete, deactivate, cancel — no browser popup",
           "do-delete" in s._UI_ADMIN_PAGE and "do-deactivate" in s._UI_ADMIN_PAGE
           and "do-reactivate" in s._UI_ADMIN_PAGE and "do-cancel" in s._UI_ADMIN_PAGE
-          and "confirm(" not in s._UI_ADMIN_PAGE)
+          and not re.search(r"\b(alert|confirm|prompt)\s*\(", _admin_js))
+    # ...and it opens where the button that opens it is, not at the far end
+    # of a long card.
+    check("...anchored under the button, drawn by the page",
+          ".site-card .confirm {" in s._UI_ADMIN_PAGE
+          and "position: absolute;" in s._UI_ADMIN_PAGE
+          and "q('.card-head').insertAdjacentHTML" in s._UI_ADMIN_PAGE)
     check("...as a public/private switch plus host basics — the advanced knobs stay in the terminal",
           "auth-switch" in s._UI_ADMIN_PAGE
           and "has_password" in s._UI_ADMIN_PAGE
@@ -1185,8 +1363,72 @@ def run_dispatch_tests(s):
 
         health_keys = {r["key"] for r in s._health_checks()}
         check("The health rows cover the roster, green included",
-              {"service", "cert", "password"} <= health_keys
+              {"service", "cert", "password", "disk"} <= health_keys
               and (s._IS_MACOS or {"netwatch", "swap"} <= health_keys))
+
+        # Disk: the outage every other row assumes is not happening. Two
+        # thresholds, because one does not fit a Pi card and a VPS both.
+        disk = s._status_data()["disk"]
+        check("The status snapshot carries free and total disk",
+              set(disk) == {"free_mb", "total_mb"}
+              and disk["free_mb"] is not None and disk["total_mb"] > 0)
+        check("...low by the absolute floor",
+              s._disk_is_low({"free_mb": 100.0, "total_mb": 100000.0}))
+        check("...low by the fraction, on a disk with plenty left in MB",
+              s._disk_is_low({"free_mb": 5000.0, "total_mb": 200000.0}))
+        check("...and roomy is not low",
+              not s._disk_is_low({"free_mb": 50000.0, "total_mb": 200000.0}))
+        check("...an unreadable disk is not reported as low",
+              not s._disk_is_low({"free_mb": None, "total_mb": None}))
+        # Severity, not just fault: one colour cannot say both "visitors
+        # cannot use this site" and "it serves, and something wants doing".
+        rows = {r["key"]: r for r in s._health_checks()}
+        check("Every health row carries a severity, not only a verdict",
+              all("blocking" in r for r in s._health_checks()))
+        # The rule, not the mood of this particular run: a stopped service
+        # blocks precisely when it is stopped.
+        check("...a stopped service blocks, a running one does not",
+              rows["service"]["blocking"] == (not rows["service"]["ok"]))
+        saved_sd = s.config.sites[0].serve_dir
+        try:
+            s.config.sites[0].serve_dir = "no-such-folder-xyz"
+            dir_row = [r for r in s._health_checks() if r["key"] == "dir"][0]
+            check("...a missing folder blocks: nothing is served at all",
+                  dir_row["blocking"])
+        finally:
+            s.config.sites[0].serve_dir = saved_sd
+        check("...while swap, disk, and the watchdog do not",
+              not rows["swap"]["blocking"] and not rows["disk"]["blocking"]
+              and (s._IS_MACOS or not rows["netwatch"]["blocking"]))
+        # The certificate is the one row with two severities: an untrusted
+        # certificate is an interstitial for every visitor to a name the
+        # site advertises, and simply where a nameless site starts.
+        saved_dom = s.config.sites[0].domain
+        saved_cert = s.config.sites[0].cert_file
+        try:
+            s.config.sites[0].cert_file = ""      # nothing trusted to present
+            s.config.sites[0].domain = ""
+            check("An untrusted certificate on a nameless site does not block",
+                  not [r for r in s._health_checks() if r["key"] == "cert"][0]["blocking"])
+            s.config.sites[0].domain = "example.test"
+            check("...but does the moment the site advertises a name",
+                  [r for r in s._health_checks() if r["key"] == "cert"][0]["blocking"])
+        finally:
+            s.config.sites[0].domain = saved_dom
+            s.config.sites[0].cert_file = saved_cert
+        check("The disk row is host-wide, not hung on a site",
+              all(r["site"] is None for r in s._health_checks() if r["key"] == "disk"))
+        # Both surfaces say the same thing: the page reads the health row,
+        # the terminal reads the issue list, and neither may know something
+        # the other does not.
+        saved_disk_snap = s._disk_snapshot
+        s._disk_snapshot = lambda: {"free_mb": 12.0, "total_mb": 100000.0}
+        try:
+            check("...and a low disk reaches the terminal's issue list too",
+                  any("free where content lands" in i for i in s._production_issues())
+                  and any(r["key"] == "disk" and not r["ok"] for r in s._health_checks()))
+        finally:
+            s._disk_snapshot = saved_disk_snap
         check("...with the mode row labeled for what it describes",
               any(r["key"] == "service" and r["label"] == "Mode"
                   for r in s._health_checks()))
@@ -1207,17 +1449,12 @@ def run_dispatch_tests(s):
                             "started_at", "cpu_ns", "sampled_at"}
               and load["sampled_at"] > 0)
 
-        # The pull channel reports only when it exists or is half-built:
-        # its absence is the normal case, not news.
-        saved_chan = (s.config.sites[0].publish_url, s.config.sites[0].publish_key)
-        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
-        check("An absent publish channel is not a row",
+        # The pull channel is retired, so it can no longer be a row at all —
+        # and no site row may carry a stale key the page still has a word for.
+        check("The retired publish channel is not a health row",
               not any(r["key"] == "channel" for r in s._health_checks()))
-        s.config.sites[0].publish_url = "https://example.com/b.tar.gz"
-        rows_half = [r for r in s._health_checks() if r["key"] == "channel"]
-        check("...a half-built one is a row that needs review",
-              len(rows_half) == 1 and not rows_half[0]["ok"])
-        (s.config.sites[0].publish_url, s.config.sites[0].publish_key) = saved_chan
+        check("...and no site row carries the channel's old fields",
+              not any("publish" in r for r in s._site_rows()))
 
         saved_hc = (s.config.sites[0].username, s.config.sites[0].password_hash)
         s.config.sites[0].username, s.config.sites[0].password_hash = "", ""
@@ -1275,8 +1512,16 @@ def run_dispatch_tests(s):
 
         # The swap size the terminal has always asked for, asked for here —
         # the same core underneath, guarded before it can reach the disk.
-        check("The status snapshot carries the swap figures",
-              set(s._status_data()["swap"]) == {"active_mb", "recommended_mb"})
+        # Allocated and active are different numbers on purpose: /proc/swaps
+        # reports usable space, a page short of the file, so a field showing
+        # the active number would make typing the recommended size look like
+        # a resize that silently did not take.
+        check("The status snapshot carries the swap figures, allocated apart from active",
+              set(s._status_data()["swap"])
+              == {"allocated_mb", "active_mb", "recommended_mb"})
+        check("...and the page's field reads the allocated one",
+              "sw.allocated_mb != null ? sw.allocated_mb" in s._UI_ADMIN_PAGE
+              and "sw.active_mb" not in s._UI_ADMIN_PAGE)
         st, _ = ui_req("POST", "/swap", body=b'{"mb": 512}')
         check("The swap endpoint is code-gated like every other", st == 403)
         st, body = ui_req("POST", f"/swap?t={ui_code}", body=b'{"mb": "big"}')
@@ -1381,8 +1626,11 @@ def run_dispatch_tests(s):
         check("A paired upload lands through the shared pipeline",
               st == 200 and b'"published"' in body
               and os.path.exists(os.path.join(ui_dir, "live", "new.html")))
-        check("...keeping the single-shot backup",
-              os.path.exists(os.path.join(ui_dir, "live.bak", "old.html")))
+        # The tree it replaced is kept — as a version in the ring now, not
+        # as a single .bak that the next publish would overwrite.
+        check("...keeping the tree it replaced as a version",
+              any(os.path.exists(os.path.join(path, "old.html"))
+                  for path, _stamp in s._version_dirs(os.path.join(ui_dir, "live"))))
 
         st, body = ui_req("POST", f"/upload?t={ui_code}",
                           body=_ui_tar([("../evil.html", "pwned")]))
@@ -1390,6 +1638,42 @@ def run_dispatch_tests(s):
               st == 422 and b'"rejected"' in body
               and not os.path.exists(os.path.join(ui_dir, "evil.html"))
               and os.path.exists(os.path.join(ui_dir, "live", "new.html")))
+
+        # Preview (#116): the same bundle, staged where only this page can
+        # see it. Everything below is a boundary, not a nicety — a preview
+        # is the operator's own unvetted content running in their browser.
+        st, body = ui_req("POST", f"/preview?t={ui_code}&site=0",
+                          body=_ui_tar([("index.html", "DRAFT"),
+                                        ("a/b.css", "body{}")]))
+        preview_token = json.loads(body)["token"] if st == 200 else ""
+        check("A preview stages without touching the live tree",
+              st == 200 and b'"staged"' in body
+              and open(os.path.join(ui_dir, "live", "new.html")).read() == "fresh")
+        check("...on its own token, which is not the run's passcode",
+              preview_token and preview_token != ui_code)
+        # The reason for the separate token: a previewed page can read its
+        # own URL. If that URL carried the passcode, a script in the
+        # operator's own draft could publish with it.
+        check("...and that token buys nothing but the preview",
+              ui_req("GET", f"/status?t={preview_token}")[0] == 403
+              and ui_req("POST", f"/upload?t={preview_token}",
+                         body=_ui_tar([("x.html", "no")]))[0] == 403)
+        st, body = ui_req("GET", f"/preview/{preview_token}/0/")
+        check("The staged root is served over the tunnel", st == 200 and body == b"DRAFT")
+        # The token is a path segment because a draft's relative links drop
+        # the query: with it in the query, the page loaded and every
+        # stylesheet 403'd. Found in a browser, pinned here.
+        check("...with relative paths resolving, which is why it is staged at all",
+              ui_req("GET", f"/preview/{preview_token}/0/a/b.css")[1] == b"body{}")
+        check("...refusing traversal through the server's own resolver",
+              ui_req("GET", f"/preview/{preview_token}/0/../../etc/passwd")[0] == 403)
+        check("...and refusing a wrong or absent preview token",
+              ui_req("GET", "/preview/wrong/0/")[0] == 403
+              and ui_req("GET", "/preview/")[0] == 404)
+        st, body = ui_req("POST", f"/preview?t={ui_code}&site=0",
+                          body=_ui_tar([("../evil.html", "pwned")]))
+        check("A bundle a publish would refuse, a preview refuses identically",
+              st == 422 and not os.path.exists(os.path.join(ui_dir, "evil.html")))
 
         # Site management ops — the page's card row runs the same cores the
         # terminal's add-site / remove-site / move-site run. Reload guards
@@ -1513,6 +1797,80 @@ def run_dispatch_tests(s):
             s.config.save()
             shutil.rmtree(s._resolve(twin_dir), ignore_errors=True)
 
+            # Removal must reclaim EVERY derived tree, not just the shapes
+            # that predate the version ring. The ring shipped without this
+            # function being updated, so a removed site left its whole kept
+            # history on disk — which is the compounding-folders trap the
+            # remove ruling exists to prevent.
+            saved_chown_rm = s._chown_operator
+            s._chown_operator = lambda path, strip_world=False: None
+
+            def _one_file_bundle(body):
+                buf = io.BytesIO()
+                with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+                    data = body.encode()
+                    info = tarfile.TarInfo(name="index.html")
+                    info.size = len(data)
+                    tf.addfile(info, io.BytesIO(data))
+                return buf.getvalue()
+
+            try:
+                doomed_dir = s._invent_site_dir()
+                di = s._append_site(doomed_dir)
+                dsite = s.config.sites[di]
+                for body in ("one", "two", "three"):
+                    s._land_bundle(dsite, _one_file_bundle(body), "test")
+                dbase = s._resolve(doomed_dir).rstrip(os.sep)
+                # A legacy slot, a pre-ring backup marker, an abandoned
+                # staging tree, and a staged preview: every shape removal
+                # is supposed to reclaim.
+                for extra in (".a", ".bak", ".new"):
+                    os.makedirs(dbase + extra, exist_ok=True)
+                s._stage_preview(dsite, _one_file_bundle("draft"))
+
+                # A neighbour whose folder name starts with the victim's: a
+                # prefix sweep would take it too.
+                near_dir = doomed_dir + "-extra"
+                os.makedirs(s._resolve(near_dir), exist_ok=True)
+                ni = s._append_site(near_dir)
+                s._land_bundle(s.config.sites[ni], _one_file_bundle("near"), "test")
+                near_cert = s.config.sites[ni].cert_file
+                near_key  = s.config.sites[ni].key_file
+                near_versions_before = {p for p, _ in s._version_dirs(near_dir)}
+
+                ring_before = len(s._version_dirs(doomed_dir))
+                check("A published site has a ring to reclaim",
+                      ring_before >= 3 and os.path.isdir(dbase + ".preview"))
+
+                err_rm = s._remove_site(di)
+                leftovers = sorted(f for f in os.listdir(s.BASE_DIR)
+                                   if f.startswith(os.path.basename(dbase))
+                                   and not f.startswith(os.path.basename(dbase) + "-"))
+                check("remove-site reclaims every tree in the ring",
+                      err_rm == "" and leftovers == [])
+                check("...the preview, the legacy slot, the backup and the staging tree with it",
+                      not any(os.path.lexists(dbase + suf)
+                              for suf in (".preview", ".a", ".b", ".bak", ".new")))
+                check("...and a neighbour whose name merely starts the same is untouched",
+                      {p for p, _ in s._version_dirs(near_dir)} == near_versions_before
+                      and near_versions_before)
+                for stray in (near_cert, near_key):
+                    sp = os.path.join(s.BASE_DIR, stray)
+                    if os.path.exists(sp):
+                        os.remove(sp)
+                for leftover in [f for f in os.listdir(s.BASE_DIR)
+                                 if f.startswith(os.path.basename(dbase))]:
+                    lp = os.path.join(s.BASE_DIR, leftover)
+                    if os.path.islink(lp):
+                        os.unlink(lp)
+                    else:
+                        shutil.rmtree(lp, ignore_errors=True)
+                s.config.sites = [x for x in s.config.sites
+                                  if x.serve_dir not in (doomed_dir, near_dir)]
+                s.config.save()
+            finally:
+                s._chown_operator = saved_chown_rm
+
             # Deactivation: invisible to routing on every matching path —
             # exact domain, the www pairing, and the domainless catch-all.
             saved_sites_all = s.config.sites
@@ -1602,7 +1960,8 @@ def run_dispatch_tests(s):
     sites = json.loads(buf.getvalue())
     check("sites --json lists every site with its shape",
           len(sites) == len(s.config.sites)
-          and {"index", "domain", "serve_dir", "auth", "cert_days", "publish"} <= set(sites[0]))
+          and {"index", "domain", "active", "serve_dir",
+               "auth", "cert_days"} == set(sites[0]))
     saved_walkers = (s._cache_warnings, s._service_is_active)
     walked = []
     try:
@@ -1622,18 +1981,16 @@ def run_dispatch_tests(s):
 
     # The write half: set validates every pair before applying any.
     saved_set   = {n: getattr(s.config, n) for n in ("port", "trusted_proxy")}
-    saved_site  = (s.config.sites[0].publish_url, s.config.sites[0].publish_key)
     saved_save  = s.Config.save
     save_count  = []
     try:
         s.Config.save = lambda self: save_count.append(1)
-        good_key = "ab" * 32
+        # One site pair and one host pair in a single call: the point is that
+        # both levels apply from one validated batch.
         with contextlib.redirect_stdout(io.StringIO()):
-            s.cmd_set(["0", "publish_url=https://cdn.example/bundle.tar.gz",
-                       f"publish_key={good_key}", "port=8444"])
+            s.cmd_set(["0", "username=batched", "port=8444"])
         check("set applies validated site and host pairs",
-              s.config.sites[0].publish_url == "https://cdn.example/bundle.tar.gz"
-              and s.config.sites[0].publish_key == good_key
+              s.config.sites[0].username == "batched"
               and s.config.port == 8444)
         check("set saves once per successful call", save_count == [1])
 
@@ -1644,10 +2001,15 @@ def run_dispatch_tests(s):
               and s.config.trusted_proxy == saved_set["trusted_proxy"]
               and save_count == [1])
 
+        # The retired channel's two keys must be refused like any other word
+        # the vocabulary does not hold — not accepted onto a Site that has
+        # nowhere to put them.
         with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_set(["publish_key=nothex"])
-        check("set rejects a malformed publish key",
-              "64 hex" in buf.getvalue() and s.config.sites[0].publish_key == good_key)
+            s.cmd_set(["publish_url=https://cdn.example/b.tar.gz", "publish_key=" + "ab" * 32])
+        check("the retired channel's keys are refused, not stored",
+              "Unknown or malformed" in buf.getvalue()
+              and not hasattr(s.config.sites[0], "publish_url")
+              and not hasattr(s.config.sites[0], "publish_key"))
 
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["password=hunter2"])
@@ -1679,15 +2041,17 @@ def run_dispatch_tests(s):
         (s.config.sites[0].username, s.config.sites[0].password_hash,
          s.config.sites[0].password_salt) = saved_auth
 
+        # The folder left the vocabulary by ruling: Servette assigns it, so
+        # there is no key to answer wrongly. 'set dir=' is now as unknown as
+        # any other invented key — the useful pin is that it is refused
+        # rather than silently ignored.
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["dir=/etc"])
-        check("set refuses a dir outside the data directory",
-              "must live under" in buf.getvalue())
-
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_set(["dir=no-such-folder-xyz"])
-        check("set refuses a dir that doesn't exist (mirrors the interactive rule)",
-              "not found" in buf.getvalue())
+        check("'dir' is not a setting any more, and saying so is not silent",
+              "Unknown or malformed" in buf.getvalue()
+              and "dir" not in s._SET_SITE_KEYS + s._SET_HOST_KEYS)
+        check("...and nothing was written",
+              s.config.sites[0].serve_dir != "/etc")
 
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["99", "username=x"])
@@ -1706,7 +2070,6 @@ def run_dispatch_tests(s):
         s.Config.save = saved_save
         for n, v in saved_set.items():
             setattr(s.config, n, v)
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_site
 
     # Every save restores the config's ownership — a root-owned 0600 config from
     # `sudo servette set` would otherwise kill the running service and send the
@@ -1917,7 +2280,7 @@ def run_dispatch_tests(s):
           not any(s._needs_root(c) for c in ("status", "sites", "log")))
     check("Privileged commands do",
           all(s._needs_root(c) for c in
-              ("setup", "config", "enable", "disable", "set", "pull", "restore-site")))
+              ("setup", "config", "enable", "disable", "set", "admin", "restore-site")))
 
     # start and stop are the conditional pair: root for the systemd path, but a
     # session server lives in *this* process, where an elevated child could
@@ -2165,8 +2528,11 @@ def run_dispatch_tests(s):
               argv[0] == "sudo" and os.path.isabs(argv[argv.index("-m") - 1]))
         check("Elevation re-runs the same command as a module",
               argv[argv.index("-m") + 1:] == ["servette", "enable"])
-        check("Elevation says what it is doing before prompting",
-              "needs root" in buf.getvalue())
+        # sudo speaks for itself: it prompts when it wants a password and is
+        # silent when the timestamp is still warm. A line of ours ahead of it
+        # is noise in both cases.
+        check("Elevation announces nothing of its own on the way in",
+              buf.getvalue() == "")
 
         # sudo resets the environment. Losing SERVETTE_HOME would point the
         # elevated run at a different data directory than the operator is in —
@@ -2227,7 +2593,6 @@ def run_dispatch_tests(s):
     saved_reload  = s._reload_server
     saved_ssrv    = s._server_running
     saved_sact    = s._service_is_active
-    site_test_dir = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site now requires serve_dir under BASE_DIR
     new_site_cert_files = []  # populated below once add-site picks its (randomized) names
     try:
         s._server_running    = lambda: False
@@ -2248,15 +2613,20 @@ def run_dispatch_tests(s):
 
         saved_input = builtins.input
         try:
-            # add-site: folder, domain (blank → self-signed), username (blank). No
-            # placeholder offer any more — an empty folder is left empty.
-            script = iter([site_test_dir, "", ""])
+            # add-site: domain (blank → self-signed), username (blank). The
+            # folder is not asked for — Servette invents it — and nothing is
+            # written into it, so an empty folder is left empty.
+            script = iter(["", ""])
             builtins.input = lambda prompt="": next(script, "")
             with contextlib.redirect_stdout(io.StringIO()) as buf:
                 s._config_add_site()
             check("add-site appends exactly one site", len(s.config.sites) == 2)
-            check("add-site's new site uses the given folder",
-                  s.config.sites[1].serve_dir == site_test_dir)
+            check("add-site invents the folder rather than asking for one",
+                  re.fullmatch(r"site-[0-9a-f]{6}", s.config.sites[1].serve_dir)
+                  and os.path.isdir(s._resolve(s.config.sites[1].serve_dir)))
+            check("...and says where content will land, without asking",
+                  s.config.sites[1].serve_dir in buf.getvalue()
+                  and "serve_dir:" not in buf.getvalue())
             check("add-site's new site gets a unique cert/key (no collision with site 0)",
                   s.config.sites[1].cert_file != s.config.sites[0].cert_file)
             check("add-site generates a real self-signed cert",
@@ -2302,7 +2672,6 @@ def run_dispatch_tests(s):
         s._server_running    = saved_ssrv
         s._service_is_active = saved_sact
         s.config.sites       = saved_sites7
-        shutil.rmtree(site_test_dir, ignore_errors=True)
 
     section("_domain_in_use")
 
@@ -2332,7 +2701,6 @@ def run_dispatch_tests(s):
     saved_sact2   = s._service_is_active
     saved_chown   = s._chown_servette
     saved_obtain  = s._obtain_trusted_cert
-    dirs2 = [tempfile.mkdtemp(dir=s.BASE_DIR) for _ in range(3)]  # add-site requires serve_dir under BASE_DIR
     generated_files = []
     try:
         s._server_running    = lambda: True
@@ -2345,7 +2713,7 @@ def run_dispatch_tests(s):
         saved_input2 = builtins.input
         try:
             # Two self-signed sites added back to back must not collide.
-            script = iter([dirs2[0], "", "", dirs2[1], "", ""])
+            script = iter(["", "", "", ""])
             builtins.input = lambda prompt="": next(script, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -2371,7 +2739,7 @@ def run_dispatch_tests(s):
             check("Survivor kept its own cert file across the removal",
                   s.config.sites[1].cert_file == survivor_cert)
 
-            script2 = iter([dirs2[2], "", ""])
+            script2 = iter(["", ""])
             builtins.input = lambda prompt="": next(script2, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
@@ -2390,16 +2758,14 @@ def run_dispatch_tests(s):
             site.domain = domain  # only happens on the real success path
         s._obtain_trusted_cert = _fake_obtain_success
         reload_calls.clear()
-        dir6 = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input3 = builtins.input
         try:
-            script3 = iter([dir6, "domain-test.example.com", ""])
+            script3 = iter(["domain-test.example.com", ""])
             builtins.input = lambda prompt="": next(script3, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
         finally:
             builtins.input = saved_input3
-            shutil.rmtree(dir6, ignore_errors=True)
         check("add-site's own reload doesn't double up on the domain branch's",
               reload_calls.count(1) == 0 and reload_calls.count("obtain-reloaded") == 1)
         generated_files.extend([s.config.sites[-1].cert_file, s.config.sites[-1].key_file])
@@ -2419,16 +2785,14 @@ def run_dispatch_tests(s):
             site.domain    = domain   # only happens on the real success path
         s._obtain_trusted_cert = _fake_obtain_repoints
         placeholders_before = {f for f in os.listdir(s.BASE_DIR) if f.startswith(("cert-", "key-"))}
-        dir6c = tempfile.mkdtemp(dir=s.BASE_DIR)
         saved_input3c = builtins.input
         try:
-            script3c = iter([dir6c, "issued.example.com", ""])
+            script3c = iter(["issued.example.com", ""])
             builtins.input = lambda prompt="": next(script3c, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
         finally:
             builtins.input = saved_input3c
-            shutil.rmtree(dir6c, ignore_errors=True)
         placeholders_after = {f for f in os.listdir(s.BASE_DIR) if f.startswith(("cert-", "key-"))}
         check("Issuance repointed the site away from its placeholder",
               s._resolve(s.config.sites[-1].cert_file) == os.path.join(acme_dir, "fullchain.pem"))
@@ -2443,16 +2807,14 @@ def run_dispatch_tests(s):
         # happened inside the failed _obtain_trusted_cert call.
         s._obtain_trusted_cert = lambda domain, site: None  # simulates ACME failure: no site.domain assignment
         reload_calls.clear()
-        dir6b = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input3b = builtins.input
         try:
-            script3b = iter([dir6b, "unreachable.example.com", ""])
+            script3b = iter(["unreachable.example.com", ""])
             builtins.input = lambda prompt="": next(script3b, "")
             with contextlib.redirect_stdout(io.StringIO()):
                 s._config_add_site()
         finally:
             builtins.input = saved_input3b
-            shutil.rmtree(dir6b, ignore_errors=True)
         failed_site = s.config.sites[-1]
         check("A failed ACME attempt leaves the site with a real, generated self-signed cert",
               os.path.exists(s._resolve(failed_site.cert_file)) and os.path.exists(s._resolve(failed_site.key_file)))
@@ -2465,16 +2827,14 @@ def run_dispatch_tests(s):
         # Duplicate-domain guard: add-site falls back to self-signed rather than
         # creating a second site that would silently steal the first's TLS identity.
         s.config.sites[1].domain = "taken.example.com"
-        dir7 = tempfile.mkdtemp(dir=s.BASE_DIR)  # add-site requires serve_dir under BASE_DIR
         saved_input4 = builtins.input
         try:
-            script4 = iter([dir7, "taken.example.com", ""])
+            script4 = iter(["taken.example.com", ""])
             builtins.input = lambda prompt="": next(script4, "")
             with contextlib.redirect_stdout(io.StringIO()) as buf:
                 s._config_add_site()
         finally:
             builtins.input = saved_input4
-            shutil.rmtree(dir7, ignore_errors=True)
         check("add-site refuses a domain already claimed by another site",
               "already used by another site" in buf.getvalue())
         check("...and the new site ends up self-signed instead", s.config.sites[-1].domain == "")
@@ -2495,45 +2855,29 @@ def run_dispatch_tests(s):
         check("...and leaves the editing site's own domain unchanged",
               s.config.sites[0].domain != "taken.example.com")
 
-        # serve_dir outside BASE_DIR breaks the publish pipeline's same-filesystem
-        # atomic swap and the systemd sandbox's ReadWritePaths — both add-site and
-        # 'dir' must refuse it rather than accept a site that silently can't publish.
-        outside_dir = tempfile.mkdtemp()  # deliberately NOT under BASE_DIR
+        # A serve_dir outside BASE_DIR breaks the publish pipeline's
+        # same-filesystem atomic swap and the systemd sandbox's
+        # ReadWritePaths. That used to be two refusals, on add-site and on
+        # 'dir'. With the folder out of the vocabulary there is nothing left
+        # to refuse — the invariant is now that every folder Servette hands
+        # out is inside BASE_DIR, which is what this pins. A hand-edited
+        # servette.toml is the only remaining way past it.
+        invented = [s._invent_site_dir() for _ in range(8)]
         try:
-            sites_before = len(s.config.sites)
-            saved_input6 = builtins.input
-            try:
-                script6 = iter([outside_dir, "", ""])
-                builtins.input = lambda prompt="": next(script6, "")
-                with contextlib.redirect_stdout(io.StringIO()) as buf3:
-                    s._config_add_site()
-            finally:
-                builtins.input = saved_input6
-            check("add-site refuses a serve_dir outside BASE_DIR",
-                  f"must be inside {s.BASE_DIR}" in buf3.getvalue())
-            check("...and no site was added", len(s.config.sites) == sites_before)
-
-            saved_dir = s.config.sites[0].serve_dir
-            saved_input7 = builtins.input
-            try:
-                builtins.input = lambda prompt="": outside_dir
-                with contextlib.redirect_stdout(io.StringIO()) as buf4:
-                    s._config_dir(s.config.sites[0])
-            finally:
-                builtins.input = saved_input7
-            check("'dir' refuses a serve_dir outside BASE_DIR",
-                  f"must be inside {s.BASE_DIR}" in buf4.getvalue())
-            check("...and leaves the site's serve_dir unchanged",
-                  s.config.sites[0].serve_dir == saved_dir)
+            check("Every invented folder lands inside the data directory",
+                  all(s._is_within_base_dir(s._resolve(d)) for d in invented))
+            check("...and none of them collides with another",
+                  len(set(invented)) == len(invented))
+            check("...and none of them is a folder holding Servette's secrets",
+                  not any(s._serve_dir_exposes_secrets(s._resolve(d)) for d in invented))
         finally:
-            shutil.rmtree(outside_dir, ignore_errors=True)
+            for d in invented:
+                shutil.rmtree(s._resolve(d), ignore_errors=True)
     finally:
         for fname in generated_files:
             p = os.path.join(s.BASE_DIR, fname)
             if os.path.exists(p):
                 os.remove(p)
-        for d in dirs2:
-            shutil.rmtree(d, ignore_errors=True)
         s._reload_server     = saved_reload2
         s._server_running    = saved_ssrv2
         s._service_is_active = saved_sact2
@@ -2994,241 +3338,261 @@ def run_dispatch_tests(s):
         s._servette_gid = saved_gid
         shutil.rmtree(probe_dir, ignore_errors=True)
 
-    section("Atomic site-content swap and restore")
+    section("Atomic site-content swap and the version ring")
 
     saved_serve_dir = s.config.sites[0].serve_dir
     swap_root = tempfile.mkdtemp()
+
+    def _publish(root, name, text, link):
+        """Land one tree through the real swap, as a publish would."""
+        d = os.path.join(root, name)
+        os.makedirs(d)
+        with open(os.path.join(d, "marker.txt"), "w") as f:
+            f.write(text)
+        s._swap_site_content(d, link)
+
+    def _marker(path):
+        return open(os.path.join(path, "marker.txt")).read()
+
     try:
-        s.config.sites[0].serve_dir = os.path.join(swap_root, "site")  # does not exist yet
+        link = os.path.join(swap_root, "site")   # does not exist yet
+        s.config.sites[0].serve_dir = link
 
-        new1 = os.path.join(swap_root, "new1")
-        os.makedirs(new1)
-        with open(os.path.join(new1, "marker.txt"), "w") as f:
-            f.write("v1")
-        s._swap_site_content(new1, s.config.sites[0].serve_dir)
-        check("First swap: content is live",
-              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v1")
-        check("First swap: serve_dir is now a symlink into a slot",
-              os.path.islink(s.config.sites[0].serve_dir)
-              and os.path.realpath(s.config.sites[0].serve_dir)
-                  in [os.path.realpath(p) for p in s._content_slots(s.config.sites[0].serve_dir)])
-        check("First swap: no backup (nothing existed to back up)",
-              not os.path.isdir(s.config.sites[0].serve_dir + ".bak"))
+        _publish(swap_root, "new1", "v1", link)
+        check("First swap: content is live", _marker(link) == "v1")
+        check("First swap: serve_dir is a symlink into a dated version tree",
+              os.path.islink(link)
+              and os.path.realpath(link)
+                  in [os.path.realpath(p) for p, _ in s._version_dirs(link)])
+        check("First swap: one version, and it is the live one",
+              [r["live"] for r in s._site_versions(s.config.sites[0])] == [True])
 
-        new2 = os.path.join(swap_root, "new2")
-        os.makedirs(new2)
-        with open(os.path.join(new2, "marker.txt"), "w") as f:
-            f.write("v2")
-        link_before = os.path.realpath(s.config.sites[0].serve_dir)
-        s._swap_site_content(new2, s.config.sites[0].serve_dir)
-        check("Second swap: new content is live",
-              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
-        check("Second swap: the link flipped to the other slot — no rename gap",
-              os.path.islink(s.config.sites[0].serve_dir)
-              and os.path.realpath(s.config.sites[0].serve_dir) != link_before)
-        check("Second swap: previous content became the backup",
-              open(os.path.join(s.config.sites[0].serve_dir + ".bak", "marker.txt")).read() == "v1")
+        link_before = os.path.realpath(link)
+        _publish(swap_root, "new2", "v2", link)
+        check("Second swap: new content is live", _marker(link) == "v2")
+        check("Second swap: the link moved to a new tree — no rename gap",
+              os.path.islink(link) and os.path.realpath(link) != link_before)
+        check("Second swap: the tree it replaced is kept",
+              any(_marker(p) == "v1" for p, _ in s._version_dirs(link)))
 
-        new3 = os.path.join(swap_root, "new3")
-        os.makedirs(new3)
-        with open(os.path.join(new3, "marker.txt"), "w") as f:
-            f.write("v3")
-        s._swap_site_content(new3, s.config.sites[0].serve_dir)
-        check("Third swap: backup now holds v2, not v1 — single-shot, not a history",
-              open(os.path.join(s.config.sites[0].serve_dir + ".bak", "marker.txt")).read() == "v2")
+        _publish(swap_root, "new3", "v3", link)
+        # The whole point of the ring: v1 survives a second publish, where
+        # the single-shot backup it replaced would have dropped it.
+        markers = {_marker(p) for p, _ in s._version_dirs(link)}
+        check("Third swap: the ring is a history, not a single-shot backup",
+              markers == {"v1", "v2", "v3"})
+        check("...ordered newest first",
+              _marker(s._version_dirs(link)[0][0]) == "v3")
 
-        saved_input = builtins.input
+        rows = s._site_versions(s.config.sites[0])
+        check("Versions report their name, time, size, and which is live",
+              len(rows) == 3 and rows[0]["live"] and not rows[1]["live"]
+              and all(r["files"] == 1 and r["bytes"] == 2 for r in rows)
+              and all(isinstance(r["published"], int) for r in rows)
+              and all("/" not in r["name"] for r in rows))
+
+        # Restore through the core, then through the command.
         saved_chownop_r = s._chown_operator
         restore_chowns = []
         try:
-            builtins.input = lambda prompt="": "y"
             s._chown_operator = lambda path, strip_world=False: restore_chowns.append((path, strip_world))
-            with contextlib.redirect_stdout(io.StringIO()):
+            err = s._restore_site(s.config.sites[0], rows[2]["name"])
+        finally:
+            s._chown_operator = saved_chownop_r
+        check("Restore to a named version serves it", err == "" and _marker(link) == "v1")
+        check("...re-establishing operator ownership (a tree was extracted as root)",
+              (os.path.realpath(link), True) in restore_chowns)
+        check("...and the version rolled away is NOT consumed — the ring keeps it",
+              {_marker(p) for p, _ in s._version_dirs(link)} == {"v1", "v2", "v3"})
+        check("...so restoring back again is possible",
+              s._restore_site(s.config.sites[0], rows[0]["name"]) == ""
+              and _marker(link) == "v3")
+
+        check("Restoring the live version is refused by name, not by silence",
+              "already the live one" in
+              s._restore_site(s.config.sites[0], s._version_dirs(link)[0][0].split("/")[-1]))
+        check("A version name the ring does not hold is refused",
+              "No kept version named" in s._restore_site(s.config.sites[0], "site.v1"))
+        # The name crosses the wire from the page, so it must never be taken
+        # as a path — only matched against what the ring actually holds.
+        check("...and a traversal dressed as a version name is refused too",
+              "No kept version named" in
+              s._restore_site(s.config.sites[0], "../../../etc"))
+
+        # No argument means the plain undo: the newest tree that is not live.
+        s._restore_site(s.config.sites[0], None)
+        check("Restore with no version named undoes the last publish", _marker(link) == "v2")
+
+        saved_input = builtins.input
+        try:
+            builtins.input = lambda prompt="": "1"
+            with contextlib.redirect_stdout(io.StringIO()) as rbuf:
                 s.cmd_restore_site(s.config.sites[0])
         finally:
             builtins.input = saved_input
-            s._chown_operator = saved_chownop_r
-        check("Restore re-establishes operator ownership (the backup came from a pull)",
-              (os.path.realpath(s.config.sites[0].serve_dir), True) in restore_chowns)
-        check("Restore: live content reverts to the backup (v2)",
-              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
-        check("Restore: backup is consumed",
-              not os.path.isdir(s.config.sites[0].serve_dir + ".bak"))
+        check("The command lists the kept versions and takes a number",
+              "1. " in rbuf.getvalue() and "(live)" not in rbuf.getvalue()
+              and _marker(link) == "v3" and "restored" in rbuf.getvalue())
 
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_restore_site(s.config.sites[0])
-        check("Restoring again with nothing to restore reports cleanly, does not raise",
-              "Nothing to restore" in buf.getvalue())
+        saved_input = builtins.input
+        try:
+            builtins.input = lambda prompt="": ""
+            with contextlib.redirect_stdout(io.StringIO()) as cbuf:
+                s.cmd_restore_site(s.config.sites[0])
+        finally:
+            builtins.input = saved_input
+        check("...and Enter cancels without touching the live content",
+              "cancelled" in cbuf.getvalue() and _marker(link) == "v3")
+
+        # Pruning: the ring has a depth, and the live tree is never swept.
+        for n in range(4, 4 + s._KEEP_VERSIONS):
+            _publish(swap_root, f"new{n}", f"v{n}", link)
+        check("The ring prunes to its depth",
+              len(s._version_dirs(link)) == s._KEEP_VERSIONS)
+        check("...dropping the oldest, keeping the newest",
+              _marker(s._version_dirs(link)[0][0]) == f"v{3 + s._KEEP_VERSIONS}")
+        # The guarantee: a version that is LIVE is never pruned, however old
+        # it is — an operator serving a year-old version is serving it, and
+        # content being served is not garbage. Restore to the oldest, then
+        # prune to a depth that would otherwise sweep it away.
+        oldest = s._site_versions(s.config.sites[0])[-1]["name"]
+        s._restore_site(s.config.sites[0], oldest)
+        live_path, live_text = os.path.realpath(link), _marker(link)
+        s._prune_versions(link, keep=1)
+        kept = [os.path.realpath(p) for p, _ in s._version_dirs(link)]
+        check("A live version is never pruned, however old it is",
+              live_path in kept and os.path.isdir(live_path)
+              and _marker(link) == live_text)
+        # Two survive a keep=1 prune, and only two: the newest, which the
+        # depth keeps, and the live one, which the rule keeps.
+        check("...while everything past the depth beside it is gone",
+              len(kept) == 2)
 
         # A missing new tree must fail loudly BEFORE anything moves: the old
         # design raised on its second rename; a symlink flip would happily
         # "succeed" dangling and serve nothing.
         ghost = os.path.join(swap_root, "never-created")
+        live_before = _marker(link)
         raised_swap = False
         try:
-            s._swap_site_content(ghost, s.config.sites[0].serve_dir)
+            s._swap_site_content(ghost, link)
         except OSError:
             raised_swap = True
         check("A failed swap raises instead of passing as silence", raised_swap)
         check("...and the live content is untouched, not gone",
-              open(os.path.join(s.config.sites[0].serve_dir, "marker.txt")).read() == "v2")
+              _marker(link) == live_before)
 
-        # Legacy conversion: a real directory (the pre-flip layout) becomes a
-        # linked site on its first swap, its old content the .bak directory —
-        # and a legacy backup restores the old way, un-converting cleanly.
+        # Legacy conversion, shape one: a real directory (the pre-flip
+        # layout) becomes a linked site on its first swap, its old content
+        # adopted into the ring rather than lost.
         legacy = os.path.join(swap_root, "legacy-site")
         os.makedirs(legacy)
-        with open(os.path.join(legacy, "old.txt"), "w") as f:
+        with open(os.path.join(legacy, "marker.txt"), "w") as f:
             f.write("pre-flip")
         s.config.sites[0].serve_dir = legacy
-        fresh = os.path.join(swap_root, "fresh")
-        os.makedirs(fresh)
-        with open(os.path.join(fresh, "new.txt"), "w") as f:
-            f.write("post-flip")
-        s._swap_site_content(fresh, legacy)
-        check("Legacy conversion: the site is a symlink and the new content live",
-              os.path.islink(legacy)
-              and open(os.path.join(legacy, "new.txt")).read() == "post-flip")
-        check("...its old content is the backup, as a real directory",
-              not os.path.islink(legacy + ".bak")
-              and open(os.path.join(legacy + ".bak", "old.txt")).read() == "pre-flip")
-        saved_input_lr = builtins.input
-        try:
-            builtins.input = lambda prompt="": "y"
-            with contextlib.redirect_stdout(io.StringIO()):
-                s.cmd_restore_site(s.config.sites[0])
-        finally:
-            builtins.input = saved_input_lr
-        check("A legacy backup restores and consumes, through the link",
-              open(os.path.join(legacy, "old.txt")).read() == "pre-flip"
-              and not os.path.isdir(legacy + ".bak"))
+        # Before any swap it is the oldest shape of all: a plain directory
+        # that has never been through the ring — and still published content.
+        plain_rows = s._site_versions(s.config.sites[0])
+        check("A plain directory reports as published, not as nothing",
+              len(plain_rows) == 1 and plain_rows[0]["live"]
+              and plain_rows[0]["files"] == 1 and plain_rows[0]["bytes"] > 0)
+        check("...and offers no restore, being already what is live",
+              all(r["live"] for r in plain_rows))
+        _publish(swap_root, "fresh", "post-flip", legacy)
+        check("Legacy real directory converts: symlink, new content live",
+              os.path.islink(legacy) and _marker(legacy) == "post-flip")
+        check("...and its old content is a version, not a lost directory",
+              any(_marker(p) == "pre-flip" for p, _ in s._version_dirs(legacy)))
+        check("...restorable like any other", s._restore_site(s.config.sites[0]) == ""
+              and _marker(legacy) == "pre-flip")
+
+        # Legacy conversion, shape two: the two-slot .a/.b layout with its
+        # single-shot .bak symlink. Both slots join the ring; the marker goes.
+        two = os.path.join(swap_root, "two-slot")
+        slot_a, slot_b = two + ".a", two + ".b"
+        for slot, text in ((slot_a, "slot-a"), (slot_b, "slot-b")):
+            os.makedirs(slot)
+            with open(os.path.join(slot, "marker.txt"), "w") as f:
+                f.write(text)
+        os.symlink(slot_a, two)
+        os.symlink(slot_b, two + ".bak")
+        s.config.sites[0].serve_dir = two
+        check("A two-slot site has no versions before its next publish",
+              s._version_dirs(two) == [])
+        # But it IS serving something, and saying otherwise told an operator
+        # with a live, working site that nothing was published.
+        two_rows = s._site_versions(s.config.sites[0])
+        check("...yet its live tree is still reported as live and sized",
+              len(two_rows) == 1 and two_rows[0]["live"]
+              and two_rows[0]["files"] == 1)
+        _publish(swap_root, "afterslots", "post-slots", two)
+        check("Two-slot conversion: the new content is live",
+              _marker(two) == "post-slots")
+        check("...the idle slots are adopted into the ring",
+              {_marker(p) for p, _ in s._version_dirs(two)}
+              >= {"slot-a", "slot-b", "post-slots"})
+        check("...and the single-shot .bak marker is gone",
+              not os.path.lexists(two + ".bak"))
     finally:
         s.config.sites[0].serve_dir = saved_serve_dir
         shutil.rmtree(swap_root, ignore_errors=True)
 
-    section("Content update pipeline")
+    section("Landing a bundle — the tail every content channel shares")
 
-    saved_url, saved_key = s.config.sites[0].publish_url, s.config.sites[0].publish_key
-    try:
-        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
-        try:
-            s._check_for_content_update(s.config.sites[0])
-            check("Neither publish_url nor publish_key set: no-ops cleanly", True)
-        except Exception as e:
-            check(f"Neither set: no-ops cleanly (raised {e})", False)
-
-        s.config.sites[0].publish_url = "https://example.com/site.tar.gz"
-        s.config.sites[0].publish_key = "not-valid-hex"
-        logging.disable(logging.CRITICAL)
-        try:
-            s._check_for_content_update(s.config.sites[0])
-            check("Invalid publish_key rejected before any network call", True)
-        except Exception as e:
-            check(f"Invalid publish_key rejected cleanly (raised {e})", False)
-        finally:
-            logging.disable(logging.NOTSET)
-    finally:
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_url, saved_key
-
-    section("Content update pipeline: full pull/verify/swap (network mocked)")
-
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives import serialization as _ser2
-
-    priv_key = Ed25519PrivateKey.generate()
-    pub_hex  = priv_key.public_key().public_bytes(
-        _ser2.Encoding.Raw, _ser2.PublicFormat.Raw).hex()
+    # These checks used to drive the pull channel's fetch-and-verify pipeline.
+    # The channel is retired; what it shared with the page — extraction into
+    # staging, ownership repair before the flip, the swap under one lock — is
+    # what actually guards a publish, so the coverage moves onto _land_bundle
+    # directly. The door in front of it (upload size cap, tunnel
+    # authentication) is checked in the page's own section.
     bundle_bytes = make_tar_gz([("index.html", "published content")])
-    signature    = priv_key.sign(bundle_bytes)
 
-    class _FakeResp:
-        def __init__(self, data):
-            self._data = data
-        def read(self, size=None):
-            return self._data if size is None else self._data[:size]
-
-    saved_urlopen    = urllib.request.urlopen
     saved_serve_dir2 = s.config.sites[0].serve_dir
-    saved_url2, saved_key2 = s.config.sites[0].publish_url, s.config.sites[0].publish_key
     swap_root2 = tempfile.mkdtemp()
     try:
-        s.config.sites[0].serve_dir   = os.path.join(swap_root2, "site")
-        s.config.sites[0].publish_url = "https://example.com/site.tar.gz"
-        s.config.sites[0].publish_key = pub_hex
+        s.config.sites[0].serve_dir = os.path.join(swap_root2, "site")
 
-        urllib.request.urlopen = lambda url, timeout=None: (
-            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        # The tree a pull swaps in was extracted by this process — root, when
-        # the command elevated — so the pull must re-establish operator
-        # ownership itself, with world bits stripped: without it every pull
-        # left the site root-owned and world-readable.
+        # The staged tree was extracted by this process — root, when the
+        # command elevated — so landing must re-establish operator ownership
+        # itself, with world bits stripped, BEFORE the tree goes live.
         saved_chownop = s._chown_operator
         chown_calls = []
         s._chown_operator = lambda path, strip_world=False: chown_calls.append((path, strip_world))
         try:
-            result = s._check_for_content_update(s.config.sites[0])
+            result = s._land_bundle(s.config.sites[0], bundle_bytes, "test")
         finally:
             s._chown_operator = saved_chownop
-        check("Correctly signed bundle is published",
+        check("A landed bundle is live",
               open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
         check("Returns 'published'", result == "published")
         live2 = s._resolve(s.config.sites[0].serve_dir).rstrip(os.sep)
-        check("Pull re-establishes operator ownership BEFORE the tree goes live",
+        check("Landing re-establishes operator ownership BEFORE the tree goes live",
               (live2 + ".new", True) in chown_calls)
-        check("...and leaves the backup alone — it was the live tree a moment ago",
-              not any(p == live2 + ".bak" for p, _ in chown_calls))
+        check("...and leaves the trees it replaces alone — they were live a moment ago",
+              not any(p != live2 + ".new" for p, _ in chown_calls))
 
-        other_key = Ed25519PrivateKey.generate()
-        bad_sig   = other_key.sign(bundle_bytes)
-        urllib.request.urlopen = lambda url, timeout=None: (
-            _FakeResp(bad_sig) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        with open(os.path.join(s.config.sites[0].serve_dir, "index.html"), "w") as f:
-            f.write("unchanged")
+        # A bundle the extractor refuses must change nothing: no ownership
+        # call, no staging left behind, the live tree untouched.
         chown_calls.clear()
         s._chown_operator = lambda path, strip_world=False: chown_calls.append((path, strip_world))
         logging.disable(logging.CRITICAL)
         try:
-            result = s._check_for_content_update(s.config.sites[0])
+            result = s._land_bundle(s.config.sites[0], b"not a tar.gz at all", "test")
         finally:
             s._chown_operator = saved_chownop
-        logging.disable(logging.NOTSET)
+            logging.disable(logging.NOTSET)
         check("A rejected bundle re-establishes nothing (nothing changed)",
               chown_calls == [])
-        check("Bundle signed by the wrong key is rejected, content unchanged",
-              open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "unchanged")
-        check("Returns 'bad-signature'", result == "bad-signature")
+        check("...leaves the live content exactly as it was",
+              open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
+        check("...returns 'rejected'", result == "rejected")
+        check("...and leaves no staging tree behind",
+              not os.path.exists(live2 + ".new"))
 
-        section("Publish pipeline: size cap and sig-URL query handling")
+        section("Publish serialization")
 
-        saved_max2 = s._MAX_BUNDLE_BYTES
-        try:
-            s._MAX_BUNDLE_BYTES = 10  # smaller than bundle_bytes
-            urllib.request.urlopen = lambda url, timeout=None: (
-                _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-            logging.disable(logging.CRITICAL)
-            result = s._check_for_content_update(s.config.sites[0])
-            logging.disable(logging.NOTSET)
-            check("Oversized bundle rejected as 'too-large' before signature check",
-                  result == "too-large")
-        finally:
-            s._MAX_BUNDLE_BYTES = saved_max2
-
-        seen_urls = []
-        def _record(url, timeout=None):
-            seen_urls.append(url)
-            return _FakeResp(signature) if ".sig" in url else _FakeResp(bundle_bytes)
-        s.config.sites[0].publish_url = "https://example.com/site.tar.gz?token=abc123"
-        urllib.request.urlopen = _record
-        s._check_for_content_update(s.config.sites[0])
-        sig_url = next(u for u in seen_urls if u != s.config.sites[0].publish_url)
-        check("'.sig' is appended to the path, not after the query string",
-              sig_url == "https://example.com/site.tar.gz.sig?token=abc123")
-        s.config.sites[0].publish_url = "https://example.com/site.tar.gz"
-
-        section("Publish pipeline serialization")
-
-        urllib.request.urlopen = lambda url, timeout=None: (
-            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
+        # One lock across every content mutation: two sessions landing into
+        # the same site must not overlap inside the swap.
         saved_swap = s._swap_site_content
         in_critical, max_concurrent = [], []
         def _slow_swap(new_dir, serve_dir):
@@ -3239,38 +3603,41 @@ def run_dispatch_tests(s):
             in_critical.pop()
         s._swap_site_content = _slow_swap
         try:
-            threads = [threading.Thread(target=s._check_for_content_update, args=(s.config.sites[0],))
+            threads = [threading.Thread(target=s._land_bundle,
+                                        args=(s.config.sites[0], bundle_bytes, "test"))
                        for _ in range(3)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-            check("Concurrent triggers never overlap inside the swap (max concurrent == 1)",
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+            check("Concurrent publishes never overlap inside the swap (max concurrent == 1)",
                   max(max_concurrent) == 1)
         finally:
             s._swap_site_content = saved_swap
 
-        section("Manual pull command (cmd_pull)")
+        section("The retired pull channel leaves nothing behind")
 
-        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_pull(s.config.sites[0])
-        check("No publish channel configured: reports cleanly, doesn't touch the network",
-              "No publish channel configured" in buf.getvalue())
-
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "https://example.com/site.tar.gz", pub_hex
-        urllib.request.urlopen = lambda url, timeout=None: (
-            _FakeResp(signature) if url.endswith(".sig") else _FakeResp(bundle_bytes))
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            s.cmd_pull(s.config.sites[0])
-        check("Successful pull prints a confirmation",
-              "New site content published" in buf.getvalue())
-        check("Successful pull actually swapped in the content",
-              open(os.path.join(s.config.sites[0].serve_dir, "index.html")).read() == "published content")
+        # A removal is only done when the names are gone from the program, not
+        # merely unreachable from a menu.
+        gone = ("cmd_pull", "_check_for_content_update", "_publish_sig_url",
+                "_config_publish")
+        check("The channel's functions are gone from the program",
+              not any(hasattr(s, n) for n in gone))
+        check("...its two settings are gone from a Site",
+              not hasattr(s.Site(), "publish_url")
+              and not hasattr(s.Site(), "publish_key"))
+        check("...the shell offers no 'pull'",
+              "pull" not in [c.split()[0] for c, _ in s._COMMANDS])
+        check("...the config sub-shell offers no 'channel' or 'publish' verb",
+              not any(c.split()[0] in ("channel", "publish")
+                      for c, _ in s._CONFIG_COMMANDS))
+        # Signature verification was this channel's trust mechanism and had no
+        # other caller: nothing in the program should still reach for Ed25519.
+        check("...and no Ed25519 verification is left in the program",
+              "Ed25519" not in io.open(os.path.abspath(s.__file__),
+                                       encoding="utf-8").read())
     finally:
-        urllib.request.urlopen = saved_urlopen
         s.config.sites[0].serve_dir = saved_serve_dir2
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_url2, saved_key2
         shutil.rmtree(swap_root2, ignore_errors=True)
 
 
@@ -3621,6 +3988,125 @@ def run_server_tests(s, serve_dir):
     resp = req("GET", path="/app.js")
     check(".js returns application/javascript",
           resp.status == 200 and "javascript" in resp.headers.get("Content-Type", ""))
+
+    section("Redirects (#117) — a setting, never a file in the site")
+
+    class _NoFollow(urllib.request.HTTPRedirectHandler):
+        """urlopen follows a 301 by default; the 301 IS the thing under test."""
+        def redirect_request(self, *_a, **_kw):
+            return None
+
+    _nofollow = urllib.request.build_opener(
+        _NoFollow, urllib.request.HTTPSHandler(context=SSL_CTX))
+
+    def hop(path):
+        """(status, Location) for one request, without following it."""
+        try:
+            r = _nofollow.open(BASE_URL + path)
+            return r.getcode(), r.headers.get("Location")
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Location")
+
+    saved_redirects = s.config.sites[0].redirects
+    try:
+        s.config.sites[0].redirects = s._clean_redirects({
+            "/old": "/index.html",
+            "/blog/": "/writing",
+            "/gone": "https://example.com/moved",
+        })
+
+        st, loc = hop("/old")
+        check("A redirected path answers 301 with the new location",
+              st == 301 and loc == "/index.html")
+        # A 301 is cacheable by default and browsers hold it hard — which is
+        # what makes a wrong one frightening. Explicit no-cache overrides
+        # that default, so the browser re-asks and a corrected rule takes
+        # effect. This header is why 301 needs no 302 escape hatch.
+        try:
+            _r = _nofollow.open(BASE_URL + "/old")
+            _cache = _r.headers.get("Cache-Control")
+        except urllib.error.HTTPError as _e:
+            _cache = _e.headers.get("Cache-Control")
+        check("...and is sent no-cache, so a wrong redirect is recoverable",
+              _cache == "no-cache")
+        check("...and one rule covers both /old and /old/",
+              hop("/old/") == (301, "/index.html"))
+        check("...a trailing slash in the rule is normalised the same way",
+              hop("/blog") == (301, "/writing") and hop("/blog/") == (301, "/writing"))
+        check("...an absolute http(s) target is sent as written",
+              hop("/gone") == (301, "https://example.com/moved"))
+        # A campaign link points at the OLD path with its query attached;
+        # dropping it would silently break every one of them.
+        check("...and the query string rides along",
+              hop("/old?utm=x") == (301, "/index.html?utm=x"))
+        check("A path with no rule is served, not redirected",
+              hop("/index.html")[0] == 200)
+        check("A missing path with no rule is still a 404",
+              hop("/nope-not-here")[0] == 404)
+
+        # The invariant this feature could have broken: a redirect is a dict
+        # lookup on the loaded config, never a read of anything on disk.
+        redirect_src = inspect.getsource(s._handle_request)
+        check("The lookup is a dict read, and runs before any path resolution",
+              "site.redirects.get(" in redirect_src
+              and redirect_src.index("site.redirects.get(")
+                  < redirect_src.index("_resolve_request_path("))
+
+        # Validation, at the one door both surfaces use.
+        check("A javascript: target is refused — a redirect is an open door",
+              s._clean_redirects({"/x": "javascript:alert(1)"}) == {})
+        check("A data: target is refused too",
+              s._clean_redirects({"/x": "data:text/html,<script>"}) == {})
+        check("A CR or LF in a target is refused — that is response splitting",
+              s._clean_redirects({"/x": "/y\r\nX-Evil: 1"}) == {})
+        check("...and one buried inside a source, where strip() cannot reach it",
+              s._clean_redirects({"/x\ny": "/z"}) == {})
+        check("...while a trailing newline is simply stripped away",
+              s._clean_redirects({"/x\n": "/y"}) == {"/x": "/y"})
+        check("A source that is not a site path is refused",
+              s._clean_redirects({"old": "/new"}) == {}
+              and s._clean_redirects({"https://elsewhere/x": "/new"}) == {})
+        check("A redirect pointing at itself is refused",
+              s._clean_redirects({"/loop": "/loop/"}) == {})
+        check("A non-table redirects value is ignored, not fatal",
+              s._clean_redirects("nonsense") == {})
+        check("The table is capped",
+              len(s._clean_redirects({f"/p{n}": "/q" for n in range(400)}))
+              == s._MAX_REDIRECTS)
+        check("...and one bad entry does not discard the good ones",
+              s._clean_redirects({"/good": "/fine", "/bad": "javascript:x"})
+              == {"/good": "/fine"})
+
+        # The terminal half of the pair: `set` speaks in scalars, so a pair
+        # is one token, and removal is the pair with nothing after the comma.
+        probe = s.Site()
+        check("set adds a redirect", s._set_site_value(probe, "redirect", "/a,/b") == ""
+              and probe.redirects == {"/a": "/b"})
+        check("...replaces one", s._set_site_value(probe, "redirect", "/a,/c") == ""
+              and probe.redirects == {"/a": "/c"})
+        check("...removes one", s._set_site_value(probe, "redirect", "/a,") == ""
+              and probe.redirects == {})
+        check("...reports a removal that removes nothing",
+              "no redirect from" in s._set_site_value(probe, "redirect", "/a,"))
+        check("...refuses a token that is not a pair",
+              "a pair" in s._set_site_value(probe, "redirect", "/a"))
+        check("...and refuses what the config load would refuse",
+              s._set_site_value(probe, "redirect", "/a,javascript:x") != "")
+
+        # Removing through _apply_settings must validate against the site's
+        # real table, not against a blank scratch object.
+        live_site = s.config.sites[0]
+        saved_live = dict(live_site.redirects)
+        try:
+            check("A removal through the shared settings path sees the real table",
+                  s._apply_settings(live_site, [("redirect", "/old,")]) == ""
+                  and "/old" not in live_site.redirects)
+        finally:
+            live_site.redirects = saved_live
+            s.config.save()
+    finally:
+        s.config.sites[0].redirects = saved_redirects
+        s.config.save()
 
     section("404 and custom 404.html")
 
@@ -4833,24 +5319,11 @@ def run_install_tests(s, tmpdir):
         s._swap_sizes    = saved_sizes
         s.os.path.exists = saved_exists_hh
 
-    section("Publish channel config")
-
-    saved_url, saved_key = s.config.sites[0].publish_url, s.config.sites[0].publish_key
-    try:
-        s.config.sites[0].publish_url = s.config.sites[0].publish_key = ""
-        check("Neither set → not flagged",
-              not any("publish channel" in issue for issue in s._production_issues()))
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "https://example.com/site.tar.gz", "a" * 64
-        check("Both set → not flagged",
-              not any("publish channel" in issue for issue in s._production_issues()))
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "https://example.com/site.tar.gz", ""
-        check("URL only → flagged as partial",
-              any("publish channel" in issue for issue in s._production_issues()))
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = "", "a" * 64
-        check("Key only → flagged as partial",
-              any("publish channel" in issue for issue in s._production_issues()))
-    finally:
-        s.config.sites[0].publish_url, s.config.sites[0].publish_key = saved_url, saved_key
+    # The half-built pull channel used to be one of the conditions this
+    # function reported. With the channel retired there is no half-state to
+    # report, and a stale sentence about one would be worse than silence.
+    check("No issue mentions the retired publish channel",
+          not any("publish channel" in issue for issue in s._production_issues()))
 
     section("Server watch (--serve supervision)")
 
@@ -5187,7 +5660,12 @@ def run_platform_tests(s):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 s.cmd_start()
-            check("cmd_start explains session mode on macOS", "Linux-only" in buf.getvalue())
+            # Two lines, and the second says only what the first does not:
+            # there is no service to install here, and tmux is the substitute.
+            out = buf.getvalue()
+            check("cmd_start explains session mode on macOS",
+                  "session only" in out and "needs Linux" in out
+                  and "tmux" in out and out.count("when you quit") == 1)
         finally:
             s._service_file_exists, s.start_server, s._server_running, s._prompt = saved
 
@@ -5284,13 +5762,24 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # Site content: the publish pipeline, and nothing else. _land_bundle
         # is the shared landing every channel funnels through — pull after
         # its signature check, the loopback page after its pairing code —
-        # and _drop_backup retires the single-shot backup marker for both
-        # the flip era (a symlink) and the era before it (a directory).
-        # _remove_site deletes a removed site's server copies (derived from
-        # the operator's originals; deactivation is the keep-everything
+        # and _drop_backup retires the pre-ring backup marker for both the
+        # flip era (a symlink) and the era before it (a directory).
+        # _restore_site flips the link to a kept version and _prune_versions
+        # drops the trees past the ring's depth — the only writer that
+        # deletes content an operator might still want, which is why it
+        # never touches the live tree. _adopt_legacy_slots renames a
+        # two-slot site's idle trees into the ring rather than deleting
+        # them. _remove_site deletes a removed site's server copies (derived
+        # from the operator's originals; deactivation is the keep-everything
         # path), sparing folders another site still points at.
-        "_land_bundle", "_swap_site_content", "cmd_restore_site",
+        "_land_bundle", "_swap_site_content", "_restore_site",
+        "_prune_versions", "_adopt_legacy_slots",
         "_drop_backup", "_remove_site",
+        # A preview is a draft nobody published: staged beside the site's
+        # tree, never inside it, and cleared when the command that made it
+        # exits. It writes content, so it is claimed here — but never the
+        # live tree, which is the whole point of previewing.
+        "_stage_preview", "_clear_previews",
         # A site FOLDER, created empty — setup must never leave nothing to
         # serve, and a page-added site gets a Servette-named folder because
         # the folder is not a question an operator should have to answer.
@@ -5320,8 +5809,8 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         print(f"      pinned writers that no longer write: {sorted(missing)}")
 
     # And of those, the ones that touch a site's content.
-    content_writers = {"_land_bundle", "_swap_site_content",
-                       "cmd_restore_site", "_drop_backup"}
+    content_writers = {"_land_bundle", "_swap_site_content", "_restore_site",
+                       "_prune_versions", "_adopt_legacy_slots", "_drop_backup"}
     check("Site content is written only by the publish channel",
           content_writers <= set(writers)
           and not (content_writers & {"cmd_setup"}))
@@ -5588,6 +6077,314 @@ def run_doc_check_tests(tmpdir):
         print(out.getvalue())
 
 
+def run_browser_tests(s, tmpdir):
+    """Load the admin page in a real browser and drive it.
+
+    Every other check in this file reads the page as TEXT — that a tab
+    exists, that an endpoint is named, that no browser dialog is called.
+    None of them execute a line of its JavaScript, so a typo'd identifier,
+    a selector that no longer matches, or a token in the wrong half of a
+    URL passes every one of them and reaches an operator. Four such bugs
+    reached this branch and were caught by hand in a browser:
+
+      - cardIndex() answered -1 while a card was still being built, so the
+        first version fetch asked for site -1;
+      - the preview token sat in the query, where a draft's own relative
+        links drop it, so the page loaded and every stylesheet was refused;
+      - the running dot lost its styling when the status row moved, and was
+        present in the markup and invisible;
+      - a path and its count rendered with nothing between them.
+
+    This runs only where Playwright and a browser are installed. Absent
+    either, it reports itself skipped and the rest of the suite is
+    unaffected — the dependency is real and a contributor should not need
+    it to run the tests. CI installs it, so it gates there.
+    """
+    section("The admin page, in a browser (skipped without Playwright)")
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  ·  skipped: pip install playwright && playwright install chromium")
+        return
+
+    # The site the page will describe: a real published history, so the
+    # version list, the restore buttons, and the sizes all have something
+    # to render rather than an empty state that proves little.
+    site = s.config.sites[0]
+    saved = (site.serve_dir, site.domain, dict(site.redirects))
+    root = tempfile.mkdtemp(dir=tmpdir)
+    httpd = None
+    try:
+        site.domain = "browser-check.test"
+        site.serve_dir = os.path.join(root, "site")
+        for n, text in enumerate(["one", "two"], 1):
+            d = os.path.join(root, f"v{n}")
+            os.makedirs(d)
+            with open(os.path.join(d, "index.html"), "w") as f:
+                f.write(f"<h1 id=live>{text}</h1>")
+            s._swap_site_content(d, site.serve_dir)
+            time.sleep(1.05)      # distinct publish seconds, so the ring orders
+
+        port = _free_port()
+        httpd, code = s._start_ui(site, s._UI_ADMIN_PAGE, port=port)
+        base = f"http://127.0.0.1:{port}"
+
+        console = []
+        with sync_playwright() as pw:
+            # `playwright install chromium` puts the browser where launch()
+            # looks, which is what CI does. SERVETTE_TEST_BROWSER names one
+            # already on the box, for an environment that ships a browser
+            # but not the build this Playwright expects.
+            try:
+                browser = pw.chromium.launch()
+            except Exception as first:
+                alt = os.environ.get("SERVETTE_TEST_BROWSER", "")
+                if not alt:
+                    print("  ·  skipped: no browser available "
+                          f"({str(first).splitlines()[0][:60]})")
+                    return
+                try:
+                    browser = pw.chromium.launch(executable_path=alt)
+                except Exception as e:
+                    print(f"  ·  skipped: SERVETTE_TEST_BROWSER unusable ({e})")
+                    return
+            page = browser.new_page()
+            page.on("console", lambda m: console.append(m.text) if m.type == "error" else None)
+            page.on("pageerror", lambda e: console.append("pageerror: " + str(e)))
+            page.goto(f"{base}/?t={code}")
+            page.wait_for_timeout(1500)
+
+            check("The page runs: the app is visible and one card is rendered",
+                  page.is_visible("#app")
+                  and page.locator("#site-cards .site-card").count() == 1)
+
+            # The bug a text pin cannot see: a card asking for site -1.
+            check("...the version list rendered, so its site index resolved",
+                  "file" in page.locator(".ver-state").first.inner_text())
+            check("...with a Restore for the version that is not live",
+                  page.locator("button.restore").count() == 1)
+
+            # The dot is markup either way; only CSS decides it is a dot.
+            check("...and the running dot is a dot where the status row puts it",
+                  page.evaluate("""() => {
+                    const el = document.getElementById('status-state');
+                    el.innerHTML = '<span class=dot></span>running';
+                    const c = getComputedStyle(el.querySelector('.dot'));
+                    return c.width === '7px' && c.borderRadius === '50%';
+                  }"""))
+
+            for tab in ("server", "stats", "sites"):
+                page.click(f"#tab-{tab}")
+                page.wait_for_timeout(700)
+                check(f"...the {tab} tab renders",
+                      page.is_visible(f"#panel-{tab if tab != 'sites' else 'sites'}"))
+
+            # The remove panel: drawn by the page, and where the button is.
+            page.locator("button.del").first.click()
+            page.wait_for_timeout(300)
+            box_b = page.locator("button.del").first.bounding_box()
+            box_p = page.locator(".site-card .confirm").first.bounding_box()
+            check("...the remove panel opens under the button that opens it",
+                  box_p is not None
+                  and 0 < box_p["y"] - (box_b["y"] + box_b["height"]) < 60)
+            page.locator(".do-cancel").first.click()
+
+            # Folding: the body goes, the head stays — so a folded card
+            # still says which site it is and whether it needs attention.
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
+            check("...folding hides the body and keeps the head",
+                  not page.locator(".site-card .card-body").first.is_visible()
+                  and page.locator(".site-card .card-title").first.is_visible())
+            # It has to survive a re-render, or every save would spring it
+            # open again.
+            page.click("#tab-server")
+            page.wait_for_timeout(600)
+            page.click("#tab-sites")
+            page.wait_for_timeout(900)
+            check("...and survives the re-render that follows every op",
+                  not page.locator(".site-card .card-body").first.is_visible())
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
+            check("...unfolding brings it back",
+                  page.locator(".site-card .card-body").first.is_visible())
+
+            # A fault is said once, on the row that carries its fix, plus
+            # the head pill a folded card still shows. Counting them a third
+            # time above the rows made one certificate read as three
+            # problems. This needs a site that HAS a fault: asserting the
+            # absence of a count on a healthy card proves nothing, which is
+            # exactly how the first version of this check passed.
+            saved_cert = s.config.sites[0].cert_file
+            try:
+                s.config.sites[0].cert_file = ""      # nothing trusted to present
+                page.click("#tab-server")
+                page.wait_for_timeout(400)
+                page.click("#tab-sites")
+                page.wait_for_timeout(900)
+                info = page.locator(".info").first.inner_text()
+                # Two indicators for one fault, and exactly two: the Status
+                # line, which is also the only place the card says it is
+                # well, and the row that carries the fix. The head pill is
+                # the folded card's Status line, so it must be hidden while
+                # this one is showing.
+                check("...a faulted card counts it once and marks it once",
+                      "1 to review" in info
+                      # The count does not name its members — each is named
+                      # on its own row, and four of them would be unreadable.
+                      and "certificate" not in info.lower()
+                      and page.locator(".cert-state .warn, .cert-state .fault"
+                                       ).count() == 1
+                      and not page.locator(".badge.needs").first.is_visible())
+                # Folded, the pill takes over — the count does not vanish
+                # just because the body is hidden.
+                page.locator("button.fold").first.click()
+                page.wait_for_timeout(300)
+                check("...and folding hands that count to the pill",
+                      page.locator(".badge.needs").first.is_visible())
+                page.locator("button.fold").first.click()
+                page.wait_for_timeout(300)
+            finally:
+                s.config.sites[0].cert_file = saved_cert
+                page.click("#tab-sites")
+                page.wait_for_timeout(800)
+
+            # An unfinished login is treated as exactly what every other
+            # thing to review is treated as: counted once, marked once on
+            # the row that fixes it, with no third register anywhere. The
+            # card said "healthy" beside a red refusal before this.
+            # Every fault state, walked in one place, because the model is
+            # only right if it is right for all of them: a count, and one
+            # mark on the row that fixes it. Nothing else, ever.
+            saved_state = (s.config.sites[0].cert_file,
+                           s.config.sites[0].serve_dir,
+                           s.config.sites[0].username,
+                           s.config.sites[0].password_hash)
+            def _card_marks():
+                page.reload(); page.wait_for_timeout(1400)
+                return page.evaluate("""() => {
+                  const c = document.querySelector('.site-card');
+                  const at = (sel) => !!c.querySelector(sel + ' .warn, ' + sel + ' .fault');
+                  return {status: c.querySelector('.info').innerText,
+                          cert: at('.cert-state'), access: at('.auth-state'),
+                          published: at('.ver-state')};
+                }""")
+            try:
+                site0 = s.config.sites[0]
+                site0.cert_file = ""
+                m = _card_marks()
+                check("...a certificate fault: counted once, marked on its own row",
+                      "1 to review" in m["status"] and m["cert"]
+                      and not m["access"] and not m["published"])
+                site0.cert_file = saved_state[0]
+                site0.serve_dir = "gone-xyz"
+                m = _card_marks()
+                check("...a missing folder: marked where publishing would fix it",
+                      "1 to review" in m["status"] and m["published"]
+                      and not m["cert"] and not m["access"])
+                site0.serve_dir = saved_state[1]
+                site0.username, site0.password_hash = "someone", ""
+                m = _card_marks()
+                check("...a half-authenticated site: marked on the access row",
+                      "1 to review" in m["status"] and m["access"]
+                      and not m["cert"] and not m["published"])
+                site0.cert_file = ""
+                site0.serve_dir = "gone-xyz"
+                m = _card_marks()
+                check("...and three at once count three and mark three",
+                      "3 to review" in m["status"]
+                      and m["cert"] and m["access"] and m["published"])
+            finally:
+                (site0.cert_file, site0.serve_dir,
+                 site0.username, site0.password_hash) = saved_state
+                page.reload(); page.wait_for_timeout(1400)
+
+            # The walk above reloaded the page, so the switch is back where
+            # it started; flip it again for the checks that follow.
+            page.locator(".auth-switch").first.check()
+            page.wait_for_timeout(400)
+            info = page.locator(".info").first.inner_text()
+            check("...an unfinished login counts, and the card stops saying healthy",
+                  "1 to review" in info and "healthy" not in info
+                  and page.locator(".auth-state .warn, .auth-state .fault"
+                                   ).count() == 1)
+            check("...with Save dim rather than a refusal to print",
+                  page.locator("button.save-site").first.is_disabled()
+                  and not page.locator(".site-card .error").first.is_visible())
+            # Typing the login completes it, so the count follows.
+            page.locator("#cfg-username-0").fill("someone")
+            page.locator("#cfg-password-0").fill("a-password")
+            page.wait_for_timeout(300)
+            check("...and completing it clears the count and frees Save",
+                  "healthy" in page.locator(".info").first.inner_text()
+                  and not page.locator("button.save-site").first.is_disabled())
+            page.locator(".auth-switch").first.uncheck()
+            page.wait_for_timeout(300)
+
+            # Preview: staged, framed, and its relative assets resolving —
+            # the check that would have caught the token-in-the-query bug.
+            draft = tempfile.mkdtemp(dir=tmpdir)
+            with open(os.path.join(draft, "index.html"), "w") as f:
+                f.write("<h1 id=d>DRAFT</h1><link rel=stylesheet href=s.css>")
+            with open(os.path.join(draft, "s.css"), "w") as f:
+                f.write("h1{color:rgb(1,2,3)}")
+            page.set_input_files('input[type="file"]', draft)
+            page.wait_for_timeout(600)
+            page.locator("button.prev").first.click()
+            page.wait_for_timeout(2000)
+            frame = page.frame_locator(".preview-frame")
+            # Two lines, and the row still centres its label and buttons
+            # against the pair: one line ran into the buttons and wrapped
+            # mid-date.
+            check("...the published line is two lines, centred against them",
+                  page.evaluate("""() => {
+                    const st = document.querySelector('.ver-state');
+                    const rows = st.querySelectorAll('span');
+                    if (rows.length !== 2) return false;
+                    const a = rows[0].getBoundingClientRect();
+                    const b = rows[1].getBoundingClientRect();
+                    const btn = document.querySelector('.switch-act button.dl')
+                                        .getBoundingClientRect();
+                    const mid = (a.top + b.bottom) / 2;
+                    return b.top >= a.bottom - 1 &&
+                           Math.abs((btn.top + btn.bottom) / 2 - mid) < 6;
+                  }"""))
+            check("...a preview renders the chosen draft",
+                  frame.locator("#d").inner_text() == "DRAFT")
+            check("...with its relative stylesheet resolving inside the frame",
+                  frame.locator("#d").evaluate(
+                      "e => getComputedStyle(e).color") == "rgb(1, 2, 3)")
+            check("...and the frame's URL carrying no admin passcode",
+                  code not in (page.locator(".preview-frame").get_attribute("src") or ""))
+
+            # A redirect, added and removed through the page's own form.
+            page.locator("button.redir-add").first.click()
+            page.wait_for_timeout(200)
+            page.locator(".redir-from").first.fill("/browser-check")
+            page.locator(".redir-to").first.fill("/index.html")
+            page.locator("button.redir-save").first.click()
+            page.wait_for_timeout(1500)
+            check("...a redirect added through the form reaches the config",
+                  "/browser-check" in s.config.sites[0].redirects)
+
+            browser.close()
+
+        # The console is a check in itself: every failure above is silent
+        # to a text pin, and most of them shout here.
+        noise = [m for m in console if "favicon" not in m.lower()
+                 and "404 (Not Found)" not in m]
+        check("The page ran with a clean console", not noise)
+        if noise:
+            for m in noise[:5]:
+                print(f"      {m}")
+    finally:
+        if httpd is not None:
+            s._stop_ui(httpd)
+        site.serve_dir, site.domain, site.redirects = saved
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("\n──────────────────────────────────────────────────────")
     print("  Servette Test Suite")
@@ -5604,6 +6401,7 @@ def main():
         run_platform_tests(s)
         run_invariant_tests(s, serve_dir, tmpdir)
         run_doc_check_tests(tmpdir)
+        run_browser_tests(s, tmpdir)
     finally:
         teardown(tmpdir, saved_config, config_path, s)
 

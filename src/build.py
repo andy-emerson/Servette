@@ -58,15 +58,23 @@ NOT_FOUND_SOURCE = "404.html"
 _NOT_FOUND_MARKER = "@@NOT_FOUND_HTML@@"
 ADMIN_SOURCE = "admin.html"
 _ADMIN_MARKER = "@@ADMIN_HTML@@"
-CHECK_SOURCE = "check.html"
-_CHECK_MARKER = "@@CHECK_HTML@@"
+CONNECTION_SOURCE = "connection.html"
+_CONNECTION_MARKER = "@@CONNECTION_HTML@@"
 # Every page the module embeds: (source file, the marker it replaces). Each
 # marker sits inside a triple-quoted literal in the sources. Three pages:
 # the 404 body and the connection test on the public surface, the admin
 # page on the loopback surface.
 EMBEDDED_PAGES = [(NOT_FOUND_SOURCE, _NOT_FOUND_MARKER),
-                  (CHECK_SOURCE, _CHECK_MARKER),
+                  (CONNECTION_SOURCE, _CONNECTION_MARKER),
                   (ADMIN_SOURCE, _ADMIN_MARKER)]
+
+# The mark is one file. README and the website link it as an image; the three
+# pages need it as a data URI in a favicon href, which is the same drawing in
+# another encoding — so the build does the encoding rather than three pages
+# carrying hand-copied transcriptions of it. Every page must name the marker:
+# a page that lost its icon should fail the build, not ship without one.
+MARK_SOURCE = os.path.join("assets", "servette-mark.svg")
+_MARK_MARKER = "@@MARK_ICON@@"
 
 _FENCE_OPEN  = "```python"
 _FENCE_CLOSE = "```"
@@ -111,6 +119,23 @@ def md_to_code(md_text, filename):
     return "".join(out)
 
 
+def mark_data_uri(repo_dir):
+    """assets/servette-mark.svg as a data URI fit for a favicon href.
+
+    Two characters would end the value early, and both are encoded rather
+    than swapped for something similar: '#' begins a URI fragment, which
+    would truncate the SVG at its first colour, and '"' would close the href
+    attribute. Percent-encoding both leaves the file free to quote font
+    names — 'SF Mono' in the stack is why the tempting shortcut of turning
+    every double quote into an apostrophe does not work here. '%' goes first
+    or it would re-encode the escapes the other two produce."""
+    with open(os.path.join(repo_dir, MARK_SOURCE), "r", encoding="utf-8") as f:
+        svg = f.read()
+    svg = re.sub(r"\s+", " ", svg).strip()
+    svg = svg.replace("%", "%25").replace('"', "%22").replace("#", "%23")
+    return "data:image/svg+xml," + svg
+
+
 def build(src_dir):
     """Concatenate the reconstructed sections, then inline the embedded pages.
 
@@ -123,9 +148,16 @@ def build(src_dir):
             parts.append(md_to_code(f.read(), name))
     out = "".join(parts)
 
+    mark = mark_data_uri(os.path.dirname(src_dir))
     for src_name, marker in EMBEDDED_PAGES:
         with open(os.path.join(src_dir, src_name), "r", encoding="utf-8") as f:
             html = f.read()
+        # The mark goes in before the guards below, so what they check is what
+        # actually ships rather than the page as authored.
+        if html.count(_MARK_MARKER) != 1:
+            raise ValueError(f"{src_name}: expected exactly one {_MARK_MARKER}, "
+                             f"found {html.count(_MARK_MARKER)}")
+        html = html.replace(_MARK_MARKER, mark)
         # Each page lands inside a triple-quoted literal. A `"""` in the HTML
         # would close it early and a backslash would be read as an escape, so
         # both fail the build rather than producing a module that is subtly

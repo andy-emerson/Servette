@@ -6,6 +6,336 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A printed line earns its place only if the reader cannot already see it
+
+**Ruled (Human):** one rule over every command's output, arrived at by
+walking `enable` and `admin` line by line. A line stays if it tells the
+reader something the surrounding lines, the labels, or the program's own
+behaviour do not already say. It goes if it announces what the next line
+names, restates what the line above stated, or reports a step the
+operator can see happening.
+
+Applied, with what each line was judged against:
+
+- `'<cmd>' needs root; asking sudo.` — **gone.** sudo prompts when it
+  wants a password and is silent when it does not, so the notice was
+  either redundant or noise. The sudo-is-missing line stays: it is the
+  only account of why nothing happened.
+- `The admin page is up:` — **gone**, and `link` became `admin page`.
+  Killing a header only works if the label carries the meaning; `link`
+  named a protocol, not a destination.
+- `admin`'s three pointer lines — **folded into the prompt**, which is
+  where a reader looks when wondering what to type. Seven lines to four.
+- `enable`'s watchdog line — **first enable only.** A refresh re-writes
+  the unit and stops; the watchdog was armed by the first enable and is
+  still armed, so on a re-run the line is not news.
+- `restore-site`'s parenthetical explaining the version ring —
+  **replaced** by one sentence saying when a kept version appears.
+- `start`'s macOS line — **rewritten** to carry only what the line above
+  does not: a permanent service needs Linux.
+
+**Why (user pov):** the operator reads the terminal to find one thing;
+every line that says nothing is a line between them and it. **(developer
+pov):** a rule settles a family of these, where line-by-line taste
+re-argues each one and drifts.
+**Reviewed and left alone:** `disable`, `stop`, `status`, `log`,
+`traffic`, `set`, `config` — one line per outcome, or structured output.
+`setup` is a first-run walkthrough, where explaining is the job.
+*(2026-08-24)*
+
+## The publish sub-shell goes; its one verb keeps its own front door
+
+**Ruled (Human):** the sub-shell existed to gather the content channel's
+scattered verbs — `pull`, `restore-site`, `channel`. The pull channel's
+removal left it wrapping a single verb that was already a top-level
+command, so it is removed rather than kept as a menu of one.
+`restore-site` is unchanged and still elevates.
+**Why (user pov):** one door per job; a menu holding one item is a step
+that teaches nothing. **(developer pov):** a wrapper with one call is
+the shape a reader has to read twice to learn it does nothing.
+**Went with it, not replaced:** the display that listed every site's
+kept versions side by side (nothing shows that now — `restore-site`
+lists one site's, and only when a rollback is available), and the one
+line pointing at the browser page. Adding a command is not part of a
+removal; either can come back if it is missed.
+*(2026-08-24)*
+
+## Command output is indented, without exception
+
+**Ruled (Human):** a bug, not a style choice. Every line the shell prints
+carries the same two-space indent; 38 lines across `enable`, `disable`,
+`start`, `stop`, `log` and the certificate warnings did not, so one
+command's output read as two programs talking.
+**Left alone:** `status`'s own headline, which is a display with its own
+layout rather than a line of command output. *(2026-08-24)*
+
+## Everything that wants attention: counted once, marked once, where the fix is
+
+**Ruled (Human).** One rule, no exceptions, applied to every state:
+
+- **The Status line counts, and says nothing else.** `N to review`, or
+  `✓ healthy`. It does not name its members — each is named on its own
+  row, and four names here would be a sentence nobody reads. This is the
+  only place a card can report itself *well*: every other row speaks for
+  its own subject.
+- **One mark per item, on the row that carries its fix.** Certificate on
+  the certificate row. Login on the access row. A missing folder on the
+  **Published** row, because publishing is what puts it back — it used to
+  sit in the facts block, nowhere near anything that would fix it.
+- **Nothing else.** No third register: no red paragraph restating what a
+  row already says. Where a form cannot be saved, **Save is dim** and the
+  row says what is missing — a refusal to print is the third register by
+  another name.
+
+**An unfinished edit is one of these items.** Flipping to private without
+a login is counted and marked, so the card cannot say "healthy" beside a
+form it is refusing. It was doing exactly that, which is the
+inconsistency that made this ruling necessary.
+**Severity by consequence, not by kind:** a stored username with no
+password locks every visitor out — red. The same login half-typed has
+changed nothing yet — amber. The row's words say which is missing ("a
+username is needed" / "a password is needed"), not both at once.
+**Verified across every state, in a browser**, because getting it right
+for the certificate and wrong for the others is what happened three
+times: nothing wrong, certificate, folder, login, and all three at once.
+*(2026-08-24)*
+
+**Ruled (Human):** two things, and only two.
+
+1. **The Status line** — the count, naming what it counts, and the only
+   place on the card that says the site is *well*. No other row can say
+   that: they report their own subject, and a card with nothing wrong
+   would otherwise say nothing at all.
+2. **One mark per problem, on the row that carries its fix** — the
+   certificate row for a certificate, the access row for a login. An
+   indicator anywhere else is an indicator you have to go and find the fix
+   for.
+
+**The head pill is not a third thing.** It is the Status line for a folded
+card: shown only while the body is hidden, so the count never vanishes
+because a card is closed, and never doubles the line inside it.
+**Refusals move to the control that refused**, for the same reason — the
+login refusal belongs under Save, not at the foot of the card below Test
+connection. So does explanatory text: the DNS note sat below the access
+block explaining a certificate button three controls above it, and now
+sits under that button.
+**The Agent got this backwards once**, removing the count and keeping the
+pill — optimising away the one indicator that carried information for the
+two that repeated it. Recorded because the reasoning that produced it
+("say it once, on the row that fixes it") was right and still led
+somewhere wrong: the count is not a repetition of the rows, it is the
+summary and the all-clear.
+**Worth knowing about the count's set:** with the page as the only
+surface, little but the certificate raises it today. A missing serve
+folder can; a half-built pull channel can, but that is terminal-only; and
+the half-authenticated state the access row reports is one the page's own
+guard prevents reaching. *(2026-08-24)*
+
+## The connection test does not report the version
+
+**Ruled (Human):** the Version row is dropped. `/.well-known/servette`
+stays — it is a published path and something outside Servette may use
+it — but nothing in the product asks for it any more.
+**Why:** on a public site the endpoint answers 404 by design, so the row
+could only ever say "withheld", and every run of the test cost a miss in
+the log for a sentence about Servette rather than about the connection.
+The operator reads the version from `status` and from the Server tab.
+**Worth recording, because it changes what the 404 buys:** the connection
+test itself answers 200 to anyone, so Servette's presence is already
+public. Withholding the version hides the version number, not the server.
+*(2026-08-24)*
+
+## A card folds, and destructive buttons look destructive
+
+**Ruled (Human):** the trash button carries a border and the destructive
+red at all times, not only under the pointer — the same shape every other
+button has, in the colour the stop button already wears. Beside it, a
+fold control (chevrons toward each other to close, away to open) hides
+the card's body for a box serving more sites than fit on a screen.
+**What folding keeps:** the head. A folded card still shows its name, its
+controls, and — only while folded — the pill standing in for the Status
+line, because the reason to fold is length, not secrecy, and a card that
+hid whether it needed attention would make folding cost something.
+**Fold state survives a re-render.** Every op re-renders the site list, so
+a fold held on the card element would spring open on each save; it is
+held by site instead, keyed on the domain where there is one, since
+dragging renumbers indexes. *(2026-08-24)*
+
+## A refusal describes the form as it stood
+
+**Ruled (Human):** a validation refusal clears when the thing it described
+changes — moving the access switch, or typing into the field it asked
+for. It used to sit in red through every subsequent flip, describing a
+form that no longer existed.
+**Not a fault, and not counted as one:** a refused save changes nothing,
+so the site gains no defect, and the head pill is right to stay where it
+is. What was wrong was the message outliving its cause — and, separately,
+where it appeared, which "A count, and one mark per problem where its
+fix is" above closes. *(2026-08-24)*
+
+## The card says what the site is, then what you do to it
+
+**Ruled (Human):** what the site is — Status, Serving, Domain,
+Certificate, Access — sits at the top of a site card. Publishing,
+versions, redirects and the connection test follow underneath.
+**Why:** the identity of the site answers the question a card is opened
+to answer; the actions are what you do once you know it. The publish
+strip led the card because publishing was the first thing the card could
+do, which is history rather than a reason.
+**And the remove panel is a popover under the button that opens it**,
+rather than a block at the far end of a long card — a question asked
+three hundred pixels from the thing you clicked is a question you have to
+go and find. The rule against borrowed voices was always about the
+browser's own dialogs (`alert`, `confirm`, `prompt`), never about panels
+the page draws itself; the suite now pins that by reading the page's
+JavaScript with comments stripped, since a prose mention of `confirm()`
+is not a call to it. *(2026-08-24)*
+
+## A redirect is any path you want to keep working
+
+**Ruled (Human):** the wording assumes nothing about why. A redirect is
+any path on this site sending visitors somewhere else — one that moved, a
+short link worth remembering, a name you want to keep working. The page
+labels them **Path** and **Sends visitors to**; the terminal spells the
+pair `redirect=/path,/where-it-goes`.
+**Why:** "old path" presumed the path used to exist and had been
+abandoned, which is one reason among several and quietly told an operator
+their other use was not what the feature was for. *(2026-08-24)*
+
+## A fault has two severities, and an unsaved change is neither
+
+**Ruled (Human):** red where the site cannot be used as it is configured;
+amber where it serves and something still wants doing. Red: nothing to
+serve, every visitor locked out by a username with no password, the
+service stopped, and an untrusted certificate on a site that advertises a
+domain — a full-page browser interstitial for everyone who visits by
+name. Amber: a self-signed certificate on a site with no domain (that is
+simply where every site starts), a half-built publish channel, low swap,
+low disk, a missing watchdog. Every health row carries the severity, so
+the card's pill, its Status line, and each row agree without deciding
+separately.
+**And a change typed but not saved is not a fault at all.** Flipping the
+access switch used to paint the row in the same amber as a real defect,
+which said "something is wrong here" about an intention the operator had
+just formed. It reads as muted, italic, and says it is not saved yet.
+**Why not all-red:** one colour cannot say both "visitors cannot use this
+site" and "this works, and something wants doing" — and a first site,
+freshly added and self-signed with no domain yet, would open in red on
+its normal starting state. Crying wolf there costs the colour its meaning
+where it matters.
+**Also:** the Status line names what it counts ("2 to review — needs
+certificate, needs password") rather than leaving a reader to work out
+which rows the number meant. *(2026-08-24)*
+
+## The 404 page leads with the connection, then the miss
+
+**Ruled (Human):** the connection card sits above the 404 card, and the
+404 card's thick left rule is gone.
+**Why:** whether the server answered and whether the wire is encrypted
+are true of the whole site and settle a visitor's first question; what is
+missing is the narrower fact and follows it. The left rule marked the 404
+card as the page's subject, which it no longer is. *(2026-08-24)*
+
+## Missing paths is not a card Servette keeps
+
+**Ruled (Human):** built to be looked at, looked at, and removed. The
+journal still tallies what was served (`top_paths`); it no longer tallies
+what was not.
+**Why:** on a real box the list was dominated by scanners guessing
+WordPress paths, one entry was Servette's own version endpoint answering
+404 by design, and the one genuinely useful line — the site root missing
+during an outage — is already visible as the outage itself. A card whose
+top entries need explaining away is not reporting, it is generating work.
+**Reopen if:** an operator asks which of their own links are broken,
+which is the question this was reaching for and did not answer.
+*(2026-08-24)*
+
+## Publishing keeps a ring of versions, not a single-shot backup
+
+**Ruled (Human):** publishing keeps the content it replaced, five deep
+including the live one, and any of them goes live again from either
+surface. The single `.bak` it replaces held exactly one, and a second
+publish dropped it — so publishing twice on a bad day lost the good
+version for good.
+**Why not git**, which is what versioning is usually for: a `git checkout`
+mutates a working tree file by file, and the property Servette is
+proudest of is that a swap is one `os.replace` on a symlink with no
+window a visitor can land in. Keeping that would leave git providing only
+*storage* — a dependency to replace a directory rename, on content
+(images, fonts, video) that git stores as full blobs with no delta
+benefit and no bound on growth. It also does not preserve ownership, so
+`_chown_operator` still runs; and a `.git` under a served folder is a
+whole source history one hidden-path rule away from the internet.
+**Rejected:** dulwich or any embedded git (above); a retention count as a
+setting for now — five is a constant, and a setting is a decision of its
+own if disk pressure makes it one. **Reopen if:** operators ask for
+diffs between deploys, which is the one thing git would genuinely add —
+though a diff of two file listings (name, size, hash) gets most of it
+without the dependency. Git as an *input* (deploy on push) is a different
+feature and remains open. *(2026-08-24)*
+
+## Redirects are a setting, not a file in the site
+
+**Ruled (Human):** an old path goes somewhere new, held per site in
+config, validated at load, and served as a dict lookup before the
+filesystem is touched. Editable from both surfaces; the terminal spells a
+pair `set 0 redirect=/old,/new` and removes with nothing after the comma.
+**Why:** the `_redirects`-file convention Netlify and Cloudflare use puts
+the table in the site folder, where it is *content* — and content is read
+at request time, which the request-time invariant forbids. This will come
+up on every migration from those platforms, so the reason is recorded
+rather than re-argued.
+**Rejected:** the `_redirects` file (above); wildcards and splats for now
+(exact paths first, which is where these systems stay simple).
+**Settled, not open — the Agent raised this as a question it should not
+have:** the status is **301**, permanent, which is what the feature is
+for and what carries a link's standing to the new path. The hazard of a
+301 is that browsers cache it hard, and a wrong one outlives fixing it —
+but the response is sent `Cache-Control: no-cache`, which overrides that
+default, so a browser re-asks and a corrected rule takes effect. 302 buys
+nothing that the header has not already bought, and costs the thing the
+feature exists for.
+**Rejected:** 302 as a safer default (it is not safer; it is weaker).
+*(2026-08-24)*
+
+## A preview is content over the tunnel, not a deployment
+
+**Ruled (Human):** Preview stages the chosen folder where only the admin
+page can see it and shows it in a frame — did the CSS land, is the image
+there, did the folder nest a level too deep. It is not HTTPS, not the
+real domain, not the site's headers, and the page says so beside it.
+**Why this shape:** real per-branch preview URLs need a wildcard
+certificate and a DNS-01 challenge — a large new surface on a security
+tool for a smaller benefit. Staging server-side rather than rendering the
+browser's own copy is what makes relative links resolve, which is most of
+what a preview is for.
+**Three boundaries, all load-bearing:** the preview carries its own token,
+never the run's passcode, because a previewed page can read its own URL
+and a script in the operator's draft must not learn the credential that
+publishes; that token sits in the URL *path*, because a draft's relative
+links drop a query string (found in a browser — the page loaded and every
+stylesheet was refused); and the frame withholds `allow-same-origin`, so
+the draft has an opaque origin and cannot reach the page that staged it.
+A preview belongs to one `admin` run and is cleared when it exits.
+*(2026-08-24)*
+
+## The footer says where more is written down
+
+**Ruled (Human):** the admin page's footer ends with "More information is
+available at **servette.org**", linked. Chosen over the alternative put
+alongside it — linking the `Servette_` wordmark — so the wordmark stays
+inert.
+**Why (Agent, not part of the ruling):** the link opens in its own tab,
+because the operator is mid-task on this page and a stray click on the
+page's own name would abandon it.
+Every footer link on every page points at **servette.org**, not at the
+GitHub repository — the 404 body and the connection test included. The
+404's footer reads exactly as the connection test's does: "Served by
+Servette — The Simple, Secure, Static-Site Server." The sentence about
+the page shipping inside Servette is gone from it; that is a fact about
+the build, not something a visitor who hit a missing page needs.
+*(2026-08-23)*
+
 ## The page is three tabs: a site is one card, the server is its own page
 
 **Ruled (Human):** **Sites** holds one card per site carrying everything
@@ -105,13 +435,21 @@ install` is the only installation path" below. *(2026-08-23)*
 **Ruled (Human):** the word is *test* — "test connection" is the idiom
 people expect on a button, and consistency across the documents was an
 argument against churn, not a reason the other word was better. Renamed
-in both pages, the admin button, and every document. The reserved path
-stays `/.well-known/servette-check`: it is a URL, and URLs that may be
+in both pages, the admin button, and every document. The source file is
+`src/connection.html` — singular, because there is only one test, and
+a connection-test spelling implied siblings that do not exist. The build
+marker and the module's constants (`_CONNECTION_PAGE`,
+`_CONNECTION_PATH`) follow the file. The reserved path stays
+`/.well-known/servette-check`: it is a URL, and URLs that may be
 bookmarked or linked from an already-published site are not renamed over
-a word choice. The report leads with findings in the reader's language,
-each carrying its evidence beneath in a footnote's voice; a public site
-withholding its version reads as a pass, not a skip, because that is the
-design working. *(2026-08-23)*
+a word choice. The constant carries that note, so a reader meets the
+explanation where they meet the mismatch.
+The report leads with findings in the reader's language, each carrying
+its evidence beneath in a footnote's voice; a public site withholding its
+version reads as a pass, not a skip, because that is the design working.
+**Rejected:** a bare test.html (reads as a developer's scratch page, and
+collides in conversation with the suite's `tests/test.py`).
+*(2026-08-23)*
 
 ## The front door is a login: link and passcode, printed apart
 
@@ -207,7 +545,7 @@ how many rows need review.
 selector cannot scope the box); a third Status tab kept for the glance
 alone (two renderings of the same rows, drifting). *(2026-08-22)*
 
-## The folder is not a setting: serve_dir is retiring from the vocabulary
+## The folder is not a setting: serve_dir has left the vocabulary
 
 **Ruled (Human):** where a site's content lives is Servette's business,
 not a question an operator answers. Content arrives only by publishing —
@@ -224,8 +562,11 @@ outlive the setting only where paths still enter from config files
 written by hand.
 **Rejected:** keeping `dir` as an advanced terminal knob (the knob is
 the footgun, not the surface it sits on).
-**First slice already in:** a page-added site is born with a
-Servette-invented folder (`_invent_site_dir`). *(2026-08-22)*
+**Built:** `_invent_site_dir` is the one folder-naming core, used by the
+page's add-card and the terminal's `add-site` alike; `set dir=`, the
+config sub-shell's `dir`, and setup's folder question are gone. The
+containment guard the setting carried has no caller left, which is the
+open question the ruling's developer-pov note anticipated. *(2026-08-22)*
 
 ## The Publish tab is the site list: cards add, move, and remove sites
 
@@ -272,7 +613,7 @@ the service). *(2026-08-22)*
 body is a traditional error page — the path, the server-is-up sentence, a
 home link, and a link to the check — and an operator's `404.html` takes
 that role by simply existing. The connection test is its own embedded
-page (`src/check.html`) at `/.well-known/servette-check`: code-first, so
+page (`src/connection.html`) at `/.well-known/servette-check`: code-first, so
 no site content ever shadows it; behind the site's own auth; answering
 200, because the page really is there; its report rendering every row
 upfront in a dimmed pending state and resolving each in place. The admin
@@ -429,7 +770,7 @@ software to build, distribute, and maintain — reopen if the one click per
 publish session grates in practice, or a real browser-less-over-SSH need
 appears). *(#108, 2026-08-22)*
 
-## Tunnel uploads are authenticated by SSH; the pull channel is slated for removal
+## Tunnel uploads are authenticated by SSH; the pull channel is removed
 
 **Ruled (Human):** content arriving through the loopback page carries no
 signature — every hop is the operator's machine or their SSH connection,
@@ -450,7 +791,14 @@ concepts from another world: signing keys, signatures, a hosted shelf.
 cron-driven deploys are capability-shaped justifications, not
 principle-shaped); removing it now, before its successor has served a
 single real publish. **Reopen:** a real operator need to publish with no
-SSH access at all. *(#108, 2026-08-22)*
+SSH access at all.
+**Built:** confirmed and removed on 2026-08-24 — the fetch, the
+signature check, `config publish`, the two per-site settings, and the
+`publish` sub-shell that had gathered the channel's verbs. What the two
+channels shared (`_land_bundle`, the extraction guards, the version
+ring, the publish lock) is untouched. The signing half of the pub tool
+lives in the website repository and goes with its next pass.
+*(#108, 2026-08-22)*
 
 ## The readability claim is "understood by one person," not "read in an afternoon"
 

@@ -1,11 +1,15 @@
 <!DOCTYPE html>
-<!-- src/admin — the operator's page, the browser half of the paired
+<!-- src/admin.html — the operator's page, the browser half of the paired
      surfaces. Served only by the loopback page server (127.0.0.1, reached
      through the operator's SSH tunnel via `servette admin`), never by the
      public site. One page, three tabs: Sites (one card per site, carrying
      everything about it — publish, domain, certificate, access), Server
      (what the box is doing and how it is set), and Statistics (traffic
      counted across every site, and the box's own load).
+
+     The stylesheet and the script each open with their own map of what
+     follows, in the order a reader meets it.
+
      Constraints, all load-bearing:
 
      - No signature, no key. Being here IS the authentication: only the
@@ -16,6 +20,9 @@
        hand-rolled ustar writer emitting only the entry types
        _extract_bundle accepts); its only requests are to the same
        loopback server that served it.
+     - The page never borrows the browser's voice: no alert, confirm, or
+       prompt anywhere. A question is asked in the page's own words, in a
+       panel, with the choices spelled out.
      - Inlined into servette.py by build.py, like 404.html: no triple
        double-quote and no backslash anywhere in this file, or the build
        fails rather than emit a broken literal. -->
@@ -23,8 +30,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="@@MARK_ICON@@">
   <title>Servette — Admin</title>
   <style>
+    /* ═══════════════════════════════════════════════════════════════════
+       Theme, then the page's furniture in the order it is built from:
+       frame, wordmark, tabs, cards, badges, buttons, fact rows, prose,
+       forms, site cards, charts. One rule per thing, in the section that
+       owns it — a variant of a button lives with the button.
+       ═══════════════════════════════════════════════════════════════════ */
+
+    /* ── Theme and reset ─────────────────────────────────────────────── */
     :root {
       --bg:      #0e0e0e;
       --surface: #161616;
@@ -34,12 +50,17 @@
       --green:   #4ade80;
       --red:     #f87171;
       --amber:   #fbbf24;
+      /* Servette green, the one accent: available actions, links, and the
+         running dot. Kept literal rather than tokenised only where it
+         appears inside an rgba() tint. */
+      --brand:   #5A8466;
       --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
               'Liberation Mono', 'Courier New', monospace;
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ── Page frame: a single column over a faint noise wash ─────────── */
     body {
       background: var(--bg);
       color: var(--text);
@@ -64,13 +85,14 @@
     .container {
       position: relative;
       z-index: 1;
-      /* Back to the reading width the public pages use: once the rows
-         became facts and the forms sat beside their labels, 760px was
-         empty space rather than room. */
+      /* The reading width the public pages use: once the rows became facts
+         and the forms sat beside their labels, 760px was empty space
+         rather than room. */
       max-width: 560px;
       width: 100%;
     }
 
+    /* ── Wordmark and tagline ────────────────────────────────────────── */
     .header { margin-bottom: 1.75rem; }
 
     .servette-logo {
@@ -82,7 +104,7 @@
       line-height: 1;
     }
 
-    .servette-logo .ette   { color: #5A8466; }
+    .servette-logo .ette   { color: var(--brand); }
     .servette-logo .cursor { color: inherit; animation: servette-blink 1.1s steps(1) infinite; }
 
     @keyframes servette-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
@@ -95,6 +117,7 @@
       text-transform: uppercase;
     }
 
+    /* ── Tabs ────────────────────────────────────────────────────────── */
     .tabs {
       display: flex;
       gap: 0.4rem;
@@ -117,9 +140,10 @@
     button.tab:hover { color: var(--text); }
     button.tab.active {
       color: var(--text);
-      border-bottom-color: #5A8466;
+      border-bottom-color: var(--brand);
     }
 
+    /* ── Cards: the one container every panel is built from ──────────── */
     .card {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -146,6 +170,10 @@
 
     .card-body { padding: 1rem 1.25rem; }
 
+    /* A rule between two parts of one card. */
+    .split { border-top: 1px solid var(--border); margin: 1rem 0; }
+
+    /* ── Badges: a card's one-word state, in the head ────────────────── */
     .badge {
       font-size: 0.7rem;
       font-weight: 500;
@@ -159,10 +187,12 @@
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
     .badge-dim   { background: rgba(255,255,255,0.04); color: var(--muted); border: 1px solid var(--border); }
     .badge-warn  { background: rgba(251,191,36,0.12); color: var(--amber); border: 1px solid rgba(251,191,36,0.4); }
-    
 
-    /* Every button reads the same way: available is Servette green, hover
-       brightens it, unavailable is dim and says so by being unclickable. */
+    /* ── Buttons ─────────────────────────────────────────────────────────
+       Every button reads the same way: available is Servette green, hover
+       brightens it, unavailable is dim and says so by being unclickable —
+       never by vanishing. The variants below change only what a button
+       means, never that rule. */
     button.action {
       font-family: inherit;
       font-size: 0.75rem;
@@ -182,96 +212,11 @@
       cursor: not-allowed;
     }
 
-    .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    /* Sits on a fact row rather than in a button row. */
+    button.action.tiny { padding: 0.2rem 0.55rem; font-size: 0.68rem; }
 
-    .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
-    .rows > div { padding: 0.18rem 0; }
-    .rows a.cfg-link { color: #5A8466; text-decoration: none; white-space: nowrap; }
-    .rows a.cfg-link:hover { text-decoration: underline; }
-    .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
-    .rows .gap { margin-top: 0.55rem; }
-    /* A ledger's total sits under a rule, at the foot of what it sums. */
-    .rows .ledger {
-      margin-top: 0.35rem;
-      padding-top: 0.35rem;
-      border-top: 1px solid var(--border);
-    }
-    .rows b { color: var(--text); font-weight: 500; }
-    .rows .ok { color: #5A8466; }
-    .rows .dot {
-      display: inline-block;
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: #5A8466;
-      margin-right: 0.45rem;
-      vertical-align: middle;
-      position: relative;
-      top: -1px;
-      animation: pulse 2s ease infinite;
-    }
-
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-
-    .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
-    .hint b { color: var(--text); font-weight: 500; }
-    .warn  { color: var(--amber); }
-    .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
-
-    .note {
-      font-size: 0.7rem;
-      color: var(--muted);
-      line-height: 1.7;
-    }
-    .note b { color: var(--text); font-weight: 500; }
-
-    .hidden { display: none !important; }
-
-    .site-card.drag {
-      border-color: rgba(90,132,102,0.7);
-      background: rgba(90,132,102,0.08);
-    }
-
-    .dropstrip {
-      padding: 0.8rem;
-      border: 1px dashed var(--border);
-      border-radius: 4px;
-      text-align: center;
-      font-size: 0.72rem;
-      color: var(--muted);
-      letter-spacing: 0.04em;
-    }
-    .dropstrip a { color: #5A8466; text-decoration: none; }
-    .dropstrip a:hover { text-decoration: underline; }
-    .site-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
-
-    /* Card reordering, the notebook's grammar: grab the header, a ghost
-       follows the cursor, the source dims to a dashed placeholder, and
-       neighbours swap in place as the ghost crosses them. */
-    .site-card .card-head { cursor: grab; user-select: none; }
-    .site-card.drag-placeholder { opacity: 0.35; border-style: dashed; }
-    .card-ghost { box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
-    .head-left, .head-right { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
-    .head-left .card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .handle { color: var(--muted); font-size: 0.8rem; }
-    button.ca {
-      font-family: inherit;
-      font-size: 0.8rem;
-      background: none;
-      border: none;
-      color: var(--muted);
-      cursor: pointer;
-      padding: 0.2rem 0.4rem;
-      border-radius: 4px;
-      line-height: 1;
-    }
-    button.ca:hover { color: var(--text); background: rgba(255,255,255,0.07); }
-    button.ca.del:hover { color: var(--red); background: rgba(248,113,113,0.12); }
-    button.ca svg { display: block; }
-    .add-zone { display: flex; justify-content: center; margin-bottom: 1.5rem; }
-
-    /* The remove panel's warning ladder: red deletes, amber pauses,
-       neutral cancels. */
+    /* Red deletes, amber pauses, neutral cancels — the warning ladder the
+       remove panel and the stop panel both use. */
     button.action.danger {
       color: var(--red);
       border-color: rgba(248,113,113,0.5);
@@ -284,10 +229,114 @@
       background: rgba(251,191,36,0.08);
     }
     button.action.pause:hover:not(:disabled) { background: rgba(251,191,36,0.18); }
-    .site-card.inactive .card-title { opacity: 0.55; }
 
-    /* Wide page, side-by-side forms: label left, field right, the hint
-       under the field. Narrow screens stack them again. */
+    /* Due: something is waiting on this button. Amber until it is pressed,
+       green under the pointer, so attention is said in colour and the
+       button still reads as available. */
+    button.action.due {
+      color: var(--amber);
+      border-color: rgba(251,191,36,0.5);
+      background: rgba(251,191,36,0.08);
+    }
+    button.action.due:hover:not(:disabled) {
+      color: var(--text);
+      border-color: rgba(90,132,102,0.6);
+      background: rgba(90,132,102,0.15);
+    }
+
+    /* An icon button is still a button: the icon replaces the label, not
+       the border. */
+    button.action.tiny svg { display: block; }
+    button.action.tiny:has(svg) { padding: 0.3rem 0.4rem; }
+
+    .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    .add-zone { display: flex; justify-content: center; margin-bottom: 1.5rem; }
+
+    button:focus-visible {
+      outline: 1px solid rgba(90,132,102,0.8);
+      outline-offset: 1px;
+    }
+
+    /* ── Fact rows: label left, value right, the shell's status in HTML ─ */
+    .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
+    .rows > div { padding: 0.18rem 0; }
+    /* padding-right, not just min-width: a key longer than the column (a
+       long request path) would otherwise butt straight against its value
+       with nothing between them. border-box keeps the value column at 8rem
+       for every key short enough to fit. */
+    .rows .k {
+      color: var(--muted);
+      display: inline-block;
+      min-width: 8rem;
+      padding-right: 0.75rem;
+    }
+    .rows a { color: var(--brand); text-decoration: none; }
+    .rows a:hover { text-decoration: underline; }
+    /* A ledger's total sits under a rule, at the foot of what it sums. */
+    .rows .ledger {
+      margin-top: 0.35rem;
+      padding-top: 0.35rem;
+      border-top: 1px solid var(--border);
+    }
+    .rows b { color: var(--text); font-weight: 500; }
+    .rows .ok { color: var(--brand); }
+    /* Not scoped to .rows: the running dot moved onto the status switch-row
+       when the service controls joined it, and a `.rows .dot` rule stopped
+       matching — the dot was still in the markup and simply invisible. */
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--brand);
+      margin-right: 0.45rem;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+      animation: pulse 2s ease infinite;
+    }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    /* ── Prose: hints under a control, errors, the attention band ─────── */
+    .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
+    .hint b { color: var(--text); font-weight: 500; }
+    .warn  { color: var(--amber); }
+    .fault { color: var(--red); }
+    /* Not a fault at all — a change typed and not yet saved. It used to
+       borrow .warn, which made an unsaved intention look like something
+       broken. */
+    .pending { color: var(--muted); font-style: italic; }
+    .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
+
+    /* What needs review, said in words and pointed at its fix. */
+    .attention {
+      border: 1px solid rgba(251,191,36,0.35);
+      background: rgba(251,191,36,0.07);
+      border-radius: 8px;
+      padding: 0.7rem 1rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.72rem;
+      line-height: 1.8;
+      color: var(--amber);
+    }
+    .attention b { color: var(--text); font-weight: 500; }
+    .attention a { color: var(--amber); text-decoration: underline; }
+
+    .note {
+      font-size: 0.7rem;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .note b { color: var(--text); font-weight: 500; }
+    /* The one link that leaves this page, so it opens in its own tab: the
+       operator is mid-task here, and navigating away would lose it. */
+    .note a { color: var(--brand); text-decoration: none; }
+    .note a:hover { text-decoration: underline; }
+
+    /* ── Forms ───────────────────────────────────────────────────────────
+       Label left, field right, the hint under the field. Narrow screens
+       stack them again, at the foot of this sheet. */
     .cfg-field {
       margin-top: 0.9rem;
       display: grid;
@@ -301,11 +350,14 @@
       color: var(--muted);
     }
     .cfg-field .cfg-hint { grid-column: 2; }
-    @media (max-width: 560px) {
-      .cfg-field { grid-template-columns: 1fr; row-gap: 0.25rem; }
-      .cfg-field .cfg-hint { grid-column: 1; }
+    .cfg-hint {
+      font-size: 0.68rem;
+      color: var(--muted);
+      line-height: 1.6;
+      margin-top: 0.3rem;
     }
-    input[type="text"], input[type="password"], select.cfg-site {
+
+    input[type="text"], input[type="password"], select {
       font-family: inherit;
       font-size: 0.75rem;
       color: var(--text);
@@ -315,26 +367,19 @@
       padding: 0.4rem 0.7rem;
       width: 100%;
     }
-    select.cfg-site { width: auto; margin-bottom: 1rem; }
-    .attention {
-      border: 1px solid rgba(251,191,36,0.35);
-      background: rgba(251,191,36,0.07);
-      border-radius: 8px;
-      padding: 0.7rem 1rem;
-      margin-bottom: 1.25rem;
-      font-size: 0.72rem;
-      line-height: 1.8;
-      color: var(--amber);
-    }
-    .attention b { color: var(--text); font-weight: 500; }
-    .attention a { color: var(--amber); text-decoration: underline; }
-    .split { border-top: 1px solid var(--border); margin: 1rem 0; }
+    select { width: auto; }
 
-    /* The public/private switch — a literal toggle: the knob's position and
-       a green tint say private (on). Laid out like the fields below it:
-       label left, control right, ending at the same right edge. */
-    /* The same 8rem key column the fact rows use, so the access value lines
-       up with Domain and Certificate above it. */
+    /* The browser's default focus halo clashes with the theme; replaced —
+       never just removed — so keyboard focus stays visible. */
+    input[type="text"]:focus, input[type="password"]:focus, select:focus {
+      outline: none;
+      border-color: rgba(90,132,102,0.8);
+      box-shadow: 0 0 0 2px rgba(90,132,102,0.25);
+    }
+
+    /* A fact row that carries a control: the same 8rem key column the
+       plain rows use, so a value with a button beside it still lines up
+       with the values above and below it. */
     .switch-row {
       display: grid;
       grid-template-columns: 8rem 1fr;
@@ -353,43 +398,13 @@
       color: var(--text);
     }
     .switch-act { display: flex; align-items: center; gap: 0.5rem; }
+    /* A value that needs two lines gets them, and the row keeps centring
+       its label and buttons against the pair. */
+    .ver-state span { display: block; }
     .switch-act label { color: var(--muted); cursor: pointer; }
-    button.action.tiny { padding: 0.2rem 0.55rem; font-size: 0.68rem; }
-    button.action.due {
-      color: var(--amber);
-      border-color: rgba(251,191,36,0.5);
-      background: rgba(251,191,36,0.08);
-    }
-    button.action.due:hover:not(:disabled) {
-      color: var(--text);
-      border-color: rgba(90,132,102,0.6);
-      background: rgba(90,132,102,0.15);
-    }
 
-    /* Charts: inline SVG, no library — the page loads no third-party code. */
-    .chart { width: 100%; height: 60px; display: block; }
-    .chart-wrap { display: flex; gap: 0.5rem; margin-top: 0.8rem; }
-    .chart-body { flex: 1; min-width: 0; }
-    .chart-y {
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      align-items: flex-end;
-      height: 60px;
-      font-size: 0.62rem;
-      color: var(--muted);
-      white-space: nowrap;
-    }
-    .chart-labels {
-      display: flex;
-      justify-content: space-between;
-      font-size: 0.62rem;
-      color: var(--muted);
-      margin-top: 0.2rem;
-    }
-    @media (max-width: 560px) {
-      .switch-row { grid-template-columns: 1fr auto; }
-    }
+    /* The public/private switch — a literal toggle: the knob's position
+       and a green tint say private (on). */
     input.switch {
       appearance: none;
       -webkit-appearance: none;
@@ -420,24 +435,132 @@
       background: rgba(90,132,102,0.15);
       border-color: rgba(90,132,102,0.6);
     }
-    input.switch:checked::after { left: auto; right: 2px; background: #5A8466; }
+    input.switch:checked::after { left: auto; right: 2px; background: var(--brand); }
     input.switch:focus-visible { outline: 1px solid rgba(90,132,102,0.8); outline-offset: 1px; }
-    /* The browser's default focus halo clashes with the theme; replaced —
-       never just removed — so keyboard focus stays visible. */
-    input[type="text"]:focus, input[type="password"]:focus, select.cfg-site:focus {
-      outline: none;
-      border-color: rgba(90,132,102,0.8);
-      box-shadow: 0 0 0 2px rgba(90,132,102,0.25);
-    }
-    button:focus-visible {
-      outline: 1px solid rgba(90,132,102,0.8);
-      outline-offset: 1px;
-    }
-    .cfg-hint {
-      font-size: 0.68rem;
+
+    /* ── Site cards ──────────────────────────────────────────────────── */
+
+    /* The primary action on a site card, sized like one: a target you can
+       drop a folder onto without aiming. The whole strip is clickable, so
+       the picker is reachable without hitting the link exactly. */
+    .dropstrip {
+      min-height: 116px;
+      padding: 1.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.35rem;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      text-align: center;
+      font-size: 0.72rem;
       color: var(--muted);
-      line-height: 1.6;
-      margin-top: 0.3rem;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+    }
+    .dropstrip:hover { border-color: rgba(90,132,102,0.5); }
+    .dropstrip .drop-lead { font-size: 0.8rem; color: var(--text); }
+    .dropstrip a { color: var(--brand); text-decoration: none; }
+    .dropstrip a:hover { text-decoration: underline; }
+
+    /* A folder is over the card: the whole card answers, not just the
+       strip, because the whole card accepts the drop. */
+    .site-card.drag {
+      border-color: rgba(90,132,102,0.7);
+      background: rgba(90,132,102,0.08);
+    }
+    .site-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
+
+    /* Reordering, the notebook's grammar: grab the header, a ghost follows
+       the cursor, the source dims to a dashed placeholder, and neighbours
+       swap in place as the ghost crosses them. */
+    .site-card .card-head { cursor: grab; user-select: none; }
+    .site-card.drag-placeholder { opacity: 0.35; border-style: dashed; }
+    .card-ghost { box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+    .head-left, .head-right { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+    .head-left .card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .handle { color: var(--muted); font-size: 0.8rem; }
+
+    /* A deactivated site keeps its card and dims its name. */
+    .site-card.inactive .card-title { opacity: 0.55; }
+
+    /* Folded: the head stays, so the card still says which site it is and
+       whether it needs attention. Only the body goes. */
+    .site-card.folded .card-body { display: none; }
+    /* The pill is the folded card's Status line, not a second copy of it.
+       Open, the Status row inside the card carries the count; folded, that
+       row is hidden and the pill takes over. Never both. */
+    .site-card:not(.folded) .badge.needs { display: none; }
+    .site-card.folded .card-head { border-bottom: none; }
+
+    /* The remove panel is a popover under the button that opens it, not a
+       block at the far end of the card — a question asked three hundred
+       pixels from the thing you clicked is a question you have to go and
+       find. Drawn by the page, never by the browser: the rule against
+       borrowed voices is about alert() and confirm(), not about panels. */
+    .card-head { position: relative; }
+    .site-card .confirm {
+      position: absolute;
+      top: calc(100% + 0.4rem);
+      right: 0.75rem;
+      z-index: 20;
+      width: min(24rem, calc(100% - 1.5rem));
+      padding: 0.25rem 1rem 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.55);
+      cursor: default;
+      user-select: text;      /* the head sets none, for dragging */
+    }
+    /* The panel hangs below the head, so the card must not clip it. */
+    .site-card { overflow: visible; }
+
+    /* The staged draft, in a frame that cannot reach back. The sandbox
+       attribute deliberately withholds allow-same-origin: the draft runs on
+       an opaque origin, so a script in someone's own content cannot read
+       this page or call its endpoints. */
+    .preview-frame {
+      width: 100%;
+      height: 420px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+      margin-top: 0.5rem;
+    }
+
+    /* ── Charts: inline SVG, no library — the page loads no third-party
+       code. The y-axis is part of the chart: a line without a scale is a
+       shape, not a measurement. ─────────────────────────────────────── */
+    .chart { width: 100%; height: 60px; display: block; }
+    .chart-wrap { display: flex; gap: 0.5rem; margin-top: 0.8rem; }
+    .chart-body { flex: 1; min-width: 0; }
+    .chart-y {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: flex-end;
+      height: 60px;
+      font-size: 0.62rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .chart-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.62rem;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
+
+    /* ── Utility and narrow screens ──────────────────────────────────── */
+    .hidden { display: none !important; }
+
+    @media (max-width: 560px) {
+      .cfg-field { grid-template-columns: 1fr; row-gap: 0.25rem; }
+      .cfg-field .cfg-hint { grid-column: 1; }
+      .switch-row { grid-template-columns: 1fr auto; }
     }
   </style>
 </head>
@@ -471,16 +594,21 @@
        is a puzzle rather than a notice. -->
   <div class="attention hidden" id="attention"></div>
 
+  <!-- role="tab" without aria-selected announces a tab strip and then
+       never says which tab is current; showTab keeps both in step. -->
   <nav class="tabs" role="tablist">
-    <button class="tab active" id="tab-sites" type="button" role="tab">Sites</button>
-    <button class="tab" id="tab-server" type="button" role="tab">Server</button>
-    <button class="tab" id="tab-stats" type="button" role="tab">Statistics</button>
+    <button class="tab active" id="tab-sites" type="button" role="tab"
+            aria-controls="panel-sites" aria-selected="true">Sites</button>
+    <button class="tab" id="tab-server" type="button" role="tab"
+            aria-controls="panel-server" aria-selected="false">Server</button>
+    <button class="tab" id="tab-stats" type="button" role="tab"
+            aria-controls="panel-stats" aria-selected="false">Statistics</button>
   </nav>
 
-  <!-- ══ Publish — one card per site: drop or choose its folder, publish.
-       Cards can be added, removed, and reordered (drag the header, or the
-       arrows), because the cards ARE the site list: order is config —
-       the first domainless site answers unmatched Hosts. ══ -->
+  <!-- ══ Sites — one card per site, carrying everything about it. Cards
+       can be added, removed, and reordered by dragging the header, because
+       the cards ARE the site list: their order is config — the first
+       domainless site answers unmatched Hosts. ══ -->
   <div id="panel-sites" role="tabpanel" class="hidden">
     <div id="site-cards"></div>
     <div class="add-zone">
@@ -489,12 +617,58 @@
     <p class="error hidden" id="sites-error"></p>
   </div>
 
+  <div id="panel-server" role="tabpanel" class="hidden">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Status</span>
+      </div>
+      <div class="card-body">
+        <div class="switch-row">
+          <span class="k">Status</span>
+          <span class="switch-value"><span id="status-state"></span>
+            <span class="switch-act">
+            <button class="action tiny" id="btn-restart" type="button">Restart</button>
+            <button class="action tiny" id="btn-power" type="button">Stop</button>
+            </span>
+          </span>
+        </div>
+        <div class="rows" id="host-rows"></div>
+        <div class="confirm hidden" id="stop-confirm">
+          <div class="split"></div>
+          <p class="hint">Stopping takes <b>every site on this server</b>
+          offline until it is started again. This page keeps working — it is
+          served by the terminal command, not by the server.</p>
+          <div class="btn-row" style="margin-top:0.75rem">
+            <button class="action danger" id="btn-stop-yes" type="button">Stop the server</button>
+            <button class="action" id="btn-stop-no" type="button">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Settings</span>
+        <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
+      </div>
+      <div class="card-body">
+        <div id="cfg-host-fields"></div>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action" id="btn-save-host" type="button">Save</button>
+        </div>
+        <p class="error hidden" id="cfg-host-error"></p>
+      </div>
+    </div>
+
+  </div>
+
   <div id="panel-stats" role="tabpanel" class="hidden">
 
     <div class="card">
       <div class="card-head">
         <span class="card-title">Site traffic</span>
-        <select class="cfg-site" id="traffic-window" style="margin:0">
+        <select id="traffic-window">
           <option value="1">last 24 hours</option>
           <option value="2">last 48 hours</option>
           <option value="7" selected>last 7 days</option>
@@ -526,54 +700,9 @@
         <p class="hint">Averages since the server started; the line is live
         while this tab is open and is kept nowhere. High CPU on a static
         server usually means a bot, not popularity.</p>
+        <p class="error hidden" id="load-error"></p>
       </div>
     </div>
-  </div>
-
-  <div id="panel-server" role="tabpanel" class="hidden">
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Server status</span>
-      </div>
-      <div class="card-body">
-        <div class="switch-row">
-          <span class="k">Status</span>
-          <span class="switch-value"><span id="status-state"></span>
-            <span class="switch-act">
-            <button class="action tiny" id="btn-restart" type="button">Restart</button>
-            <button class="action tiny" id="btn-power" type="button">Stop</button>
-            </span>
-          </span>
-        </div>
-        <div class="rows" id="host-rows"></div>
-        <div class="confirm hidden" id="stop-confirm">
-          <div class="split"></div>
-          <p class="hint">Stopping takes <b>every site on this server</b>
-          offline until it is started again. This page keeps working — it is
-          served by the terminal command, not by the server.</p>
-          <div class="btn-row" style="margin-top:0.75rem">
-            <button class="action danger" id="btn-stop-yes" type="button">Stop the server</button>
-            <button class="action" id="btn-stop-no" type="button">Cancel</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Server settings</span>
-        <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
-      </div>
-      <div class="card-body">
-        <div id="cfg-host-fields"></div>
-        <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action" id="btn-save-host" type="button">Save</button>
-        </div>
-        <p class="error hidden" id="cfg-host-error"></p>
-      </div>
-    </div>
-
   </div>
 
   </div><!-- /app -->
@@ -582,15 +711,38 @@
     This page is served on <b>127.0.0.1</b> through your SSH tunnel. It does
     not exist on the public internet. No signature or password is required
     because <b>only your SSH key can open the tunnel</b>.
+    More information is available at
+    <a href="https://servette.org" target="_blank" rel="noopener">servette.org</a>.
   </div>
 
 </div>
 
 <script>
   'use strict';
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     One script, in the order a reader meets the page:
+
+       1. Shared vocabulary — constants, formatting, and the page's state
+       2. The loopback server — one door for every request
+       3. Tabs
+       4. The Sites tab — cards, reordering, publishing
+       5. The Server tab — status, service controls, settings
+       6. The Statistics tab — traffic, load, charts, the live meter
+       7. Feature gate and startup
+
+     Every render reads `statusData` and `cfgData` and nothing else, so the
+     three tabs cannot disagree about what the server is doing.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /* ══ 1. Shared vocabulary ═══════════════════════════════════════════ */
+
   const $ = (id) => document.getElementById(id);
 
   const MAX_BUNDLE_BYTES = 500 * 1024 * 1024;  // mirrors _MAX_BUNDLE_BYTES server-side
+
+  // This run's passcode, carried by every request. Reaching the tunnel is
+  // the authentication; the passcode only proves this is that run's page.
   const CODE = new URLSearchParams(location.search).get('t') || '';
 
   // A fetch that dies with no HTTP response at all surfaces as a TypeError
@@ -602,68 +754,121 @@
     'command has ended, reconnect, run servette admin again, and open the ' +
     'fresh link it prints.';
 
-  /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
+  // What to tell the operator about a failure, decided once: a dead wire
+  // reads as the tunnel, and anything else already carries the server's own
+  // sentence — the same one the terminal would have printed. `about` names
+  // what was being attempted, and is worth saying only for the second kind:
+  // the tunnel sentence is about the tunnel, not about the request.
+  const reason = (e, about) => (e instanceof TypeError) ? TUNNEL_DOWN
+    : (about ? about + ': ' : '') + e.message;
 
-  const PANELS = { sites: 'panel-sites', server: 'panel-server',
-                   stats: 'panel-stats' };
+  /* ── Text and markup. Everything the server sends is escaped before it
+     reaches innerHTML; page-authored markup is interpolated as written. ── */
 
-  function showTab(name) {
-    // Old bookmarks still land somewhere sensible.
-    if (['status', 'config', 'settings'].includes(name)) name = 'server';
-    if (['analytics', 'traffic'].includes(name)) name = 'stats';
-    if (name === 'publish') name = 'sites';
-    if (!PANELS[name]) name = 'sites';
-    for (const key of Object.keys(PANELS)) {
-      $(PANELS[key]).classList.toggle('hidden', key !== name);
-      $('tab-' + key).classList.toggle('active', key === name);
-    }
-    refresh();  // every tab renders from the same /status + /config truth
-    if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
-    if (location.hash !== '#' + name)
-      history.replaceState(null, '', '#' + name + location.search);
-  }
+  const escapeHtml = (s) => String(s == null ? '' : s)
+    .replace(/[&<>"']/g, (c) => '&#' + c.charCodeAt(0) + ';');
 
-  $('tab-sites').addEventListener('click', () => showTab('sites'));
-  $('tab-server').addEventListener('click', () => showTab('server'));
-  $('tab-stats').addEventListener('click', () => showTab('stats'));
-
-  /* ══ The page's truth: /status and /config fetched together, rendered
-     into both tabs at once. ══ */
-
+  // A label/value line. Both halves are interpolated raw, so a caller
+  // passing server text escapes it first — factRow, just below, is the
+  // wrapper that always does.
   const row = (k, v, cls) =>
     `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
 
   // A fact is not a victory: rows read like the shell's status — label and
   // value, plainly — and only a row that needs attention wears a mark.
+  // Two marks, because two things are true at once and one colour cannot
+  // say both: red where visitors cannot use the site as configured (nothing
+  // to serve, everyone locked out, the server stopped, an untrusted
+  // certificate on a site that advertises a name), amber where it serves
+  // and something still wants doing.
+  const faultClass = (c) => c.blocking ? 'fault' : 'warn';
   const factRow = (c) => row(escapeHtml(c.label),
     c.ok ? escapeHtml(c.detail)
-         : `<span class="warn">${escapeHtml(c.detail)}</span>`);
+         : `<span class="${faultClass(c)}">${escapeHtml(c.detail)}</span>`);
 
-  let statusData = null;
-  let latestVersion = null;   // filled once per page, by asking
+  // One labelled input. The hint is page-authored markup (several carry
+  // <b>), never server text; the value is escaped because it is.
+  const field = (key, label, value, opts) => {
+    const o = opts || {};
+    return `<div class="cfg-field">` +
+      `<label for="cfg-${key}">${label}</label>` +
+      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
+      ` value="${escapeHtml(value)}">` +
+      (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
+      `</div>`;
+  };
 
-  // Asked once when the page opens, and never on a timer: Servette does not
-  // phone home on its own schedule, and this is the operator asking.
-  async function checkUpgrade() {
-    try {
-      const r = await fetch('/update?t=' + encodeURIComponent(CODE));
-      if (!r.ok) return;
-      latestVersion = (await r.json()).latest || null;
-      if (latestVersion) renderServer();
-    } catch (e) { /* offline, or PyPI unreachable — the row simply omits it */ }
+  const fmtSize = (n) =>
+    n < 1024 ? n + ' B'
+    : n < 1024 * 1024 ? (n / 1024).toFixed(1) + ' KB'
+    : (n / (1024 * 1024)).toFixed(1) + ' MB';
+
+  // dd Mmm yy, then the time. Day-first and a two-digit year keep every
+  // stamp the same width, so a column of them lines up.
+  const when = (epoch) => {
+    const d = new Date(epoch * 1000);
+    return String(d.getDate()).padStart(2, '0') + ' ' +
+           d.toLocaleString(undefined, { month: 'short' }) + ' ' +
+           String(d.getFullYear()).slice(-2) + ', ' +
+           d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit' });
+  };
+
+  /* ── Badges and error lines: the two ways this page reports on itself. ── */
+
+  // Only the colour variant is swapped. A badge may carry a marker class
+  // that says which badge it is (a site card has two), and replacing the
+  // whole class list would quietly take that with it.
+  const BADGE_VARIANTS = ['badge-green', 'badge-red', 'badge-dim', 'badge-warn'];
+  function setBadge(el, cls, text) {
+    el.classList.remove(...BADGE_VARIANTS);
+    el.classList.add('badge', cls);
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
+  function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
+  function clearError(el) { el.classList.add('hidden'); }
+
+  /* ── The page's state: one read of the server, rendered into every tab. ── */
+
+  let statusData = null;      // GET /status  — what the box is doing
+  let cfgData = null;         // GET /config  — what it is set to
+  let latestVersion = null;   // GET /update  — asked once, by the operator
+
+  /* ══ 2. The loopback server ═════════════════════════════════════════
+     Every request goes through these. The passcode is attached in one
+     place, and every POST is judged one way: the body is read before the
+     status is believed, because the server answers a refusal with the
+     sentence the terminal would have printed. ══ */
+
+  const api = (path, params) =>
+    path + '?' + new URLSearchParams(Object.assign({ t: CODE }, params || {}));
+
+  async function getJSON(path, params) {
+    const r = await fetch(api(path, params));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
   }
 
+  // `want` is the value of `result` that means this op succeeded: 'ok' from
+  // the site, service, and swap doors, 'saved' from a settings write.
+  async function post(path, body, want) {
+    const r = await fetch(api(path), { method: 'POST', body: JSON.stringify(body) });
+    let data = {};
+    try { data = await r.json(); } catch (e) { data = {}; }
+    if (!r.ok || data.result !== want)
+      throw new Error(data.error || 'HTTP ' + r.status);
+    return data;
+  }
+
+  // The one read every tab renders from. Both documents are fetched
+  // together, so no tab can show status from one moment beside config
+  // from another.
   async function refresh() {
     clearError($('cfg-host-error'));
     try {
-      const [rs, rc] = await Promise.all([
-        fetch('/status?t=' + encodeURIComponent(CODE)),
-        fetch('/config?t=' + encodeURIComponent(CODE)),
-      ]);
-      if (!rs.ok) throw new Error('HTTP ' + rs.status);
-      if (!rc.ok) throw new Error('HTTP ' + rc.status);
-      statusData = await rs.json();
-      cfgData = await rc.json();
+      const [status, cfg] = await Promise.all([getJSON('/status'), getJSON('/config')]);
+      statusData = status;
+      cfgData = cfg;
       renderServer();
       renderSiteCards();
       clearError($('sites-error'));
@@ -677,346 +882,165 @@
     }
   }
 
-
-  /* ══ Traffic — the journal re-read as counts, fetched on entry. ══ */
-
-  async function loadTraffic() {
-    clearError($('traffic-error'));
+  // Asked once when the page opens, and never on a timer: Servette does not
+  // phone home on its own schedule, and this is the operator asking.
+  async function checkUpgrade() {
     try {
-      const r = await fetch('/traffic?t=' + encodeURIComponent(CODE) +
-                            '&days=' + encodeURIComponent($('traffic-window').value));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const t = await r.json();
-      const total = t.total || 0;
-      // Status codes are the server's vocabulary, not the reader's: each
-      // count is named for what actually happened.
-      const NAMED = [['Files sent', ['200', '206']],
-                     ['Already cached', ['304']],
-                     ['Nothing there', ['404']],
-                     ['Refused', ['403', '405']],
-                     ['Sign-in needed', ['401']],
-                     ['Rate limited', ['429']]];
-      const named = NAMED
-        .map(([name, codes]) => [name, codes.reduce(
-          (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
-        .filter(([, n]) => n > 0);
-      $('traffic-chart').innerHTML = total
-        ? chart(lineSVG(t.days.map((d) => d[1])),
-                t.days.length ? t.days[0][0] : '',
-                t.days.length ? t.days[t.days.length - 1][0] : '',
-                Math.max(...t.days.map((d) => d[1])))
-        : '';
-      $('traffic-rows').innerHTML = !total
-        ? row('Requests', 'none in this window — or no readable journal on this host')
-        : named.map(([name, n]) => row(name, String(n))).join('') +
-          row('Total requests', `<b>${total}</b>`, 'ledger');
-    } catch (e) {
-      showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
-        : 'Could not read traffic: ' + e.message);
-    }
+      latestVersion = (await getJSON('/update')).latest || null;
+      if (latestVersion) renderServer();
+    } catch (e) { /* offline, or PyPI unreachable — the row simply omits it */ }
   }
 
-  async function serviceOp(b, op) {
-    b.disabled = true;
-    clearError($('cfg-host-error'));
-    try {
-      const r = await fetch('/service?t=' + encodeURIComponent(CODE),
-                            { method: 'POST', body: JSON.stringify({ op }) });
-      let data = {};
-      try { data = await r.json(); } catch { data = {}; }
-      if (!r.ok || data.result !== 'ok')
-        throw new Error(data.error || 'HTTP ' + r.status);
-      await refresh();
-    } catch (e) {
-      showError($('cfg-host-error'),
-                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+  /* ══ 3. Tabs — fragment-addressable, so a terminal command can
+     deep-link. ══ */
+
+  const PANELS = { sites: 'panel-sites', server: 'panel-server',
+                   stats: 'panel-stats' };
+
+  function showTab(name) {
+    // Old bookmarks still land somewhere sensible.
+    if (['status', 'config', 'settings'].includes(name)) name = 'server';
+    if (['analytics', 'traffic'].includes(name)) name = 'stats';
+    if (name === 'publish') name = 'sites';
+    if (!PANELS[name]) name = 'sites';
+    for (const key of Object.keys(PANELS)) {
+      $(PANELS[key]).classList.toggle('hidden', key !== name);
+      $('tab-' + key).classList.toggle('active', key === name);
+      $('tab-' + key).setAttribute('aria-selected', String(key === name));
     }
-    b.disabled = false;
+    refresh();  // every tab renders from the same /status + /config truth
+    if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
+    if (location.hash !== '#' + name)
+      history.replaceState(null, '', '#' + name + location.search);
   }
 
-  $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
-  // One control for the two states: starting needs no ceremony, stopping
-  // takes every site offline and asks first.
-  $('btn-power').addEventListener('click', () => {
-    if ((statusData || {}).running) $('stop-confirm').classList.toggle('hidden');
-    else serviceOp($('btn-power'), 'start');
-  });
-  // Every site on the box goes dark, so this one asks first — in the page's
-  // own voice, the way a site card asks before deleting.
-  $('btn-stop-no').addEventListener('click', () =>
-    $('stop-confirm').classList.add('hidden'));
-  $('btn-stop-yes').addEventListener('click', async () => {
-    $('stop-confirm').classList.add('hidden');
-    await serviceOp($('btn-power'), 'stop');
-  });
+  $('tab-sites').addEventListener('click', () => showTab('sites'));
+  $('tab-server').addEventListener('click', () => showTab('server'));
+  $('tab-stats').addEventListener('click', () => showTab('stats'));
 
-  $('btn-traffic-refresh').addEventListener('click', loadTraffic);
-  $('traffic-window').addEventListener('change', loadTraffic);
+  /* ══ 4. The Sites tab ═══════════════════════════════════════════════
+     One card per site, carrying everything about it. The cards ARE the
+     site list: their order is config — the first domainless site answers
+     unmatched Hosts — so reordering them is a config write. ══ */
 
-  /* ══ Settings forms — over the same validators the `set` command runs, so
-     a value the terminal refuses the page refuses with the same sentence.
-     Deliberately absent from these forms (the terminal keeps them): the
-     serve folder (publishing manages it), port and trusted proxy
-     (behind-a-balancer deployments), the pull channel's URL/key pair, and
-     every lifecycle verb. The domain is not a form either — naming a site
-     runs its certificate issuance, on the Publish card. ══ */
-
-  const HOST_FIELDS = [
-    ['email', 'Email',
-     'Registers this server with the certificate authority — one account for ' +
-     'every site here, not one per domain. Where renewal and expiry notices go.'],
-    ['rate_limit', 'Rate limit',
-     'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
-    ['auth_rate_limit', 'Auth rate limit',
-     'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
-    ['cache_size_mb', 'File cache size (MB)',
-     'Memory set aside to serve frequently requested files without re-reading the disk.'],
-  ];
-
-  let cfgData = null;
-  const field = (key, label, value, opts) => {
-    const o = opts || {};
-    return `<div class="cfg-field">` +
-      `<label for="cfg-${key}">${label}</label>` +
-      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
-      ` value="${escapeHtml(String(value == null ? '' : value))}">` +
-      (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
-      `</div>`;
+  // What a site's unhealthy row is called on its card — the fault named,
+  // rather than an exclamation mark standing in for the name.
+  const NEEDS_WORD = {
+    cert:     'Needs certificate',
+    password: 'Needs password',
+    dir:      'Folder missing',
   };
 
-  function renderServer() {
-    const checks = (statusData && statusData.checks) || [];
-    const hostChecks = checks.filter((c) => c.site === null);
-    const d = statusData || {};
+  // A card's index is its position in the DOM, read at the moment it is
+  // needed: adding, removing, or dragging a card renumbers its neighbours,
+  // and a stale index would act on the wrong site.
+  // Which cards are folded shut. Kept here rather than on the card,
+  // because every op re-renders the list and a card that sprang open on
+  // each save would be worse than no fold at all. Keyed by domain where
+  // there is one, since dragging renumbers indexes.
+  const folded = new Set();
+  const foldKey = (siteData, idx) => siteData.domain || '#' + idx;
 
-    // What has no card of its own says its piece here; a site's trouble is
-    // worn by that site's card on the Sites tab.
-    const needs = hostChecks.filter((c) => !c.ok);
-    $('attention').classList.toggle('hidden', !needs.length);
-    $('attention').innerHTML = needs.map((c) =>
-      `<b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
-      `<a href="#server">open Server →</a>`).join('<br>');
-    for (const a of $('attention').querySelectorAll('a'))
-      a.addEventListener('click', (e) => { e.preventDefault(); showTab('server'); });
+  const cardIndex = (el) =>
+    [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
 
-    $('status-state').innerHTML = d.running
-      ? '<span class="dot"></span>running'
-      : '<span class="warn">stopped</span>';
-    // Two controls, not three: restart is meaningless on a stopped server,
-    // and the third is whichever of stop/start the state calls for.
-    $('btn-restart').disabled = !d.running;
-    $('btn-restart').title = d.running
-      ? 'Stop and start the service — applies a port change, or clears a wedged process'
-      : 'Nothing to restart — the server is stopped';
-    $('btn-power').textContent = d.running ? 'Stop' : 'Start';
-    $('btn-power').classList.toggle('danger', !!d.running);
-    $('btn-power').title = d.running
-      ? 'Take every site on this server offline until it is started again'
-      : 'Start the installed system service';
-
-    $('host-rows').innerHTML =
-      row('Version', 'v' + (d.version || '?') +
-        (latestVersion
-          ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
-            ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
-          : '')) +
-      hostChecks.map(factRow).join('');
-
-    // Present always, dim when there is nothing to start — the same rule
-    // every other button follows.
-    // Swap is a size the operator types — the terminal has always asked for
-    // it that way — so it is a field among fields, saved by the same button.
-    const sw = d.swap || {};
-    const swapField = (sw.active_mb == null && sw.recommended_mb == null) ? '' :
-      field('swap_mb', 'Swap file (MB)',
-            sw.active_mb != null ? sw.active_mb : '',
-            { hint: 'Disk that absorbs a memory spike, so a burst past free RAM ' +
-                    'cannot take the host down.' +
-                    (sw.recommended_mb
-                      ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
-                      : '') });
-    const typingInSwap = document.activeElement
-      && document.activeElement.id === 'cfg-swap_mb';
-    if (!typingInSwap)
-      $('cfg-host-fields').innerHTML =
-        HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('')
-        + swapField;
-
-    renderLoad();
-  }
-
-  // Utilization lives with the other counts, on the Analytics tab: the two
-  // figures, then the live meter that builds while the page is open.
-  const when = (epoch) => new Date(epoch * 1000).toLocaleString(undefined,
-    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-
-  function renderLoad() {
-    const l = ((statusData || {}).load) || {};
-    $('load-rows').innerHTML =
-      row('CPU', l.cpu_percent == null ? '(not available on this host)'
-                 : l.cpu_percent.toFixed(1) + '% average' +
-                   (l.started_at ? ' since ' + escapeHtml(when(l.started_at)) : '')) +
-      row('Memory', l.memory_mb == null ? '(not available on this host)'
-                    : l.memory_mb.toFixed(1) + ' MB');
-    $('load-chart').innerHTML = cpuSeries.length < 2
-      ? '<p class="hint">Live CPU — the line starts when you open this tab.</p>'
-      : chart(lineSVG(cpuSeries),
-              (cpuSeries.length - 1) * METER_SECONDS + 's ago',
-              cpuSeries[cpuSeries.length - 1].toFixed(1) + '% now',
-              Math.max(1, ...cpuSeries).toFixed(0), '%');
-  }
-
-  /* ══ Charts — inline SVG, sized by viewBox, no library. Every chart is
-     drawn with its scale: a line without a y-axis is a shape, not a
-     measurement. ══ */
-
-  function lineSVG(values) {
-    const w = 300, h = 60, max = Math.max(1, ...values);
-    const pts = values.length === 1
-      ? [`0,${(h - (values[0] / max) * h).toFixed(1)}`,
-         `${w},${(h - (values[0] / max) * h).toFixed(1)}`]
-      : values.map((v, i) =>
-          `${(i / (values.length - 1) * w).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`);
-    return `<svg viewBox="0 0 ${w} ${h}" class="chart" preserveAspectRatio="none">` +
-      `<polyline points="${pts.join(' ')}" fill="none" stroke="#5A8466" ` +
-      `stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline></svg>`;
-  }
-
-  // A chart, its y-axis (top of scale and zero), and its x labels.
-  const chart = (svg, xFrom, xTo, yMax, unit) =>
-    `<div class="chart-wrap"><div class="chart-y">` +
-    `<span>${escapeHtml(String(yMax))}${unit || ''}</span><span>0</span></div>` +
-    `<div class="chart-body">${svg}` +
-    `<div class="chart-labels"><span>${escapeHtml(xFrom)}</span>` +
-    `<span>${escapeHtml(xTo)}</span></div></div></div>`;
-
-  /* ══ The live meter: successive readings of the server's own cumulative
-     CPU counter, differenced here. Nothing is sampled or stored on the
-     server — the line exists only while this tab is open. ══ */
-
-  const METER_SECONDS = 3;
-  let meterTimer = null, lastSample = null, cpuSeries = [];
-
-  async function sampleLoad() {
+  // One op door for add, remove, move, name, and certificate: the server
+  // runs the same cores the terminal's add-site / remove-site / move-site /
+  // set domain / certificate run, then the cards re-render from fresh
+  // /config truth.
+  async function siteOp(body, errEl) {
+    clearError($('sites-error'));
+    if (errEl) clearError(errEl);
     try {
-      const r = await fetch('/status?t=' + encodeURIComponent(CODE));
-      if (!r.ok) { stopMeter(); return; }
-      const d = await r.json();
-      const l = d.load || {};
-      if (l.cpu_ns != null && lastSample) {
-        const dt = l.sampled_at - lastSample.at;
-        if (dt > 0) {
-          cpuSeries.push(Math.max(0,
-            (l.cpu_ns - lastSample.ns) / 1_000_000_000 / dt * 100));
-          if (cpuSeries.length > 60) cpuSeries.shift();
+      await post('/sites', body, 'ok');
+      await refresh();
+      return true;
+    } catch (e) {
+      showError(errEl || $('sites-error'), reason(e));
+      if (body.op === 'move')
+        renderSiteCards();  // snap the dragged DOM back to the loaded truth
+      return false;
+    }
+  }
+
+  $('btn-add-site').addEventListener('click', () => siteOp({ op: 'add' }));
+
+  function renderSiteCards() {
+    const wrap = $('site-cards');
+    wrap.innerHTML = '';
+    const sites = (cfgData && cfgData.sites) || [];
+    // One site is a site; the plural is earned.
+    $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
+    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx)));
+  }
+
+  /* ── Reordering, in the notebook's grammar: grab the header, a ghost
+     follows the cursor, the source dims to a placeholder, neighbours swap
+     in place as the ghost crosses them — and the drop is a single move
+     op, so the config write happens once, at the end. ── */
+
+  function attachCardDrag(head, el) {
+    head.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || e.target.closest('button') || e.target.closest('a')
+          || e.target.closest('.confirm')) return;   // the panel is not a handle
+      const startX = e.clientX, startY = e.clientY;
+      const rect = el.getBoundingClientRect();
+      const offY = e.clientY - rect.top;
+      const startIdx = cardIndex(el);
+      let started = false, ghost = null;
+      const move = (ev) => {
+        // A drag begins only after 5px of travel, so a click on the header
+        // is still a click.
+        if (!started) {
+          if (Math.abs(ev.clientX - startX) < 5 && Math.abs(ev.clientY - startY) < 5) return;
+          started = true;
+          ghost = el.cloneNode(true);
+          ghost.classList.add('card-ghost');
+          ghost.style.cssText = 'position:fixed;left:' + rect.left + 'px;top:' + rect.top +
+            'px;width:' + rect.width + 'px;margin:0;pointer-events:none;z-index:1000;opacity:0.93;';
+          document.body.appendChild(ghost);
+          el.classList.add('drag-placeholder');
+          document.body.style.userSelect = 'none';
         }
-      }
-      if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
-      statusData = d;
-      renderLoad();
-    } catch (e) {
-      // Nothing is listening any more — the admin command ended, or the
-      // tunnel closed. Keep polling and every attempt prints another
-      // 'channel N: open failed' in the operator's terminal.
-      stopMeter();
-      showError($('traffic-error'), TUNNEL_DOWN);
-    }
+        ghost.style.top = (ev.clientY - offY) + 'px';
+        const cards = [...document.querySelectorAll('#site-cards .site-card')];
+        const i = cards.indexOf(el);
+        const gr = ghost.getBoundingClientRect();
+        if (i > 0 && gr.top < cards[i - 1].getBoundingClientRect().top)
+          el.parentNode.insertBefore(el, cards[i - 1]);
+        else if (i < cards.length - 1 && gr.bottom > cards[i + 1].getBoundingClientRect().bottom)
+          el.parentNode.insertBefore(cards[i + 1], el);
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        if (!started) return;
+        ghost.remove();
+        el.classList.remove('drag-placeholder');
+        document.body.style.userSelect = '';
+        const endIdx = cardIndex(el);
+        if (endIdx !== startIdx) siteOp({ op: 'move', from: startIdx, to: endIdx });
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
   }
 
-  function startMeter() {
-    if (meterTimer) return;
-    meterTimer = setInterval(sampleLoad, METER_SECONDS * 1000);
-    sampleLoad();
-  }
-
-  function stopMeter() {
-    clearInterval(meterTimer);
-    meterTimer = null;
-  }
-
-  // A backgrounded tab has nobody reading it, and a closing one is gone:
-  // either way the polling stops, so an abandoned page cannot keep dialing
-  // a tunnel whose command has ended.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) stopMeter();
-    else if (!$('panel-stats').classList.contains('hidden')) startMeter();
-  });
-  window.addEventListener('pagehide', stopMeter);
-
-  async function saveSettings(values, siteIdx, badge, errEl) {
-    clearError(errEl);
-    setBadge(badge, 'badge-dim', 'saving…');
-    try {
-      const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
-        method: 'POST',
-        body: JSON.stringify({ site: siteIdx, values }),
-      });
-      let data = {};
-      try { data = await r.json(); } catch { data = {}; }
-      if (r.ok && data.result === 'saved') {
-        setBadge(badge, 'badge-green', '✓ saved');
-        refresh();
-      } else {
-        throw new Error(data.error || 'HTTP ' + r.status);
-      }
-    } catch (e) {
-      setBadge(badge, 'badge-red', '✕ not saved');
-      showError(errEl, (e instanceof TypeError)
-        ? TUNNEL_DOWN + ' Nothing was changed.'
-        : e.message + ' — nothing was changed.');
-    }
-  }
-
-  $('btn-save-host').addEventListener('click', async () => {
-    const values = {};
-    for (const [k] of HOST_FIELDS) values[k] = $('cfg-' + k).value.trim();
-    const badge = $('cfg-host-badge'), errEl = $('cfg-host-error');
-    clearError(errEl);
-
-    // The swapfile is the one setting whose save does filesystem work, so it
-    // runs only when its number actually changed — pressing Save on an
-    // untouched field must never swapoff anything.
-    const field = $('cfg-swap_mb');
-    const want = field ? parseInt(field.value.trim(), 10) : NaN;
-    const active = ((statusData || {}).swap || {}).active_mb;
-    const resize = field && want > 0 && want !== active;
-    if (field && field.value.trim() && !(want > 0))
-      return showError(errEl, 'Swap file size must be a number of megabytes.');
-
-    setBadge(badge, 'badge-dim', 'saving…');
-    try {
-      const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
-        method: 'POST', body: JSON.stringify({ site: 0, values }),
-      });
-      let data = {};
-      try { data = await r.json(); } catch { data = {}; }
-      if (!r.ok || data.result !== 'saved')
-        throw new Error(data.error || 'HTTP ' + r.status);
-
-      if (resize) {
-        setBadge(badge, 'badge-dim', 'resizing the swapfile…');
-        const rs = await fetch('/swap?t=' + encodeURIComponent(CODE), {
-          method: 'POST', body: JSON.stringify({ mb: want }),
-        });
-        let sd = {};
-        try { sd = await rs.json(); } catch { sd = {}; }
-        if (!rs.ok || sd.result !== 'ok')
-          throw new Error(sd.error || 'HTTP ' + rs.status);
-      }
-      setBadge(badge, 'badge-green', '✓ saved');
-      refresh();
-    } catch (e) {
-      setBadge(badge, 'badge-red', '✕ not saved');
-      showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
-    }
-  });
-
-  /* ══ Publish — the pub tool's bundle builder with the signing removed.
-     The server's contract (_extract_bundle / _land_bundle): a tar.gz of
+  /* ── The bundle builder: the pub tool's, with the signing removed. The
+     server's contract (_extract_bundle / _land_bundle) is a tar.gz of
      plain files and directories, paths relative to the site root, no entry
      escaping it, under 500 MB uncompressed — POSTed to /upload with this
-     run's passcode. ══ */
+     run's passcode. Hand-rolled ustar, because the browser has no tar and
+     this page loads no third-party code. ── */
 
+  // The same hidden-path rule the server enforces: any '.'-segment except
+  // .well-known is never served, so it is not bundled either — a .git or
+  // .env under the site folder must not end up on the server.
+  const isHiddenPath = (path) =>
+    path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
+
+  // ustar splits a long path across two header fields; find a split point
+  // that fits both, or refuse rather than emit a truncated name.
   function splitTarName(path) {
     const len = (s) => new TextEncoder().encode(s).length;
     if (len(path) <= 100) return ['', path];
@@ -1059,6 +1083,8 @@
   // entries: [{ path, bytes }] with '/'-separated site-root-relative paths.
   function buildTar(entries) {
     const mtime = Math.floor(Date.now() / 1000);
+    // Every ancestor directory gets its own entry, so the archive is
+    // complete rather than relying on the extractor to invent them.
     const dirs = new Set();
     for (const e of entries)
       for (let i = e.path.indexOf('/'); i !== -1; i = e.path.indexOf('/', i + 1))
@@ -1087,142 +1113,36 @@
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  function setBadge(el, cls, text) {
-    el.className = 'badge ' + cls;
-    el.textContent = text;
-    el.classList.remove('hidden');
-  }
-  function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
-  function clearError(el) { el.classList.add('hidden'); }
+  /* ── The drop door. A dropped folder walks the same intake as the
+     picker: a single dropped directory is the site folder (its name
+     stripped, exactly like the picker does), and several dropped items
+     land as the site root's own entries. ── */
 
-  function fmtSize(n) {
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    return (n / (1024 * 1024)).toFixed(1) + ' MB';
-  }
-
-  const escapeHtml = (s) =>
-    s.replace(/[&<>"']/g, (c) => '&#' + c.charCodeAt(0) + ';');
-
-  // The same hidden-path rule the server enforces: any '.'-segment except
-  // .well-known is never served, so it is not bundled either — a .git or
-  // .env under the site folder must not end up on the server.
-  const isHiddenPath = (path) =>
-    path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
-
-  // What a site's unhealthy row is called on its card — the fault named,
-  // rather than an exclamation mark standing in for the name.
-  const NEEDS_WORD = {
-    cert:     'Needs certificate',
-    password: 'Needs password',
-    dir:      'Folder missing',
-    channel:  'Channel unfinished',
-  };
-
-  const cardIndex = (el) =>
-    [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
-
-  // One op door for add, remove, and move: the server runs the same cores
-  // the terminal's add-site / remove-site / move-site run, then the cards
-  // re-render from fresh /config truth.
-  async function siteOp(body, errEl) {
-    clearError($('sites-error'));
-    if (errEl) clearError(errEl);
-    try {
-      const r = await fetch('/sites?t=' + encodeURIComponent(CODE), {
-        method: 'POST', body: JSON.stringify(body),
-      });
-      let data = {};
-      try { data = await r.json(); } catch { data = {}; }
-      if (!r.ok || data.result !== 'ok')
-        throw new Error(data.error || 'HTTP ' + r.status);
-      await refresh();
-      return true;
-    } catch (e) {
-      showError(errEl || $('sites-error'),
-                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
-      if (body.op === 'move')
-        renderSiteCards();  // snap the dragged DOM back to the loaded truth
-      return false;
+  // Read one directory to the end. The reader hands back a batch at a time
+  // and signals the end with an empty one, so this cannot be a single call.
+  async function readChildren(dirEntry, prefix, out) {
+    const reader = dirEntry.createReader();
+    for (;;) {
+      const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+      if (!batch.length) break;
+      for (const child of batch) await readDropped(child, prefix, out);
     }
   }
 
-  $('btn-add-site').addEventListener('click', () => siteOp({ op: 'add' }));
-
-  function renderSiteCards() {
-    const wrap = $('site-cards');
-    wrap.innerHTML = '';
-    const sites = (cfgData && cfgData.sites) || [];
-    // One site is a site; the plural is earned.
-    $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
-    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx, sites.length)));
-  }
-
-  // Reordering, in the notebook's grammar: grab the header, a ghost follows
-  // the cursor, the source dims to a placeholder, neighbours swap in place
-  // as the ghost crosses them — and the drop is a single move op.
-  function attachCardDrag(head, el) {
-    head.addEventListener('mousedown', (e) => {
-      if (e.button !== 0 || e.target.closest('button') || e.target.closest('a')) return;
-      const startX = e.clientX, startY = e.clientY;
-      const rect = el.getBoundingClientRect();
-      const offY = e.clientY - rect.top;
-      const startIdx = cardIndex(el);
-      let started = false, ghost = null;
-      const move = (ev) => {
-        if (!started) {
-          if (Math.abs(ev.clientX - startX) < 5 && Math.abs(ev.clientY - startY) < 5) return;
-          started = true;
-          ghost = el.cloneNode(true);
-          ghost.classList.add('card-ghost');
-          ghost.style.cssText = 'position:fixed;left:' + rect.left + 'px;top:' + rect.top +
-            'px;width:' + rect.width + 'px;margin:0;pointer-events:none;z-index:1000;opacity:0.93;';
-          document.body.appendChild(ghost);
-          el.classList.add('drag-placeholder');
-          document.body.style.userSelect = 'none';
-        }
-        ghost.style.top = (ev.clientY - offY) + 'px';
-        const cards = [...document.querySelectorAll('#site-cards .site-card')];
-        const i = cards.indexOf(el);
-        const gr = ghost.getBoundingClientRect();
-        if (i > 0 && gr.top < cards[i - 1].getBoundingClientRect().top)
-          el.parentNode.insertBefore(el, cards[i - 1]);
-        else if (i < cards.length - 1 && gr.bottom > cards[i + 1].getBoundingClientRect().bottom)
-          el.parentNode.insertBefore(cards[i + 1], el);
-      };
-      const up = () => {
-        document.removeEventListener('mousemove', move);
-        document.removeEventListener('mouseup', up);
-        if (!started) return;
-        ghost.remove();
-        el.classList.remove('drag-placeholder');
-        document.body.style.userSelect = '';
-        const endIdx = cardIndex(el);
-        if (endIdx !== startIdx) siteOp({ op: 'move', from: startIdx, to: endIdx });
-      };
-      document.addEventListener('mousemove', move);
-      document.addEventListener('mouseup', up);
-    });
-  }
-
-  // The drop door: a dropped folder walks the same intake. A single dropped
-  // directory is the site folder (its name stripped, exactly like the
-  // picker); several dropped items land as the site root's own entries.
   async function readDropped(entry, prefix, out) {
     if (entry.isFile) {
       const file = await new Promise((res, rej) => entry.file(res, rej));
       out.push({ path: prefix + entry.name, file });
     } else if (entry.isDirectory) {
-      const reader = entry.createReader();
-      for (;;) {
-        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
-        if (!batch.length) break;
-        for (const e of batch) await readDropped(e, prefix + entry.name + '/', out);
-      }
+      await readChildren(entry, prefix + entry.name + '/', out);
     }
   }
 
-  function buildSiteCard(siteData, idx, total) {
+  /* ── One card. Everything about a site lives inside it — publish, facts,
+     domain, certificate, access, the outside test — so nothing on the card
+     needs to say which site it means. ── */
+
+  function buildSiteCard(siteData, idx) {
     const label = siteData.domain || 'site ' + idx;
     const inactive = siteData.active === false;
     const siteNeeds = (((statusData || {}).checks) || [])
@@ -1234,7 +1154,7 @@
     // cancels — one bullet says exactly what each choice means. A card
     // that is already deactivated offers only the delete.
     const confirmHtml =
-      `<div class="confirm hidden"><div class="split"></div>` +
+      `<div class="confirm hidden">` +
       `<p class="hint"><b>Delete</b> removes this server's copies — the ` +
       `published files and their backup. Your originals in local storage ` +
       `are untouched; publishing again rebuilds the site.</p>` +
@@ -1253,34 +1173,26 @@
          `and visitors get the plain not-found answer until it is reactivated.</p>` +
          `<div class="btn-row" style="margin-top:0.75rem">` +
          `<button class="action do-reactivate" type="button">Reactivate</button></div>`)
-      : (`<div class="dropstrip">drop this site's folder here, or <a href="#">choose it</a></div>` +
-         `<input type="file" webkitdirectory multiple class="hidden">` +
-         `<p class="hint summary">The folder to drop is the one holding the ` +
-         `site's <b>index.html</b>.</p>` +
-         `<div class="btn-row" style="margin-top:0.75rem">` +
-           `<button class="action pub" type="button" disabled>Publish</button>` +
-         `</div>` +
-         `<div class="done hidden">` +
-           `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
-           `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
-           `in the terminal is the one step back.</p>` +
-         `</div>` +
 
-         // ── Everything else this site is: its facts, and the controls
-         // that change them. One card per site, so no selector is needed
-         // to say which site any of it belongs to.
-         `<div class="split"></div>` +
-         `<div class="rows info"></div>` +
+      // ── What this site IS, at the top: its state, the address it
+      // answers at, and the three things that decide both. What you DO to
+      // it — publish, preview, download, redirect — follows underneath.
+      : (`<div class="rows info"></div>` +
 
          `<div class="switch-row"><span class="k">Domain</span>` +
          `<span class="switch-value"><input class="dom-input" type="text" ` +
-         `placeholder="example.com" value="${escapeHtml(siteData.domain || '')}">` +
+         `placeholder="example.com" value="${escapeHtml(siteData.domain)}">` +
          `<span class="switch-act"><button class="action tiny dom" type="button">` +
          `Set</button></span></span></div>` +
          `<div class="switch-row"><span class="k">Certificate</span>` +
          `<span class="switch-value"><span class="cert-state"></span>` +
          `<span class="switch-act"><button class="action tiny cert" type="button">` +
          `Get certificate</button></span></span></div>` +
+         // The explanation belongs under the button it explains, not three
+         // controls further down where it read as a note about access.
+         `<p class="cfg-hint">A certificate is issued only for a name that ` +
+         `already points here — check that the domain's DNS has an A record ` +
+         `to this server's IP before requesting one.</p>` +
 
          `<div class="switch-row">` +
          `<label class="k auth-label">Access</label>` +
@@ -1292,61 +1204,157 @@
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
 
-         `<p class="hint">A certificate is issued only for a name that ` +
-         `already points here — check that the domain's DNS has an A record ` +
-         `to this server's IP before requesting one.</p>` +
+         // ── Publishing: drop a folder, look at it, ship it.
+         `<div class="split"></div>` +
+         `<div class="dropstrip"><span class="drop-lead">Drop this site's folder here</span>` +
+         `<span>or <a href="#">browse for it</a></span></div>` +
+         `<input type="file" webkitdirectory multiple class="hidden">` +
+         `<p class="hint summary">The folder to drop is the one holding the ` +
+         `site's <b>index.html</b>.</p>` +
+         // Both of these act on the folder you chose, so both are dim until
+         // you have chosen one. Download is not here: it acts on what is
+         // live, and sits on the line that reports it.
+         `<div class="btn-row" style="margin-top:0.75rem">` +
+           `<button class="action pub" type="button" disabled ` +
+           `title="Choose a folder first">Publish</button>` +
+           // Look before you ship. Content only — the real domain, its
+           // certificate, and its headers are not in scope here.
+           `<button class="action prev" type="button" disabled ` +
+           `title="Choose a folder first — this shows what you are about to ` +
+           `publish, not the live site">Preview</button>` +
+         `</div>` +
+         `<div class="preview hidden">` +
+           `<p class="hint">This is the folder you chose, served over the ` +
+           `tunnel and not published. Links inside it work; the site's real ` +
+           `domain, certificate, and headers are not part of what you are ` +
+           `seeing.</p>` +
+           `<iframe class="preview-frame" sandbox="allow-scripts allow-forms" ` +
+           `title="Preview of the chosen folder"></iframe>` +
+         `</div>` +
+         `<div class="done hidden">` +
+           `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
+         `</div>` +
 
+         // ── What this site has served, newest first. Present always, not
+         // only after a publish: "put yesterday's back" is a thing you
+         // want on the day you did not publish anything.
+         `<div class="split"></div>` +
+         `<div class="switch-row"><span class="k">Published</span>` +
+         `<span class="switch-value"><span class="ver-state">reading…</span>` +
+         `<span class="switch-act">` +
+         // The reverse of Publish, on the line that says what is live: the
+         // live tree as the same tar.gz the publish door accepts, so what
+         // comes down can go back up.
+         `<button class="action tiny dl" type="button" ` +
+         `title="Download the live content as a tar.gz">Download</button>` +
+         `<button class="action tiny ver-refresh" type="button" ` +
+         `title="Re-read this list. The page updates it after a publish or ` +
+         `restore of its own — this is for one done in the terminal.">` +
+         `Refresh</button>` +
+         `</span></span></div>` +
+         `<div class="rows versions"></div>` +
+
+         // ── Redirects: one path on this site sends visitors to another
+         // place. A setting, so it lives with the site's other settings
+         // rather than as a file in the content.
+         `<div class="split"></div>` +
+         `<div class="switch-row"><span class="k">Redirects</span>` +
+         `<span class="switch-value"><span class="redir-state"></span>` +
+         `<span class="switch-act"><button class="action tiny redir-add" ` +
+         `type="button">Add</button></span></span></div>` +
+         `<div class="rows redirects"></div>` +
+         `<div class="redir-form hidden">` +
+           `<div class="cfg-field"><label>Path</label>` +
+           `<input class="redir-from" type="text" placeholder="/talk"></div>` +
+           `<div class="cfg-field"><label>Sends visitors to</label>` +
+           `<input class="redir-to" type="text" placeholder="/2026/keynote"></div>` +
+           `<p class="cfg-hint">Any path on this site: one that moved, a short ` +
+           `link worth remembering, a name you want to keep working. It can ` +
+           `point at another path here or at a full https:// address. Visitors ` +
+           `are sent on with a <b>permanent</b> redirect, which browsers ` +
+           `remember — so a wrong one outlives fixing it here.</p>` +
+           `<div class="btn-row" style="margin-top:0.75rem">` +
+           `<button class="action redir-save" type="button">Add redirect</button>` +
+           `<button class="action redir-cancel" type="button">Cancel</button>` +
+           `</div>` +
+         `</div>` +
+
+         // ── The one view a page on the tunnel cannot compute for itself.
          `<div class="split"></div>` +
          `<div class="btn-row">` +
          `<button class="action outside" type="button" disabled>Test connection</button>` +
          `</div>`)
+
+    const q = (sel) => card.querySelector(sel);
 
     card.innerHTML =
       `<div class="card-head">` +
         `<span class="head-left"><span class="handle" title="Drag to reorder">⠿</span>` +
         `<span class="card-title">${escapeHtml(label)}</span></span>` +
         `<span class="head-right">` +
+          // The fault badge names the fault and stays put. The state badge
+          // beside it is the one publishing writes into, which is why they
+          // are separate elements: overwriting the first would erase a
+          // standing fault the moment a folder was read.
           (siteNeeds.length
-            ? `<span class="badge badge-warn needs" title="${escapeHtml(
+            ? `<span class="badge ${siteNeeds.some((c) => c.blocking)
+                 ? 'badge-red' : 'badge-warn'} needs" title="${escapeHtml(
                  siteNeeds.map((c) => c.detail).join(' · '))}">${
                  siteNeeds.length === 1
                    ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
                    : siteNeeds.length + ' to review'}</span>`
             : '') +
-          `<span class="badge badge-dim${inactive ? '' : ' hidden'}">${
+          `<span class="badge state badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
-          `<button class="ca del" type="button" title="Remove or deactivate">` +
-            `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" ` +
+          // Collapse, for a box serving more sites than fit on a screen.
+          // Chevrons toward each other close; away, open.
+          `<button class="action tiny fold" type="button" ` +
+            `title="Collapse this card"><svg viewBox="0 0 16 16" width="12" ` +
+            `height="12" fill="none" stroke="currentColor" stroke-width="1.6" ` +
+            `stroke-linecap="round"><path class="fold-a" d="M4 2.5l4 3.5 4-3.5"></path>` +
+            `<path class="fold-b" d="M4 13.5l4-3.5 4 3.5"></path></svg></button>` +
+          // Removing a site is destructive, so it wears the destructive
+          // colour all the time rather than only under the pointer — the
+          // same rule the stop button follows.
+          `<button class="action tiny danger del" type="button" ` +
+            `title="Remove or deactivate">` +
+            `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" ` +
             `stroke="currentColor" stroke-width="1.3"><path d="M3 4h10M6.5 4V2.5h3V4` +
             `M5 4l0.6 9.5h4.8L11 4"></path></svg></button>` +
         `</span>` +
       `</div>` +
-      `<div class="card-body">` + bodyHtml + confirmHtml +
+      `<div class="card-body">` + bodyHtml +
         `<p class="error hidden"></p>` +
       `</div>`;
+    // Anchored to the head, so the panel opens where the trash button is
+    // rather than at the far end of a long card. Appended after innerHTML
+    // because it belongs to the head, not to the body's flow.
+    q('.card-head').insertAdjacentHTML('beforeend', confirmHtml);
 
-    const q = (sel) => card.querySelector(sel);
-    const badge = q('.badge'), errEl = q('.error');
+    const badge = q('.badge.state'), errEl = q('.error');
+    // One error element, moved to whichever control refused. A message
+    // about the login field is no use at the foot of the card, below Test
+    // connection — the reason to fix something and the thing that fixes it
+    // belong within a glance of each other.
+    const errAt = (anchor, msg) => {
+      if (anchor) anchor.insertAdjacentElement('afterend', errEl);
+      showError(errEl, msg);
+    };
     let files = null, folderName = '';
     const mark = (cls, text) => setBadge(badge, cls, text);
+
+    /* ── Lifecycle: deactivate, reactivate, delete ── */
 
     // Deactivation rides the same settings write as everything else — it is
     // a setting ('set n active=no' is the terminal spelling).
     async function setActive(on) {
       clearError(errEl);
       try {
-        const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
-          method: 'POST',
-          body: JSON.stringify({ site: cardIndex(card),
-                                 values: { active: on ? 'yes' : 'no' } }),
-        });
-        let data = {};
-        try { data = await r.json(); } catch { data = {}; }
-        if (!r.ok || data.result !== 'saved')
-          throw new Error(data.error || 'HTTP ' + r.status);
+        await post('/config', { site: cardIndex(card),
+                                values: { active: on ? 'yes' : 'no' } }, 'saved');
         await refresh();
       } catch (e) {
-        showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+        showError(errEl, reason(e));
       }
     }
 
@@ -1369,15 +1377,40 @@
     const react = q('.do-reactivate');
     if (react) react.addEventListener('click', () => setActive(true));
 
+    // ── Fold. The head keeps its title, its badges, and its controls, so
+    // a folded card still says which site it is and whether it needs
+    // attention — the reason to fold is length, not secrecy.
+    const key = foldKey(siteData, idx);
+    const applyFold = () => {
+      const shut = folded.has(key);
+      card.classList.toggle('folded', shut);
+      q('.fold').title = shut ? 'Expand this card' : 'Collapse this card';
+      // Shallow chevrons at the edges, with a clear gap between them.
+      // Drawn tall and meeting in the middle they read as an X, which sits
+      // beside a delete button and means the wrong thing entirely.
+      // A caret needs its angle: rise about equal to half its width. The
+      // gap between the two is what stops them reading as an X, so the
+      // pair sit at the edges — apexes 4px apart in a 16px box.
+      q('.fold-a').setAttribute('d', shut ? 'M4 6l4-3.5 4 3.5' : 'M4 2.5l4 3.5 4-3.5');
+      q('.fold-b').setAttribute('d', shut ? 'M4 10l4 3.5 4-3.5' : 'M4 13.5l4-3.5 4 3.5');
+    };
+    q('.fold').addEventListener('click', () => {
+      if (folded.has(key)) folded.delete(key); else folded.add(key);
+      applyFold();
+    });
+    applyFold();
+
     attachCardDrag(q('.card-head'), card);
 
     // Everything below is the publish machinery only an active card carries.
     if (inactive) return card;
-    const input = q('input'), pubBtn = q('.pub');
+    const input = q('input[type="file"]'), pubBtn = q('.pub');
+    const prevBtn = q('.prev');
     const summary = q('.summary'), done = q('.done');
 
-    // One intake for both doors — the picker and the drop — so they cannot
-    // drift on the hidden-path rule or the summary.
+    /* ── Reading a folder: one intake for both doors, the picker and the
+       drop, so they cannot drift on the hidden-path rule or the summary. ── */
+
     function useFolder(items, name) {
       const kept = items.filter((en) => !isHiddenPath(en.path));
       const hidden = items.length - kept.length;
@@ -1398,11 +1431,18 @@
         (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
                          `the site root would show a directory miss</span>`);
       done.classList.add('hidden');
+      q('.preview').classList.add('hidden');
       pubBtn.disabled = false;
+      pubBtn.title = 'Publish this folder as the live site';
+      prevBtn.disabled = false;
+      prevBtn.title = 'Look at this folder before publishing it';
       mark('badge-green', '✓ folder read');
     }
 
-    q('.dropstrip a').addEventListener('click', (e) => { e.preventDefault(); input.click(); });
+    // The whole strip opens the picker, not just the link inside it — a
+    // drop target that only accepts a click on two exact words is a
+    // smaller target than it looks.
+    q('.dropstrip').addEventListener('click', (e) => { e.preventDefault(); input.click(); });
     input.addEventListener('change', () => {
       clearError(errEl);
       const all = [...input.files];
@@ -1414,10 +1454,21 @@
       })).filter((en) => en.path), all[0].webkitRelativePath.split('/')[0]);
     });
 
-    card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag'); });
-    card.addEventListener('dragleave', () => card.classList.remove('drag'));
+    // dragenter/dragleave fire for every child element the pointer crosses,
+    // so the highlight is counted rather than toggled — otherwise a large
+    // drop zone flickers as the pointer moves over the text inside it.
+    let dragDepth = 0;
+    card.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      if (dragDepth++ === 0) card.classList.add('drag');
+    });
+    card.addEventListener('dragover', (e) => e.preventDefault());
+    card.addEventListener('dragleave', () => {
+      if (--dragDepth <= 0) { dragDepth = 0; card.classList.remove('drag'); }
+    });
     card.addEventListener('drop', async (e) => {
       e.preventDefault();
+      dragDepth = 0;
       card.classList.remove('drag');
       clearError(errEl);
       const entries = [...e.dataTransfer.items]
@@ -1429,12 +1480,7 @@
         let name;
         if (entries.length === 1 && entries[0].isDirectory) {
           name = entries[0].name;
-          const reader = entries[0].createReader();
-          for (;;) {
-            const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
-            if (!batch.length) break;
-            for (const child of batch) await readDropped(child, '', items);
-          }
+          await readChildren(entries[0], '', items);   // the folder's name is stripped
         } else {
           name = 'dropped files';
           for (const entry of entries) await readDropped(entry, '', items);
@@ -1445,28 +1491,22 @@
       }
     });
 
+    /* ── Publishing: build the bundle in the browser, POST it whole. ── */
+
     pubBtn.addEventListener('click', async () => {
       clearError(errEl);
       pubBtn.disabled = true;
       mark('badge-dim', 'building…');
       try {
-        const entries = [];
-        let totalBytes = 0;
-        for (const { path, file } of files) {
-          const bytes = new Uint8Array(await file.arrayBuffer());
-          totalBytes += bytes.length;
-          if (totalBytes > MAX_BUNDLE_BYTES)
-            throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
-                            `the server would reject it`);
-          entries.push({ path, bytes });
-        }
-        const gz = await gzipBytes(buildTar(entries));
+        const { entries, gz } = await buildBundle();
 
+        // Not through post(): the body is the gzipped bundle itself rather
+        // than JSON, and a refused passcode earns its own sentence.
         mark('badge-dim', 'publishing…');
-        const resp = await fetch('/upload?t=' + encodeURIComponent(CODE) +
-                                 '&site=' + cardIndex(card), { method: 'POST', body: gz });
+        const resp = await fetch(api('/upload', { site: cardIndex(card) }),
+                                 { method: 'POST', body: gz });
         let result = '';
-        try { result = (await resp.json()).result; } catch { result = ''; }
+        try { result = (await resp.json()).result; } catch (e) { result = ''; }
 
         if (resp.ok && result === 'published') {
           q('.note-done').innerHTML = `<b>${escapeHtml(folderName)}/</b> is live — ` +
@@ -1475,6 +1515,7 @@
             `content kept as the one-step backup.`;
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');
+          loadVersions();          // the tree just replaced is now restorable
         } else if (resp.status === 403) {
           throw new Error('The server refused the passcode — close this page, ' +
                           'and open the fresh link the terminal prints for this run.');
@@ -1484,8 +1525,10 @@
                           ' — nothing was changed. The terminal log has the detail.');
         }
       } catch (e) {
-        // A dropped tunnel mid-upload cannot half-publish: the server swaps
-        // content in only after a complete, valid bundle has landed.
+        // Not reason(): a dropped tunnel mid-upload cannot half-publish (the
+        // server swaps content in only after a complete, valid bundle has
+        // landed), and the refusals thrown just above already end by saying
+        // nothing was changed.
         showError(errEl, (e instanceof TypeError)
           ? TUNNEL_DOWN + ' Nothing was published.' : e.message);
         mark('badge-red', '✕ failed');
@@ -1493,125 +1536,701 @@
       pubBtn.disabled = !files;
     });
 
-    // ── The site's own facts and controls, all card-local: each card owns
-    // its state, so nothing needs to say which site it means. ──
-    const info = q('.info');
-    if (info) {
-      const checksFor = (((statusData || {}).checks) || []).filter((c) => c.site === idx);
-      const certRow = checksFor.find((c) => c.key === 'cert');
-      const authRow = checksFor.find((c) => c.key === 'password');
-      const others  = checksFor.filter((c) => c.key !== 'cert' && c.key !== 'password');
-      let authDesired = null;   // null = follow the server
-      const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
+    /* ── Preview: the same bundle, staged where only this page can reach
+       it. Content only — HTTPS, the real domain, and the site's headers are
+       not part of what a preview shows, and the note beside it says so. ── */
 
-      const renderInfo = () => {
-        const on = authOn();
-        const pending = authDesired !== null && authDesired !== !!siteData.username;
-        info.innerHTML =
-          row('Status', siteNeeds.length
-            ? `<span class="warn">${siteNeeds.length} to review</span>`
-            : '<span class="ok">✓</span> healthy') +
-          row('Serving', siteData.domain
-            ? `<b>${escapeHtml('https://' + siteData.domain)}</b>`
-            : "this server's IP address (no domain set)") +
-          others.map((c) => {
-            const cut = c.label.indexOf(' · ');
-            return factRow(cut < 0 ? c
-              : Object.assign({}, c, { label: c.label.slice(cut + 3) }));
-          }).join('');
-
-        q('.cert-state').innerHTML = !certRow ? ''
-          : certRow.ok ? escapeHtml(certRow.detail)
-          : `<span class="warn">${escapeHtml(certRow.detail)}</span>`;
-        // Naming and certifying are two acts on one card: the name saves
-        // instantly, the certificate is asked for when you ask for it —
-        // and the button says so while the site has no trusted one.
-        const certBtn = q('.cert');
-        certBtn.disabled = !siteData.domain;
-        certBtn.classList.toggle('due', !!siteData.domain && !!certRow && !certRow.ok);
-        certBtn.textContent = (certRow && certRow.ok) ? 'Renew' : 'Get certificate';
-        certBtn.title = siteData.domain
-          ? 'Request a certificate for ' + siteData.domain
-          : 'Set a domain first — a certificate is issued for a name';
-
-        q('.auth-switch').checked = on;
-        q('.auth-action').textContent = on ? 'Make public' : 'Make private';
-        q('.auth-state').innerHTML = pending
-          ? `<span class="warn">${on ? 'username and password required'
-                                     : 'becoming public when saved'}</span>`
-          : (authRow && !authRow.ok)
-            ? `<span class="warn">${escapeHtml(authRow.detail)}</span>`
-            : (on ? 'private' : 'public');
-        q('.auth-fields').innerHTML = !on ? '' :
-          field('username-' + idx, 'Username', siteData.username,
-                { hint: 'Case-sensitive. Any characters except a colon.' }) +
-          field('password-' + idx,
-                siteData.has_password ? 'New password (blank = keep the current one)' : 'Password',
-                '', { type: 'password',
-                      hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
-        q('.auth-save').classList.toggle('hidden', !(on || pending));
-        q('.auth-hint').textContent = on ? ''
-          : (siteData.username
-             ? 'Saving makes the site public: the login is removed and the stored password deleted.'
-             : '');
-
-        const outside = q('.outside');
-        outside.disabled = !siteData.domain;
-        outside.title = siteData.domain
-          ? 'Opens the connection test on ' + siteData.domain
-          : 'Needs a domain — a site without one has no public name to test';
-      };
-      renderInfo();
-
-      q('.auth-switch').addEventListener('change', (e) => {
-        authDesired = e.target.checked;
-        renderInfo();
-      });
-
-      q('.outside').addEventListener('click', () => {
-        if (siteData.domain)
-          window.open('https://' + siteData.domain + '/.well-known/servette-check', '_blank');
-      });
-
-      // Setting the name is a config write and nothing more — instant, and
-      // it cannot fail on someone else's DNS.
-      q('.dom').addEventListener('click', async () => {
-        const domain = q('.dom-input').value.trim().toLowerCase();
-        clearError(errEl);
-        if (!domain) return showError(errEl, 'Type the domain first.');
-        await siteOp({ op: 'name', site: cardIndex(card), domain }, errEl);
-      });
-
-      // Asking for the certificate is the slow, network-dependent act, so
-      // it waits itself out and reports its own failure.
-      q('.cert').addEventListener('click', async () => {
-        const b = q('.cert');
-        const old = b.textContent;
-        b.disabled = true;
-        b.textContent = 'requesting…';
-        const ok = await siteOp({ op: 'certificate', site: cardIndex(card) }, errEl);
-        if (!ok) { b.disabled = false; b.textContent = old; }
-      });
-
-      q('.save-site').addEventListener('click', () => {
-        clearError(errEl);
-        if (!authOn())
-          return saveSettings({ username: '' }, cardIndex(card), badge, errEl);
-        const username = q('#cfg-username-' + idx).value.trim();
-        const pw = q('#cfg-password-' + idx).value;
-        if (!username)
-          return showError(errEl, 'A username is needed — or make the site public.');
-        if (!siteData.has_password && !pw)
-          return showError(errEl, 'A password is needed the first time a site turns private.');
-        saveSettings(Object.assign({ username }, pw ? { password: pw } : {}),
-                     cardIndex(card), badge, errEl);
-      });
+    // Building the bundle is the publish path's own work, so it is one
+    // function and both buttons call it.
+    async function buildBundle() {
+      const entries = [];
+      let totalBytes = 0;
+      for (const { path, file } of files) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        totalBytes += bytes.length;
+        if (totalBytes > MAX_BUNDLE_BYTES)
+          throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
+                          `the server would reject it`);
+        entries.push({ path, bytes });
+      }
+      return { entries, gz: await gzipBytes(buildTar(entries)) };
     }
+
+    prevBtn.addEventListener('click', async () => {
+      clearError(errEl);
+      prevBtn.disabled = true;
+      mark('badge-dim', 'staging…');
+      try {
+        const { gz } = await buildBundle();
+        const resp = await fetch(api('/preview', { site: siteIndex() }),
+                                 { method: 'POST', body: gz });
+        let data = {};
+        try { data = await resp.json(); } catch (e) { data = {}; }
+        if (!resp.ok || data.result !== 'staged')
+          throw new Error('The server would not stage this folder' +
+                          (data.result ? ` (${data.result})` : '') +
+                          ' — the same check a publish would fail.');
+        // The token is a path segment, not a query parameter: a draft's own
+        // relative links resolve against the path and drop the query, so a
+        // token in the query would load the page and 403 every stylesheet
+        // it asks for. And it is the PREVIEW token, never the run's
+        // passcode — a draft can read its own address, and must not learn
+        // the credential that publishes.
+        q('.preview-frame').src = '/preview/' + encodeURIComponent(data.token) +
+          '/' + encodeURIComponent(siteIndex()) + '/';
+        q('.preview').classList.remove('hidden');
+        mark('badge-green', '✓ staged');
+      } catch (e) {
+        showError(errEl, reason(e));
+        mark('badge-red', '✕ not staged');
+      }
+      prevBtn.disabled = !files;
+    });
+
+    /* ── The version ring: what this site has served, and one click back
+       to any of it. The list is its own fetch because answering it walks
+       every kept tree on disk, and /status is polled every few seconds. ── */
+
+    // Every other control on this card reads its index at click time,
+    // because dragging renumbers the neighbours. The version list is the
+    // one that also runs while the card is still being built and is not in
+    // the DOM yet — where cardIndex answers -1. It falls back to the index
+    // the card was built for, which is right until the first drag.
+    const siteIndex = () => {
+      const i = cardIndex(card);
+      return i < 0 ? idx : i;
+    };
+
+    async function loadVersions() {
+        const state = q('.ver-state'), list = q('.versions');
+        try {
+          const v = await getJSON('/versions', { site: siteIndex() });
+          const rows = v.versions || [];
+          const live = rows.find((r) => r.live);
+          // The live version's own size is the answer to "did the right
+          // folder land" — a file count off by an order of magnitude is
+          // the wrong folder, however right the site looks.
+          // Two lines: what is there, then when it landed. One line ran to
+          // the buttons and wrapped mid-date; the switch-row still centres
+          // the label and the buttons against the pair.
+          // A missing folder is marked here, because publishing is what
+          // fixes it — the same rule every other fault follows. It has no
+          // row of its own and used to sit in the facts block, which is
+          // nowhere near anything that would put it right.
+          const gone = checksFor.find((c) => c.key === 'dir');
+          state.innerHTML = gone
+            ? `<span class="${faultClass(gone)}">${escapeHtml(gone.detail)}</span>`
+            : live
+              ? `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
+                `${fmtSize(live.bytes)}</span>` +
+                `<span>${escapeHtml(when(live.published))}</span>`
+              : 'nothing published yet';
+          // Nothing published is nothing to download, and offering it
+          // anyway made the card contradict itself in two adjacent words.
+          const dl = q('.dl');
+          dl.disabled = !live || !live.files;
+          dl.title = dl.disabled
+            ? 'Nothing published yet — there is nothing to download'
+            : 'Download the live content as a tar.gz';
+          list.innerHTML = rows.length < 2 ? '' :
+            rows.map((r) => row(escapeHtml(when(r.published)),
+              `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
+              (r.live ? ' <span class="ok">· live</span>'
+                      : ` <button class="action tiny restore" type="button" ` +
+                        `data-v="${escapeHtml(r.name)}">Restore</button>`))).join('') +
+            `<p class="hint">The ${v.keep} most recent are kept. Restoring does ` +
+            `not consume one — you can restore back.</p>`;
+          for (const b of list.querySelectorAll('.restore'))
+            b.addEventListener('click', async () => {
+              b.disabled = true;
+              b.textContent = 'restoring…';
+              const ok = await siteOp({ op: 'restore', site: siteIndex(),
+                                        version: b.dataset.v }, errEl);
+              if (!ok) { b.disabled = false; b.textContent = 'Restore'; }
+            });
+        } catch (e) {
+          state.textContent = '';
+          showError(errEl, reason(e, 'Could not read the kept versions'));
+        }
+      }
+
+    q('.ver-refresh').addEventListener('click', loadVersions);
+    loadVersions();
+
+    // The response carries Content-Disposition, so the browser saves it
+    // rather than navigating: the operator stays on the page they were
+    // working in.
+    q('.dl').addEventListener('click', () => {
+      clearError(errEl);
+      location.assign(api('/download', { site: siteIndex() }));
+    });
+
+    /* ── Redirects. Both halves of the pair reach _set_site_value through
+       the same settings write, so a rule the terminal refuses the page
+       refuses with the same sentence. ── */
+
+    const renderRedirects = () => {
+      const table = siteData.redirects || {};
+      const keys = Object.keys(table).sort();
+      q('.redir-state').textContent = keys.length
+        ? keys.length + (keys.length === 1 ? ' rule' : ' rules') : 'none';
+      q('.redirects').innerHTML = keys.map((k) =>
+        row(escapeHtml(k),
+            `→ ${escapeHtml(table[k])} <button class="action tiny redir-del" ` +
+            `type="button" data-k="${escapeHtml(k)}">Remove</button>`)).join('');
+      for (const b of q('.redirects').querySelectorAll('.redir-del'))
+        b.addEventListener('click', () => {
+          b.disabled = true;
+          // Nothing after the comma is the removal, the same spelling the
+          // terminal takes.
+          saveSettings({ redirect: b.dataset.k + ',' }, siteIndex(), badge, errEl);
+        });
+    };
+    renderRedirects();
+
+    q('.redir-add').addEventListener('click', () =>
+      q('.redir-form').classList.toggle('hidden'));
+    q('.redir-cancel').addEventListener('click', () =>
+      q('.redir-form').classList.add('hidden'));
+    q('.redir-save').addEventListener('click', () => {
+      const from = q('.redir-from').value.trim();
+      const to   = q('.redir-to').value.trim();
+      clearError(errEl);
+      if (!from || !to)
+        return errAt(q('.redir-form'),
+                     'Both the path and where it sends visitors are needed.');
+      // The pair travels as one value, so the comma is the separator on both
+      // surfaces — which leaves it out of reach as a character in the old
+      // path. Rare, and said plainly rather than mangled quietly.
+      if (from.includes(','))
+        return errAt(q('.redir-form'), 'A path containing a comma has to be set by ' +
+                     'editing servette.toml — the comma separates the pair here.');
+      saveSettings({ redirect: from + ',' + to }, siteIndex(), badge, errEl);
+    });
+
+    /* ── The site's facts and the controls that change them. ── */
+
+    const info = q('.info');
+    const checksFor = (((statusData || {}).checks) || []).filter((c) => c.site === idx);
+    const certRow = checksFor.find((c) => c.key === 'cert');
+    const authRow = checksFor.find((c) => c.key === 'password');
+
+    // What the operator has asked for but not yet saved. null means the
+    // switch is still showing what the server says.
+    let authDesired = null;
+    const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
+
+    /* ── What this card wants dealt with ───────────────────────────────
+       ONE list, and everything about attention reads it: the count on the
+       Status line, and the mark on the row that fixes each item. Two
+       appearances per item, never three, and never a third register (a red
+       paragraph somewhere else) for the same fact.
+
+       It holds the server's stored faults AND an edit begun on this card
+       and not finished. An unfinished edit is not a defect of the site —
+       nothing is saved — but it is something to deal with, and a card that
+       said "healthy" beside a form it was refusing to accept was lying
+       about one of the two. */
+
+    // The switch says private; what the login still needs, in the words of
+    // the thing that is actually missing. Read live from the fields, so the
+    // count follows the typing. null means nothing is missing.
+    const authGap = () => {
+      if (!authOn()) return null;
+      const u = q('#cfg-username-' + idx), pw = q('#cfg-password-' + idx);
+      if (!u) return null;                    // the fields are not rendered yet
+      if (!u.value.trim()) return 'a username is needed';
+      if (!siteData.has_password && !pw.value) return 'a password is needed';
+      return null;
+    };
+    const authIncomplete = () => authGap() !== null;
+
+    const reviewList = () => {
+      const out = checksFor.filter((c) => !c.ok && c.key !== 'password');
+      const gap = authGap();
+      // The stored half-authenticated state and an edit in progress are the
+      // same row's business, so only one of them is ever listed. The stored
+      // one BLOCKS — a username saved with no password locks every visitor
+      // out — while an edit half-typed has changed nothing yet.
+      if (gap)
+        out.push({ key: 'password',
+                   blocking: !!siteData.username && !siteData.has_password,
+                   detail: gap });
+      else if (authRow && !authRow.ok)
+        out.push(authRow);
+      return out;
+    };
+
+    /* Two renders, because they run at different rates. renderInfo rebuilds
+       the card's controls — including the login fields — and runs when the
+       card's shape changes. renderAttention only re-states what needs
+       dealing with, and runs on every keystroke, because whether the login
+       is complete changes as you type. Rebuilding the fields on a keystroke
+       would wipe what was being typed into them; that is exactly what the
+       first version of this did. */
+
+    const renderAttention = () => {
+      const on = authOn();
+      const pending = authDesired !== null && authDesired !== !!siteData.username;
+      const needs = reviewList();
+      const blocking = needs.some((c) => c.blocking);
+
+      // The head pill is the Status line for a folded card, so it reads the
+      // same list rather than a snapshot taken when the card was built.
+      const pill = q('.badge.needs');
+      if (pill) {
+        pill.textContent = needs.length === 1
+          ? (NEEDS_WORD[needs[0].key] || 'Needs attention')
+          : needs.length + ' to review';
+        pill.classList.toggle('badge-red', blocking);
+        pill.classList.toggle('badge-warn', !blocking);
+        pill.classList.toggle('hidden', !needs.length);
+      }
+
+      info.innerHTML =
+        // The count, and the all-clear. It does not name its members: each
+        // is named on the row that fixes it, and four names here would be a
+        // sentence nobody reads. This is also the only place the card can
+        // say the site is WELL — every other row speaks for its own subject.
+        row('Status', needs.length
+          ? `<span class="${blocking ? 'fault' : 'warn'}">` +
+            `${needs.length} to review</span>`
+          : '<span class="ok">✓</span> healthy') +
+        // The site itself, one click away and in its own tab: the fastest
+        // answer to "did that publish land" is looking at it.
+        row('Serving', siteData.domain
+          ? `<a href="${escapeHtml('https://' + siteData.domain)}" target="_blank" ` +
+            `rel="noopener">${escapeHtml('https://' + siteData.domain)}</a>`
+          : "this server's IP address (no domain set)");
+
+      // One marker per row, taken from the same list the count read, so a
+      // row and the count can never disagree about what is wrong.
+      q('.cert-state').innerHTML = !certRow ? ''
+        : certRow.ok ? escapeHtml(certRow.detail)
+        : `<span class="${faultClass(certRow)}">${escapeHtml(certRow.detail)}</span>`;
+
+      const mine = needs.find((c) => c.key === 'password');
+      q('.auth-state').innerHTML = mine
+        ? `<span class="${faultClass(mine)}">${escapeHtml(mine.detail)}</span>`
+        // Going public needs nothing filled in, so it is a note, not a
+        // thing to review.
+        : (pending && !on)
+          ? '<span class="pending">not saved yet — becoming public</span>'
+          : (on ? 'private' : 'public');
+
+      // Dim rather than a refusal to print: what is missing is already on
+      // the access row and in the count, and a red paragraph saying it a
+      // third time is what made one problem look like three.
+      const saveBtn = q('.save-site');
+      saveBtn.disabled = authIncomplete();
+      saveBtn.title = saveBtn.disabled
+        ? 'Fill in the username and password above, or make the site public'
+        : 'Save the access settings for this site';
+    };
+
+    const renderInfo = () => {
+      const on = authOn();
+      const pending = authDesired !== null && authDesired !== !!siteData.username;
+
+      // Naming and certifying are two acts on one card: the name saves
+      // instantly, the certificate is asked for when you ask for it —
+      // and the button says so while the site has no trusted one.
+      const certBtn = q('.cert');
+      certBtn.disabled = !siteData.domain;
+      certBtn.classList.toggle('due', !!siteData.domain && !!certRow && !certRow.ok);
+      certBtn.textContent = (certRow && certRow.ok) ? 'Renew' : 'Get certificate';
+      certBtn.title = siteData.domain
+        ? 'Request a certificate for ' + siteData.domain
+        : 'Set a domain first — a certificate is issued for a name';
+
+      q('.auth-switch').checked = on;
+      q('.auth-action').textContent = on ? 'Make public' : 'Make private';
+      q('.auth-fields').innerHTML = !on ? '' :
+        field('username-' + idx, 'Username', siteData.username,
+              { hint: 'Case-sensitive. Any characters except a colon.' }) +
+        field('password-' + idx,
+              siteData.has_password ? 'New password (blank = keep the current one)' : 'Password',
+              '', { type: 'password',
+                    hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
+      q('.auth-save').classList.toggle('hidden', !(on || pending));
+      q('.auth-hint').textContent = on ? ''
+        : (siteData.username
+           ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+           : '');
+
+      // Typing changes whether the login is complete, so the count follows
+      // the keystroke — but only the attention half re-renders, or the
+      // fields would be rebuilt under the cursor.
+      for (const el of q('.auth-fields').querySelectorAll('input'))
+        el.addEventListener('input', () => { clearError(errEl); renderAttention(); });
+
+      const outside = q('.outside');
+      outside.disabled = !siteData.domain;
+      outside.title = siteData.domain
+        ? 'Opens the connection test on ' + siteData.domain
+        : 'Needs a domain — a site without one has no public name to test';
+
+      // Last, because it reads the fields the block above just created.
+      renderAttention();
+    };
+    renderInfo();
+
+    q('.auth-switch').addEventListener('change', (e) => {
+      // A refusal describes the form as it stood when Save was pressed.
+      // Move the switch and it is about a form that no longer exists, so it
+      // goes with the state that produced it — it used to sit there in red
+      // through every subsequent flip.
+      clearError(errEl);
+      authDesired = e.target.checked;
+      renderInfo();
+    });
+
+    // The public internet's vantage is the one view a page on the tunnel
+    // cannot compute: cross-origin responses are opaque by the browser's
+    // rules, so the site's own reserved page is opened instead.
+    q('.outside').addEventListener('click', () => {
+      if (siteData.domain)
+        window.open('https://' + siteData.domain + '/.well-known/servette-check',
+                    '_blank', 'noopener');
+    });
+
+    // Setting the name is a config write and nothing more — instant, and
+    // it cannot fail on someone else's DNS.
+    q('.dom').addEventListener('click', async () => {
+      const domain = q('.dom-input').value.trim().toLowerCase();
+      clearError(errEl);
+      if (!domain) return errAt(q('.dom-input').closest('.switch-row'),
+                                'Type the domain first.');
+      await siteOp({ op: 'name', site: cardIndex(card), domain }, errEl);
+    });
+
+    // Asking for the certificate is the slow, network-dependent act, so
+    // it waits itself out and reports its own failure.
+    q('.cert').addEventListener('click', async () => {
+      const b = q('.cert');
+      const old = b.textContent;
+      b.disabled = true;
+      b.textContent = 'requesting…';
+      const ok = await siteOp({ op: 'certificate', site: cardIndex(card) }, errEl);
+      if (!ok) { b.disabled = false; b.textContent = old; }
+    });
+
+    q('.save-site').addEventListener('click', () => {
+      clearError(errEl);
+      if (!authOn())
+        return saveSettings({ username: '' }, cardIndex(card), badge, errEl);
+      // No refusal to print: Save is dim until the login is complete, and
+      // what is missing is already said on the access row and counted on
+      // the status line. A red paragraph here was a third register for a
+      // fact the card states twice.
+      const username = q('#cfg-username-' + idx).value.trim();
+      const pw = q('#cfg-password-' + idx).value;
+      saveSettings(Object.assign({ username }, pw ? { password: pw } : {}),
+                   cardIndex(card), badge, errEl);
+    });
 
     return card;
   }
 
-  /* ══ Feature gate & startup. ══ */
+  /* ══ 5. The Server tab ══════════════════════════════════════════════
+     What the box is doing, and how it is set. The settings forms run over
+     the same validators the `set` command runs, so a value the terminal
+     refuses the page refuses with the same sentence. Deliberately absent
+     (the terminal keeps them): port and trusted proxy (behind-a-balancer
+     deployments) and every lifecycle verb. The domain is not a form either
+     — naming a site belongs on that site's card. ══ */
+
+  const HOST_FIELDS = [
+    ['email', 'Email',
+     'Registers this server with the certificate authority — one account for ' +
+     'every site here, not one per domain. Where renewal and expiry notices go.'],
+    ['rate_limit', 'Rate limit',
+     'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
+    ['auth_rate_limit', 'Auth rate limit',
+     'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
+    ['cache_size_mb', 'File cache size (MB)',
+     'Memory set aside to serve frequently requested files without re-reading the disk.'],
+  ];
+
+  function renderServer() {
+    const d = statusData || {};
+    const hostChecks = ((d.checks) || []).filter((c) => c.site === null);
+
+    // What has no card of its own says its piece here; a site's trouble is
+    // worn by that site's card on the Sites tab.
+    const needs = hostChecks.filter((c) => !c.ok);
+    $('attention').classList.toggle('hidden', !needs.length);
+    $('attention').innerHTML = needs.map((c) =>
+      `<b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
+      `<a href="#server">open Server →</a>`).join('<br>');
+    for (const a of $('attention').querySelectorAll('a'))
+      a.addEventListener('click', (e) => { e.preventDefault(); showTab('server'); });
+
+    $('status-state').innerHTML = d.running
+      ? '<span class="dot"></span>running'
+      : '<span class="warn">stopped</span>';
+    // Two controls, not three: restart is meaningless on a stopped server,
+    // and the second is whichever of stop/start the state calls for. Both
+    // are always present, dim when unavailable — the rule every button on
+    // this page follows.
+    $('btn-restart').disabled = !d.running;
+    $('btn-restart').title = d.running
+      ? 'Stop and start the service — applies a port change, or clears a wedged process'
+      : 'Nothing to restart — the server is stopped';
+    $('btn-power').textContent = d.running ? 'Stop' : 'Start';
+    $('btn-power').classList.toggle('danger', !!d.running);
+    $('btn-power').title = d.running
+      ? 'Take every site on this server offline until it is started again'
+      : 'Start the installed system service';
+
+    // The upgrade row tells; it never installs. Upgrading is a terminal
+    // act, so the row names the two commands and stops there.
+    $('host-rows').innerHTML =
+      row('Version', 'v' + (d.version || '?') +
+        (latestVersion
+          ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
+            ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
+          : '')) +
+      hostChecks.map(factRow).join('');
+
+    renderHostFields();
+    renderLoad();
+  }
+
+  function renderHostFields() {
+    // Swap is a size the operator types — the terminal has always asked for
+    // it that way — so it is a field among fields, saved by the same button.
+    const sw = (statusData || {}).swap || {};
+    // Allocated, not active: the kernel reports usable space, a page short
+    // of the file, so a field showing 1099 for an 1100 MB file would make
+    // typing the recommended number look like a resize that did not take.
+    const swapField = (sw.allocated_mb == null && sw.recommended_mb == null) ? '' :
+      field('swap_mb', 'Swap file (MB)',
+            sw.allocated_mb != null ? sw.allocated_mb : '',
+            { hint: 'Disk that absorbs a memory spike, so a burst past free RAM ' +
+                    'cannot take the host down.' +
+                    (sw.recommended_mb
+                      ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
+                      : '') });
+    // Re-rendering the form under a cursor would discard what is being
+    // typed, and the meter refreshes this tab every few seconds.
+    if (document.activeElement && document.activeElement.id === 'cfg-swap_mb') return;
+    $('cfg-host-fields').innerHTML =
+      HOST_FIELDS.map(([k, l, h]) => field(k, l, ((cfgData || {}).host || {})[k], { hint: h }))
+        .join('') + swapField;
+  }
+
+  /* ── The service's lifecycle: start, restart, stop. The page runs the
+     lifecycle of an installed service; it never installs one. ── */
+
+  async function serviceOp(b, op) {
+    b.disabled = true;
+    clearError($('cfg-host-error'));
+    try {
+      await post('/service', { op }, 'ok');
+      await refresh();
+    } catch (e) {
+      showError($('cfg-host-error'), reason(e));
+    }
+    b.disabled = false;
+  }
+
+  $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
+  // One control for the two states: starting needs no ceremony, stopping
+  // takes every site offline and asks first — in the page's own voice, the
+  // way a site card asks before deleting.
+  $('btn-power').addEventListener('click', () => {
+    if ((statusData || {}).running) $('stop-confirm').classList.toggle('hidden');
+    else serviceOp($('btn-power'), 'start');
+  });
+  $('btn-stop-no').addEventListener('click', () =>
+    $('stop-confirm').classList.add('hidden'));
+  $('btn-stop-yes').addEventListener('click', async () => {
+    $('stop-confirm').classList.add('hidden');
+    await serviceOp($('btn-power'), 'stop');
+  });
+
+  /* ── Saving settings. One Save covers every field on a form. ── */
+
+  async function saveSettings(values, siteIdx, badge, errEl) {
+    clearError(errEl);
+    setBadge(badge, 'badge-dim', 'saving…');
+    try {
+      await post('/config', { site: siteIdx, values }, 'saved');
+      setBadge(badge, 'badge-green', '✓ saved');
+      refresh();
+    } catch (e) {
+      setBadge(badge, 'badge-red', '✕ not saved');
+      showError(errEl, reason(e) + ' Nothing was changed.');
+    }
+  }
+
+  $('btn-save-host').addEventListener('click', async () => {
+    const badge = $('cfg-host-badge'), errEl = $('cfg-host-error');
+    clearError(errEl);
+    const values = {};
+    for (const [k] of HOST_FIELDS) values[k] = $('cfg-' + k).value.trim();
+
+    // The swapfile is the one setting whose save does filesystem work, so it
+    // runs only when its number actually changed — pressing Save on an
+    // untouched field must never swapoff anything.
+    const swapEl = $('cfg-swap_mb');
+    const want = swapEl ? parseInt(swapEl.value.trim(), 10) : NaN;
+    const allocated = ((statusData || {}).swap || {}).allocated_mb;
+    const resize = swapEl && want > 0 && want !== allocated;
+    if (swapEl && swapEl.value.trim() && !(want > 0))
+      return showError(errEl, 'Swap file size must be a number of megabytes.');
+
+    setBadge(badge, 'badge-dim', 'saving…');
+    try {
+      await post('/config', { site: 0, values }, 'saved');
+      if (resize) {
+        setBadge(badge, 'badge-dim', 'resizing the swapfile…');
+        await post('/swap', { mb: want }, 'ok');
+      }
+      setBadge(badge, 'badge-green', '✓ saved');
+      refresh();
+    } catch (e) {
+      setBadge(badge, 'badge-red', '✕ not saved');
+      showError(errEl, reason(e));
+    }
+  });
+
+  /* ══ 6. The Statistics tab ══════════════════════════════════════════
+     Counted traffic across every site, and the box's own load. ══ */
+
+  async function loadTraffic() {
+    clearError($('traffic-error'));
+    try {
+      const t = await getJSON('/traffic', { days: $('traffic-window').value });
+      const total = t.total || 0;
+      // Status codes are the server's vocabulary, not the reader's: each
+      // count is named for what actually happened.
+      const NAMED = [['Files sent', ['200', '206']],
+                     ['Already cached', ['304']],
+                     ['Nothing there', ['404']],
+                     ['Refused', ['403', '405']],
+                     ['Sign-in needed', ['401']],
+                     ['Rate limited', ['429']]];
+      const named = NAMED
+        .map(([name, codes]) => [name, codes.reduce(
+          (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
+        .filter(([, n]) => n > 0);
+      $('traffic-chart').innerHTML = total
+        ? chart(lineSVG(t.days.map((d) => d[1])),
+                t.days.length ? t.days[0][0] : '',
+                t.days.length ? t.days[t.days.length - 1][0] : '',
+                Math.max(...t.days.map((d) => d[1])))
+        : '';
+      $('traffic-rows').innerHTML = !total
+        ? row('Requests', 'none in this window — or no readable journal on this host')
+        : named.map(([name, n]) => row(name, String(n))).join('') +
+          row('Total requests', `<b>${total}</b>`, 'ledger');
+
+    } catch (e) {
+      showError($('traffic-error'), reason(e, 'Could not read traffic'));
+    }
+  }
+
+  $('btn-traffic-refresh').addEventListener('click', loadTraffic);
+  $('traffic-window').addEventListener('change', loadTraffic);
+
+  function renderLoad() {
+    const l = ((statusData || {}).load) || {};
+    $('load-rows').innerHTML =
+      row('CPU', l.cpu_percent == null ? '(not available on this host)'
+                 : l.cpu_percent.toFixed(1) + '% average' +
+                   (l.started_at ? ' since ' + escapeHtml(when(l.started_at)) : '')) +
+      row('Memory', l.memory_mb == null ? '(not available on this host)'
+                    : l.memory_mb.toFixed(1) + ' MB');
+    $('load-chart').innerHTML = cpuSeries.length < 2
+      ? '<p class="hint">Live CPU — the line starts when you open this tab.</p>'
+      : chart(lineSVG(cpuSeries),
+              (cpuSeries.length - 1) * METER_SECONDS + 's ago',
+              cpuSeries[cpuSeries.length - 1].toFixed(1) + '% now',
+              Math.max(1, ...cpuSeries).toFixed(0), '%');
+  }
+
+  /* ── Charts: inline SVG, sized by viewBox, no library. Every chart is
+     drawn with its scale — a line without a y-axis is a shape, not a
+     measurement. ── */
+
+  function lineSVG(values) {
+    const w = 300, h = 60, max = Math.max(1, ...values);
+    // A single reading has no slope to draw, so it is drawn as the flat
+    // line it is, corner to corner.
+    const pts = values.length === 1
+      ? [`0,${(h - (values[0] / max) * h).toFixed(1)}`,
+         `${w},${(h - (values[0] / max) * h).toFixed(1)}`]
+      : values.map((v, i) =>
+          `${(i / (values.length - 1) * w).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`);
+    return `<svg viewBox="0 0 ${w} ${h}" class="chart" preserveAspectRatio="none">` +
+      `<polyline points="${pts.join(' ')}" fill="none" stroke="#5A8466" ` +
+      `stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline></svg>`;
+  }
+
+  // A chart, its y-axis (top of scale and zero), and its x labels.
+  const chart = (svg, xFrom, xTo, yMax, unit) =>
+    `<div class="chart-wrap"><div class="chart-y">` +
+    `<span>${escapeHtml(String(yMax))}${unit || ''}</span><span>0</span></div>` +
+    `<div class="chart-body">${svg}` +
+    `<div class="chart-labels"><span>${escapeHtml(xFrom)}</span>` +
+    `<span>${escapeHtml(xTo)}</span></div></div></div>`;
+
+  /* ── The live meter: successive readings of the server's own cumulative
+     CPU counter, differenced here. Nothing is sampled or stored on the
+     server — the line exists only while this tab is open. ── */
+
+  const METER_SECONDS = 3;
+  let meterTimer = null, lastSample = null, cpuSeries = [];
+
+  async function sampleLoad() {
+    try {
+      const d = await getJSON('/status');
+      const l = d.load || {};
+      if (l.cpu_ns != null && lastSample) {
+        const dt = l.sampled_at - lastSample.at;
+        if (dt > 0) {
+          cpuSeries.push(Math.max(0,
+            (l.cpu_ns - lastSample.ns) / 1_000_000_000 / dt * 100));
+          if (cpuSeries.length > 60) cpuSeries.shift();
+        }
+      }
+      if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
+      statusData = d;
+      renderLoad();
+      clearError($('load-error'));
+    } catch (e) {
+      // Nothing is listening any more — the admin command ended, or the
+      // tunnel closed. Keep polling and every attempt prints another
+      // 'channel N: open failed' in the operator's terminal.
+      stopMeter();
+      showError($('load-error'), reason(e));
+    }
+  }
+
+  function startMeter() {
+    if (meterTimer) return;
+    meterTimer = setInterval(sampleLoad, METER_SECONDS * 1000);
+    sampleLoad();
+  }
+
+  function stopMeter() {
+    clearInterval(meterTimer);
+    meterTimer = null;
+  }
+
+  // A backgrounded tab has nobody reading it, and a closing one is gone:
+  // either way the polling stops, so an abandoned page cannot keep dialing
+  // a tunnel whose command has ended.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopMeter();
+    else if (!$('panel-stats').classList.contains('hidden')) startMeter();
+  });
+  window.addEventListener('pagehide', stopMeter);
+
+  /* ══ 7. Feature gate and startup ════════════════════════════════════ */
+
   const supported = typeof CompressionStream === 'function';
   $(supported ? 'app' : 'unsupported').classList.remove('hidden');
   if (supported) {

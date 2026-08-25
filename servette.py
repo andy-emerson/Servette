@@ -49,7 +49,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 # Paths
 #
@@ -133,9 +133,78 @@ def _check_password(submitted, stored_hash, stored_salt):
 
 
 # A site
+_MAX_REDIRECTS      = 200
+_MAX_REDIRECT_CHARS = 2000
+
+
+def _clean_redirects(raw):
+    """The site's redirect table, validated once at load so serving one is a
+    dict lookup and nothing else.
+
+    A source is a site-absolute path; a target is another site-absolute path
+    or an absolute http(s) URL. Anything else is dropped with a log line
+    rather than raised: one bad entry in a hand-edited table must not take a
+    whole site down, and a redirect that quietly did something other than
+    what it said would be worse than one that does nothing.
+
+    Two of the checks are load-bearing rather than tidy. A target is
+    narrowed to path-or-http(s) because a redirect is an open door by
+    nature, and `javascript:` or `data:` in a Location is a way to run
+    script on the operator's own origin. Control characters are refused on
+    both sides because a Location carrying CR or LF is response splitting —
+    the value reaches a header, and this is where that is stopped."""
+    out = {}
+    if not isinstance(raw, dict):
+        log.warning("redirects is not a table — ignoring it")
+        return out
+    if len(raw) > _MAX_REDIRECTS:
+        log.warning("more than %d redirects — only the first %d are loaded",
+                    _MAX_REDIRECTS, _MAX_REDIRECTS)
+    for key, target in list(raw.items())[:_MAX_REDIRECTS]:
+        src, dst = str(key).strip(), str(target).strip()
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in src + dst):
+            log.warning("redirect with a control character in it — ignored")
+            continue
+        if not src.startswith("/") or len(src) > _MAX_REDIRECT_CHARS:
+            log.warning("redirect source %r is not a site path — ignored", src[:80])
+            continue
+        if len(dst) > _MAX_REDIRECT_CHARS or not (
+                dst.startswith("/") or dst.startswith("http://")
+                or dst.startswith("https://")):
+            log.warning("redirect target %r is not a path or http(s) URL — ignored",
+                        dst[:80])
+            continue
+        # One rule covers /old and /old/, on both sides of the lookup.
+        norm = src.rstrip("/") or "/"
+        if norm == (dst.rstrip("/") or "/"):
+            log.warning("redirect %s points at itself — ignored", norm)
+            continue
+        out[norm] = dst
+    return out
+
+
+def _redirect_toml(site):
+    """The site's redirect table as TOML, or nothing at all when it is empty.
+
+    Written LAST inside each [[site]] block, because a TOML sub-table
+    swallows every key that follows it: a scalar written after
+    [site.redirects] would be read back as part of the table, not as a
+    field of the site."""
+    if not site.redirects:
+        return ""
+    def q(value):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    lines = "\n".join(f"{q(src)} = {q(dst)}"
+                      for src, dst in sorted(site.redirects.items()))
+    return ("\n# A path on this site = where a visitor asking for it is sent.\n"
+            "# Answered with a 301, before any file is looked for.\n"
+            "[site.redirects]\n" + lines + "\n")
+
+
 class Site:
     """One `[[site]]` block: everything that varies per hosted domain — the domain
-    itself, its folder, its own certificate, its visitor auth, its publish channel.
+    itself, whether it is served, its folder, its own certificate, its visitor
+    auth, its redirects.
     Host-level settings (port, TLS, rate limits, cache, ACME email, security headers,
     ...) live once on Config, not here: every field lives at exactly one level, no
     fallback lookup between them."""
@@ -152,8 +221,11 @@ class Site:
         self.username       = data.get("username",       "")
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
-        self.publish_url    = data.get("publish_url",    "")
-        self.publish_key    = data.get("publish_key",    "")
+        # Old path -> new path, validated once here so the request path is a
+        # dict lookup and nothing more. A file in the site folder would be
+        # content, and content is read at request time — which is the whole
+        # reason this is a setting.
+        self.redirects      = _clean_redirects(data.get("redirects", {}))
         self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
@@ -250,8 +322,6 @@ class Config:
                 "username":      data.get("username",      ""),
                 "password_hash": data.get("password_hash", ""),
                 "password_salt": data.get("password_salt", ""),
-                "publish_url":   data.get("publish_url",   ""),
-                "publish_key":   data.get("publish_key",   ""),
             })
             if data.get("password") and not legacy.password_hash:
                 legacy.password_hash, legacy.password_salt = _hash_password(data["password"])
@@ -394,16 +464,10 @@ key_file = {s(site.key_file)}
 # Leave username blank to disable password protection
 username = {s(site.username)}
 
-# Site publish channel: where signed content bundles are pulled from, and the
-# public key (distinct from Servette's own release-signing key) that verifies
-# them. Leave blank to disable — no polling happens without both set.
-publish_url = {s(site.publish_url)}
-publish_key = {s(site.publish_key)}
-
 # Machine-generated — do not edit by hand
 password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
-""" for site in self.sites)
+{_redirect_toml(site)}""" for site in self.sites)
 
         content = f"""\
 # Servette configuration — https://github.com/andy-emerson/servette
@@ -841,9 +905,11 @@ def _security_headers(site):
     return headers
 
 
-# Reserved paths
+# Reserved paths. The connection test's URL keeps the older word: the page
+# was renamed, the address cannot be (DECISIONS.md, "It is a connection
+# test") — a published URL outlives the name someone gave the page.
 _WELL_KNOWN_VERSION_PATH = "/.well-known/servette"
-_CHECK_PATH              = "/.well-known/servette-check"
+_CONNECTION_PATH         = "/.well-known/servette-check"
 
 # The default 404 body (DECISIONS.md: "The error page is server-delivered,
 # client-executed"): authored as src/404.html and inlined by build.py, so it is
@@ -871,8 +937,10 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22 role=%22img%22 aria-label=%22Servette%22> <title>Servette</title> <rect x=%222%22 y=%222%22 width=%2260%22 height=%2260%22 rx=%2213%22 fill=%22%230e0e0e%22 stroke=%22%235A8466%22 stroke-width=%224%22/> <text x=%2214%22 y=%2245%22 font-family=%22ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace%22 font-size=%2236%22 font-weight=%22600%22 fill=%22%235A8466%22>S</text> <rect x=%2235%22 y=%2239%22 width=%2216%22 height=%226%22 rx=%221.5%22 fill=%22%235A8466%22/> </svg>">
   <title>404 — not found</title>
   <style>
+    /* ── Theme and reset ─────────────────────────────────────────────── */
     :root {
       --bg:      #0e0e0e;
       --surface: #161616;
@@ -889,6 +957,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ── Page frame: centred column over a faint noise wash ──────────── */
     body {
       background: var(--bg);
       color: var(--text);
@@ -918,6 +987,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       width: 100%;
     }
 
+    /* ── Wordmark and tagline ────────────────────────────────────────── */
     .header {
       margin-bottom: 3rem;
     }
@@ -959,9 +1029,9 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
     .dot.red { background: var(--red); animation: none; }
 
+    /* ── The miss itself: code, path, and why you are seeing this ────── */
     .notfound {
       border: 1px solid var(--border);
-      border-left: 3px solid var(--muted);
       border-radius: 8px;
       background: var(--surface);
       padding: 1.25rem;
@@ -1019,15 +1089,7 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       flex-wrap: wrap;
     }
 
-    .notfound-links a {
-      font-size: 0.75rem;
-      color: #5A8466;
-      text-decoration: none;
-    }
-
-    .notfound-links a:hover { text-decoration: underline; }
-
-    /* ── Connection card ── */
+    /* ── Connection card: the one live judgment this page keeps ──────── */
     .verified {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1073,22 +1135,23 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
       background: var(--surface);
     }
 
-    .verified-links a {
+    /* Every link on the page is a Servette link — one rule for all of them. */
+    .notfound-links a, .verified-links a, .note a {
       font-size: 0.75rem;
       color: #5A8466;
       text-decoration: none;
     }
+    .notfound-links a:hover, .verified-links a:hover, .note a:hover {
+      text-decoration: underline;
+    }
 
-    .verified-links a:hover { text-decoration: underline; }
-
+    /* ── Footer ──────────────────────────────────────────────────────── */
     .note {
       font-size: 0.7rem;
       color: var(--muted);
       line-height: 1.7;
     }
-    .note a { color: #60a5fa; text-decoration: none; }
-    .note a:hover { text-decoration: underline; }
-    .note a.brand { color: #5A8466; }
+    .note a { font-size: inherit; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -1106,29 +1169,15 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline" id="tagline">
+    <div class="tagline">
       <span class="dot" id="dot"></span><span id="tagline-text">THE SERVER IS RUNNING — THIS PATH IS NOT</span>
     </div>
   </div>
 
-  <!-- The server is up and answered — the path is what is missing — so this
-       leads with the path rather than with blame. -->
-  <div class="notfound">
-    <div class="notfound-head">
-      <span class="notfound-code">404</span>
-      <span class="notfound-msg">Nothing published here</span>
-    </div>
-    <div class="notfound-path" id="notfound-path">—</div>
-    <p class="notfound-why" id="notfound-why">
-      The server is running and answered this request, so the connection is
-      fine — only the path is missing. You are seeing this page because the
-      site publishes no <code>404.html</code> of its own.
-    </p>
-    <div class="notfound-links">
-      <a href="/">← the site's home page</a>
-    </div>
-  </div>
-
+  <!-- The connection card leads: whether the server answered, and whether
+       the wire is encrypted, are true of the whole site and settle a
+       reader's first question. What is missing is the narrower fact, and
+       follows it. -->
   <div class="verified">
     <div class="verified-header">
       <div>
@@ -1142,9 +1191,27 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- The server is up and answered — the path is what is missing — so this
+       leads with the path rather than with blame. -->
+  <div class="notfound">
+    <div class="notfound-head">
+      <span class="notfound-code">404</span>
+      <span class="notfound-msg">Nothing published here</span>
+    </div>
+    <div class="notfound-path" id="notfound-path">—</div>
+    <p class="notfound-why">
+      The server is running and answered this request, so the connection is
+      fine — only the path is missing. You are seeing this page because the
+      site publishes no <code>404.html</code> of its own.
+    </p>
+    <div class="notfound-links">
+      <a href="/">← the site's home page</a>
+    </div>
+  </div>
+
   <div class="note">
-    This page ships inside Servette itself. Served by
-    <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
+    Served by
+    <a href="https://servette.org">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
 
@@ -1183,22 +1250,26 @@ _NOT_FOUND_PAGE = """<!DOCTYPE html>
 """.encode()
 _NOT_FOUND_ETAG = '"' + hashlib.sha256(_NOT_FOUND_PAGE).hexdigest()[:16] + '"'
 
-# The connection test (src/check.html), served at _CHECK_PATH on every site —
-# a reserved path under /.well-known/, the one namespace the hidden-path rule
+# The connection test (src/connection.html), served on every site at a
+# reserved path under /.well-known/ — the one namespace the hidden-path rule
 # already sets apart, so an operator's content never shadows the outside
 # vantage the way a custom 404.html takes over the miss body.
-_CHECK_PAGE = """<!DOCTYPE html>
-<!-- src/check.html — the connection test, inlined into the module by
-     build.py and served at the reserved path /.well-known/servette-check
-     (DECISIONS.md, "The connection test has its own reserved page").
-     Linked from the default 404 body and from the admin page's Status tab.
+_CONNECTION_PAGE = """<!DOCTYPE html>
+<!-- src/connection.html — inlined into the module by build.py and
+     served at the reserved path /.well-known/servette-check (DECISIONS.md,
+     "The connection test has its own reserved page"). The URL keeps the
+     older word on purpose: the page was renamed, the address cannot be.
+     Linked from the default 404 body, and from each site's card on the
+     admin page.
 
      Same-origin by construction, so it can read what a cross-origin probe
      never could: it checks the connection it was itself loaded over. It
      never enumerates the filesystem — no "did you mean" suggestions —
      because that would turn a public page into a file-discovery oracle for
-     strangers. The version-discovery row needs the operator's session (the
-     endpoint is auth-gated) and shows for a logged-in reader only. Because
+     strangers. It does not report the server's version: on a public site
+     that endpoint answers 404 by design, so the row could only ever say
+     "withheld" while costing a miss in the log on every run, and the
+     operator reads the version from `status` or the admin page. Because
      this file ships with the server, its checks can never drift from the
      features they check — and because its path is reserved, an operator's
      own content never takes it over, so the outside vantage survives a
@@ -1210,8 +1281,10 @@ _CHECK_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22 role=%22img%22 aria-label=%22Servette%22> <title>Servette</title> <rect x=%222%22 y=%222%22 width=%2260%22 height=%2260%22 rx=%2213%22 fill=%22%230e0e0e%22 stroke=%22%235A8466%22 stroke-width=%224%22/> <text x=%2214%22 y=%2245%22 font-family=%22ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace%22 font-size=%2236%22 font-weight=%22600%22 fill=%22%235A8466%22>S</text> <rect x=%2235%22 y=%2239%22 width=%2216%22 height=%226%22 rx=%221.5%22 fill=%22%235A8466%22/> </svg>">
   <title>Connection test</title>
   <style>
+    /* ── Theme and reset ─────────────────────────────────────────────── */
     :root {
       --bg:      #0e0e0e;
       --surface: #161616;
@@ -1228,6 +1301,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ── Page frame: centred column over a faint noise wash ──────────── */
     body {
       background: var(--bg);
       color: var(--text);
@@ -1257,6 +1331,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
       width: 100%;
     }
 
+    /* ── Wordmark and tagline ────────────────────────────────────────── */
     .header {
       margin-bottom: 3rem;
     }
@@ -1298,7 +1373,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
     .dot.red { background: var(--red); animation: none; }
 
-    /* ── Connection card ── */
+    /* ── Connection card: the headline verdict ───────────────────────── */
     .verified {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1338,7 +1413,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
     .badge-green { background: rgba(74,222,128,0.12); color: var(--green); border: 1px solid rgba(74,222,128,0.2); }
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
 
-    /* ── The report ── */
+    /* ── The report: one row per finding, evidence underneath ────────── */
     .checks {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1417,9 +1492,8 @@ _CHECK_PAGE = """<!DOCTYPE html>
       color: var(--muted);
       line-height: 1.7;
     }
-    .note a { color: #60a5fa; text-decoration: none; }
+    .note a { color: #5A8466; text-decoration: none; }
     .note a:hover { text-decoration: underline; }
-    .note a.brand { color: #5A8466; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -1437,7 +1511,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
   <div class="header">
     <div class="servette-logo">Serv<span class="ette">ette</span><span class="cursor">_</span></div>
-    <div class="tagline" id="tagline">
+    <div class="tagline">
       <span class="dot" id="dot"></span><span id="tagline-text">checking...</span>
     </div>
   </div>
@@ -1463,7 +1537,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 
   <div class="note">
     Served by
-    <a href="https://github.com/andy-emerson/servette" class="brand">Servette</a> —
+    <a href="https://servette.org">Servette</a> —
     The Simple, Secure, Static-Site Server.
   </div>
 
@@ -1513,8 +1587,8 @@ _CHECK_PAGE = """<!DOCTYPE html>
     { name: 'Encrypted', run: async () => {
         const r = await fetch(here, { cache: 'no-store' });
         const ct = r.headers.get('Content-Type') || '(absent)';
-        return { ok: location.protocol === 'https:' && r.status === 200,
-                 obs: location.protocol === 'https:'
+        return { ok: isHttps && r.status === 200,
+                 obs: isHttps
                    ? 'HTTPS, and this browser accepted the certificate'
                    : 'served over plain HTTP — visitors are unprotected',
                  ev: 'GET ' + P + ' → ' + r.status + ', ' + ct }; } },
@@ -1592,24 +1666,9 @@ _CHECK_PAGE = """<!DOCTYPE html>
                  ev: 'POST → ' + post + ' · unknown → ' + miss +
                      ' · traversal → ' + trav }; } },
 
-    // Version discovery — same-origin, auth-gated: the one check only this
-    // page can make. Servette serves it solely on a private site, so the
-    // exact version reaches a party that already signed in (this browser)
-    // and never an anonymous scanner. A public site withholding it is the
-    // design working, which is a pass, not a skip.
-    { name: 'Version', run: async () => {
-        const r = await fetch('/.well-known/servette', { cache: 'no-store' });
-        if (r.status === 404)
-          return { ok: true, obs: 'withheld — the site is public, so nobody is told',
-                   ev: 'GET /.well-known/servette → 404' };
-        if (r.status !== 200)
-          return { ok: null, obs: 'not answered (an older Servette, or not signed in)',
-                   ev: 'GET /.well-known/servette → ' + r.status };
-        const v = await r.json();
-        return { ok: true, obs: 'running v' + v.running + ', readable only once signed in',
-                 ev: 'GET /.well-known/servette → 200' }; } },
   ];
 
+  // ── Rendering the report ──────────────────────────────────────────
   const LABEL = { pass: 'PASS', fail: 'FAIL', skip: 'SKIP', pending: '····' };
   const logEl = $('t-log');
 
@@ -1642,8 +1701,11 @@ _CHECK_PAGE = """<!DOCTYPE html>
     const rows = checks.map((c) => ({ c, el: addRow(c.name) }));
     for (const { c, el } of rows) {
       let r;
+      // A check that throws is a skip, not a failure — the request never
+      // completed, so nothing was observed. What went wrong becomes the
+      // evidence, the same as for a check that did complete.
       try { r = await c.run(); }
-      catch (e) { r = { ok: null, obs: 'could not run' }; }
+      catch (e) { r = { ok: null, obs: 'could not run', ev: String(e) }; }
       el.obs.textContent = r.obs;
       el.ev.textContent = r.ev || '';
       if (r.ok === true)       { paint(el.row, el.st, 'pass'); pass++; }
@@ -1666,7 +1728,7 @@ _CHECK_PAGE = """<!DOCTYPE html>
 </body>
 </html>
 """.encode()
-_CHECK_ETAG = '"' + hashlib.sha256(_CHECK_PAGE).hexdigest()[:16] + '"'
+_CONNECTION_ETAG = '"' + hashlib.sha256(_CONNECTION_PAGE).hexdigest()[:16] + '"'
 
 
 # Log escaping
@@ -1805,21 +1867,40 @@ def _handle_request(method, url_path, headers, raw_ip):
     # the site's own auth like everything else, and carrying the same
     # revalidate-always caching contract as the 404 body, for the same
     # reason: the page's checks probe the URL it was served from.
-    if url_path.split("?", 1)[0] == _CHECK_PATH:
+    if url_path.split("?", 1)[0] == _CONNECTION_PATH:
         cache = _cache_control_header(site.username)
         if "max-age" in cache:
             cache = ("private" if site.username else "public") + ", no-cache"
-        if headers.get("If-None-Match", "") == _CHECK_ETAG:
+        if headers.get("If-None-Match", "") == _CONNECTION_ETAG:
             log.info("304 Not Modified %s to %s", log_path, ip)
-            return resp(304, [(b"etag", _CHECK_ETAG.encode()),
+            return resp(304, [(b"etag", _CONNECTION_ETAG.encode()),
                               (b"cache-control", cache.encode())])
         log.info("200 %s (connection test) to %s", log_path, ip)
         return resp(200, [
             (b"content-type",   b"text/html; charset=utf-8"),
-            (b"content-length", str(len(_CHECK_PAGE)).encode()),
-            (b"etag",           _CHECK_ETAG.encode()),
+            (b"content-length", str(len(_CONNECTION_PAGE)).encode()),
+            (b"etag",           _CONNECTION_ETAG.encode()),
             (b"cache-control",  cache.encode()),
-        ], _CHECK_PAGE)
+        ], _CONNECTION_PAGE)
+
+    # Redirects, before the filesystem is touched at all. One dict lookup on
+    # a table loaded with the config — never a file read, which is what the
+    # _redirects-file convention other hosts use would cost at request time
+    # (DECISIONS.md, "Redirects are a setting, not a file in the site").
+    # Query strings ride along: a redirect names a path, and dropping the
+    # query would silently break every campaign link pointed at the old one.
+    if site.redirects:
+        bare, sep, query = url_path.partition("?")
+        target = site.redirects.get(bare.rstrip("/") or "/")
+        if target:
+            if sep and "?" not in target:
+                target += sep + query
+            log.info("301 %s to %s", log_path, ip)
+            return resp(301, [
+                (b"location",       target.encode("ascii", "ignore")),
+                (b"content-length", b"0"),
+                (b"cache-control",  b"no-cache"),
+            ])
 
     # Resolve request path to a file within the matched site's own serve_dir
     try:
@@ -2342,19 +2423,19 @@ def start_server():
         _https_server, _https_thread, _http_server
 
     if _server_running():
-        print("Server is already running.")
+        print("  Server is already running.")
         return
 
     for site in config.sites:
         for fname in [site.serve_dir, site.cert_file, site.key_file]:
             if not fname:
-                print("Not fully configured. Run 'config' to set up the server.")
+                print("  Not fully configured. Run 'config' to set up the server.")
                 if "--serve" in sys.argv:
                     sys.exit(1)
                 return
             full_path = _resolve(fname)
             if not os.path.exists(full_path):
-                print(f"File not found: {full_path}")
+                print(f"  File not found: {full_path}")
                 if "--serve" in sys.argv:
                     sys.exit(1)
                 return
@@ -2364,7 +2445,7 @@ def start_server():
         https = _TLSThreadingHTTPServer(("0.0.0.0", config.port), _Handler, _build_site_ssl_contexts())
     except Exception as e:
         log.error("Server failed to start on port %d: %s", config.port, e)
-        print(f"Server failed to start on port {config.port}: {e}")
+        print(f"  Server failed to start on port {config.port}: {e}")
         if "--serve" in sys.argv:
             sys.exit(1)
         return
@@ -2374,7 +2455,7 @@ def start_server():
         redirect = _CappedThreadingHTTPServer(("0.0.0.0", 80), _RedirectHandler)
     except OSError as e:
         log.warning("Could not bind to port 80: %s", e)
-        print("Note: could not bind to port 80. HTTP redirects unavailable.")
+        print("  Note: could not bind to port 80. HTTP redirects unavailable.")
         redirect = None
 
     _https_server = https
@@ -2403,12 +2484,12 @@ def start_server():
         if days is not None and days < 30:
             label = site.domain or "this site"
             if days <= 0:
-                print(f"Warning: SSL certificate for {label} has expired. Browsers will block visitors.")
-                print("Run 'config' then 'cert' to renew it.\n")
+                print(f"  Warning: SSL certificate for {label} has expired. Browsers will block visitors.")
+                print("  Run 'config' then 'cert' to renew it.\n")
                 log.warning("SSL certificate for %s has expired", label)
             else:
-                print(f"Warning: SSL certificate for {label} expires in {days} days.")
-                print("Run 'config' then 'cert' to renew it.\n")
+                print(f"  Warning: SSL certificate for {label} expires in {days} days.")
+                print("  Run 'config' then 'cert' to renew it.\n")
                 log.warning("SSL certificate for %s expires in %d days", label, days)
 
     for issue in _production_issues():
@@ -2442,7 +2523,7 @@ def stop_server():
         _sweep_thread.join(timeout=5)
         _sweep_thread = None
     log.info("Server stopped")
-    print("Session server stopped.")
+    print("  Session server stopped.")
 
 
 # The service watch
@@ -2813,7 +2894,7 @@ def _obtain_trusted_cert(domain, site):
     challenge_dir    = os.path.join(ACME_WEBROOT, ".well-known", "acme-challenge")
 
     print(f"\nGetting a trusted SSL certificate for {domain}...")
-    print("Make sure your domain points to this server's IP first.\n")
+    print("  Make sure your domain points to this server's IP first.\n")
 
     os.makedirs(challenge_dir, exist_ok=True)
     os.makedirs(CERTS_DIR, exist_ok=True)
@@ -4083,7 +4164,7 @@ def _write_unit_files():
             ["useradd", "--system", "--no-create-home", "--shell", "/sbin/nologin", "servette"],
             check=True
         )
-        print("Created system user 'servette'.")
+        print("  Created system user 'servette'.")
 
     # The runtime is settled before the unit texts, which name what it decides —
     # and proved before it replaces anything, so a copy the service could not
@@ -4166,11 +4247,14 @@ def cmd_enable():
         updating = _write_unit_files()
 
         if updating:
-            print("Service file updated.")
+            # A refresh says what changed and stops. The watchdog was armed
+            # by the first enable and is still armed; repeating it on every
+            # re-run made a two-line result look like a four-line one.
+            print("  Service file updated.")
         else:
-            print("Servette enabled as a system service.")
-            print("It will start automatically on boot and survive SSH disconnects.")
-        print("Network watchdog timer enabled (recovers a dropped default route).")
+            print("  Servette enabled as a system service.")
+            print("  It will start automatically on boot and survive SSH disconnects.")
+            print("  A watchdog timer recovers a dropped default route.")
         log.info("Enabled as systemd service")
 
         _ensure_swap()
@@ -4181,18 +4265,18 @@ def cmd_enable():
             if _prompt("Server is running in session only. Restart as a service now?"):
                 stop_server()
                 subprocess.run(["systemctl", "start", "servette"], check=True, capture_output=True)
-                print("Server started as a service.")
+                print("  Server started as a service.")
                 log.info("Service started after enable")
                 cmd_status()
 
     except ValueError:
         pass  # the writer already printed the path refusal
     except PermissionError:
-        print("Error: enable needs root, and sudo is unavailable — re-run as root.")
+        print("  Error: enable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
-        print("Error: enable requires a Linux server with systemd.")
+        print("  Error: enable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
-        print(f"Error during enable: {e}")
+        print(f"  Error during enable: {e}")
 
 
 # disable
@@ -4217,18 +4301,25 @@ def cmd_disable():
         # second program sitting on the host with nothing running it.
         shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
         subprocess.run(["systemctl", "daemon-reload"], check=True)
-        print("Servette service disabled.")
+        print("  Servette service disabled.")
         log.info("Systemd service disabled")
     except PermissionError:
-        print("Error: disable needs root, and sudo is unavailable — re-run as root.")
+        print("  Error: disable needs root, and sudo is unavailable — re-run as root.")
     except FileNotFoundError:
-        print("Error: disable requires a Linux server with systemd.")
+        print("  Error: disable requires a Linux server with systemd.")
     except subprocess.CalledProcessError as e:
-        print(f"Error during disable: {e}")
+        print(f"  Error during disable: {e}")
 
 
 # Menu metrics
 _PAD = 22
+
+# When free disk is worth saying out loud. Two thresholds because one does
+# not fit both a 4 GB Pi card and a 200 GB VPS: an absolute floor a publish
+# plus its kept versions can exhaust, and a fraction that catches a large
+# disk filling steadily.
+_DISK_LOW_MB       = 512
+_DISK_LOW_FRACTION = 0.10
 
 
 def _banner(title):
@@ -4264,9 +4355,7 @@ _COMMANDS = [
     ("log [n]",          "show the last n log entries"),
     ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
-    ("publish",          "one guided flow for site content: pull, roll back, channel"),
-    ("pull [n]",         "check a site's publish channel and pull new content now"),
-    ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
+    ("restore-site [n]", "roll back a site's content to a kept version"),
     ("help",             "show this message"),
     ("quit",             "exit"),
 ]
@@ -4275,14 +4364,12 @@ HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d i
 # The config commands
 _CONFIG_COMMANDS = [
     ("sites",           "list configured sites"),
-    ("add-site",        "add a new site (folder, domain, password, publish channel)"),
+    ("add-site",        "add a new site (domain and password)"),
     ("remove-site <n>", "remove a site"),
     ("move-site <n> <to>", "reorder sites (the first domainless one answers unmatched Hosts)"),
-    ("dir [n]",         "directory to serve"),
     ("port",            "HTTPS port"),
     ("cert [n]",        "SSL certificate and key"),
     ("email",           "email address"),
-    ("publish [n]",     "site publish channel (watch URL and signing key)"),
     ("username [n]",    "login username"),
     ("password [n]",    "login password"),
     ("limits",          "rate limits"),
@@ -4295,17 +4382,6 @@ _CONFIG_COMMANDS = [
     ("back",            "return to main shell"),
 ]
 CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
-
-
-# The publish commands
-_PUBLISH_COMMANDS = [
-    ("pull [n]",         "fetch and swap in new content from the site's channel"),
-    ("restore-site [n]", "roll back a site's content (undoes its last pull)"),
-    ("channel [n]",      "view or edit the publish channel (watch URL and key)"),
-    ("show",             "show each site's channel and backup"),
-    ("back",             "return to main shell"),
-]
-PUBLISH_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _PUBLISH_COMMANDS)
 
 
 # Safe input
@@ -4357,8 +4433,6 @@ def _config_show():
             ("Directory",   val(site.serve_dir)),
             ("Certificate", val(site.cert_file)),
             ("Key",         val(site.key_file)),
-            ("Publish URL", val(site.publish_url)),
-            ("Publish key", val(site.publish_key)),
             ("Username",    val(site.username)),
             ("Password",    "(set)" if site.password_hash else "(not set)"),
         ]
@@ -4374,7 +4448,7 @@ def _config_sites():
         state = "" if site.active else ", DEACTIVATED (set active=yes to serve)"
         print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}{state}")
     print()
-    print("  Edit one with e.g. 'dir 1', 'cert 1', 'publish 1' (index defaults to 0).")
+    print("  Edit one with e.g. 'cert 1', 'username 1' (index defaults to 0).")
     print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
 
 
@@ -4408,10 +4482,11 @@ def _serve_dir_exposes_secrets(path):
 
 # add-site
 def _invent_site_dir():
-    """Create and own an empty folder for a page-added site. Servette names
-    it: the folder is where publishes land, not a question an operator
-    should have to answer (the add-card ruling — and the folder concept is
-    on its way out of the vocabulary entirely)."""
+    """Create and own an empty folder for a new site. Servette names it: the
+    folder is where publishes land, not a question an operator answers
+    ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-has-left-the-vocabulary)).
+    Both doors — the page's add-card and the terminal's add-site — come
+    here, so neither can invent a folder the other would not."""
     name = f"site-{os.urandom(3).hex()}"
     os.makedirs(_resolve(name), exist_ok=True)
     _chown_operator(_resolve(name))
@@ -4445,33 +4520,18 @@ def _append_site(serve_dir):
 
 
 def _config_add_site():
-    """Add a site — the same questions cmd_setup asks for the very first one
-    (domain, password), plus the folder question the first site gets for free
-    (its default, 'site', is baked in and can't also serve a second site)."""
+    """Add a site — the same two questions cmd_setup asks for the very first
+    one, domain and password. The folder is not among them: Servette names
+    and creates it, the same way the page's add-card does."""
     print("\n  Adding a new site.\n")
-    dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
-    if dirs:
-        print("  Existing folders:")
-        for d in dirs:
-            print(f"    {d}")
-        print()
-    folder = _input("  serve_dir: ").strip()
-    if not folder or not os.path.isdir(_resolve(folder)):
-        print(f"  → directory not found: {_resolve(folder or '(blank)')}. Create it first, then try again.")
-        return
-    if not _is_within_base_dir(_resolve(folder)):
-        print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
-        return
-    if _serve_dir_exposes_secrets(_resolve(folder)):
-        print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
-        return
-    # Nothing is written and nothing is offered: a site with no index.html
-    # answers its own domain with the embedded error page, which says the
-    # server is up and that nothing is published yet. Setup still never leaves
-    # a site with nothing to serve (#37) — it just no longer needs to put a
-    # file in the operator's folder to keep that promise.
-    if not os.path.exists(os.path.join(_resolve(folder), "index.html")):
-        print("  No index.html yet — the site will answer with Servette's error page until you publish one.")
+    # Nothing is written into it and nothing is offered: a site with no
+    # index.html answers its own domain with the embedded error page, which
+    # says the server is up and that nothing is published yet. Setup still
+    # never leaves a site with nothing to serve (#37) — it just no longer
+    # needs to put a file in a folder to keep that promise.
+    folder = _invent_site_dir()
+    print(f"  Content will land in {_resolve(folder)} — Servette's to manage.")
+    print("  Until you publish, the site answers with Servette's error page.")
 
     # The self-signed pair keeps a second site from colliding with the
     # first's cert.pem/key.pem — overwritten if a domain is obtained below,
@@ -4524,14 +4584,14 @@ def _config_add_site():
 
 # remove-site
 def _remove_site(idx):
-    """Drop site `idx` and delete its server copies — the content tree, the
-    publish slots, and the one-step backup. The operator's originals live in
-    their own local storage; everything here is a derived copy, which is what
-    makes deletion the honest meaning of 'remove' (deactivation is the
-    keep-everything alternative). The site's certificate files are kept, and
-    a folder another site still points at is left alone. Returns an error
-    sentence, empty on success. Shared by the terminal's remove-site and the
-    page's cards."""
+    """Drop site `idx` and delete its server copies — the live tree, every
+    kept version in its ring, a staged preview, and the shapes that predate
+    the ring. The operator's originals live in their own local storage;
+    everything here is a derived copy, which is what makes deletion the
+    honest meaning of 'remove' (deactivation is the keep-everything
+    alternative). The site's certificate files are kept, and a folder another
+    site still points at is left alone. Returns an error sentence, empty on
+    success. Shared by the terminal's remove-site and the page's cards."""
     if not (0 <= idx < len(config.sites)):
         return f"no site {idx}"
     if len(config.sites) == 1:
@@ -4543,8 +4603,17 @@ def _remove_site(idx):
     shared = any(os.path.realpath(_resolve(s.serve_dir)) == os.path.realpath(base)
                  for s in config.sites)
     if not shared and _is_within_base_dir(base):
-        for suffix in ("", ".a", ".b", ".bak", ".new"):
-            path = base + suffix
+        # Every derived tree, named by the same functions that create them
+        # rather than by a prefix sweep over the directory: a sweep is
+        # shorter and would also delete a neighbouring site whose folder
+        # name happens to start with this one's. _version_dirs is the ring
+        # (a filter, not a prefix match), _content_slots and .bak are the
+        # pre-ring shapes a legacy site may still hold, .new is an
+        # abandoned staging tree, and _preview_dir is an unpublished draft.
+        doomed = [p for p, _stamp in _version_dirs(victim.serve_dir)]
+        doomed += list(_content_slots(victim.serve_dir))
+        doomed += [base + ".bak", base + ".new", _preview_dir(victim), base]
+        for path in doomed:
             try:
                 if os.path.islink(path):
                     os.unlink(path)
@@ -4607,32 +4676,6 @@ def _config_move_site(args):
         return
     err = _move_site(int(args[0]), int(args[1]))
     print(f"  {err}" if err else "  → moved.")
-
-
-# dir
-def _config_dir(site):
-    dirs = sorted(d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d)) and not d.startswith("."))
-    if dirs:
-        print()
-        for d in dirs:
-            print(f"    {d}{' ←' if d == site.serve_dir else ''}")
-    new_value = _input(f"\n  serve_dir [{site.serve_dir}]: ").strip()
-    if not new_value:
-        print("  → unchanged")
-        return
-    path = _resolve(new_value)
-    if not os.path.isdir(path):
-        print(f"  → directory not found: {path}")
-        return
-    if not _is_within_base_dir(path):
-        print(f"  → serve_dir must be inside {BASE_DIR} — the publish channel and the systemd sandbox both depend on it.")
-        return
-    if _serve_dir_exposes_secrets(path):
-        print("  → that folder holds Servette's own config or TLS keys — serving it would publish them. Pick another.")
-        return
-    site.serve_dir = new_value
-    config.save()
-    print("  → saved")
 
 
 # The generic setter
@@ -4796,35 +4839,6 @@ def _config_trusted_proxy():
     print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
 
 
-# publish
-def _config_publish(site):
-    print(f"\n  Current watch URL: {site.publish_url or '(not set)'}")
-    print("  Where signed content bundles (a .tar.gz plus its .sig) are pulled from —")
-    print("  typically a GitHub release. Leave blank to disable publishing.\n")
-    url = _input("  publish_url: ").strip()
-    if url and not url.startswith("https://"):
-        print("  → must be an https:// URL, unchanged")
-    elif url != site.publish_url:
-        site.publish_url = url
-        config.save()
-        print("  → saved" if url else "  → cleared, publishing disabled")
-    else:
-        print("  → unchanged")
-
-    print(f"\n  Current signing key: {site.publish_key or '(not set)'}")
-    print("  The public half of the content-signing keypair generated by the publish")
-    print("  tool — 64 hex characters (a 32-byte Ed25519 public key). Leave blank to clear.\n")
-    key = _input("  publish_key: ").strip().lower()
-    if key and not re.fullmatch(r"[0-9a-f]{64}", key):
-        print("  → not a 64-character hex string, unchanged")
-    elif key != site.publish_key:
-        site.publish_key = key
-        config.save()
-        print("  → saved" if key else "  → cleared")
-    else:
-        print("  → unchanged")
-
-
 # tls
 def _config_tls():
     print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
@@ -4900,10 +4914,6 @@ def cmd_config():
             _config_remove_site(args)
         elif cmd == "move-site":
             _config_move_site(args)
-        elif cmd in ("dir", "directory"):
-            site = _config_site_arg(args)
-            if site is not None:
-                _config_dir(site)
         elif cmd == "port":
             _config_set("port", "port", int, lambda v: 1 <= v <= 65535, "invalid port number")
         elif cmd == "cert":
@@ -4920,10 +4930,6 @@ def cmd_config():
                 _config_password(site)
         elif cmd == "email":
             _config_set("email", "email")
-        elif cmd == "publish":
-            site = _config_site_arg(args)
-            if site is not None:
-                _config_publish(site)
         elif cmd == "limits":
             _config_limits()
         elif cmd == "cache":
@@ -4956,17 +4962,20 @@ def cmd_start():
                 log.info("Service started")
                 cmd_status()
             except PermissionError:
-                print("Error: start needs root, and sudo is unavailable — re-run as root.")
+                print("  Error: start needs root, and sudo is unavailable — re-run as root.")
             except FileNotFoundError:
-                print("Error: start requires a Linux server with systemd.")
+                print("  Error: start requires a Linux server with systemd.")
             except subprocess.CalledProcessError as e:
-                print(f"Error starting service: {e}")
+                print(f"  Error starting service: {e}")
     else:
         start_server()
         if _server_running():
-            print("Running in session only — server will stop when you quit.")
+            # The macOS line carries only what the line above does not: there
+            # is no service to install here, and tmux is the substitute. It
+            # does not restate that quitting stops the server.
+            print("  Running in session only — server will stop when you quit.")
             if _IS_MACOS:
-                print("Service install is Linux-only; keep this session alive (tmux/screen) to stay up.")
+                print("  A permanent service needs Linux; here, run it under tmux or screen.")
             elif _prompt("Install as a permanent service?"):
                 cmd_enable()
 
@@ -4978,15 +4987,15 @@ def cmd_stop():
     if _service_is_active():
         try:
             subprocess.run(["systemctl", "stop", "servette"], check=True, capture_output=True)
-            print("Service stopped.")
+            print("  Service stopped.")
             log.info("Service stopped")
             stopped = True
         except PermissionError:
-            print("Error: stop needs root, and sudo is unavailable — re-run as root.")
+            print("  Error: stop needs root, and sudo is unavailable — re-run as root.")
         except FileNotFoundError:
-            print("Error: stop requires a Linux server with systemd.")
+            print("  Error: stop requires a Linux server with systemd.")
         except subprocess.CalledProcessError as e:
-            print(f"Error stopping service: {e}")
+            print(f"  Error stopping service: {e}")
 
     if _server_running():
         stop_server()
@@ -5007,9 +5016,9 @@ def cmd_log(n=20):
         print(output, end="")
     except FileNotFoundError:
         if _IS_MACOS:
-            print("No journal on macOS — in session mode the log is this terminal's own output.")
+            print("  No journal on macOS — in session mode the log is this terminal's own output.")
         else:
-            print("journalctl not found. Is this a systemd system?")
+            print("  journalctl not found. Is this a systemd system?")
 
 
 # Traffic
@@ -5092,12 +5101,13 @@ def cmd_traffic():
     print()
 
 
-# The update channel for a site's *content*: a signed tar.gz bundle, pulled
-# from publish_url, verified against publish_key, and swapped into serve_dir
-# with a single-shot .bak — 'restore-site' rolls back to it, and a successful
-# restore consumes it. Pull-only — this box never accepts an inbound push of
-# content, only fetches from a URL it already trusts. (Servette's own code
-# updates travel through the package manager, not through Servette.)
+# The update channel for a site's *content*: a tar.gz bundle the operator
+# uploads over their own SSH tunnel, extracted into a staging tree and made
+# live with one atomic link flip, the tree it replaces kept in the ring for
+# 'restore-site' to flip back to. Nothing arrives from the network unasked —
+# the door is the loopback page, reachable only through the operator's
+# tunnel. (Servette's own code updates travel through the package manager,
+# not through Servette.)
 # The bundle ceiling
 _MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
 
@@ -5120,9 +5130,9 @@ def _extract_bundle(data, dest_dir):
         # gzip stream decompresses it, so getmembers() paid the FULL
         # decompression cost before the size cap ever ran — the cap bounded
         # what was written, not the CPU a bomb burns. next() lets the walk
-        # abort at the ceiling. (Only a signed bundle gets here at all, so
-        # this bounds a compromised or buggy publisher, not the anonymous
-        # internet.)
+        # abort at the ceiling. (Only a bundle the operator uploaded over
+        # their own tunnel gets here at all, so this bounds a buggy build of
+        # their own site, not the anonymous internet.)
         members = []
         total   = 0
         while (m := tf.next()) is not None:
@@ -5144,90 +5154,165 @@ def _extract_bundle(data, dest_dir):
             tf.extractall(dest_dir, members=members)
 
 
-# The content slots
+# The kept versions
+_KEEP_VERSIONS = 5   # trees kept per site, the live one included
+
+
 def _content_slots(serve_dir):
-    """The two sibling trees the serve_dir symlink flips between."""
+    """The two sibling trees the pre-ring design flipped between. Kept only
+    so a site published under it can be adopted into the ring."""
     base = _resolve(serve_dir).rstrip(os.sep)
     return base + ".a", base + ".b"
 
 
 def _drop_backup(bak):
-    """Remove the single-shot backup marker, whichever era made it: a symlink
-    from the flip design (the tree it names is handled by the caller), or a
-    real directory from before it."""
+    """Remove the single-shot backup marker the pre-ring design left: a
+    symlink from the flip era (the tree it names is adopted separately), or
+    a real directory from before that."""
     if os.path.islink(bak):
         os.remove(bak)
     elif os.path.isdir(bak):
         shutil.rmtree(bak, ignore_errors=True)
 
 
+def _version_dirs(serve_dir):
+    """Every kept tree for this site, newest first, as (path, epoch).
+
+    A name that does not parse is not a version and is left alone — the
+    scan is a filter over siblings, never a prefix match that could sweep
+    up a directory Servette did not create."""
+    base = _resolve(serve_dir).rstrip(os.sep)
+    head, tail = os.path.split(base)
+    try:
+        names = os.listdir(head or ".")
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if not name.startswith(tail + ".v"):
+            continue
+        stamp, _dot, extra = name[len(tail) + 2:].partition(".")
+        path = os.path.join(head, name)
+        if not (stamp.isdigit() and os.path.isdir(path) and not os.path.islink(path)):
+            continue
+        # Two publishes inside one second share an epoch and are told apart
+        # by the sequence suffix — which must sort with the clock, not
+        # against it, or the newer of the two would read as the older.
+        out.append((path, int(stamp), int(extra) if extra.isdigit() else 1))
+    out.sort(key=lambda r: (-r[1], -r[2]))
+    return [(path, stamp) for path, stamp, _seq in out]
+
+
+def _new_version_dir(serve_dir, when=None):
+    """An unused version-directory path for a tree published at `when`
+    (default now). Two publishes inside one second take '.2', '.3': the
+    name must be unique, or the second would land on top of the first."""
+    base  = _resolve(serve_dir).rstrip(os.sep)
+    stamp = int(when if when is not None else time.time())
+    path  = f"{base}.v{stamp}"
+    n = 2
+    while os.path.lexists(path):
+        path = f"{base}.v{stamp}.{n}"
+        n += 1
+    return path
+
+
+def _adopt_legacy_slots(serve_dir):
+    """Bring a two-slot site's trees into the ring, after the flip that made
+    them idle. Renaming a tree the live symlink points at would break the
+    link, so the live one is skipped — it is adopted on the publish after
+    this one, when it is no longer live. The `.bak` symlink goes: the ring
+    is the history now."""
+    base = _resolve(serve_dir).rstrip(os.sep)
+    _drop_backup(base + ".bak")
+    live = os.path.realpath(base)
+    for slot in _content_slots(serve_dir):
+        if not os.path.isdir(slot) or os.path.islink(slot):
+            continue
+        if os.path.realpath(slot) == live:
+            continue
+        try:
+            os.rename(slot, _new_version_dir(serve_dir, os.path.getmtime(slot)))
+        except OSError:
+            pass          # a slot that will not move is left, never deleted
+
+
+def _prune_versions(serve_dir, keep=None):
+    """Drop the oldest trees past the ring's depth. The live tree is never a
+    candidate however old it is: an operator who restored a year-old version
+    is serving it, and content being served is not garbage."""
+    keep = _KEEP_VERSIONS if keep is None else keep
+    live = os.path.realpath(_resolve(serve_dir).rstrip(os.sep))
+    for path, _stamp in _version_dirs(serve_dir)[keep:]:
+        if os.path.realpath(path) != live:
+            shutil.rmtree(path, ignore_errors=True)
+
+
 # The content swap
 def _swap_site_content(new_dir, serve_dir):
-    """Make new_dir the live content behind serve_dir, keeping the previous
-    tree as the single-shot backup that restore-site consumes.
+    """Make new_dir the live content behind serve_dir, keeping the trees
+    behind it as the ring `restore-site` chooses from.
 
-    serve_dir is a symlink into one of two sibling slots (.a/.b): new_dir's
-    tree moves into the idle slot and one atomic os.replace flips the link —
-    no window, crash-safe. `serve_dir.bak` then points at the previous slot.
+    new_dir's tree is renamed to a fresh `<link>.v<epoch>` sibling and one
+    atomic os.replace flips the link — no window, crash-safe. Pruning runs
+    after the flip, so a publish that fills the disk fails in staging with
+    every kept version still there.
+
     A legacy real directory at serve_dir is converted on its first swap: the
-    old content becomes the .bak directory and the link lands — the one swap
-    that still carries the old rename gap, once per site ever, with the same
-    rollback the old design had (a failed conversion must never leave NO live
-    directory — every request a 404 — while the caller reports merely
+    old content becomes a version and the link lands — the one swap that
+    still carries the old rename gap, once per site ever, with the same
+    rollback the old design had (a failed conversion must never leave NO
+    live directory — every request a 404 — while the caller reports merely
     'rejected')."""
     if not os.path.isdir(new_dir):
         # A dangling symlink would "succeed" — the old rename raised here,
         # and the flip must fail just as loudly rather than serve nothing.
         raise FileNotFoundError(f"new content tree missing: {new_dir}")
     live = _resolve(serve_dir).rstrip(os.sep)
-    bak  = live + ".bak"
-    a, b = _content_slots(serve_dir)
+    dest = _new_version_dir(serve_dir)
 
     if os.path.islink(live):
-        old_target = os.path.realpath(live)
-        dest = b if old_target == os.path.realpath(a) else a
-        if os.path.realpath(new_dir) != os.path.realpath(dest):
-            _drop_backup(bak)                    # single-shot: newest wins
-            shutil.rmtree(dest, ignore_errors=True)
-            os.rename(new_dir, dest)
+        os.rename(new_dir, dest)
         flip = live + ".flip"
         if os.path.lexists(flip):
             os.remove(flip)                      # a crash's leftover, harmless
         os.symlink(dest, flip)
         os.replace(flip, live)                   # the swap: one atomic syscall
-        _drop_backup(bak)
-        if os.path.isdir(old_target) and old_target != os.path.realpath(live):
-            os.symlink(old_target, bak)
+        _adopt_legacy_slots(serve_dir)
+        _prune_versions(serve_dir)
         return
 
     # Legacy: a real directory (or nothing yet) at serve_dir — convert.
     had_live = os.path.isdir(live)
-    if os.path.realpath(new_dir) != os.path.realpath(a):
-        shutil.rmtree(a, ignore_errors=True)
-        os.rename(new_dir, a)
+    os.rename(new_dir, dest)
+    kept = None
     if had_live:
-        _drop_backup(bak)
-        os.rename(live, bak)
+        # Dated by its own mtime, not by now: it is the older content, and
+        # the ring sorts on the name.
+        kept = _new_version_dir(serve_dir, os.path.getmtime(live))
+        os.rename(live, kept)
     try:
-        os.symlink(a, live)
+        os.symlink(dest, live)
     except OSError:
         if had_live:
-            os.rename(bak, live)
+            os.rename(kept, live)
         raise
+    _adopt_legacy_slots(serve_dir)
+    _prune_versions(serve_dir)
 
 
 _publish_lock = threading.Lock()  # serializes site-content mutation across every
-                                   # site: 'pull' and 'restore-site' can run from
-                                   # two shell sessions at once, and the swap is
-                                   # multiple unguarded filesystem ops, not one.
+                                   # site: a page publish and 'restore-site' can
+                                   # run from two sessions at once, and the swap
+                                   # is several unguarded filesystem ops, not one.
 
 
 # Landing a bundle
 def _land_bundle(site, bundle, source):
-    """Extract `bundle` into staging and swap it live for `site`, with the
-    single-shot backup and ownership repair — the shared tail of every content
-    channel. `source` is only for the log line. Returns "rejected" or
-    "published"."""
+    """Extract `bundle` into staging and swap it live for `site`, keeping the
+    previous trees in the ring, with ownership repair — the shared tail of
+    every content channel. `source` is only for the log line. Returns
+    "rejected" or "published"."""
     with _publish_lock:
         staging = _resolve(site.serve_dir).rstrip(os.sep) + ".new"
         shutil.rmtree(staging, ignore_errors=True)
@@ -5238,6 +5323,8 @@ def _land_bundle(site, bundle, source):
             # tree goes live: the operator owns their content, the service
             # reads through its group. strip_world because the extraction's
             # own 644/755 modes are Servette's writing, not the operator's,
+            # (kept versions need nothing: each was the live tree once and
+            # keeps the ownership it already has)
             # and must honour the never-world-bits promise. The backup needs
             # nothing: it was the live tree a moment ago and keeps the
             # ownership it already has. A failed extraction dies here, in
@@ -5253,179 +5340,217 @@ def _land_bundle(site, bundle, source):
     return "published"
 
 
-# The .sig companion
-def _publish_sig_url(url):
-    """url's own '.sig' companion, with '.sig' appended to the path rather than
-    the whole URL — naive string concatenation breaks for a publish_url that
-    carries a query string (e.g. a pre-signed download link), landing '.sig'
-    after the query instead of after the file extension."""
-    parts = urlsplit(url)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path + ".sig",
-                       parts.query, parts.fragment))
+# preview
+def _preview_dir(site):
+    """Where a staged preview lives: a sibling of the site's tree, never
+    inside it. Inside, the public server would serve the unpublished draft
+    to the internet."""
+    return _resolve(site.serve_dir).rstrip(os.sep) + ".preview"
 
 
-# Checking the channel
-def _check_for_content_update(site):
-    """Pull, verify, and swap in a new site bundle for `site` if its publish
-    channel is configured. No-ops silently (not an error) if publish_url/
-    publish_key aren't both set on it — publishing is opt-in, per site. Called
-    by the interactive 'pull' command, which turns the returned status into a
-    printed line.
+def _stage_preview(site, bundle):
+    """Extract `bundle` where the loopback server can serve it, without
+    going near the live tree. Returns "staged" or "rejected".
 
-    Returns a short status string: "not-configured", "invalid-key",
-    "fetch-failed", "too-large", "bad-signature", "rejected", or "published"."""
-    if not (site.publish_url and site.publish_key):
-        return "not-configured"
-
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    from cryptography.exceptions import InvalidSignature
-
+    The same _extract_bundle every content channel runs, so a bundle the
+    publish door would refuse the preview refuses identically — a preview
+    that accepted more than a publish would be a preview of something that
+    can never ship."""
+    dest = _preview_dir(site)
+    shutil.rmtree(dest, ignore_errors=True)
     try:
-        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(site.publish_key))
-    except ValueError:
-        log.error("publish_key is not a valid Ed25519 public key — publishing disabled")
-        return "invalid-key"
-
-    try:
-        # Capped read: bounds memory to _MAX_BUNDLE_BYTES regardless of what
-        # the response claims or how much data is actually sent.
-        bundle = urllib.request.urlopen(site.publish_url, timeout=30).read(_MAX_BUNDLE_BYTES + 1)
-        if len(bundle) > _MAX_BUNDLE_BYTES:
-            log.error("Publish bundle exceeds %d bytes — rejecting before signature check", _MAX_BUNDLE_BYTES)
-            return "too-large"
-        signature = urllib.request.urlopen(_publish_sig_url(site.publish_url), timeout=15).read(4096)
+        _extract_bundle(bundle, dest)
     except Exception as e:
-        log.warning("Could not fetch publish bundle: %s", e)
-        return "fetch-failed"
-
-    try:
-        pub_key.verify(signature, bundle)
-    except InvalidSignature:
-        log.error("Publish bundle signature verification failed — rejecting")
-        return "bad-signature"
-
-    return _land_bundle(site, bundle, site.publish_url)
+        log.error("Preview bundle rejected: %s", e)
+        shutil.rmtree(dest, ignore_errors=True)
+        return "rejected"
+    log.info("Staged a preview for %s", site.domain or site.serve_dir)
+    return "staged"
 
 
-# pull
-def cmd_pull(site):
-    """Manually check the publish channel for new site content and pull it in."""
-    if not (site.publish_url and site.publish_key):
-        print("  No publish channel configured — run 'config publish' first.")
-        return
-    with _spinner("Checking for new site content..."):
-        result = _check_for_content_update(site)
-    messages = {
-        "invalid-key":   "Pull failed: publish_key is not a valid Ed25519 public key.",
-        "fetch-failed":  "Pull failed: could not fetch the publish bundle. See 'log' for details.",
-        "too-large":     f"Pull failed: bundle exceeds {_MAX_BUNDLE_BYTES} bytes.",
-        "bad-signature": "Pull failed: bundle signature verification failed — rejecting.",
-        "rejected":      "Pull failed: bundle was rejected. See 'log' for details.",
-        "published":     "New site content published.",
-    }
-    print(f"  {messages[result]}")
+def _clear_previews():
+    """Drop every staged preview. A preview belongs to one `admin` run: it is
+    a draft nobody published, and leaving it on disk would keep an
+    unpublished tree beside a live site indefinitely."""
+    for site in config.sites:
+        shutil.rmtree(_preview_dir(site), ignore_errors=True)
+
+
+def _tar_live_site(site, cap=_MAX_BUNDLE_BYTES):
+    """The site's live tree as gzipped tar bytes, or None if it is too big to
+    hold in memory. Content leaves the box the same way it arrived — same
+    format, same cap — so a downloaded archive is a bundle the publish door
+    would accept back.
+
+    Paths are relative to the site root and the hidden-path rule applies on
+    the way out as it does on the way in: a dot-directory is not served, so
+    it is not handed over either."""
+    root = os.path.realpath(_resolve(site.serve_dir).rstrip(os.sep))
+    if not os.path.isdir(root):
+        return None
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for base, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs if not d.startswith(".") or d == ".well-known"]
+            for name in sorted(names):
+                if name.startswith("."):
+                    continue
+                full = os.path.join(base, name)
+                if os.path.islink(full) or not os.path.isfile(full):
+                    continue        # only regular files, as _extract_bundle accepts
+                rel = os.path.relpath(full, root)
+                try:
+                    tf.add(full, arcname=rel, recursive=False)
+                except OSError:
+                    continue
+                if buf.tell() > cap:
+                    return None
+    return buf.getvalue()
+
+
+def _tree_size(path):
+    """(files, bytes) under path. A file that vanishes mid-walk is skipped,
+    not raised: this is a description, and a racing publish must not make
+    describing the site an error."""
+    files = total = 0
+    for root, _dirs, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+                files += 1
+            except OSError:
+                pass
+    return files, total
+
+
+def _site_versions(site):
+    """The kept trees of one site as rows both surfaces render: the name to
+    restore by, when it was published, how many files and bytes it holds, and
+    which one is live.
+
+    The live tree is ALWAYS reported, ring member or not. A site published
+    before the ring existed serves a tree the ring does not hold — it joins
+    on its next publish — and reporting an empty list would tell an operator
+    with a live, working site that nothing is published, which is both false
+    and alarming. That tree carries its own mtime as its date and is never
+    offered for restore, because it is already live.
+
+    Walking every tree is why this is its own call rather than part of the
+    status snapshot — it runs when an operator asks to see the history, not
+    on every poll of a page that refreshes itself."""
+    live_link = _resolve(site.serve_dir).rstrip(os.sep)
+    live      = os.path.realpath(live_link)
+    rows, in_ring = [], False
+    for path, stamp in _version_dirs(site.serve_dir):
+        files, total = _tree_size(path)
+        is_live = os.path.realpath(path) == live
+        in_ring = in_ring or is_live
+        rows.append({"name": os.path.basename(path), "published": stamp,
+                     "files": files, "bytes": total, "live": is_live})
+    if not in_ring and os.path.isdir(live):
+        files, total = _tree_size(live)
+        try:
+            stamp = int(os.path.getmtime(live))
+        except OSError:
+            stamp = 0
+        rows.insert(0, {"name": os.path.basename(live), "published": stamp,
+                        "files": files, "bytes": total, "live": True})
+    return rows
+
+
+def _restore_site(site, version=None):
+    """Serve a kept version again. `version` is a name as _site_versions
+    reports it; None means the newest tree that is not already live — plain
+    'undo the last publish'. Returns "" on success, or a sentence saying why
+    not.
+
+    The flip is the publish's flip, so a restore has no window either. The
+    tree is NOT consumed: it stays in the ring, so restoring the wrong one
+    is itself undoable. That is the whole difference from the single-shot
+    backup this replaced."""
+    live_path = _resolve(site.serve_dir).rstrip(os.sep)
+    versions  = _version_dirs(site.serve_dir)
+    if not versions:
+        return ("Nothing to restore — a kept version appears the first time "
+                "new content replaces old.")
+    if not os.path.islink(live_path):
+        return ("This site's folder is not yet behind the version link — "
+                "publish once, and the content it replaces joins the ring.")
+
+    live = os.path.realpath(live_path)
+    if version is None:
+        target = next((p for p, _ in versions if os.path.realpath(p) != live), None)
+        if target is None:
+            return "Nothing to restore — the only kept version is the live one."
+    else:
+        # Matched by base name against the ring, never taken as a path: the
+        # page's version name arrives over the wire, and a caller must not be
+        # able to name a directory the ring does not hold.
+        target = next((p for p, _ in versions
+                       if os.path.basename(p) == version), None)
+        if target is None:
+            return f"No kept version named {version}."
+        if os.path.realpath(target) == live:
+            return "That version is already the live one."
+
+    with _publish_lock:
+        if not os.path.isdir(target):
+            return "That version was removed while you were deciding."
+        flip = live_path + ".flip"
+        if os.path.lexists(flip):
+            os.remove(flip)
+        os.symlink(target, flip)
+        os.replace(flip, live_path)              # the restore: one atomic flip
+        # The tree may date from a publish that extracted as root — the same
+        # ownership repair as a publish, for the same reason.
+        _chown_operator(os.path.realpath(live_path), strip_world=True)
+    log.info("Restored content for %s to %s",
+             site.domain or site.serve_dir, os.path.basename(target))
+    return ""
+
+
+def _version_line(row):
+    """One kept version as a line for the terminal: when, how big, and
+    whether it is the one being served."""
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["published"]))
+    size = (f"{row['bytes'] / (1024 * 1024):.1f} MB" if row["bytes"] >= 1024 * 1024
+            else f"{row['bytes'] / 1024:.0f} KB")
+    files = f"{row['files']} file" + ("" if row["files"] == 1 else "s")
+    return f"{when} — {files}, {size}" + ("  (live)" if row["live"] else "")
 
 
 def cmd_restore_site(site):
-    """Roll back to the content saved by the last successful publish. The
-    backup is single-shot: one is kept, and a successful restore consumes it.
-    On a converted site the restore is the same atomic flip as the publish —
-    instant, no window; the tree being rolled away is then removed. A legacy
-    real-directory backup restores the old way (its window rides along, once)."""
-    live_dir = _resolve(site.serve_dir).rstrip(os.sep)
-    bak_dir  = live_dir + ".bak"
-
-    if not os.path.isdir(bak_dir):
-        print("  Nothing to restore — no site backup. (Publishing saves one each time it swaps in new content.)")
+    """Roll back to a kept version. One choice is a yes/no; several are a
+    numbered list, newest first. Nothing is consumed — the version being
+    rolled away stays in the ring, so this is undoable in its own terms."""
+    rows = _site_versions(site)
+    kept = [r for r in rows if not r["live"]]
+    if not kept:
+        # One line, and it says when that changes rather than explaining the
+        # ring: "no kept versions yet" alone leaves a reader wondering what
+        # would make one.
+        print("  Nothing to restore — a kept version appears the first time")
+        print("  new content replaces old.")
         return
 
-    if not _prompt("Restore site content from backup? The backup is then removed."):
-        print("  Restore cancelled.")
-        return
-
-    with _publish_lock:
-        if not os.path.isdir(bak_dir):
-            print("  Nothing to restore — a publish ran while you were deciding and consumed the backup.")
+    if len(kept) == 1:
+        print(f"\n  Kept: {_version_line(kept[0])}")
+        if not _prompt("Restore this content?"):
+            print("  Restore cancelled.")
             return
-        if os.path.islink(live_dir) and os.path.islink(bak_dir):
-            bad    = os.path.realpath(live_dir)
-            target = os.path.realpath(bak_dir)
-            flip   = live_dir + ".flip"
-            if os.path.lexists(flip):
-                os.remove(flip)
-            os.symlink(target, flip)
-            os.replace(flip, live_dir)          # the restore: one atomic flip
-            os.remove(bak_dir)                  # consumed
-            if os.path.isdir(bad) and bad != target:
-                shutil.rmtree(bad, ignore_errors=True)
-        else:
-            # A legacy real-directory backup — possibly behind a converted
-            # site, so the link (or old directory) is cleared first.
-            if os.path.islink(live_dir):
-                bad = os.path.realpath(live_dir)
-                os.remove(live_dir)
-                shutil.rmtree(bad, ignore_errors=True)
-            elif os.path.isdir(live_dir):
-                shutil.rmtree(live_dir)
-            os.rename(bak_dir, live_dir)
-        # The restored tree may date from a pre-flip pull that extracted as
-        # root — the same ownership repair as a publish, for the same reason.
-        _chown_operator(os.path.realpath(live_dir), strip_world=True)
-    print("  Site content restored from backup.")
+        choice = kept[0]
+    else:
+        print()
+        for n, row in enumerate(kept, 1):
+            print(f"  {n}. {_version_line(row)}")
+        raw = _input("\n  Restore which? [number, Enter = cancel]: ").strip()
+        if not raw.isdigit() or not (1 <= int(raw) <= len(kept)):
+            print("  Restore cancelled.")
+            return
+        choice = kept[int(raw) - 1]
 
-# The publish display
-def _publish_show():
-    _section("Publish")
-    for i, site in enumerate(config.sites):
-        backup = os.path.isdir(_resolve(site.serve_dir).rstrip(os.sep) + ".bak")
-        print(f"  [{i}] {site.domain or site.serve_dir}")
-        print(f"      channel: {site.publish_url if site.publish_url and site.publish_key else '(not set)'}")
-        print(f"      backup:  {'present — restore-site undoes the last pull' if backup else 'none'}")
-    print()
-
-
-# publish
-def cmd_publish():
-    _publish_show()
-    print("  Prefer a browser? 'admin' opens the publish page over your SSH tunnel.")
-    print(PUBLISH_HELP)
-
-    while True:
-        try:
-            raw = input("  publish> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-
-        if not raw:
-            continue
-
-        parts = raw.split()
-        cmd   = parts[0].lower()
-        args  = parts[1:]
-
-        if cmd == "show":
-            _publish_show()
-        elif cmd == "pull":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_pull(site)
-        elif cmd == "restore-site":
-            site = _config_site_arg(args)
-            if site is not None:
-                cmd_restore_site(site)
-        elif cmd == "channel":
-            site = _config_site_arg(args)
-            if site is not None:
-                _config_publish(site)
-        elif cmd in ("back", "done", "exit", "quit"):
-            break
-        elif cmd in ("help", "?"):
-            print(PUBLISH_HELP)
-        else:
-            print(f"  Unknown command: {cmd}")
-            print(PUBLISH_HELP)
-
+    err = _restore_site(site, choice["name"])
+    print(f"  {err}" if err else "  Site content restored.")
 
 # The loopback server's shape
 _UI_HOST          = "127.0.0.1"
@@ -5490,13 +5615,17 @@ _UI_LOGIN_PAGE = """<!doctype html>
 
 # The admin page
 _UI_ADMIN_PAGE = """<!DOCTYPE html>
-<!-- src/admin — the operator's page, the browser half of the paired
+<!-- src/admin.html — the operator's page, the browser half of the paired
      surfaces. Served only by the loopback page server (127.0.0.1, reached
      through the operator's SSH tunnel via `servette admin`), never by the
      public site. One page, three tabs: Sites (one card per site, carrying
      everything about it — publish, domain, certificate, access), Server
      (what the box is doing and how it is set), and Statistics (traffic
      counted across every site, and the box's own load).
+
+     The stylesheet and the script each open with their own map of what
+     follows, in the order a reader meets it.
+
      Constraints, all load-bearing:
 
      - No signature, no key. Being here IS the authentication: only the
@@ -5507,6 +5636,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
        hand-rolled ustar writer emitting only the entry types
        _extract_bundle accepts); its only requests are to the same
        loopback server that served it.
+     - The page never borrows the browser's voice: no alert, confirm, or
+       prompt anywhere. A question is asked in the page's own words, in a
+       panel, with the choices spelled out.
      - Inlined into servette.py by build.py, like 404.html: no triple
        double-quote and no backslash anywhere in this file, or the build
        fails rather than emit a broken literal. -->
@@ -5514,8 +5646,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22 role=%22img%22 aria-label=%22Servette%22> <title>Servette</title> <rect x=%222%22 y=%222%22 width=%2260%22 height=%2260%22 rx=%2213%22 fill=%22%230e0e0e%22 stroke=%22%235A8466%22 stroke-width=%224%22/> <text x=%2214%22 y=%2245%22 font-family=%22ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace%22 font-size=%2236%22 font-weight=%22600%22 fill=%22%235A8466%22>S</text> <rect x=%2235%22 y=%2239%22 width=%2216%22 height=%226%22 rx=%221.5%22 fill=%22%235A8466%22/> </svg>">
   <title>Servette — Admin</title>
   <style>
+    /* ═══════════════════════════════════════════════════════════════════
+       Theme, then the page's furniture in the order it is built from:
+       frame, wordmark, tabs, cards, badges, buttons, fact rows, prose,
+       forms, site cards, charts. One rule per thing, in the section that
+       owns it — a variant of a button lives with the button.
+       ═══════════════════════════════════════════════════════════════════ */
+
+    /* ── Theme and reset ─────────────────────────────────────────────── */
     :root {
       --bg:      #0e0e0e;
       --surface: #161616;
@@ -5525,12 +5666,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       --green:   #4ade80;
       --red:     #f87171;
       --amber:   #fbbf24;
+      /* Servette green, the one accent: available actions, links, and the
+         running dot. Kept literal rather than tokenised only where it
+         appears inside an rgba() tint. */
+      --brand:   #5A8466;
       --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
               'Liberation Mono', 'Courier New', monospace;
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* ── Page frame: a single column over a faint noise wash ─────────── */
     body {
       background: var(--bg);
       color: var(--text);
@@ -5555,13 +5701,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .container {
       position: relative;
       z-index: 1;
-      /* Back to the reading width the public pages use: once the rows
-         became facts and the forms sat beside their labels, 760px was
-         empty space rather than room. */
+      /* The reading width the public pages use: once the rows became facts
+         and the forms sat beside their labels, 760px was empty space
+         rather than room. */
       max-width: 560px;
       width: 100%;
     }
 
+    /* ── Wordmark and tagline ────────────────────────────────────────── */
     .header { margin-bottom: 1.75rem; }
 
     .servette-logo {
@@ -5573,7 +5720,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       line-height: 1;
     }
 
-    .servette-logo .ette   { color: #5A8466; }
+    .servette-logo .ette   { color: var(--brand); }
     .servette-logo .cursor { color: inherit; animation: servette-blink 1.1s steps(1) infinite; }
 
     @keyframes servette-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
@@ -5586,6 +5733,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       text-transform: uppercase;
     }
 
+    /* ── Tabs ────────────────────────────────────────────────────────── */
     .tabs {
       display: flex;
       gap: 0.4rem;
@@ -5608,9 +5756,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     button.tab:hover { color: var(--text); }
     button.tab.active {
       color: var(--text);
-      border-bottom-color: #5A8466;
+      border-bottom-color: var(--brand);
     }
 
+    /* ── Cards: the one container every panel is built from ──────────── */
     .card {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -5637,6 +5786,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     .card-body { padding: 1rem 1.25rem; }
 
+    /* A rule between two parts of one card. */
+    .split { border-top: 1px solid var(--border); margin: 1rem 0; }
+
+    /* ── Badges: a card's one-word state, in the head ────────────────── */
     .badge {
       font-size: 0.7rem;
       font-weight: 500;
@@ -5650,10 +5803,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .badge-red   { background: rgba(248,113,113,0.12); color: var(--red);  border: 1px solid rgba(248,113,113,0.2); }
     .badge-dim   { background: rgba(255,255,255,0.04); color: var(--muted); border: 1px solid var(--border); }
     .badge-warn  { background: rgba(251,191,36,0.12); color: var(--amber); border: 1px solid rgba(251,191,36,0.4); }
-    
 
-    /* Every button reads the same way: available is Servette green, hover
-       brightens it, unavailable is dim and says so by being unclickable. */
+    /* ── Buttons ─────────────────────────────────────────────────────────
+       Every button reads the same way: available is Servette green, hover
+       brightens it, unavailable is dim and says so by being unclickable —
+       never by vanishing. The variants below change only what a button
+       means, never that rule. */
     button.action {
       font-family: inherit;
       font-size: 0.75rem;
@@ -5673,96 +5828,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       cursor: not-allowed;
     }
 
-    .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    /* Sits on a fact row rather than in a button row. */
+    button.action.tiny { padding: 0.2rem 0.55rem; font-size: 0.68rem; }
 
-    .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
-    .rows > div { padding: 0.18rem 0; }
-    .rows a.cfg-link { color: #5A8466; text-decoration: none; white-space: nowrap; }
-    .rows a.cfg-link:hover { text-decoration: underline; }
-    .rows .k { color: var(--muted); display: inline-block; min-width: 8rem; }
-    .rows .gap { margin-top: 0.55rem; }
-    /* A ledger's total sits under a rule, at the foot of what it sums. */
-    .rows .ledger {
-      margin-top: 0.35rem;
-      padding-top: 0.35rem;
-      border-top: 1px solid var(--border);
-    }
-    .rows b { color: var(--text); font-weight: 500; }
-    .rows .ok { color: #5A8466; }
-    .rows .dot {
-      display: inline-block;
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: #5A8466;
-      margin-right: 0.45rem;
-      vertical-align: middle;
-      position: relative;
-      top: -1px;
-      animation: pulse 2s ease infinite;
-    }
-
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-
-    .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
-    .hint b { color: var(--text); font-weight: 500; }
-    .warn  { color: var(--amber); }
-    .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
-
-    .note {
-      font-size: 0.7rem;
-      color: var(--muted);
-      line-height: 1.7;
-    }
-    .note b { color: var(--text); font-weight: 500; }
-
-    .hidden { display: none !important; }
-
-    .site-card.drag {
-      border-color: rgba(90,132,102,0.7);
-      background: rgba(90,132,102,0.08);
-    }
-
-    .dropstrip {
-      padding: 0.8rem;
-      border: 1px dashed var(--border);
-      border-radius: 4px;
-      text-align: center;
-      font-size: 0.72rem;
-      color: var(--muted);
-      letter-spacing: 0.04em;
-    }
-    .dropstrip a { color: #5A8466; text-decoration: none; }
-    .dropstrip a:hover { text-decoration: underline; }
-    .site-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
-
-    /* Card reordering, the notebook's grammar: grab the header, a ghost
-       follows the cursor, the source dims to a dashed placeholder, and
-       neighbours swap in place as the ghost crosses them. */
-    .site-card .card-head { cursor: grab; user-select: none; }
-    .site-card.drag-placeholder { opacity: 0.35; border-style: dashed; }
-    .card-ghost { box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
-    .head-left, .head-right { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
-    .head-left .card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .handle { color: var(--muted); font-size: 0.8rem; }
-    button.ca {
-      font-family: inherit;
-      font-size: 0.8rem;
-      background: none;
-      border: none;
-      color: var(--muted);
-      cursor: pointer;
-      padding: 0.2rem 0.4rem;
-      border-radius: 4px;
-      line-height: 1;
-    }
-    button.ca:hover { color: var(--text); background: rgba(255,255,255,0.07); }
-    button.ca.del:hover { color: var(--red); background: rgba(248,113,113,0.12); }
-    button.ca svg { display: block; }
-    .add-zone { display: flex; justify-content: center; margin-bottom: 1.5rem; }
-
-    /* The remove panel's warning ladder: red deletes, amber pauses,
-       neutral cancels. */
+    /* Red deletes, amber pauses, neutral cancels — the warning ladder the
+       remove panel and the stop panel both use. */
     button.action.danger {
       color: var(--red);
       border-color: rgba(248,113,113,0.5);
@@ -5775,10 +5845,114 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       background: rgba(251,191,36,0.08);
     }
     button.action.pause:hover:not(:disabled) { background: rgba(251,191,36,0.18); }
-    .site-card.inactive .card-title { opacity: 0.55; }
 
-    /* Wide page, side-by-side forms: label left, field right, the hint
-       under the field. Narrow screens stack them again. */
+    /* Due: something is waiting on this button. Amber until it is pressed,
+       green under the pointer, so attention is said in colour and the
+       button still reads as available. */
+    button.action.due {
+      color: var(--amber);
+      border-color: rgba(251,191,36,0.5);
+      background: rgba(251,191,36,0.08);
+    }
+    button.action.due:hover:not(:disabled) {
+      color: var(--text);
+      border-color: rgba(90,132,102,0.6);
+      background: rgba(90,132,102,0.15);
+    }
+
+    /* An icon button is still a button: the icon replaces the label, not
+       the border. */
+    button.action.tiny svg { display: block; }
+    button.action.tiny:has(svg) { padding: 0.3rem 0.4rem; }
+
+    .btn-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    .add-zone { display: flex; justify-content: center; margin-bottom: 1.5rem; }
+
+    button:focus-visible {
+      outline: 1px solid rgba(90,132,102,0.8);
+      outline-offset: 1px;
+    }
+
+    /* ── Fact rows: label left, value right, the shell's status in HTML ─ */
+    .rows { font-size: 0.72rem; line-height: 1.9; color: var(--text); }
+    .rows > div { padding: 0.18rem 0; }
+    /* padding-right, not just min-width: a key longer than the column (a
+       long request path) would otherwise butt straight against its value
+       with nothing between them. border-box keeps the value column at 8rem
+       for every key short enough to fit. */
+    .rows .k {
+      color: var(--muted);
+      display: inline-block;
+      min-width: 8rem;
+      padding-right: 0.75rem;
+    }
+    .rows a { color: var(--brand); text-decoration: none; }
+    .rows a:hover { text-decoration: underline; }
+    /* A ledger's total sits under a rule, at the foot of what it sums. */
+    .rows .ledger {
+      margin-top: 0.35rem;
+      padding-top: 0.35rem;
+      border-top: 1px solid var(--border);
+    }
+    .rows b { color: var(--text); font-weight: 500; }
+    .rows .ok { color: var(--brand); }
+    /* Not scoped to .rows: the running dot moved onto the status switch-row
+       when the service controls joined it, and a `.rows .dot` rule stopped
+       matching — the dot was still in the markup and simply invisible. */
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--brand);
+      margin-right: 0.45rem;
+      vertical-align: middle;
+      position: relative;
+      top: -1px;
+      animation: pulse 2s ease infinite;
+    }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    /* ── Prose: hints under a control, errors, the attention band ─────── */
+    .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
+    .hint b { color: var(--text); font-weight: 500; }
+    .warn  { color: var(--amber); }
+    .fault { color: var(--red); }
+    /* Not a fault at all — a change typed and not yet saved. It used to
+       borrow .warn, which made an unsaved intention look like something
+       broken. */
+    .pending { color: var(--muted); font-style: italic; }
+    .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
+
+    /* What needs review, said in words and pointed at its fix. */
+    .attention {
+      border: 1px solid rgba(251,191,36,0.35);
+      background: rgba(251,191,36,0.07);
+      border-radius: 8px;
+      padding: 0.7rem 1rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.72rem;
+      line-height: 1.8;
+      color: var(--amber);
+    }
+    .attention b { color: var(--text); font-weight: 500; }
+    .attention a { color: var(--amber); text-decoration: underline; }
+
+    .note {
+      font-size: 0.7rem;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .note b { color: var(--text); font-weight: 500; }
+    /* The one link that leaves this page, so it opens in its own tab: the
+       operator is mid-task here, and navigating away would lose it. */
+    .note a { color: var(--brand); text-decoration: none; }
+    .note a:hover { text-decoration: underline; }
+
+    /* ── Forms ───────────────────────────────────────────────────────────
+       Label left, field right, the hint under the field. Narrow screens
+       stack them again, at the foot of this sheet. */
     .cfg-field {
       margin-top: 0.9rem;
       display: grid;
@@ -5792,11 +5966,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       color: var(--muted);
     }
     .cfg-field .cfg-hint { grid-column: 2; }
-    @media (max-width: 560px) {
-      .cfg-field { grid-template-columns: 1fr; row-gap: 0.25rem; }
-      .cfg-field .cfg-hint { grid-column: 1; }
+    .cfg-hint {
+      font-size: 0.68rem;
+      color: var(--muted);
+      line-height: 1.6;
+      margin-top: 0.3rem;
     }
-    input[type="text"], input[type="password"], select.cfg-site {
+
+    input[type="text"], input[type="password"], select {
       font-family: inherit;
       font-size: 0.75rem;
       color: var(--text);
@@ -5806,26 +5983,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       padding: 0.4rem 0.7rem;
       width: 100%;
     }
-    select.cfg-site { width: auto; margin-bottom: 1rem; }
-    .attention {
-      border: 1px solid rgba(251,191,36,0.35);
-      background: rgba(251,191,36,0.07);
-      border-radius: 8px;
-      padding: 0.7rem 1rem;
-      margin-bottom: 1.25rem;
-      font-size: 0.72rem;
-      line-height: 1.8;
-      color: var(--amber);
-    }
-    .attention b { color: var(--text); font-weight: 500; }
-    .attention a { color: var(--amber); text-decoration: underline; }
-    .split { border-top: 1px solid var(--border); margin: 1rem 0; }
+    select { width: auto; }
 
-    /* The public/private switch — a literal toggle: the knob's position and
-       a green tint say private (on). Laid out like the fields below it:
-       label left, control right, ending at the same right edge. */
-    /* The same 8rem key column the fact rows use, so the access value lines
-       up with Domain and Certificate above it. */
+    /* The browser's default focus halo clashes with the theme; replaced —
+       never just removed — so keyboard focus stays visible. */
+    input[type="text"]:focus, input[type="password"]:focus, select:focus {
+      outline: none;
+      border-color: rgba(90,132,102,0.8);
+      box-shadow: 0 0 0 2px rgba(90,132,102,0.25);
+    }
+
+    /* A fact row that carries a control: the same 8rem key column the
+       plain rows use, so a value with a button beside it still lines up
+       with the values above and below it. */
     .switch-row {
       display: grid;
       grid-template-columns: 8rem 1fr;
@@ -5844,43 +6014,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       color: var(--text);
     }
     .switch-act { display: flex; align-items: center; gap: 0.5rem; }
+    /* A value that needs two lines gets them, and the row keeps centring
+       its label and buttons against the pair. */
+    .ver-state span { display: block; }
     .switch-act label { color: var(--muted); cursor: pointer; }
-    button.action.tiny { padding: 0.2rem 0.55rem; font-size: 0.68rem; }
-    button.action.due {
-      color: var(--amber);
-      border-color: rgba(251,191,36,0.5);
-      background: rgba(251,191,36,0.08);
-    }
-    button.action.due:hover:not(:disabled) {
-      color: var(--text);
-      border-color: rgba(90,132,102,0.6);
-      background: rgba(90,132,102,0.15);
-    }
 
-    /* Charts: inline SVG, no library — the page loads no third-party code. */
-    .chart { width: 100%; height: 60px; display: block; }
-    .chart-wrap { display: flex; gap: 0.5rem; margin-top: 0.8rem; }
-    .chart-body { flex: 1; min-width: 0; }
-    .chart-y {
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      align-items: flex-end;
-      height: 60px;
-      font-size: 0.62rem;
-      color: var(--muted);
-      white-space: nowrap;
-    }
-    .chart-labels {
-      display: flex;
-      justify-content: space-between;
-      font-size: 0.62rem;
-      color: var(--muted);
-      margin-top: 0.2rem;
-    }
-    @media (max-width: 560px) {
-      .switch-row { grid-template-columns: 1fr auto; }
-    }
+    /* The public/private switch — a literal toggle: the knob's position
+       and a green tint say private (on). */
     input.switch {
       appearance: none;
       -webkit-appearance: none;
@@ -5911,24 +6051,132 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       background: rgba(90,132,102,0.15);
       border-color: rgba(90,132,102,0.6);
     }
-    input.switch:checked::after { left: auto; right: 2px; background: #5A8466; }
+    input.switch:checked::after { left: auto; right: 2px; background: var(--brand); }
     input.switch:focus-visible { outline: 1px solid rgba(90,132,102,0.8); outline-offset: 1px; }
-    /* The browser's default focus halo clashes with the theme; replaced —
-       never just removed — so keyboard focus stays visible. */
-    input[type="text"]:focus, input[type="password"]:focus, select.cfg-site:focus {
-      outline: none;
-      border-color: rgba(90,132,102,0.8);
-      box-shadow: 0 0 0 2px rgba(90,132,102,0.25);
-    }
-    button:focus-visible {
-      outline: 1px solid rgba(90,132,102,0.8);
-      outline-offset: 1px;
-    }
-    .cfg-hint {
-      font-size: 0.68rem;
+
+    /* ── Site cards ──────────────────────────────────────────────────── */
+
+    /* The primary action on a site card, sized like one: a target you can
+       drop a folder onto without aiming. The whole strip is clickable, so
+       the picker is reachable without hitting the link exactly. */
+    .dropstrip {
+      min-height: 116px;
+      padding: 1.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.35rem;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      text-align: center;
+      font-size: 0.72rem;
       color: var(--muted);
-      line-height: 1.6;
-      margin-top: 0.3rem;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+    }
+    .dropstrip:hover { border-color: rgba(90,132,102,0.5); }
+    .dropstrip .drop-lead { font-size: 0.8rem; color: var(--text); }
+    .dropstrip a { color: var(--brand); text-decoration: none; }
+    .dropstrip a:hover { text-decoration: underline; }
+
+    /* A folder is over the card: the whole card answers, not just the
+       strip, because the whole card accepts the drop. */
+    .site-card.drag {
+      border-color: rgba(90,132,102,0.7);
+      background: rgba(90,132,102,0.08);
+    }
+    .site-card.drag .dropstrip { border-color: rgba(90,132,102,0.7); color: var(--text); }
+
+    /* Reordering, the notebook's grammar: grab the header, a ghost follows
+       the cursor, the source dims to a dashed placeholder, and neighbours
+       swap in place as the ghost crosses them. */
+    .site-card .card-head { cursor: grab; user-select: none; }
+    .site-card.drag-placeholder { opacity: 0.35; border-style: dashed; }
+    .card-ghost { box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+    .head-left, .head-right { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+    .head-left .card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .handle { color: var(--muted); font-size: 0.8rem; }
+
+    /* A deactivated site keeps its card and dims its name. */
+    .site-card.inactive .card-title { opacity: 0.55; }
+
+    /* Folded: the head stays, so the card still says which site it is and
+       whether it needs attention. Only the body goes. */
+    .site-card.folded .card-body { display: none; }
+    /* The pill is the folded card's Status line, not a second copy of it.
+       Open, the Status row inside the card carries the count; folded, that
+       row is hidden and the pill takes over. Never both. */
+    .site-card:not(.folded) .badge.needs { display: none; }
+    .site-card.folded .card-head { border-bottom: none; }
+
+    /* The remove panel is a popover under the button that opens it, not a
+       block at the far end of the card — a question asked three hundred
+       pixels from the thing you clicked is a question you have to go and
+       find. Drawn by the page, never by the browser: the rule against
+       borrowed voices is about alert() and confirm(), not about panels. */
+    .card-head { position: relative; }
+    .site-card .confirm {
+      position: absolute;
+      top: calc(100% + 0.4rem);
+      right: 0.75rem;
+      z-index: 20;
+      width: min(24rem, calc(100% - 1.5rem));
+      padding: 0.25rem 1rem 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.55);
+      cursor: default;
+      user-select: text;      /* the head sets none, for dragging */
+    }
+    /* The panel hangs below the head, so the card must not clip it. */
+    .site-card { overflow: visible; }
+
+    /* The staged draft, in a frame that cannot reach back. The sandbox
+       attribute deliberately withholds allow-same-origin: the draft runs on
+       an opaque origin, so a script in someone's own content cannot read
+       this page or call its endpoints. */
+    .preview-frame {
+      width: 100%;
+      height: 420px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+      margin-top: 0.5rem;
+    }
+
+    /* ── Charts: inline SVG, no library — the page loads no third-party
+       code. The y-axis is part of the chart: a line without a scale is a
+       shape, not a measurement. ─────────────────────────────────────── */
+    .chart { width: 100%; height: 60px; display: block; }
+    .chart-wrap { display: flex; gap: 0.5rem; margin-top: 0.8rem; }
+    .chart-body { flex: 1; min-width: 0; }
+    .chart-y {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: flex-end;
+      height: 60px;
+      font-size: 0.62rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .chart-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.62rem;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
+
+    /* ── Utility and narrow screens ──────────────────────────────────── */
+    .hidden { display: none !important; }
+
+    @media (max-width: 560px) {
+      .cfg-field { grid-template-columns: 1fr; row-gap: 0.25rem; }
+      .cfg-field .cfg-hint { grid-column: 1; }
+      .switch-row { grid-template-columns: 1fr auto; }
     }
   </style>
 </head>
@@ -5962,16 +6210,21 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
        is a puzzle rather than a notice. -->
   <div class="attention hidden" id="attention"></div>
 
+  <!-- role="tab" without aria-selected announces a tab strip and then
+       never says which tab is current; showTab keeps both in step. -->
   <nav class="tabs" role="tablist">
-    <button class="tab active" id="tab-sites" type="button" role="tab">Sites</button>
-    <button class="tab" id="tab-server" type="button" role="tab">Server</button>
-    <button class="tab" id="tab-stats" type="button" role="tab">Statistics</button>
+    <button class="tab active" id="tab-sites" type="button" role="tab"
+            aria-controls="panel-sites" aria-selected="true">Sites</button>
+    <button class="tab" id="tab-server" type="button" role="tab"
+            aria-controls="panel-server" aria-selected="false">Server</button>
+    <button class="tab" id="tab-stats" type="button" role="tab"
+            aria-controls="panel-stats" aria-selected="false">Statistics</button>
   </nav>
 
-  <!-- ══ Publish — one card per site: drop or choose its folder, publish.
-       Cards can be added, removed, and reordered (drag the header, or the
-       arrows), because the cards ARE the site list: order is config —
-       the first domainless site answers unmatched Hosts. ══ -->
+  <!-- ══ Sites — one card per site, carrying everything about it. Cards
+       can be added, removed, and reordered by dragging the header, because
+       the cards ARE the site list: their order is config — the first
+       domainless site answers unmatched Hosts. ══ -->
   <div id="panel-sites" role="tabpanel" class="hidden">
     <div id="site-cards"></div>
     <div class="add-zone">
@@ -5980,12 +6233,58 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     <p class="error hidden" id="sites-error"></p>
   </div>
 
+  <div id="panel-server" role="tabpanel" class="hidden">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Status</span>
+      </div>
+      <div class="card-body">
+        <div class="switch-row">
+          <span class="k">Status</span>
+          <span class="switch-value"><span id="status-state"></span>
+            <span class="switch-act">
+            <button class="action tiny" id="btn-restart" type="button">Restart</button>
+            <button class="action tiny" id="btn-power" type="button">Stop</button>
+            </span>
+          </span>
+        </div>
+        <div class="rows" id="host-rows"></div>
+        <div class="confirm hidden" id="stop-confirm">
+          <div class="split"></div>
+          <p class="hint">Stopping takes <b>every site on this server</b>
+          offline until it is started again. This page keeps working — it is
+          served by the terminal command, not by the server.</p>
+          <div class="btn-row" style="margin-top:0.75rem">
+            <button class="action danger" id="btn-stop-yes" type="button">Stop the server</button>
+            <button class="action" id="btn-stop-no" type="button">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">Settings</span>
+        <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
+      </div>
+      <div class="card-body">
+        <div id="cfg-host-fields"></div>
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="action" id="btn-save-host" type="button">Save</button>
+        </div>
+        <p class="error hidden" id="cfg-host-error"></p>
+      </div>
+    </div>
+
+  </div>
+
   <div id="panel-stats" role="tabpanel" class="hidden">
 
     <div class="card">
       <div class="card-head">
         <span class="card-title">Site traffic</span>
-        <select class="cfg-site" id="traffic-window" style="margin:0">
+        <select id="traffic-window">
           <option value="1">last 24 hours</option>
           <option value="2">last 48 hours</option>
           <option value="7" selected>last 7 days</option>
@@ -6017,54 +6316,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         <p class="hint">Averages since the server started; the line is live
         while this tab is open and is kept nowhere. High CPU on a static
         server usually means a bot, not popularity.</p>
+        <p class="error hidden" id="load-error"></p>
       </div>
     </div>
-  </div>
-
-  <div id="panel-server" role="tabpanel" class="hidden">
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Server status</span>
-      </div>
-      <div class="card-body">
-        <div class="switch-row">
-          <span class="k">Status</span>
-          <span class="switch-value"><span id="status-state"></span>
-            <span class="switch-act">
-            <button class="action tiny" id="btn-restart" type="button">Restart</button>
-            <button class="action tiny" id="btn-power" type="button">Stop</button>
-            </span>
-          </span>
-        </div>
-        <div class="rows" id="host-rows"></div>
-        <div class="confirm hidden" id="stop-confirm">
-          <div class="split"></div>
-          <p class="hint">Stopping takes <b>every site on this server</b>
-          offline until it is started again. This page keeps working — it is
-          served by the terminal command, not by the server.</p>
-          <div class="btn-row" style="margin-top:0.75rem">
-            <button class="action danger" id="btn-stop-yes" type="button">Stop the server</button>
-            <button class="action" id="btn-stop-no" type="button">Cancel</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">Server settings</span>
-        <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
-      </div>
-      <div class="card-body">
-        <div id="cfg-host-fields"></div>
-        <div class="btn-row" style="margin-top:0.9rem">
-          <button class="action" id="btn-save-host" type="button">Save</button>
-        </div>
-        <p class="error hidden" id="cfg-host-error"></p>
-      </div>
-    </div>
-
   </div>
 
   </div><!-- /app -->
@@ -6073,15 +6327,38 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     This page is served on <b>127.0.0.1</b> through your SSH tunnel. It does
     not exist on the public internet. No signature or password is required
     because <b>only your SSH key can open the tunnel</b>.
+    More information is available at
+    <a href="https://servette.org" target="_blank" rel="noopener">servette.org</a>.
   </div>
 
 </div>
 
 <script>
   'use strict';
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     One script, in the order a reader meets the page:
+
+       1. Shared vocabulary — constants, formatting, and the page's state
+       2. The loopback server — one door for every request
+       3. Tabs
+       4. The Sites tab — cards, reordering, publishing
+       5. The Server tab — status, service controls, settings
+       6. The Statistics tab — traffic, load, charts, the live meter
+       7. Feature gate and startup
+
+     Every render reads `statusData` and `cfgData` and nothing else, so the
+     three tabs cannot disagree about what the server is doing.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /* ══ 1. Shared vocabulary ═══════════════════════════════════════════ */
+
   const $ = (id) => document.getElementById(id);
 
   const MAX_BUNDLE_BYTES = 500 * 1024 * 1024;  // mirrors _MAX_BUNDLE_BYTES server-side
+
+  // This run's passcode, carried by every request. Reaching the tunnel is
+  // the authentication; the passcode only proves this is that run's page.
   const CODE = new URLSearchParams(location.search).get('t') || '';
 
   // A fetch that dies with no HTTP response at all surfaces as a TypeError
@@ -6093,68 +6370,121 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     'command has ended, reconnect, run servette admin again, and open the ' +
     'fresh link it prints.';
 
-  /* ══ Tabs — fragment-addressable, so a terminal command can deep-link. ══ */
+  // What to tell the operator about a failure, decided once: a dead wire
+  // reads as the tunnel, and anything else already carries the server's own
+  // sentence — the same one the terminal would have printed. `about` names
+  // what was being attempted, and is worth saying only for the second kind:
+  // the tunnel sentence is about the tunnel, not about the request.
+  const reason = (e, about) => (e instanceof TypeError) ? TUNNEL_DOWN
+    : (about ? about + ': ' : '') + e.message;
 
-  const PANELS = { sites: 'panel-sites', server: 'panel-server',
-                   stats: 'panel-stats' };
+  /* ── Text and markup. Everything the server sends is escaped before it
+     reaches innerHTML; page-authored markup is interpolated as written. ── */
 
-  function showTab(name) {
-    // Old bookmarks still land somewhere sensible.
-    if (['status', 'config', 'settings'].includes(name)) name = 'server';
-    if (['analytics', 'traffic'].includes(name)) name = 'stats';
-    if (name === 'publish') name = 'sites';
-    if (!PANELS[name]) name = 'sites';
-    for (const key of Object.keys(PANELS)) {
-      $(PANELS[key]).classList.toggle('hidden', key !== name);
-      $('tab-' + key).classList.toggle('active', key === name);
-    }
-    refresh();  // every tab renders from the same /status + /config truth
-    if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
-    if (location.hash !== '#' + name)
-      history.replaceState(null, '', '#' + name + location.search);
-  }
+  const escapeHtml = (s) => String(s == null ? '' : s)
+    .replace(/[&<>"']/g, (c) => '&#' + c.charCodeAt(0) + ';');
 
-  $('tab-sites').addEventListener('click', () => showTab('sites'));
-  $('tab-server').addEventListener('click', () => showTab('server'));
-  $('tab-stats').addEventListener('click', () => showTab('stats'));
-
-  /* ══ The page's truth: /status and /config fetched together, rendered
-     into both tabs at once. ══ */
-
+  // A label/value line. Both halves are interpolated raw, so a caller
+  // passing server text escapes it first — factRow, just below, is the
+  // wrapper that always does.
   const row = (k, v, cls) =>
     `<div class="${cls || ''}"><span class="k">${k}</span>${v}</div>`;
 
   // A fact is not a victory: rows read like the shell's status — label and
   // value, plainly — and only a row that needs attention wears a mark.
+  // Two marks, because two things are true at once and one colour cannot
+  // say both: red where visitors cannot use the site as configured (nothing
+  // to serve, everyone locked out, the server stopped, an untrusted
+  // certificate on a site that advertises a name), amber where it serves
+  // and something still wants doing.
+  const faultClass = (c) => c.blocking ? 'fault' : 'warn';
   const factRow = (c) => row(escapeHtml(c.label),
     c.ok ? escapeHtml(c.detail)
-         : `<span class="warn">${escapeHtml(c.detail)}</span>`);
+         : `<span class="${faultClass(c)}">${escapeHtml(c.detail)}</span>`);
 
-  let statusData = null;
-  let latestVersion = null;   // filled once per page, by asking
+  // One labelled input. The hint is page-authored markup (several carry
+  // <b>), never server text; the value is escaped because it is.
+  const field = (key, label, value, opts) => {
+    const o = opts || {};
+    return `<div class="cfg-field">` +
+      `<label for="cfg-${key}">${label}</label>` +
+      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
+      ` value="${escapeHtml(value)}">` +
+      (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
+      `</div>`;
+  };
 
-  // Asked once when the page opens, and never on a timer: Servette does not
-  // phone home on its own schedule, and this is the operator asking.
-  async function checkUpgrade() {
-    try {
-      const r = await fetch('/update?t=' + encodeURIComponent(CODE));
-      if (!r.ok) return;
-      latestVersion = (await r.json()).latest || null;
-      if (latestVersion) renderServer();
-    } catch (e) { /* offline, or PyPI unreachable — the row simply omits it */ }
+  const fmtSize = (n) =>
+    n < 1024 ? n + ' B'
+    : n < 1024 * 1024 ? (n / 1024).toFixed(1) + ' KB'
+    : (n / (1024 * 1024)).toFixed(1) + ' MB';
+
+  // dd Mmm yy, then the time. Day-first and a two-digit year keep every
+  // stamp the same width, so a column of them lines up.
+  const when = (epoch) => {
+    const d = new Date(epoch * 1000);
+    return String(d.getDate()).padStart(2, '0') + ' ' +
+           d.toLocaleString(undefined, { month: 'short' }) + ' ' +
+           String(d.getFullYear()).slice(-2) + ', ' +
+           d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit' });
+  };
+
+  /* ── Badges and error lines: the two ways this page reports on itself. ── */
+
+  // Only the colour variant is swapped. A badge may carry a marker class
+  // that says which badge it is (a site card has two), and replacing the
+  // whole class list would quietly take that with it.
+  const BADGE_VARIANTS = ['badge-green', 'badge-red', 'badge-dim', 'badge-warn'];
+  function setBadge(el, cls, text) {
+    el.classList.remove(...BADGE_VARIANTS);
+    el.classList.add('badge', cls);
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
+  function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
+  function clearError(el) { el.classList.add('hidden'); }
+
+  /* ── The page's state: one read of the server, rendered into every tab. ── */
+
+  let statusData = null;      // GET /status  — what the box is doing
+  let cfgData = null;         // GET /config  — what it is set to
+  let latestVersion = null;   // GET /update  — asked once, by the operator
+
+  /* ══ 2. The loopback server ═════════════════════════════════════════
+     Every request goes through these. The passcode is attached in one
+     place, and every POST is judged one way: the body is read before the
+     status is believed, because the server answers a refusal with the
+     sentence the terminal would have printed. ══ */
+
+  const api = (path, params) =>
+    path + '?' + new URLSearchParams(Object.assign({ t: CODE }, params || {}));
+
+  async function getJSON(path, params) {
+    const r = await fetch(api(path, params));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
   }
 
+  // `want` is the value of `result` that means this op succeeded: 'ok' from
+  // the site, service, and swap doors, 'saved' from a settings write.
+  async function post(path, body, want) {
+    const r = await fetch(api(path), { method: 'POST', body: JSON.stringify(body) });
+    let data = {};
+    try { data = await r.json(); } catch (e) { data = {}; }
+    if (!r.ok || data.result !== want)
+      throw new Error(data.error || 'HTTP ' + r.status);
+    return data;
+  }
+
+  // The one read every tab renders from. Both documents are fetched
+  // together, so no tab can show status from one moment beside config
+  // from another.
   async function refresh() {
     clearError($('cfg-host-error'));
     try {
-      const [rs, rc] = await Promise.all([
-        fetch('/status?t=' + encodeURIComponent(CODE)),
-        fetch('/config?t=' + encodeURIComponent(CODE)),
-      ]);
-      if (!rs.ok) throw new Error('HTTP ' + rs.status);
-      if (!rc.ok) throw new Error('HTTP ' + rc.status);
-      statusData = await rs.json();
-      cfgData = await rc.json();
+      const [status, cfg] = await Promise.all([getJSON('/status'), getJSON('/config')]);
+      statusData = status;
+      cfgData = cfg;
       renderServer();
       renderSiteCards();
       clearError($('sites-error'));
@@ -6168,346 +6498,165 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
   }
 
-
-  /* ══ Traffic — the journal re-read as counts, fetched on entry. ══ */
-
-  async function loadTraffic() {
-    clearError($('traffic-error'));
+  // Asked once when the page opens, and never on a timer: Servette does not
+  // phone home on its own schedule, and this is the operator asking.
+  async function checkUpgrade() {
     try {
-      const r = await fetch('/traffic?t=' + encodeURIComponent(CODE) +
-                            '&days=' + encodeURIComponent($('traffic-window').value));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const t = await r.json();
-      const total = t.total || 0;
-      // Status codes are the server's vocabulary, not the reader's: each
-      // count is named for what actually happened.
-      const NAMED = [['Files sent', ['200', '206']],
-                     ['Already cached', ['304']],
-                     ['Nothing there', ['404']],
-                     ['Refused', ['403', '405']],
-                     ['Sign-in needed', ['401']],
-                     ['Rate limited', ['429']]];
-      const named = NAMED
-        .map(([name, codes]) => [name, codes.reduce(
-          (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
-        .filter(([, n]) => n > 0);
-      $('traffic-chart').innerHTML = total
-        ? chart(lineSVG(t.days.map((d) => d[1])),
-                t.days.length ? t.days[0][0] : '',
-                t.days.length ? t.days[t.days.length - 1][0] : '',
-                Math.max(...t.days.map((d) => d[1])))
-        : '';
-      $('traffic-rows').innerHTML = !total
-        ? row('Requests', 'none in this window — or no readable journal on this host')
-        : named.map(([name, n]) => row(name, String(n))).join('') +
-          row('Total requests', `<b>${total}</b>`, 'ledger');
-    } catch (e) {
-      showError($('traffic-error'), (e instanceof TypeError) ? TUNNEL_DOWN
-        : 'Could not read traffic: ' + e.message);
-    }
+      latestVersion = (await getJSON('/update')).latest || null;
+      if (latestVersion) renderServer();
+    } catch (e) { /* offline, or PyPI unreachable — the row simply omits it */ }
   }
 
-  async function serviceOp(b, op) {
-    b.disabled = true;
-    clearError($('cfg-host-error'));
-    try {
-      const r = await fetch('/service?t=' + encodeURIComponent(CODE),
-                            { method: 'POST', body: JSON.stringify({ op }) });
-      let data = {};
-      try { data = await r.json(); } catch { data = {}; }
-      if (!r.ok || data.result !== 'ok')
-        throw new Error(data.error || 'HTTP ' + r.status);
-      await refresh();
-    } catch (e) {
-      showError($('cfg-host-error'),
-                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+  /* ══ 3. Tabs — fragment-addressable, so a terminal command can
+     deep-link. ══ */
+
+  const PANELS = { sites: 'panel-sites', server: 'panel-server',
+                   stats: 'panel-stats' };
+
+  function showTab(name) {
+    // Old bookmarks still land somewhere sensible.
+    if (['status', 'config', 'settings'].includes(name)) name = 'server';
+    if (['analytics', 'traffic'].includes(name)) name = 'stats';
+    if (name === 'publish') name = 'sites';
+    if (!PANELS[name]) name = 'sites';
+    for (const key of Object.keys(PANELS)) {
+      $(PANELS[key]).classList.toggle('hidden', key !== name);
+      $('tab-' + key).classList.toggle('active', key === name);
+      $('tab-' + key).setAttribute('aria-selected', String(key === name));
     }
-    b.disabled = false;
+    refresh();  // every tab renders from the same /status + /config truth
+    if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
+    if (location.hash !== '#' + name)
+      history.replaceState(null, '', '#' + name + location.search);
   }
 
-  $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
-  // One control for the two states: starting needs no ceremony, stopping
-  // takes every site offline and asks first.
-  $('btn-power').addEventListener('click', () => {
-    if ((statusData || {}).running) $('stop-confirm').classList.toggle('hidden');
-    else serviceOp($('btn-power'), 'start');
-  });
-  // Every site on the box goes dark, so this one asks first — in the page's
-  // own voice, the way a site card asks before deleting.
-  $('btn-stop-no').addEventListener('click', () =>
-    $('stop-confirm').classList.add('hidden'));
-  $('btn-stop-yes').addEventListener('click', async () => {
-    $('stop-confirm').classList.add('hidden');
-    await serviceOp($('btn-power'), 'stop');
-  });
+  $('tab-sites').addEventListener('click', () => showTab('sites'));
+  $('tab-server').addEventListener('click', () => showTab('server'));
+  $('tab-stats').addEventListener('click', () => showTab('stats'));
 
-  $('btn-traffic-refresh').addEventListener('click', loadTraffic);
-  $('traffic-window').addEventListener('change', loadTraffic);
+  /* ══ 4. The Sites tab ═══════════════════════════════════════════════
+     One card per site, carrying everything about it. The cards ARE the
+     site list: their order is config — the first domainless site answers
+     unmatched Hosts — so reordering them is a config write. ══ */
 
-  /* ══ Settings forms — over the same validators the `set` command runs, so
-     a value the terminal refuses the page refuses with the same sentence.
-     Deliberately absent from these forms (the terminal keeps them): the
-     serve folder (publishing manages it), port and trusted proxy
-     (behind-a-balancer deployments), the pull channel's URL/key pair, and
-     every lifecycle verb. The domain is not a form either — naming a site
-     runs its certificate issuance, on the Publish card. ══ */
-
-  const HOST_FIELDS = [
-    ['email', 'Email',
-     'Registers this server with the certificate authority — one account for ' +
-     'every site here, not one per domain. Where renewal and expiry notices go.'],
-    ['rate_limit', 'Rate limit',
-     'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
-    ['auth_rate_limit', 'Auth rate limit',
-     'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
-    ['cache_size_mb', 'File cache size (MB)',
-     'Memory set aside to serve frequently requested files without re-reading the disk.'],
-  ];
-
-  let cfgData = null;
-  const field = (key, label, value, opts) => {
-    const o = opts || {};
-    return `<div class="cfg-field">` +
-      `<label for="cfg-${key}">${label}</label>` +
-      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
-      ` value="${escapeHtml(String(value == null ? '' : value))}">` +
-      (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
-      `</div>`;
+  // What a site's unhealthy row is called on its card — the fault named,
+  // rather than an exclamation mark standing in for the name.
+  const NEEDS_WORD = {
+    cert:     'Needs certificate',
+    password: 'Needs password',
+    dir:      'Folder missing',
   };
 
-  function renderServer() {
-    const checks = (statusData && statusData.checks) || [];
-    const hostChecks = checks.filter((c) => c.site === null);
-    const d = statusData || {};
+  // A card's index is its position in the DOM, read at the moment it is
+  // needed: adding, removing, or dragging a card renumbers its neighbours,
+  // and a stale index would act on the wrong site.
+  // Which cards are folded shut. Kept here rather than on the card,
+  // because every op re-renders the list and a card that sprang open on
+  // each save would be worse than no fold at all. Keyed by domain where
+  // there is one, since dragging renumbers indexes.
+  const folded = new Set();
+  const foldKey = (siteData, idx) => siteData.domain || '#' + idx;
 
-    // What has no card of its own says its piece here; a site's trouble is
-    // worn by that site's card on the Sites tab.
-    const needs = hostChecks.filter((c) => !c.ok);
-    $('attention').classList.toggle('hidden', !needs.length);
-    $('attention').innerHTML = needs.map((c) =>
-      `<b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
-      `<a href="#server">open Server →</a>`).join('<br>');
-    for (const a of $('attention').querySelectorAll('a'))
-      a.addEventListener('click', (e) => { e.preventDefault(); showTab('server'); });
+  const cardIndex = (el) =>
+    [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
 
-    $('status-state').innerHTML = d.running
-      ? '<span class="dot"></span>running'
-      : '<span class="warn">stopped</span>';
-    // Two controls, not three: restart is meaningless on a stopped server,
-    // and the third is whichever of stop/start the state calls for.
-    $('btn-restart').disabled = !d.running;
-    $('btn-restart').title = d.running
-      ? 'Stop and start the service — applies a port change, or clears a wedged process'
-      : 'Nothing to restart — the server is stopped';
-    $('btn-power').textContent = d.running ? 'Stop' : 'Start';
-    $('btn-power').classList.toggle('danger', !!d.running);
-    $('btn-power').title = d.running
-      ? 'Take every site on this server offline until it is started again'
-      : 'Start the installed system service';
-
-    $('host-rows').innerHTML =
-      row('Version', 'v' + (d.version || '?') +
-        (latestVersion
-          ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
-            ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
-          : '')) +
-      hostChecks.map(factRow).join('');
-
-    // Present always, dim when there is nothing to start — the same rule
-    // every other button follows.
-    // Swap is a size the operator types — the terminal has always asked for
-    // it that way — so it is a field among fields, saved by the same button.
-    const sw = d.swap || {};
-    const swapField = (sw.active_mb == null && sw.recommended_mb == null) ? '' :
-      field('swap_mb', 'Swap file (MB)',
-            sw.active_mb != null ? sw.active_mb : '',
-            { hint: 'Disk that absorbs a memory spike, so a burst past free RAM ' +
-                    'cannot take the host down.' +
-                    (sw.recommended_mb
-                      ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
-                      : '') });
-    const typingInSwap = document.activeElement
-      && document.activeElement.id === 'cfg-swap_mb';
-    if (!typingInSwap)
-      $('cfg-host-fields').innerHTML =
-        HOST_FIELDS.map(([k, l, h]) => field(k, l, (cfgData.host || {})[k], { hint: h })).join('')
-        + swapField;
-
-    renderLoad();
-  }
-
-  // Utilization lives with the other counts, on the Analytics tab: the two
-  // figures, then the live meter that builds while the page is open.
-  const when = (epoch) => new Date(epoch * 1000).toLocaleString(undefined,
-    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-
-  function renderLoad() {
-    const l = ((statusData || {}).load) || {};
-    $('load-rows').innerHTML =
-      row('CPU', l.cpu_percent == null ? '(not available on this host)'
-                 : l.cpu_percent.toFixed(1) + '% average' +
-                   (l.started_at ? ' since ' + escapeHtml(when(l.started_at)) : '')) +
-      row('Memory', l.memory_mb == null ? '(not available on this host)'
-                    : l.memory_mb.toFixed(1) + ' MB');
-    $('load-chart').innerHTML = cpuSeries.length < 2
-      ? '<p class="hint">Live CPU — the line starts when you open this tab.</p>'
-      : chart(lineSVG(cpuSeries),
-              (cpuSeries.length - 1) * METER_SECONDS + 's ago',
-              cpuSeries[cpuSeries.length - 1].toFixed(1) + '% now',
-              Math.max(1, ...cpuSeries).toFixed(0), '%');
-  }
-
-  /* ══ Charts — inline SVG, sized by viewBox, no library. Every chart is
-     drawn with its scale: a line without a y-axis is a shape, not a
-     measurement. ══ */
-
-  function lineSVG(values) {
-    const w = 300, h = 60, max = Math.max(1, ...values);
-    const pts = values.length === 1
-      ? [`0,${(h - (values[0] / max) * h).toFixed(1)}`,
-         `${w},${(h - (values[0] / max) * h).toFixed(1)}`]
-      : values.map((v, i) =>
-          `${(i / (values.length - 1) * w).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`);
-    return `<svg viewBox="0 0 ${w} ${h}" class="chart" preserveAspectRatio="none">` +
-      `<polyline points="${pts.join(' ')}" fill="none" stroke="#5A8466" ` +
-      `stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline></svg>`;
-  }
-
-  // A chart, its y-axis (top of scale and zero), and its x labels.
-  const chart = (svg, xFrom, xTo, yMax, unit) =>
-    `<div class="chart-wrap"><div class="chart-y">` +
-    `<span>${escapeHtml(String(yMax))}${unit || ''}</span><span>0</span></div>` +
-    `<div class="chart-body">${svg}` +
-    `<div class="chart-labels"><span>${escapeHtml(xFrom)}</span>` +
-    `<span>${escapeHtml(xTo)}</span></div></div></div>`;
-
-  /* ══ The live meter: successive readings of the server's own cumulative
-     CPU counter, differenced here. Nothing is sampled or stored on the
-     server — the line exists only while this tab is open. ══ */
-
-  const METER_SECONDS = 3;
-  let meterTimer = null, lastSample = null, cpuSeries = [];
-
-  async function sampleLoad() {
+  // One op door for add, remove, move, name, and certificate: the server
+  // runs the same cores the terminal's add-site / remove-site / move-site /
+  // set domain / certificate run, then the cards re-render from fresh
+  // /config truth.
+  async function siteOp(body, errEl) {
+    clearError($('sites-error'));
+    if (errEl) clearError(errEl);
     try {
-      const r = await fetch('/status?t=' + encodeURIComponent(CODE));
-      if (!r.ok) { stopMeter(); return; }
-      const d = await r.json();
-      const l = d.load || {};
-      if (l.cpu_ns != null && lastSample) {
-        const dt = l.sampled_at - lastSample.at;
-        if (dt > 0) {
-          cpuSeries.push(Math.max(0,
-            (l.cpu_ns - lastSample.ns) / 1_000_000_000 / dt * 100));
-          if (cpuSeries.length > 60) cpuSeries.shift();
+      await post('/sites', body, 'ok');
+      await refresh();
+      return true;
+    } catch (e) {
+      showError(errEl || $('sites-error'), reason(e));
+      if (body.op === 'move')
+        renderSiteCards();  // snap the dragged DOM back to the loaded truth
+      return false;
+    }
+  }
+
+  $('btn-add-site').addEventListener('click', () => siteOp({ op: 'add' }));
+
+  function renderSiteCards() {
+    const wrap = $('site-cards');
+    wrap.innerHTML = '';
+    const sites = (cfgData && cfgData.sites) || [];
+    // One site is a site; the plural is earned.
+    $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
+    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx)));
+  }
+
+  /* ── Reordering, in the notebook's grammar: grab the header, a ghost
+     follows the cursor, the source dims to a placeholder, neighbours swap
+     in place as the ghost crosses them — and the drop is a single move
+     op, so the config write happens once, at the end. ── */
+
+  function attachCardDrag(head, el) {
+    head.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || e.target.closest('button') || e.target.closest('a')
+          || e.target.closest('.confirm')) return;   // the panel is not a handle
+      const startX = e.clientX, startY = e.clientY;
+      const rect = el.getBoundingClientRect();
+      const offY = e.clientY - rect.top;
+      const startIdx = cardIndex(el);
+      let started = false, ghost = null;
+      const move = (ev) => {
+        // A drag begins only after 5px of travel, so a click on the header
+        // is still a click.
+        if (!started) {
+          if (Math.abs(ev.clientX - startX) < 5 && Math.abs(ev.clientY - startY) < 5) return;
+          started = true;
+          ghost = el.cloneNode(true);
+          ghost.classList.add('card-ghost');
+          ghost.style.cssText = 'position:fixed;left:' + rect.left + 'px;top:' + rect.top +
+            'px;width:' + rect.width + 'px;margin:0;pointer-events:none;z-index:1000;opacity:0.93;';
+          document.body.appendChild(ghost);
+          el.classList.add('drag-placeholder');
+          document.body.style.userSelect = 'none';
         }
-      }
-      if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
-      statusData = d;
-      renderLoad();
-    } catch (e) {
-      // Nothing is listening any more — the admin command ended, or the
-      // tunnel closed. Keep polling and every attempt prints another
-      // 'channel N: open failed' in the operator's terminal.
-      stopMeter();
-      showError($('traffic-error'), TUNNEL_DOWN);
-    }
+        ghost.style.top = (ev.clientY - offY) + 'px';
+        const cards = [...document.querySelectorAll('#site-cards .site-card')];
+        const i = cards.indexOf(el);
+        const gr = ghost.getBoundingClientRect();
+        if (i > 0 && gr.top < cards[i - 1].getBoundingClientRect().top)
+          el.parentNode.insertBefore(el, cards[i - 1]);
+        else if (i < cards.length - 1 && gr.bottom > cards[i + 1].getBoundingClientRect().bottom)
+          el.parentNode.insertBefore(cards[i + 1], el);
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        if (!started) return;
+        ghost.remove();
+        el.classList.remove('drag-placeholder');
+        document.body.style.userSelect = '';
+        const endIdx = cardIndex(el);
+        if (endIdx !== startIdx) siteOp({ op: 'move', from: startIdx, to: endIdx });
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
   }
 
-  function startMeter() {
-    if (meterTimer) return;
-    meterTimer = setInterval(sampleLoad, METER_SECONDS * 1000);
-    sampleLoad();
-  }
-
-  function stopMeter() {
-    clearInterval(meterTimer);
-    meterTimer = null;
-  }
-
-  // A backgrounded tab has nobody reading it, and a closing one is gone:
-  // either way the polling stops, so an abandoned page cannot keep dialing
-  // a tunnel whose command has ended.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) stopMeter();
-    else if (!$('panel-stats').classList.contains('hidden')) startMeter();
-  });
-  window.addEventListener('pagehide', stopMeter);
-
-  async function saveSettings(values, siteIdx, badge, errEl) {
-    clearError(errEl);
-    setBadge(badge, 'badge-dim', 'saving…');
-    try {
-      const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
-        method: 'POST',
-        body: JSON.stringify({ site: siteIdx, values }),
-      });
-      let data = {};
-      try { data = await r.json(); } catch { data = {}; }
-      if (r.ok && data.result === 'saved') {
-        setBadge(badge, 'badge-green', '✓ saved');
-        refresh();
-      } else {
-        throw new Error(data.error || 'HTTP ' + r.status);
-      }
-    } catch (e) {
-      setBadge(badge, 'badge-red', '✕ not saved');
-      showError(errEl, (e instanceof TypeError)
-        ? TUNNEL_DOWN + ' Nothing was changed.'
-        : e.message + ' — nothing was changed.');
-    }
-  }
-
-  $('btn-save-host').addEventListener('click', async () => {
-    const values = {};
-    for (const [k] of HOST_FIELDS) values[k] = $('cfg-' + k).value.trim();
-    const badge = $('cfg-host-badge'), errEl = $('cfg-host-error');
-    clearError(errEl);
-
-    // The swapfile is the one setting whose save does filesystem work, so it
-    // runs only when its number actually changed — pressing Save on an
-    // untouched field must never swapoff anything.
-    const field = $('cfg-swap_mb');
-    const want = field ? parseInt(field.value.trim(), 10) : NaN;
-    const active = ((statusData || {}).swap || {}).active_mb;
-    const resize = field && want > 0 && want !== active;
-    if (field && field.value.trim() && !(want > 0))
-      return showError(errEl, 'Swap file size must be a number of megabytes.');
-
-    setBadge(badge, 'badge-dim', 'saving…');
-    try {
-      const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
-        method: 'POST', body: JSON.stringify({ site: 0, values }),
-      });
-      let data = {};
-      try { data = await r.json(); } catch { data = {}; }
-      if (!r.ok || data.result !== 'saved')
-        throw new Error(data.error || 'HTTP ' + r.status);
-
-      if (resize) {
-        setBadge(badge, 'badge-dim', 'resizing the swapfile…');
-        const rs = await fetch('/swap?t=' + encodeURIComponent(CODE), {
-          method: 'POST', body: JSON.stringify({ mb: want }),
-        });
-        let sd = {};
-        try { sd = await rs.json(); } catch { sd = {}; }
-        if (!rs.ok || sd.result !== 'ok')
-          throw new Error(sd.error || 'HTTP ' + rs.status);
-      }
-      setBadge(badge, 'badge-green', '✓ saved');
-      refresh();
-    } catch (e) {
-      setBadge(badge, 'badge-red', '✕ not saved');
-      showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
-    }
-  });
-
-  /* ══ Publish — the pub tool's bundle builder with the signing removed.
-     The server's contract (_extract_bundle / _land_bundle): a tar.gz of
+  /* ── The bundle builder: the pub tool's, with the signing removed. The
+     server's contract (_extract_bundle / _land_bundle) is a tar.gz of
      plain files and directories, paths relative to the site root, no entry
      escaping it, under 500 MB uncompressed — POSTed to /upload with this
-     run's passcode. ══ */
+     run's passcode. Hand-rolled ustar, because the browser has no tar and
+     this page loads no third-party code. ── */
 
+  // The same hidden-path rule the server enforces: any '.'-segment except
+  // .well-known is never served, so it is not bundled either — a .git or
+  // .env under the site folder must not end up on the server.
+  const isHiddenPath = (path) =>
+    path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
+
+  // ustar splits a long path across two header fields; find a split point
+  // that fits both, or refuse rather than emit a truncated name.
   function splitTarName(path) {
     const len = (s) => new TextEncoder().encode(s).length;
     if (len(path) <= 100) return ['', path];
@@ -6550,6 +6699,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // entries: [{ path, bytes }] with '/'-separated site-root-relative paths.
   function buildTar(entries) {
     const mtime = Math.floor(Date.now() / 1000);
+    // Every ancestor directory gets its own entry, so the archive is
+    // complete rather than relying on the extractor to invent them.
     const dirs = new Set();
     for (const e of entries)
       for (let i = e.path.indexOf('/'); i !== -1; i = e.path.indexOf('/', i + 1))
@@ -6578,142 +6729,36 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     return new Uint8Array(await new Response(stream).arrayBuffer());
   }
 
-  function setBadge(el, cls, text) {
-    el.className = 'badge ' + cls;
-    el.textContent = text;
-    el.classList.remove('hidden');
-  }
-  function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
-  function clearError(el) { el.classList.add('hidden'); }
+  /* ── The drop door. A dropped folder walks the same intake as the
+     picker: a single dropped directory is the site folder (its name
+     stripped, exactly like the picker does), and several dropped items
+     land as the site root's own entries. ── */
 
-  function fmtSize(n) {
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    return (n / (1024 * 1024)).toFixed(1) + ' MB';
-  }
-
-  const escapeHtml = (s) =>
-    s.replace(/[&<>"']/g, (c) => '&#' + c.charCodeAt(0) + ';');
-
-  // The same hidden-path rule the server enforces: any '.'-segment except
-  // .well-known is never served, so it is not bundled either — a .git or
-  // .env under the site folder must not end up on the server.
-  const isHiddenPath = (path) =>
-    path.split('/').some((seg) => seg.startsWith('.') && seg !== '.well-known');
-
-  // What a site's unhealthy row is called on its card — the fault named,
-  // rather than an exclamation mark standing in for the name.
-  const NEEDS_WORD = {
-    cert:     'Needs certificate',
-    password: 'Needs password',
-    dir:      'Folder missing',
-    channel:  'Channel unfinished',
-  };
-
-  const cardIndex = (el) =>
-    [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
-
-  // One op door for add, remove, and move: the server runs the same cores
-  // the terminal's add-site / remove-site / move-site run, then the cards
-  // re-render from fresh /config truth.
-  async function siteOp(body, errEl) {
-    clearError($('sites-error'));
-    if (errEl) clearError(errEl);
-    try {
-      const r = await fetch('/sites?t=' + encodeURIComponent(CODE), {
-        method: 'POST', body: JSON.stringify(body),
-      });
-      let data = {};
-      try { data = await r.json(); } catch { data = {}; }
-      if (!r.ok || data.result !== 'ok')
-        throw new Error(data.error || 'HTTP ' + r.status);
-      await refresh();
-      return true;
-    } catch (e) {
-      showError(errEl || $('sites-error'),
-                (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
-      if (body.op === 'move')
-        renderSiteCards();  // snap the dragged DOM back to the loaded truth
-      return false;
+  // Read one directory to the end. The reader hands back a batch at a time
+  // and signals the end with an empty one, so this cannot be a single call.
+  async function readChildren(dirEntry, prefix, out) {
+    const reader = dirEntry.createReader();
+    for (;;) {
+      const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+      if (!batch.length) break;
+      for (const child of batch) await readDropped(child, prefix, out);
     }
   }
 
-  $('btn-add-site').addEventListener('click', () => siteOp({ op: 'add' }));
-
-  function renderSiteCards() {
-    const wrap = $('site-cards');
-    wrap.innerHTML = '';
-    const sites = (cfgData && cfgData.sites) || [];
-    // One site is a site; the plural is earned.
-    $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
-    sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx, sites.length)));
-  }
-
-  // Reordering, in the notebook's grammar: grab the header, a ghost follows
-  // the cursor, the source dims to a placeholder, neighbours swap in place
-  // as the ghost crosses them — and the drop is a single move op.
-  function attachCardDrag(head, el) {
-    head.addEventListener('mousedown', (e) => {
-      if (e.button !== 0 || e.target.closest('button') || e.target.closest('a')) return;
-      const startX = e.clientX, startY = e.clientY;
-      const rect = el.getBoundingClientRect();
-      const offY = e.clientY - rect.top;
-      const startIdx = cardIndex(el);
-      let started = false, ghost = null;
-      const move = (ev) => {
-        if (!started) {
-          if (Math.abs(ev.clientX - startX) < 5 && Math.abs(ev.clientY - startY) < 5) return;
-          started = true;
-          ghost = el.cloneNode(true);
-          ghost.classList.add('card-ghost');
-          ghost.style.cssText = 'position:fixed;left:' + rect.left + 'px;top:' + rect.top +
-            'px;width:' + rect.width + 'px;margin:0;pointer-events:none;z-index:1000;opacity:0.93;';
-          document.body.appendChild(ghost);
-          el.classList.add('drag-placeholder');
-          document.body.style.userSelect = 'none';
-        }
-        ghost.style.top = (ev.clientY - offY) + 'px';
-        const cards = [...document.querySelectorAll('#site-cards .site-card')];
-        const i = cards.indexOf(el);
-        const gr = ghost.getBoundingClientRect();
-        if (i > 0 && gr.top < cards[i - 1].getBoundingClientRect().top)
-          el.parentNode.insertBefore(el, cards[i - 1]);
-        else if (i < cards.length - 1 && gr.bottom > cards[i + 1].getBoundingClientRect().bottom)
-          el.parentNode.insertBefore(cards[i + 1], el);
-      };
-      const up = () => {
-        document.removeEventListener('mousemove', move);
-        document.removeEventListener('mouseup', up);
-        if (!started) return;
-        ghost.remove();
-        el.classList.remove('drag-placeholder');
-        document.body.style.userSelect = '';
-        const endIdx = cardIndex(el);
-        if (endIdx !== startIdx) siteOp({ op: 'move', from: startIdx, to: endIdx });
-      };
-      document.addEventListener('mousemove', move);
-      document.addEventListener('mouseup', up);
-    });
-  }
-
-  // The drop door: a dropped folder walks the same intake. A single dropped
-  // directory is the site folder (its name stripped, exactly like the
-  // picker); several dropped items land as the site root's own entries.
   async function readDropped(entry, prefix, out) {
     if (entry.isFile) {
       const file = await new Promise((res, rej) => entry.file(res, rej));
       out.push({ path: prefix + entry.name, file });
     } else if (entry.isDirectory) {
-      const reader = entry.createReader();
-      for (;;) {
-        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
-        if (!batch.length) break;
-        for (const e of batch) await readDropped(e, prefix + entry.name + '/', out);
-      }
+      await readChildren(entry, prefix + entry.name + '/', out);
     }
   }
 
-  function buildSiteCard(siteData, idx, total) {
+  /* ── One card. Everything about a site lives inside it — publish, facts,
+     domain, certificate, access, the outside test — so nothing on the card
+     needs to say which site it means. ── */
+
+  function buildSiteCard(siteData, idx) {
     const label = siteData.domain || 'site ' + idx;
     const inactive = siteData.active === false;
     const siteNeeds = (((statusData || {}).checks) || [])
@@ -6725,7 +6770,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // cancels — one bullet says exactly what each choice means. A card
     // that is already deactivated offers only the delete.
     const confirmHtml =
-      `<div class="confirm hidden"><div class="split"></div>` +
+      `<div class="confirm hidden">` +
       `<p class="hint"><b>Delete</b> removes this server's copies — the ` +
       `published files and their backup. Your originals in local storage ` +
       `are untouched; publishing again rebuilds the site.</p>` +
@@ -6744,34 +6789,26 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `and visitors get the plain not-found answer until it is reactivated.</p>` +
          `<div class="btn-row" style="margin-top:0.75rem">` +
          `<button class="action do-reactivate" type="button">Reactivate</button></div>`)
-      : (`<div class="dropstrip">drop this site's folder here, or <a href="#">choose it</a></div>` +
-         `<input type="file" webkitdirectory multiple class="hidden">` +
-         `<p class="hint summary">The folder to drop is the one holding the ` +
-         `site's <b>index.html</b>.</p>` +
-         `<div class="btn-row" style="margin-top:0.75rem">` +
-           `<button class="action pub" type="button" disabled>Publish</button>` +
-         `</div>` +
-         `<div class="done hidden">` +
-           `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
-           `<p class="hint">Want the previous content back? <b>restore-site${total > 1 ? ' ' + idx : ''}</b> ` +
-           `in the terminal is the one step back.</p>` +
-         `</div>` +
 
-         // ── Everything else this site is: its facts, and the controls
-         // that change them. One card per site, so no selector is needed
-         // to say which site any of it belongs to.
-         `<div class="split"></div>` +
-         `<div class="rows info"></div>` +
+      // ── What this site IS, at the top: its state, the address it
+      // answers at, and the three things that decide both. What you DO to
+      // it — publish, preview, download, redirect — follows underneath.
+      : (`<div class="rows info"></div>` +
 
          `<div class="switch-row"><span class="k">Domain</span>` +
          `<span class="switch-value"><input class="dom-input" type="text" ` +
-         `placeholder="example.com" value="${escapeHtml(siteData.domain || '')}">` +
+         `placeholder="example.com" value="${escapeHtml(siteData.domain)}">` +
          `<span class="switch-act"><button class="action tiny dom" type="button">` +
          `Set</button></span></span></div>` +
          `<div class="switch-row"><span class="k">Certificate</span>` +
          `<span class="switch-value"><span class="cert-state"></span>` +
          `<span class="switch-act"><button class="action tiny cert" type="button">` +
          `Get certificate</button></span></span></div>` +
+         // The explanation belongs under the button it explains, not three
+         // controls further down where it read as a note about access.
+         `<p class="cfg-hint">A certificate is issued only for a name that ` +
+         `already points here — check that the domain's DNS has an A record ` +
+         `to this server's IP before requesting one.</p>` +
 
          `<div class="switch-row">` +
          `<label class="k auth-label">Access</label>` +
@@ -6783,61 +6820,157 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
 
-         `<p class="hint">A certificate is issued only for a name that ` +
-         `already points here — check that the domain's DNS has an A record ` +
-         `to this server's IP before requesting one.</p>` +
+         // ── Publishing: drop a folder, look at it, ship it.
+         `<div class="split"></div>` +
+         `<div class="dropstrip"><span class="drop-lead">Drop this site's folder here</span>` +
+         `<span>or <a href="#">browse for it</a></span></div>` +
+         `<input type="file" webkitdirectory multiple class="hidden">` +
+         `<p class="hint summary">The folder to drop is the one holding the ` +
+         `site's <b>index.html</b>.</p>` +
+         // Both of these act on the folder you chose, so both are dim until
+         // you have chosen one. Download is not here: it acts on what is
+         // live, and sits on the line that reports it.
+         `<div class="btn-row" style="margin-top:0.75rem">` +
+           `<button class="action pub" type="button" disabled ` +
+           `title="Choose a folder first">Publish</button>` +
+           // Look before you ship. Content only — the real domain, its
+           // certificate, and its headers are not in scope here.
+           `<button class="action prev" type="button" disabled ` +
+           `title="Choose a folder first — this shows what you are about to ` +
+           `publish, not the live site">Preview</button>` +
+         `</div>` +
+         `<div class="preview hidden">` +
+           `<p class="hint">This is the folder you chose, served over the ` +
+           `tunnel and not published. Links inside it work; the site's real ` +
+           `domain, certificate, and headers are not part of what you are ` +
+           `seeing.</p>` +
+           `<iframe class="preview-frame" sandbox="allow-scripts allow-forms" ` +
+           `title="Preview of the chosen folder"></iframe>` +
+         `</div>` +
+         `<div class="done hidden">` +
+           `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
+         `</div>` +
 
+         // ── What this site has served, newest first. Present always, not
+         // only after a publish: "put yesterday's back" is a thing you
+         // want on the day you did not publish anything.
+         `<div class="split"></div>` +
+         `<div class="switch-row"><span class="k">Published</span>` +
+         `<span class="switch-value"><span class="ver-state">reading…</span>` +
+         `<span class="switch-act">` +
+         // The reverse of Publish, on the line that says what is live: the
+         // live tree as the same tar.gz the publish door accepts, so what
+         // comes down can go back up.
+         `<button class="action tiny dl" type="button" ` +
+         `title="Download the live content as a tar.gz">Download</button>` +
+         `<button class="action tiny ver-refresh" type="button" ` +
+         `title="Re-read this list. The page updates it after a publish or ` +
+         `restore of its own — this is for one done in the terminal.">` +
+         `Refresh</button>` +
+         `</span></span></div>` +
+         `<div class="rows versions"></div>` +
+
+         // ── Redirects: one path on this site sends visitors to another
+         // place. A setting, so it lives with the site's other settings
+         // rather than as a file in the content.
+         `<div class="split"></div>` +
+         `<div class="switch-row"><span class="k">Redirects</span>` +
+         `<span class="switch-value"><span class="redir-state"></span>` +
+         `<span class="switch-act"><button class="action tiny redir-add" ` +
+         `type="button">Add</button></span></span></div>` +
+         `<div class="rows redirects"></div>` +
+         `<div class="redir-form hidden">` +
+           `<div class="cfg-field"><label>Path</label>` +
+           `<input class="redir-from" type="text" placeholder="/talk"></div>` +
+           `<div class="cfg-field"><label>Sends visitors to</label>` +
+           `<input class="redir-to" type="text" placeholder="/2026/keynote"></div>` +
+           `<p class="cfg-hint">Any path on this site: one that moved, a short ` +
+           `link worth remembering, a name you want to keep working. It can ` +
+           `point at another path here or at a full https:// address. Visitors ` +
+           `are sent on with a <b>permanent</b> redirect, which browsers ` +
+           `remember — so a wrong one outlives fixing it here.</p>` +
+           `<div class="btn-row" style="margin-top:0.75rem">` +
+           `<button class="action redir-save" type="button">Add redirect</button>` +
+           `<button class="action redir-cancel" type="button">Cancel</button>` +
+           `</div>` +
+         `</div>` +
+
+         // ── The one view a page on the tunnel cannot compute for itself.
          `<div class="split"></div>` +
          `<div class="btn-row">` +
          `<button class="action outside" type="button" disabled>Test connection</button>` +
          `</div>`)
+
+    const q = (sel) => card.querySelector(sel);
 
     card.innerHTML =
       `<div class="card-head">` +
         `<span class="head-left"><span class="handle" title="Drag to reorder">⠿</span>` +
         `<span class="card-title">${escapeHtml(label)}</span></span>` +
         `<span class="head-right">` +
+          // The fault badge names the fault and stays put. The state badge
+          // beside it is the one publishing writes into, which is why they
+          // are separate elements: overwriting the first would erase a
+          // standing fault the moment a folder was read.
           (siteNeeds.length
-            ? `<span class="badge badge-warn needs" title="${escapeHtml(
+            ? `<span class="badge ${siteNeeds.some((c) => c.blocking)
+                 ? 'badge-red' : 'badge-warn'} needs" title="${escapeHtml(
                  siteNeeds.map((c) => c.detail).join(' · '))}">${
                  siteNeeds.length === 1
                    ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
                    : siteNeeds.length + ' to review'}</span>`
             : '') +
-          `<span class="badge badge-dim${inactive ? '' : ' hidden'}">${
+          `<span class="badge state badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
-          `<button class="ca del" type="button" title="Remove or deactivate">` +
-            `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" ` +
+          // Collapse, for a box serving more sites than fit on a screen.
+          // Chevrons toward each other close; away, open.
+          `<button class="action tiny fold" type="button" ` +
+            `title="Collapse this card"><svg viewBox="0 0 16 16" width="12" ` +
+            `height="12" fill="none" stroke="currentColor" stroke-width="1.6" ` +
+            `stroke-linecap="round"><path class="fold-a" d="M4 2.5l4 3.5 4-3.5"></path>` +
+            `<path class="fold-b" d="M4 13.5l4-3.5 4 3.5"></path></svg></button>` +
+          // Removing a site is destructive, so it wears the destructive
+          // colour all the time rather than only under the pointer — the
+          // same rule the stop button follows.
+          `<button class="action tiny danger del" type="button" ` +
+            `title="Remove or deactivate">` +
+            `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" ` +
             `stroke="currentColor" stroke-width="1.3"><path d="M3 4h10M6.5 4V2.5h3V4` +
             `M5 4l0.6 9.5h4.8L11 4"></path></svg></button>` +
         `</span>` +
       `</div>` +
-      `<div class="card-body">` + bodyHtml + confirmHtml +
+      `<div class="card-body">` + bodyHtml +
         `<p class="error hidden"></p>` +
       `</div>`;
+    // Anchored to the head, so the panel opens where the trash button is
+    // rather than at the far end of a long card. Appended after innerHTML
+    // because it belongs to the head, not to the body's flow.
+    q('.card-head').insertAdjacentHTML('beforeend', confirmHtml);
 
-    const q = (sel) => card.querySelector(sel);
-    const badge = q('.badge'), errEl = q('.error');
+    const badge = q('.badge.state'), errEl = q('.error');
+    // One error element, moved to whichever control refused. A message
+    // about the login field is no use at the foot of the card, below Test
+    // connection — the reason to fix something and the thing that fixes it
+    // belong within a glance of each other.
+    const errAt = (anchor, msg) => {
+      if (anchor) anchor.insertAdjacentElement('afterend', errEl);
+      showError(errEl, msg);
+    };
     let files = null, folderName = '';
     const mark = (cls, text) => setBadge(badge, cls, text);
+
+    /* ── Lifecycle: deactivate, reactivate, delete ── */
 
     // Deactivation rides the same settings write as everything else — it is
     // a setting ('set n active=no' is the terminal spelling).
     async function setActive(on) {
       clearError(errEl);
       try {
-        const r = await fetch('/config?t=' + encodeURIComponent(CODE), {
-          method: 'POST',
-          body: JSON.stringify({ site: cardIndex(card),
-                                 values: { active: on ? 'yes' : 'no' } }),
-        });
-        let data = {};
-        try { data = await r.json(); } catch { data = {}; }
-        if (!r.ok || data.result !== 'saved')
-          throw new Error(data.error || 'HTTP ' + r.status);
+        await post('/config', { site: cardIndex(card),
+                                values: { active: on ? 'yes' : 'no' } }, 'saved');
         await refresh();
       } catch (e) {
-        showError(errEl, (e instanceof TypeError) ? TUNNEL_DOWN : e.message);
+        showError(errEl, reason(e));
       }
     }
 
@@ -6860,15 +6993,40 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const react = q('.do-reactivate');
     if (react) react.addEventListener('click', () => setActive(true));
 
+    // ── Fold. The head keeps its title, its badges, and its controls, so
+    // a folded card still says which site it is and whether it needs
+    // attention — the reason to fold is length, not secrecy.
+    const key = foldKey(siteData, idx);
+    const applyFold = () => {
+      const shut = folded.has(key);
+      card.classList.toggle('folded', shut);
+      q('.fold').title = shut ? 'Expand this card' : 'Collapse this card';
+      // Shallow chevrons at the edges, with a clear gap between them.
+      // Drawn tall and meeting in the middle they read as an X, which sits
+      // beside a delete button and means the wrong thing entirely.
+      // A caret needs its angle: rise about equal to half its width. The
+      // gap between the two is what stops them reading as an X, so the
+      // pair sit at the edges — apexes 4px apart in a 16px box.
+      q('.fold-a').setAttribute('d', shut ? 'M4 6l4-3.5 4 3.5' : 'M4 2.5l4 3.5 4-3.5');
+      q('.fold-b').setAttribute('d', shut ? 'M4 10l4 3.5 4-3.5' : 'M4 13.5l4-3.5 4 3.5');
+    };
+    q('.fold').addEventListener('click', () => {
+      if (folded.has(key)) folded.delete(key); else folded.add(key);
+      applyFold();
+    });
+    applyFold();
+
     attachCardDrag(q('.card-head'), card);
 
     // Everything below is the publish machinery only an active card carries.
     if (inactive) return card;
-    const input = q('input'), pubBtn = q('.pub');
+    const input = q('input[type="file"]'), pubBtn = q('.pub');
+    const prevBtn = q('.prev');
     const summary = q('.summary'), done = q('.done');
 
-    // One intake for both doors — the picker and the drop — so they cannot
-    // drift on the hidden-path rule or the summary.
+    /* ── Reading a folder: one intake for both doors, the picker and the
+       drop, so they cannot drift on the hidden-path rule or the summary. ── */
+
     function useFolder(items, name) {
       const kept = items.filter((en) => !isHiddenPath(en.path));
       const hidden = items.length - kept.length;
@@ -6889,11 +7047,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         (hasIndex ? '' : ` · <span class="warn">no index.html at the top level — ` +
                          `the site root would show a directory miss</span>`);
       done.classList.add('hidden');
+      q('.preview').classList.add('hidden');
       pubBtn.disabled = false;
+      pubBtn.title = 'Publish this folder as the live site';
+      prevBtn.disabled = false;
+      prevBtn.title = 'Look at this folder before publishing it';
       mark('badge-green', '✓ folder read');
     }
 
-    q('.dropstrip a').addEventListener('click', (e) => { e.preventDefault(); input.click(); });
+    // The whole strip opens the picker, not just the link inside it — a
+    // drop target that only accepts a click on two exact words is a
+    // smaller target than it looks.
+    q('.dropstrip').addEventListener('click', (e) => { e.preventDefault(); input.click(); });
     input.addEventListener('change', () => {
       clearError(errEl);
       const all = [...input.files];
@@ -6905,10 +7070,21 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       })).filter((en) => en.path), all[0].webkitRelativePath.split('/')[0]);
     });
 
-    card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag'); });
-    card.addEventListener('dragleave', () => card.classList.remove('drag'));
+    // dragenter/dragleave fire for every child element the pointer crosses,
+    // so the highlight is counted rather than toggled — otherwise a large
+    // drop zone flickers as the pointer moves over the text inside it.
+    let dragDepth = 0;
+    card.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      if (dragDepth++ === 0) card.classList.add('drag');
+    });
+    card.addEventListener('dragover', (e) => e.preventDefault());
+    card.addEventListener('dragleave', () => {
+      if (--dragDepth <= 0) { dragDepth = 0; card.classList.remove('drag'); }
+    });
     card.addEventListener('drop', async (e) => {
       e.preventDefault();
+      dragDepth = 0;
       card.classList.remove('drag');
       clearError(errEl);
       const entries = [...e.dataTransfer.items]
@@ -6920,12 +7096,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         let name;
         if (entries.length === 1 && entries[0].isDirectory) {
           name = entries[0].name;
-          const reader = entries[0].createReader();
-          for (;;) {
-            const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
-            if (!batch.length) break;
-            for (const child of batch) await readDropped(child, '', items);
-          }
+          await readChildren(entries[0], '', items);   // the folder's name is stripped
         } else {
           name = 'dropped files';
           for (const entry of entries) await readDropped(entry, '', items);
@@ -6936,28 +7107,22 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       }
     });
 
+    /* ── Publishing: build the bundle in the browser, POST it whole. ── */
+
     pubBtn.addEventListener('click', async () => {
       clearError(errEl);
       pubBtn.disabled = true;
       mark('badge-dim', 'building…');
       try {
-        const entries = [];
-        let totalBytes = 0;
-        for (const { path, file } of files) {
-          const bytes = new Uint8Array(await file.arrayBuffer());
-          totalBytes += bytes.length;
-          if (totalBytes > MAX_BUNDLE_BYTES)
-            throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
-                            `the server would reject it`);
-          entries.push({ path, bytes });
-        }
-        const gz = await gzipBytes(buildTar(entries));
+        const { entries, gz } = await buildBundle();
 
+        // Not through post(): the body is the gzipped bundle itself rather
+        // than JSON, and a refused passcode earns its own sentence.
         mark('badge-dim', 'publishing…');
-        const resp = await fetch('/upload?t=' + encodeURIComponent(CODE) +
-                                 '&site=' + cardIndex(card), { method: 'POST', body: gz });
+        const resp = await fetch(api('/upload', { site: cardIndex(card) }),
+                                 { method: 'POST', body: gz });
         let result = '';
-        try { result = (await resp.json()).result; } catch { result = ''; }
+        try { result = (await resp.json()).result; } catch (e) { result = ''; }
 
         if (resp.ok && result === 'published') {
           q('.note-done').innerHTML = `<b>${escapeHtml(folderName)}/</b> is live — ` +
@@ -6966,6 +7131,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             `content kept as the one-step backup.`;
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');
+          loadVersions();          // the tree just replaced is now restorable
         } else if (resp.status === 403) {
           throw new Error('The server refused the passcode — close this page, ' +
                           'and open the fresh link the terminal prints for this run.');
@@ -6975,8 +7141,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                           ' — nothing was changed. The terminal log has the detail.');
         }
       } catch (e) {
-        // A dropped tunnel mid-upload cannot half-publish: the server swaps
-        // content in only after a complete, valid bundle has landed.
+        // Not reason(): a dropped tunnel mid-upload cannot half-publish (the
+        // server swaps content in only after a complete, valid bundle has
+        // landed), and the refusals thrown just above already end by saying
+        // nothing was changed.
         showError(errEl, (e instanceof TypeError)
           ? TUNNEL_DOWN + ' Nothing was published.' : e.message);
         mark('badge-red', '✕ failed');
@@ -6984,125 +7152,701 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       pubBtn.disabled = !files;
     });
 
-    // ── The site's own facts and controls, all card-local: each card owns
-    // its state, so nothing needs to say which site it means. ──
-    const info = q('.info');
-    if (info) {
-      const checksFor = (((statusData || {}).checks) || []).filter((c) => c.site === idx);
-      const certRow = checksFor.find((c) => c.key === 'cert');
-      const authRow = checksFor.find((c) => c.key === 'password');
-      const others  = checksFor.filter((c) => c.key !== 'cert' && c.key !== 'password');
-      let authDesired = null;   // null = follow the server
-      const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
+    /* ── Preview: the same bundle, staged where only this page can reach
+       it. Content only — HTTPS, the real domain, and the site's headers are
+       not part of what a preview shows, and the note beside it says so. ── */
 
-      const renderInfo = () => {
-        const on = authOn();
-        const pending = authDesired !== null && authDesired !== !!siteData.username;
-        info.innerHTML =
-          row('Status', siteNeeds.length
-            ? `<span class="warn">${siteNeeds.length} to review</span>`
-            : '<span class="ok">✓</span> healthy') +
-          row('Serving', siteData.domain
-            ? `<b>${escapeHtml('https://' + siteData.domain)}</b>`
-            : "this server's IP address (no domain set)") +
-          others.map((c) => {
-            const cut = c.label.indexOf(' · ');
-            return factRow(cut < 0 ? c
-              : Object.assign({}, c, { label: c.label.slice(cut + 3) }));
-          }).join('');
-
-        q('.cert-state').innerHTML = !certRow ? ''
-          : certRow.ok ? escapeHtml(certRow.detail)
-          : `<span class="warn">${escapeHtml(certRow.detail)}</span>`;
-        // Naming and certifying are two acts on one card: the name saves
-        // instantly, the certificate is asked for when you ask for it —
-        // and the button says so while the site has no trusted one.
-        const certBtn = q('.cert');
-        certBtn.disabled = !siteData.domain;
-        certBtn.classList.toggle('due', !!siteData.domain && !!certRow && !certRow.ok);
-        certBtn.textContent = (certRow && certRow.ok) ? 'Renew' : 'Get certificate';
-        certBtn.title = siteData.domain
-          ? 'Request a certificate for ' + siteData.domain
-          : 'Set a domain first — a certificate is issued for a name';
-
-        q('.auth-switch').checked = on;
-        q('.auth-action').textContent = on ? 'Make public' : 'Make private';
-        q('.auth-state').innerHTML = pending
-          ? `<span class="warn">${on ? 'username and password required'
-                                     : 'becoming public when saved'}</span>`
-          : (authRow && !authRow.ok)
-            ? `<span class="warn">${escapeHtml(authRow.detail)}</span>`
-            : (on ? 'private' : 'public');
-        q('.auth-fields').innerHTML = !on ? '' :
-          field('username-' + idx, 'Username', siteData.username,
-                { hint: 'Case-sensitive. Any characters except a colon.' }) +
-          field('password-' + idx,
-                siteData.has_password ? 'New password (blank = keep the current one)' : 'Password',
-                '', { type: 'password',
-                      hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
-        q('.auth-save').classList.toggle('hidden', !(on || pending));
-        q('.auth-hint').textContent = on ? ''
-          : (siteData.username
-             ? 'Saving makes the site public: the login is removed and the stored password deleted.'
-             : '');
-
-        const outside = q('.outside');
-        outside.disabled = !siteData.domain;
-        outside.title = siteData.domain
-          ? 'Opens the connection test on ' + siteData.domain
-          : 'Needs a domain — a site without one has no public name to test';
-      };
-      renderInfo();
-
-      q('.auth-switch').addEventListener('change', (e) => {
-        authDesired = e.target.checked;
-        renderInfo();
-      });
-
-      q('.outside').addEventListener('click', () => {
-        if (siteData.domain)
-          window.open('https://' + siteData.domain + '/.well-known/servette-check', '_blank');
-      });
-
-      // Setting the name is a config write and nothing more — instant, and
-      // it cannot fail on someone else's DNS.
-      q('.dom').addEventListener('click', async () => {
-        const domain = q('.dom-input').value.trim().toLowerCase();
-        clearError(errEl);
-        if (!domain) return showError(errEl, 'Type the domain first.');
-        await siteOp({ op: 'name', site: cardIndex(card), domain }, errEl);
-      });
-
-      // Asking for the certificate is the slow, network-dependent act, so
-      // it waits itself out and reports its own failure.
-      q('.cert').addEventListener('click', async () => {
-        const b = q('.cert');
-        const old = b.textContent;
-        b.disabled = true;
-        b.textContent = 'requesting…';
-        const ok = await siteOp({ op: 'certificate', site: cardIndex(card) }, errEl);
-        if (!ok) { b.disabled = false; b.textContent = old; }
-      });
-
-      q('.save-site').addEventListener('click', () => {
-        clearError(errEl);
-        if (!authOn())
-          return saveSettings({ username: '' }, cardIndex(card), badge, errEl);
-        const username = q('#cfg-username-' + idx).value.trim();
-        const pw = q('#cfg-password-' + idx).value;
-        if (!username)
-          return showError(errEl, 'A username is needed — or make the site public.');
-        if (!siteData.has_password && !pw)
-          return showError(errEl, 'A password is needed the first time a site turns private.');
-        saveSettings(Object.assign({ username }, pw ? { password: pw } : {}),
-                     cardIndex(card), badge, errEl);
-      });
+    // Building the bundle is the publish path's own work, so it is one
+    // function and both buttons call it.
+    async function buildBundle() {
+      const entries = [];
+      let totalBytes = 0;
+      for (const { path, file } of files) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        totalBytes += bytes.length;
+        if (totalBytes > MAX_BUNDLE_BYTES)
+          throw new Error(`bundle exceeds ${fmtSize(MAX_BUNDLE_BYTES)} uncompressed — ` +
+                          `the server would reject it`);
+        entries.push({ path, bytes });
+      }
+      return { entries, gz: await gzipBytes(buildTar(entries)) };
     }
+
+    prevBtn.addEventListener('click', async () => {
+      clearError(errEl);
+      prevBtn.disabled = true;
+      mark('badge-dim', 'staging…');
+      try {
+        const { gz } = await buildBundle();
+        const resp = await fetch(api('/preview', { site: siteIndex() }),
+                                 { method: 'POST', body: gz });
+        let data = {};
+        try { data = await resp.json(); } catch (e) { data = {}; }
+        if (!resp.ok || data.result !== 'staged')
+          throw new Error('The server would not stage this folder' +
+                          (data.result ? ` (${data.result})` : '') +
+                          ' — the same check a publish would fail.');
+        // The token is a path segment, not a query parameter: a draft's own
+        // relative links resolve against the path and drop the query, so a
+        // token in the query would load the page and 403 every stylesheet
+        // it asks for. And it is the PREVIEW token, never the run's
+        // passcode — a draft can read its own address, and must not learn
+        // the credential that publishes.
+        q('.preview-frame').src = '/preview/' + encodeURIComponent(data.token) +
+          '/' + encodeURIComponent(siteIndex()) + '/';
+        q('.preview').classList.remove('hidden');
+        mark('badge-green', '✓ staged');
+      } catch (e) {
+        showError(errEl, reason(e));
+        mark('badge-red', '✕ not staged');
+      }
+      prevBtn.disabled = !files;
+    });
+
+    /* ── The version ring: what this site has served, and one click back
+       to any of it. The list is its own fetch because answering it walks
+       every kept tree on disk, and /status is polled every few seconds. ── */
+
+    // Every other control on this card reads its index at click time,
+    // because dragging renumbers the neighbours. The version list is the
+    // one that also runs while the card is still being built and is not in
+    // the DOM yet — where cardIndex answers -1. It falls back to the index
+    // the card was built for, which is right until the first drag.
+    const siteIndex = () => {
+      const i = cardIndex(card);
+      return i < 0 ? idx : i;
+    };
+
+    async function loadVersions() {
+        const state = q('.ver-state'), list = q('.versions');
+        try {
+          const v = await getJSON('/versions', { site: siteIndex() });
+          const rows = v.versions || [];
+          const live = rows.find((r) => r.live);
+          // The live version's own size is the answer to "did the right
+          // folder land" — a file count off by an order of magnitude is
+          // the wrong folder, however right the site looks.
+          // Two lines: what is there, then when it landed. One line ran to
+          // the buttons and wrapped mid-date; the switch-row still centres
+          // the label and the buttons against the pair.
+          // A missing folder is marked here, because publishing is what
+          // fixes it — the same rule every other fault follows. It has no
+          // row of its own and used to sit in the facts block, which is
+          // nowhere near anything that would put it right.
+          const gone = checksFor.find((c) => c.key === 'dir');
+          state.innerHTML = gone
+            ? `<span class="${faultClass(gone)}">${escapeHtml(gone.detail)}</span>`
+            : live
+              ? `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
+                `${fmtSize(live.bytes)}</span>` +
+                `<span>${escapeHtml(when(live.published))}</span>`
+              : 'nothing published yet';
+          // Nothing published is nothing to download, and offering it
+          // anyway made the card contradict itself in two adjacent words.
+          const dl = q('.dl');
+          dl.disabled = !live || !live.files;
+          dl.title = dl.disabled
+            ? 'Nothing published yet — there is nothing to download'
+            : 'Download the live content as a tar.gz';
+          list.innerHTML = rows.length < 2 ? '' :
+            rows.map((r) => row(escapeHtml(when(r.published)),
+              `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
+              (r.live ? ' <span class="ok">· live</span>'
+                      : ` <button class="action tiny restore" type="button" ` +
+                        `data-v="${escapeHtml(r.name)}">Restore</button>`))).join('') +
+            `<p class="hint">The ${v.keep} most recent are kept. Restoring does ` +
+            `not consume one — you can restore back.</p>`;
+          for (const b of list.querySelectorAll('.restore'))
+            b.addEventListener('click', async () => {
+              b.disabled = true;
+              b.textContent = 'restoring…';
+              const ok = await siteOp({ op: 'restore', site: siteIndex(),
+                                        version: b.dataset.v }, errEl);
+              if (!ok) { b.disabled = false; b.textContent = 'Restore'; }
+            });
+        } catch (e) {
+          state.textContent = '';
+          showError(errEl, reason(e, 'Could not read the kept versions'));
+        }
+      }
+
+    q('.ver-refresh').addEventListener('click', loadVersions);
+    loadVersions();
+
+    // The response carries Content-Disposition, so the browser saves it
+    // rather than navigating: the operator stays on the page they were
+    // working in.
+    q('.dl').addEventListener('click', () => {
+      clearError(errEl);
+      location.assign(api('/download', { site: siteIndex() }));
+    });
+
+    /* ── Redirects. Both halves of the pair reach _set_site_value through
+       the same settings write, so a rule the terminal refuses the page
+       refuses with the same sentence. ── */
+
+    const renderRedirects = () => {
+      const table = siteData.redirects || {};
+      const keys = Object.keys(table).sort();
+      q('.redir-state').textContent = keys.length
+        ? keys.length + (keys.length === 1 ? ' rule' : ' rules') : 'none';
+      q('.redirects').innerHTML = keys.map((k) =>
+        row(escapeHtml(k),
+            `→ ${escapeHtml(table[k])} <button class="action tiny redir-del" ` +
+            `type="button" data-k="${escapeHtml(k)}">Remove</button>`)).join('');
+      for (const b of q('.redirects').querySelectorAll('.redir-del'))
+        b.addEventListener('click', () => {
+          b.disabled = true;
+          // Nothing after the comma is the removal, the same spelling the
+          // terminal takes.
+          saveSettings({ redirect: b.dataset.k + ',' }, siteIndex(), badge, errEl);
+        });
+    };
+    renderRedirects();
+
+    q('.redir-add').addEventListener('click', () =>
+      q('.redir-form').classList.toggle('hidden'));
+    q('.redir-cancel').addEventListener('click', () =>
+      q('.redir-form').classList.add('hidden'));
+    q('.redir-save').addEventListener('click', () => {
+      const from = q('.redir-from').value.trim();
+      const to   = q('.redir-to').value.trim();
+      clearError(errEl);
+      if (!from || !to)
+        return errAt(q('.redir-form'),
+                     'Both the path and where it sends visitors are needed.');
+      // The pair travels as one value, so the comma is the separator on both
+      // surfaces — which leaves it out of reach as a character in the old
+      // path. Rare, and said plainly rather than mangled quietly.
+      if (from.includes(','))
+        return errAt(q('.redir-form'), 'A path containing a comma has to be set by ' +
+                     'editing servette.toml — the comma separates the pair here.');
+      saveSettings({ redirect: from + ',' + to }, siteIndex(), badge, errEl);
+    });
+
+    /* ── The site's facts and the controls that change them. ── */
+
+    const info = q('.info');
+    const checksFor = (((statusData || {}).checks) || []).filter((c) => c.site === idx);
+    const certRow = checksFor.find((c) => c.key === 'cert');
+    const authRow = checksFor.find((c) => c.key === 'password');
+
+    // What the operator has asked for but not yet saved. null means the
+    // switch is still showing what the server says.
+    let authDesired = null;
+    const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
+
+    /* ── What this card wants dealt with ───────────────────────────────
+       ONE list, and everything about attention reads it: the count on the
+       Status line, and the mark on the row that fixes each item. Two
+       appearances per item, never three, and never a third register (a red
+       paragraph somewhere else) for the same fact.
+
+       It holds the server's stored faults AND an edit begun on this card
+       and not finished. An unfinished edit is not a defect of the site —
+       nothing is saved — but it is something to deal with, and a card that
+       said "healthy" beside a form it was refusing to accept was lying
+       about one of the two. */
+
+    // The switch says private; what the login still needs, in the words of
+    // the thing that is actually missing. Read live from the fields, so the
+    // count follows the typing. null means nothing is missing.
+    const authGap = () => {
+      if (!authOn()) return null;
+      const u = q('#cfg-username-' + idx), pw = q('#cfg-password-' + idx);
+      if (!u) return null;                    // the fields are not rendered yet
+      if (!u.value.trim()) return 'a username is needed';
+      if (!siteData.has_password && !pw.value) return 'a password is needed';
+      return null;
+    };
+    const authIncomplete = () => authGap() !== null;
+
+    const reviewList = () => {
+      const out = checksFor.filter((c) => !c.ok && c.key !== 'password');
+      const gap = authGap();
+      // The stored half-authenticated state and an edit in progress are the
+      // same row's business, so only one of them is ever listed. The stored
+      // one BLOCKS — a username saved with no password locks every visitor
+      // out — while an edit half-typed has changed nothing yet.
+      if (gap)
+        out.push({ key: 'password',
+                   blocking: !!siteData.username && !siteData.has_password,
+                   detail: gap });
+      else if (authRow && !authRow.ok)
+        out.push(authRow);
+      return out;
+    };
+
+    /* Two renders, because they run at different rates. renderInfo rebuilds
+       the card's controls — including the login fields — and runs when the
+       card's shape changes. renderAttention only re-states what needs
+       dealing with, and runs on every keystroke, because whether the login
+       is complete changes as you type. Rebuilding the fields on a keystroke
+       would wipe what was being typed into them; that is exactly what the
+       first version of this did. */
+
+    const renderAttention = () => {
+      const on = authOn();
+      const pending = authDesired !== null && authDesired !== !!siteData.username;
+      const needs = reviewList();
+      const blocking = needs.some((c) => c.blocking);
+
+      // The head pill is the Status line for a folded card, so it reads the
+      // same list rather than a snapshot taken when the card was built.
+      const pill = q('.badge.needs');
+      if (pill) {
+        pill.textContent = needs.length === 1
+          ? (NEEDS_WORD[needs[0].key] || 'Needs attention')
+          : needs.length + ' to review';
+        pill.classList.toggle('badge-red', blocking);
+        pill.classList.toggle('badge-warn', !blocking);
+        pill.classList.toggle('hidden', !needs.length);
+      }
+
+      info.innerHTML =
+        // The count, and the all-clear. It does not name its members: each
+        // is named on the row that fixes it, and four names here would be a
+        // sentence nobody reads. This is also the only place the card can
+        // say the site is WELL — every other row speaks for its own subject.
+        row('Status', needs.length
+          ? `<span class="${blocking ? 'fault' : 'warn'}">` +
+            `${needs.length} to review</span>`
+          : '<span class="ok">✓</span> healthy') +
+        // The site itself, one click away and in its own tab: the fastest
+        // answer to "did that publish land" is looking at it.
+        row('Serving', siteData.domain
+          ? `<a href="${escapeHtml('https://' + siteData.domain)}" target="_blank" ` +
+            `rel="noopener">${escapeHtml('https://' + siteData.domain)}</a>`
+          : "this server's IP address (no domain set)");
+
+      // One marker per row, taken from the same list the count read, so a
+      // row and the count can never disagree about what is wrong.
+      q('.cert-state').innerHTML = !certRow ? ''
+        : certRow.ok ? escapeHtml(certRow.detail)
+        : `<span class="${faultClass(certRow)}">${escapeHtml(certRow.detail)}</span>`;
+
+      const mine = needs.find((c) => c.key === 'password');
+      q('.auth-state').innerHTML = mine
+        ? `<span class="${faultClass(mine)}">${escapeHtml(mine.detail)}</span>`
+        // Going public needs nothing filled in, so it is a note, not a
+        // thing to review.
+        : (pending && !on)
+          ? '<span class="pending">not saved yet — becoming public</span>'
+          : (on ? 'private' : 'public');
+
+      // Dim rather than a refusal to print: what is missing is already on
+      // the access row and in the count, and a red paragraph saying it a
+      // third time is what made one problem look like three.
+      const saveBtn = q('.save-site');
+      saveBtn.disabled = authIncomplete();
+      saveBtn.title = saveBtn.disabled
+        ? 'Fill in the username and password above, or make the site public'
+        : 'Save the access settings for this site';
+    };
+
+    const renderInfo = () => {
+      const on = authOn();
+      const pending = authDesired !== null && authDesired !== !!siteData.username;
+
+      // Naming and certifying are two acts on one card: the name saves
+      // instantly, the certificate is asked for when you ask for it —
+      // and the button says so while the site has no trusted one.
+      const certBtn = q('.cert');
+      certBtn.disabled = !siteData.domain;
+      certBtn.classList.toggle('due', !!siteData.domain && !!certRow && !certRow.ok);
+      certBtn.textContent = (certRow && certRow.ok) ? 'Renew' : 'Get certificate';
+      certBtn.title = siteData.domain
+        ? 'Request a certificate for ' + siteData.domain
+        : 'Set a domain first — a certificate is issued for a name';
+
+      q('.auth-switch').checked = on;
+      q('.auth-action').textContent = on ? 'Make public' : 'Make private';
+      q('.auth-fields').innerHTML = !on ? '' :
+        field('username-' + idx, 'Username', siteData.username,
+              { hint: 'Case-sensitive. Any characters except a colon.' }) +
+        field('password-' + idx,
+              siteData.has_password ? 'New password (blank = keep the current one)' : 'Password',
+              '', { type: 'password',
+                    hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
+      q('.auth-save').classList.toggle('hidden', !(on || pending));
+      q('.auth-hint').textContent = on ? ''
+        : (siteData.username
+           ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+           : '');
+
+      // Typing changes whether the login is complete, so the count follows
+      // the keystroke — but only the attention half re-renders, or the
+      // fields would be rebuilt under the cursor.
+      for (const el of q('.auth-fields').querySelectorAll('input'))
+        el.addEventListener('input', () => { clearError(errEl); renderAttention(); });
+
+      const outside = q('.outside');
+      outside.disabled = !siteData.domain;
+      outside.title = siteData.domain
+        ? 'Opens the connection test on ' + siteData.domain
+        : 'Needs a domain — a site without one has no public name to test';
+
+      // Last, because it reads the fields the block above just created.
+      renderAttention();
+    };
+    renderInfo();
+
+    q('.auth-switch').addEventListener('change', (e) => {
+      // A refusal describes the form as it stood when Save was pressed.
+      // Move the switch and it is about a form that no longer exists, so it
+      // goes with the state that produced it — it used to sit there in red
+      // through every subsequent flip.
+      clearError(errEl);
+      authDesired = e.target.checked;
+      renderInfo();
+    });
+
+    // The public internet's vantage is the one view a page on the tunnel
+    // cannot compute: cross-origin responses are opaque by the browser's
+    // rules, so the site's own reserved page is opened instead.
+    q('.outside').addEventListener('click', () => {
+      if (siteData.domain)
+        window.open('https://' + siteData.domain + '/.well-known/servette-check',
+                    '_blank', 'noopener');
+    });
+
+    // Setting the name is a config write and nothing more — instant, and
+    // it cannot fail on someone else's DNS.
+    q('.dom').addEventListener('click', async () => {
+      const domain = q('.dom-input').value.trim().toLowerCase();
+      clearError(errEl);
+      if (!domain) return errAt(q('.dom-input').closest('.switch-row'),
+                                'Type the domain first.');
+      await siteOp({ op: 'name', site: cardIndex(card), domain }, errEl);
+    });
+
+    // Asking for the certificate is the slow, network-dependent act, so
+    // it waits itself out and reports its own failure.
+    q('.cert').addEventListener('click', async () => {
+      const b = q('.cert');
+      const old = b.textContent;
+      b.disabled = true;
+      b.textContent = 'requesting…';
+      const ok = await siteOp({ op: 'certificate', site: cardIndex(card) }, errEl);
+      if (!ok) { b.disabled = false; b.textContent = old; }
+    });
+
+    q('.save-site').addEventListener('click', () => {
+      clearError(errEl);
+      if (!authOn())
+        return saveSettings({ username: '' }, cardIndex(card), badge, errEl);
+      // No refusal to print: Save is dim until the login is complete, and
+      // what is missing is already said on the access row and counted on
+      // the status line. A red paragraph here was a third register for a
+      // fact the card states twice.
+      const username = q('#cfg-username-' + idx).value.trim();
+      const pw = q('#cfg-password-' + idx).value;
+      saveSettings(Object.assign({ username }, pw ? { password: pw } : {}),
+                   cardIndex(card), badge, errEl);
+    });
 
     return card;
   }
 
-  /* ══ Feature gate & startup. ══ */
+  /* ══ 5. The Server tab ══════════════════════════════════════════════
+     What the box is doing, and how it is set. The settings forms run over
+     the same validators the `set` command runs, so a value the terminal
+     refuses the page refuses with the same sentence. Deliberately absent
+     (the terminal keeps them): port and trusted proxy (behind-a-balancer
+     deployments) and every lifecycle verb. The domain is not a form either
+     — naming a site belongs on that site's card. ══ */
+
+  const HOST_FIELDS = [
+    ['email', 'Email',
+     'Registers this server with the certificate authority — one account for ' +
+     'every site here, not one per domain. Where renewal and expiry notices go.'],
+    ['rate_limit', 'Rate limit',
+     'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
+    ['auth_rate_limit', 'Auth rate limit',
+     'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
+    ['cache_size_mb', 'File cache size (MB)',
+     'Memory set aside to serve frequently requested files without re-reading the disk.'],
+  ];
+
+  function renderServer() {
+    const d = statusData || {};
+    const hostChecks = ((d.checks) || []).filter((c) => c.site === null);
+
+    // What has no card of its own says its piece here; a site's trouble is
+    // worn by that site's card on the Sites tab.
+    const needs = hostChecks.filter((c) => !c.ok);
+    $('attention').classList.toggle('hidden', !needs.length);
+    $('attention').innerHTML = needs.map((c) =>
+      `<b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
+      `<a href="#server">open Server →</a>`).join('<br>');
+    for (const a of $('attention').querySelectorAll('a'))
+      a.addEventListener('click', (e) => { e.preventDefault(); showTab('server'); });
+
+    $('status-state').innerHTML = d.running
+      ? '<span class="dot"></span>running'
+      : '<span class="warn">stopped</span>';
+    // Two controls, not three: restart is meaningless on a stopped server,
+    // and the second is whichever of stop/start the state calls for. Both
+    // are always present, dim when unavailable — the rule every button on
+    // this page follows.
+    $('btn-restart').disabled = !d.running;
+    $('btn-restart').title = d.running
+      ? 'Stop and start the service — applies a port change, or clears a wedged process'
+      : 'Nothing to restart — the server is stopped';
+    $('btn-power').textContent = d.running ? 'Stop' : 'Start';
+    $('btn-power').classList.toggle('danger', !!d.running);
+    $('btn-power').title = d.running
+      ? 'Take every site on this server offline until it is started again'
+      : 'Start the installed system service';
+
+    // The upgrade row tells; it never installs. Upgrading is a terminal
+    // act, so the row names the two commands and stops there.
+    $('host-rows').innerHTML =
+      row('Version', 'v' + (d.version || '?') +
+        (latestVersion
+          ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
+            ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
+          : '')) +
+      hostChecks.map(factRow).join('');
+
+    renderHostFields();
+    renderLoad();
+  }
+
+  function renderHostFields() {
+    // Swap is a size the operator types — the terminal has always asked for
+    // it that way — so it is a field among fields, saved by the same button.
+    const sw = (statusData || {}).swap || {};
+    // Allocated, not active: the kernel reports usable space, a page short
+    // of the file, so a field showing 1099 for an 1100 MB file would make
+    // typing the recommended number look like a resize that did not take.
+    const swapField = (sw.allocated_mb == null && sw.recommended_mb == null) ? '' :
+      field('swap_mb', 'Swap file (MB)',
+            sw.allocated_mb != null ? sw.allocated_mb : '',
+            { hint: 'Disk that absorbs a memory spike, so a burst past free RAM ' +
+                    'cannot take the host down.' +
+                    (sw.recommended_mb
+                      ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
+                      : '') });
+    // Re-rendering the form under a cursor would discard what is being
+    // typed, and the meter refreshes this tab every few seconds.
+    if (document.activeElement && document.activeElement.id === 'cfg-swap_mb') return;
+    $('cfg-host-fields').innerHTML =
+      HOST_FIELDS.map(([k, l, h]) => field(k, l, ((cfgData || {}).host || {})[k], { hint: h }))
+        .join('') + swapField;
+  }
+
+  /* ── The service's lifecycle: start, restart, stop. The page runs the
+     lifecycle of an installed service; it never installs one. ── */
+
+  async function serviceOp(b, op) {
+    b.disabled = true;
+    clearError($('cfg-host-error'));
+    try {
+      await post('/service', { op }, 'ok');
+      await refresh();
+    } catch (e) {
+      showError($('cfg-host-error'), reason(e));
+    }
+    b.disabled = false;
+  }
+
+  $('btn-restart').addEventListener('click', () => serviceOp($('btn-restart'), 'restart'));
+  // One control for the two states: starting needs no ceremony, stopping
+  // takes every site offline and asks first — in the page's own voice, the
+  // way a site card asks before deleting.
+  $('btn-power').addEventListener('click', () => {
+    if ((statusData || {}).running) $('stop-confirm').classList.toggle('hidden');
+    else serviceOp($('btn-power'), 'start');
+  });
+  $('btn-stop-no').addEventListener('click', () =>
+    $('stop-confirm').classList.add('hidden'));
+  $('btn-stop-yes').addEventListener('click', async () => {
+    $('stop-confirm').classList.add('hidden');
+    await serviceOp($('btn-power'), 'stop');
+  });
+
+  /* ── Saving settings. One Save covers every field on a form. ── */
+
+  async function saveSettings(values, siteIdx, badge, errEl) {
+    clearError(errEl);
+    setBadge(badge, 'badge-dim', 'saving…');
+    try {
+      await post('/config', { site: siteIdx, values }, 'saved');
+      setBadge(badge, 'badge-green', '✓ saved');
+      refresh();
+    } catch (e) {
+      setBadge(badge, 'badge-red', '✕ not saved');
+      showError(errEl, reason(e) + ' Nothing was changed.');
+    }
+  }
+
+  $('btn-save-host').addEventListener('click', async () => {
+    const badge = $('cfg-host-badge'), errEl = $('cfg-host-error');
+    clearError(errEl);
+    const values = {};
+    for (const [k] of HOST_FIELDS) values[k] = $('cfg-' + k).value.trim();
+
+    // The swapfile is the one setting whose save does filesystem work, so it
+    // runs only when its number actually changed — pressing Save on an
+    // untouched field must never swapoff anything.
+    const swapEl = $('cfg-swap_mb');
+    const want = swapEl ? parseInt(swapEl.value.trim(), 10) : NaN;
+    const allocated = ((statusData || {}).swap || {}).allocated_mb;
+    const resize = swapEl && want > 0 && want !== allocated;
+    if (swapEl && swapEl.value.trim() && !(want > 0))
+      return showError(errEl, 'Swap file size must be a number of megabytes.');
+
+    setBadge(badge, 'badge-dim', 'saving…');
+    try {
+      await post('/config', { site: 0, values }, 'saved');
+      if (resize) {
+        setBadge(badge, 'badge-dim', 'resizing the swapfile…');
+        await post('/swap', { mb: want }, 'ok');
+      }
+      setBadge(badge, 'badge-green', '✓ saved');
+      refresh();
+    } catch (e) {
+      setBadge(badge, 'badge-red', '✕ not saved');
+      showError(errEl, reason(e));
+    }
+  });
+
+  /* ══ 6. The Statistics tab ══════════════════════════════════════════
+     Counted traffic across every site, and the box's own load. ══ */
+
+  async function loadTraffic() {
+    clearError($('traffic-error'));
+    try {
+      const t = await getJSON('/traffic', { days: $('traffic-window').value });
+      const total = t.total || 0;
+      // Status codes are the server's vocabulary, not the reader's: each
+      // count is named for what actually happened.
+      const NAMED = [['Files sent', ['200', '206']],
+                     ['Already cached', ['304']],
+                     ['Nothing there', ['404']],
+                     ['Refused', ['403', '405']],
+                     ['Sign-in needed', ['401']],
+                     ['Rate limited', ['429']]];
+      const named = NAMED
+        .map(([name, codes]) => [name, codes.reduce(
+          (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
+        .filter(([, n]) => n > 0);
+      $('traffic-chart').innerHTML = total
+        ? chart(lineSVG(t.days.map((d) => d[1])),
+                t.days.length ? t.days[0][0] : '',
+                t.days.length ? t.days[t.days.length - 1][0] : '',
+                Math.max(...t.days.map((d) => d[1])))
+        : '';
+      $('traffic-rows').innerHTML = !total
+        ? row('Requests', 'none in this window — or no readable journal on this host')
+        : named.map(([name, n]) => row(name, String(n))).join('') +
+          row('Total requests', `<b>${total}</b>`, 'ledger');
+
+    } catch (e) {
+      showError($('traffic-error'), reason(e, 'Could not read traffic'));
+    }
+  }
+
+  $('btn-traffic-refresh').addEventListener('click', loadTraffic);
+  $('traffic-window').addEventListener('change', loadTraffic);
+
+  function renderLoad() {
+    const l = ((statusData || {}).load) || {};
+    $('load-rows').innerHTML =
+      row('CPU', l.cpu_percent == null ? '(not available on this host)'
+                 : l.cpu_percent.toFixed(1) + '% average' +
+                   (l.started_at ? ' since ' + escapeHtml(when(l.started_at)) : '')) +
+      row('Memory', l.memory_mb == null ? '(not available on this host)'
+                    : l.memory_mb.toFixed(1) + ' MB');
+    $('load-chart').innerHTML = cpuSeries.length < 2
+      ? '<p class="hint">Live CPU — the line starts when you open this tab.</p>'
+      : chart(lineSVG(cpuSeries),
+              (cpuSeries.length - 1) * METER_SECONDS + 's ago',
+              cpuSeries[cpuSeries.length - 1].toFixed(1) + '% now',
+              Math.max(1, ...cpuSeries).toFixed(0), '%');
+  }
+
+  /* ── Charts: inline SVG, sized by viewBox, no library. Every chart is
+     drawn with its scale — a line without a y-axis is a shape, not a
+     measurement. ── */
+
+  function lineSVG(values) {
+    const w = 300, h = 60, max = Math.max(1, ...values);
+    // A single reading has no slope to draw, so it is drawn as the flat
+    // line it is, corner to corner.
+    const pts = values.length === 1
+      ? [`0,${(h - (values[0] / max) * h).toFixed(1)}`,
+         `${w},${(h - (values[0] / max) * h).toFixed(1)}`]
+      : values.map((v, i) =>
+          `${(i / (values.length - 1) * w).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`);
+    return `<svg viewBox="0 0 ${w} ${h}" class="chart" preserveAspectRatio="none">` +
+      `<polyline points="${pts.join(' ')}" fill="none" stroke="#5A8466" ` +
+      `stroke-width="1.5" vector-effect="non-scaling-stroke"></polyline></svg>`;
+  }
+
+  // A chart, its y-axis (top of scale and zero), and its x labels.
+  const chart = (svg, xFrom, xTo, yMax, unit) =>
+    `<div class="chart-wrap"><div class="chart-y">` +
+    `<span>${escapeHtml(String(yMax))}${unit || ''}</span><span>0</span></div>` +
+    `<div class="chart-body">${svg}` +
+    `<div class="chart-labels"><span>${escapeHtml(xFrom)}</span>` +
+    `<span>${escapeHtml(xTo)}</span></div></div></div>`;
+
+  /* ── The live meter: successive readings of the server's own cumulative
+     CPU counter, differenced here. Nothing is sampled or stored on the
+     server — the line exists only while this tab is open. ── */
+
+  const METER_SECONDS = 3;
+  let meterTimer = null, lastSample = null, cpuSeries = [];
+
+  async function sampleLoad() {
+    try {
+      const d = await getJSON('/status');
+      const l = d.load || {};
+      if (l.cpu_ns != null && lastSample) {
+        const dt = l.sampled_at - lastSample.at;
+        if (dt > 0) {
+          cpuSeries.push(Math.max(0,
+            (l.cpu_ns - lastSample.ns) / 1_000_000_000 / dt * 100));
+          if (cpuSeries.length > 60) cpuSeries.shift();
+        }
+      }
+      if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
+      statusData = d;
+      renderLoad();
+      clearError($('load-error'));
+    } catch (e) {
+      // Nothing is listening any more — the admin command ended, or the
+      // tunnel closed. Keep polling and every attempt prints another
+      // 'channel N: open failed' in the operator's terminal.
+      stopMeter();
+      showError($('load-error'), reason(e));
+    }
+  }
+
+  function startMeter() {
+    if (meterTimer) return;
+    meterTimer = setInterval(sampleLoad, METER_SECONDS * 1000);
+    sampleLoad();
+  }
+
+  function stopMeter() {
+    clearInterval(meterTimer);
+    meterTimer = null;
+  }
+
+  // A backgrounded tab has nobody reading it, and a closing one is gone:
+  // either way the polling stops, so an abandoned page cannot keep dialing
+  // a tunnel whose command has ended.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopMeter();
+    else if (!$('panel-stats').classList.contains('hidden')) startMeter();
+  });
+  window.addEventListener('pagehide', stopMeter);
+
+  /* ══ 7. Feature gate and startup ════════════════════════════════════ */
+
   const supported = typeof CompressionStream === 'function';
   $(supported ? 'app' : 'unsupported').classList.remove('hidden');
   if (supported) {
@@ -7126,14 +7870,71 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info("ui: " + fmt % args)  # the default writes to stderr, past the log
 
-    def _respond(self, status, body, ctype="text/html; charset=utf-8"):
-        data = body.encode()
+    def _respond(self, status, body, ctype="text/html; charset=utf-8", extra=()):
+        # `body` is text for every JSON and message answer, and bytes for the
+        # two that hand back a file: the site download and a preview asset.
+        data = body if isinstance(body, bytes) else body.encode()
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in extra:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve_preview(self, path):
+        """Serve one file out of a staged preview: /preview/TOKEN/SITE/rest.
+
+        The token rides in the PATH, not the query, and that is the whole
+        reason a preview is staged server-side at all. A draft's own
+        `<link href="s.css">` resolves against the path and drops any query
+        string, so a token in the query would authenticate the page and then
+        403 every stylesheet and image it asks for — a preview showing
+        unstyled text. With the token as a path segment, every relative
+        reference inside the draft resolves and works, which is exactly what
+        an operator is previewing for. (Found in a browser: the page loaded,
+        the stylesheet did not.)
+
+        Everything the draft could reach is bounded here. The token is not
+        the run's passcode — a previewed page can read its own URL, and a
+        script in someone's own content must not learn the credential that
+        publishes. The tree is the staging directory, never the live one.
+        Resolution is the server's own _resolve_request_path, so traversal
+        and hidden paths are refused by the code that refuses them on the
+        public side. And the response says twice that this is untrusted
+        content: nosniff, and a CSP sandbox so the draft has an opaque
+        origin even if it is opened outside the page's own frame."""
+        rest = path[len("/preview"):]
+        parts = rest[1:].split("/", 2) if rest.startswith("/") else []
+        if len(parts) < 2:
+            return self._respond(404, "Not a live preview.")
+        token = getattr(self.server, "preview_code", "")
+        if not token or not hmac.compare_digest(parts[0], token):
+            return self._respond(403, "Not a live preview.")
+        try:
+            idx = int(parts[1])
+        except ValueError:
+            return self._respond(400, "site must be a whole number.")
+        if not (0 <= idx < len(config.sites)):
+            return self._respond(404, "No such site.")
+        staged = _preview_dir(config.sites[idx])
+        if not os.path.isdir(staged):
+            return self._respond(404, "Nothing staged for this site.")
+        file_path, status = _resolve_request_path("/" + (parts[2] if len(parts) > 2 else ""),
+                                                  staged)
+        if status != 200 or file_path is None:
+            return self._respond(status, "Not in this preview."
+                                 if status == 404 else "Refused.")
+        try:
+            with open(file_path, "rb") as f:
+                body = f.read(_MAX_BUNDLE_BYTES)
+        except OSError:
+            return self._respond(404, "Not in this preview.")
+        return self._respond(200, body, _mime_type(file_path), [
+            ("X-Content-Type-Options", "nosniff"),
+            ("Content-Security-Policy", "sandbox allow-scripts allow-forms"),
+        ])
 
     def _auth(self):
         """"ok", "locked", "bad", or "none". A wrong code is a guess and is
@@ -7152,7 +7953,17 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path not in ("/", "/status", "/config", "/traffic", "/update"):
+
+        # Preview content, on its own token. NOT the run's passcode: a
+        # previewed page can read its own URL, and a draft with a script in
+        # it must not be able to lift the credential that publishes. The
+        # preview token buys exactly one thing — reading the staged tree —
+        # and it is minted fresh by each staging.
+        if path == "/preview" or path.startswith("/preview/"):
+            return self._serve_preview(path)
+
+        if path not in ("/", "/status", "/config", "/traffic", "/update",
+                        "/versions", "/download"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -7174,8 +7985,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
                            "active": s.active,
-                           "username": s.username, "publish_url": s.publish_url,
-                           "publish_key": s.publish_key,
+                           "username": s.username,
+                           "redirects": s.redirects,
                            "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
@@ -7186,6 +7997,47 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps({"latest": _upgrade_available()}),
                                  "application/json")
+
+        if path == "/download":
+            # Content leaves the box the way it arrived: the same tar.gz the
+            # publish door takes, so what comes down can go back up. A site
+            # too large to hold in memory says so rather than half-sending.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            try:
+                idx = int(parse_qs(urlsplit(self.path).query).get("site", ["0"])[0])
+            except ValueError:
+                return self._respond(400, "site must be a whole number.")
+            if not (0 <= idx < len(config.sites)):
+                return self._respond(404, "No such site.")
+            target = config.sites[idx]
+            blob = _tar_live_site(target)
+            if blob is None:
+                return self._respond(413, json.dumps(
+                    {"error": f"this site is larger than {_MAX_BUNDLE_BYTES // (1024 * 1024)} MB "
+                              "— copy it with scp instead"}), "application/json")
+            # The filename is built from the site's own name, never from
+            # anything a request supplied.
+            stem = re.sub(r"[^a-z0-9.-]", "-", (target.domain or f"site-{idx}").lower())
+            return self._respond(200, blob, "application/gzip",
+                                 [("Content-Disposition",
+                                   f'attachment; filename="{stem}.tar.gz"')])
+
+        if path == "/versions":
+            # One site's kept trees. Its own endpoint rather than a field on
+            # /status because answering it walks every tree on disk, and
+            # /status is polled every few seconds while the page is open.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            try:
+                idx = int(parse_qs(urlsplit(self.path).query).get("site", ["0"])[0])
+            except ValueError:
+                return self._respond(400, "site must be a whole number.")
+            if not (0 <= idx < len(config.sites)):
+                return self._respond(404, "No such site.")
+            return self._respond(200, json.dumps(
+                {"versions": _site_versions(config.sites[idx]),
+                 "keep": _KEEP_VERSIONS}), "application/json")
 
         if path == "/traffic":
             # The Analytics tab's feed: the journal re-read as counts, and
@@ -7206,7 +8058,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path not in ("/upload", "/config", "/sites", "/service", "/swap"):
+        if path not in ("/upload", "/preview", "/config", "/sites", "/service",
+                        "/swap"):
             return self._respond(404, "Not found.")
         if self._auth() != "ok":
             return self._respond(403, "Not logged in.")
@@ -7332,6 +8185,21 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                    "detail" if outcome == "refused" else
                                    "could not reach the certificate authority — "
                                    "try again in a moment")
+                elif op == "restore":
+                    # The same _restore_site the terminal's numbered list
+                    # runs. The version arrives as a name over the wire and
+                    # is matched against the ring inside the core, never
+                    # taken as a path.
+                    try:
+                        idx = int(body.get("site"))
+                    except (TypeError, ValueError):
+                        idx = -1
+                    if not (0 <= idx < len(config.sites)):
+                        err = f"no site {idx}"
+                    else:
+                        want = body.get("version")
+                        err = _restore_site(config.sites[idx],
+                                            str(want) if want else None)
                 else:
                     err = "unknown op"
             except PermissionError:
@@ -7403,6 +8271,20 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(422, json.dumps({"result": "rejected"}),
                                      "application/json")
             site = config.sites[idx]
+
+        if path == "/preview":
+            # The same bundle, staged where only this page can see it. A
+            # fresh token per staging, so a preview's reach ends when the
+            # next one is staged or the command exits.
+            result = _stage_preview(site, self.rfile.read(length))
+            if result != "staged":
+                return self._respond(422, json.dumps({"result": result}),
+                                     "application/json")
+            self.server.preview_code = os.urandom(8).hex()
+            return self._respond(200, json.dumps(
+                {"result": "staged", "token": self.server.preview_code}),
+                "application/json")
+
         result = _land_bundle(site, self.rfile.read(length), "browser upload")
         if result == "published" and getattr(self.server, "on_publish", None):
             self.server.on_publish(site)  # the terminal narrates what the browser did
@@ -7419,14 +8301,18 @@ def _start_ui(site, page, port=_UI_PORT):
     httpd = http.server.ThreadingHTTPServer((_UI_HOST, port), _UIHandler)
     httpd.site, httpd.page = site, page
     httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
+    httpd.preview_code = ""      # minted by the first staging, not before
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, httpd.code
 
 
 def _stop_ui(httpd):
-    """The page dies with the command: stop accepting, close the socket."""
+    """The page dies with the command: stop accepting, close the socket, and
+    drop any staged preview — a draft nobody published has no business
+    outliving the session that made it."""
     httpd.shutdown()
     httpd.server_close()
+    _clear_previews()
 
 
 # admin
@@ -7442,18 +8328,24 @@ def cmd_admin():
         "content swapped in — restore-site undoes it.")
 
     try:
-        # Link and passcode, printed apart: the link is stable and worth a
-        # bookmark, the passcode is this run's — the login page marries the
-        # two. The troubleshooting lives behind 'help', summoned exactly
-        # when the page fails to load.
-        print("  The admin page is up:")
-        print(f"    link      http://localhost:{_UI_PORT}/")
-        print(f"    passcode  {code}")
-        print("    (page won't load? type 'help')")
+        # Two labelled lines and nothing above them. The address is stable
+        # and worth a bookmark, the passcode is this run's, and the login
+        # page marries the two — printing them apart keeps a bookmark free
+        # of the secret. Each label says what its line IS, which is why no
+        # header announces the page: it could only repeat the label.
+        print(f"  admin page  http://localhost:{_UI_PORT}/")
+        print(f"  passcode    {code}")
         print()
         while True:
             try:
-                raw = input("  admin — 'back' closes the page: ").strip().lower()
+                # The prompt is where a reader looks when wondering what to
+                # type, so the two things they might want are named there
+                # rather than on lines of their own above. 'close the page'
+                # names what 'back' actually ends — the page server this
+                # command started — and matches the line printed on the way
+                # out; the browser tab is the operator's to close.
+                raw = input("  type 'help' if the page will not load, "
+                            "'back' to close the page: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -7462,8 +8354,8 @@ def cmd_admin():
                 print("  the tunnel. Add this line once to ~/.ssh/config on the computer")
                 print("  you ssh FROM, inside this server's entry, then reconnect:")
                 print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
-                print(f"  The link is worth a bookmark — the login page it opens")
-                print(f"  asks for this run's passcode: {code}")
+                print(f"  The address is worth a bookmark — the login page it")
+                print(f"  opens asks for this run's passcode: {code}")
                 continue
             if raw in ("back", "done", "exit", "quit", "q"):
                 break
@@ -7515,8 +8407,6 @@ def _production_issues():
         # username with nothing stored to check locks every visitor out.
         if site.username and not site.password_hash:
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
-        if bool(site.publish_url) != bool(site.publish_key):
-            issues.append(f"publish channel partially configured{tag} — run 'config publish' to finish setup")
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
                                    _cache_headroom_mb(config.cache_size_mb))
@@ -7531,6 +8421,13 @@ def _production_issues():
                           "recommended — run 'enable' to resize")
         else:
             issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'enable' to add a swapfile")
+    # Both surfaces say the same thing about disk: the page reads the health
+    # row, the terminal reads this list, and neither may know something the
+    # other does not.
+    disk = _disk_snapshot()
+    if _disk_is_low(disk):
+        issues.append(f"only {disk['free_mb']:,.0f} MB free where content lands — "
+                      "a publish may fail; remove what the box no longer needs")
     return issues
 
 
@@ -7648,7 +8545,6 @@ def _site_rows():
         "serve_dir": site.serve_dir,
         "auth":      bool(site.username),
         "cert_days": _cert_days_remaining(_resolve(site.cert_file)),
-        "publish":   bool(site.publish_url and site.publish_key),
     } for i, site in enumerate(config.sites)]
 
 
@@ -7664,13 +8560,15 @@ def _health_checks():
     running        = service_active or _server_running()
     # Labeled Mode, because that is what its three answers describe — and
     # the page prints no second Mode row beside it.
-    rows.append({"key": "service", "site": None, "ok": running, "label": "Mode",
+    rows.append({"key": "service", "site": None, "ok": running,
+                 "blocking": not running, "label": "Mode",
                  "detail": "system service (survives reboots)" if service_active
                  else ("session only (stops when this terminal closes)" if running
                        else "stopped — 'start' brings it up")})
     if not _IS_MACOS:
         armed = os.path.exists(NETWATCH_PATH + ".timer")
-        rows.append({"key": "netwatch", "site": None, "ok": armed, "label": "Network watchdog",
+        rows.append({"key": "netwatch", "site": None, "ok": armed,
+                     "blocking": False, "label": "Network watchdog",
                      "detail": "armed (checks once per minute)" if armed
                      else "not installed — 'enable' provisions it"})
         mem_kb, _avail_kb, committed_kb = _meminfo()
@@ -7692,7 +8590,21 @@ def _health_checks():
         else:
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
         rows.append({"key": "swap", "site": None, "ok": offer is None,
-                     "label": "Swap file", "detail": detail})
+                     "blocking": False, "label": "Swap file", "detail": detail})
+    # Disk is host-wide and platform-independent: a full disk is the outage
+    # every other row assumes is not happening. A publish that cannot write
+    # its tree fails in staging and leaves the live site alone, so this is a
+    # warning rather than a fault — but an unread number prevents nothing,
+    # which is why it is a row and not only a figure.
+    disk = _disk_snapshot()
+    if disk["free_mb"] is not None:
+        low = _disk_is_low(disk)
+        rows.append({"key": "disk", "site": None, "ok": not low,
+                     "blocking": False, "label": "Disk",
+                     "detail": f"{disk['free_mb']:,.0f} MB free of "
+                               f"{disk['total_mb']:,.0f} MB"
+                               + (" — publishing may fail" if low else "")})
+
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""
@@ -7702,13 +8614,22 @@ def _health_checks():
         # operator must hear about.
         dir_ok = bool(site.serve_dir) and os.path.exists(_resolve(site.serve_dir))
         if not dir_ok:
-            rows.append({"key": "dir", "site": i, "ok": False, "label": tag + "Folder",
+            rows.append({"key": "dir", "site": i, "ok": False, "blocking": True,
+                         "label": tag + "Folder",
                          "detail": "missing — publish to recreate it"})
         days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
         covers = _domain_from_cert(_resolve(site.cert_file)) if site.cert_file else None
         mismatched = bool(site.domain) and bool(covers) and covers != site.domain
         cert_ok = days is not None and days > 0 and bool(site.domain) and not mismatched
-        rows.append({"key": "cert", "site": i, "ok": cert_ok, "label": tag + "Certificate",
+        # Severity turns on whether the site claims a public name. With a
+        # domain set, an untrusted certificate is a full-page browser
+        # interstitial for everyone who visits it — the site is unusable at
+        # the name it advertises. Without one, self-signed is simply where
+        # every site starts, and reporting it in the same red as a locked-out
+        # site would cry wolf on the normal case.
+        rows.append({"key": "cert", "site": i, "ok": cert_ok,
+                     "blocking": bool(site.domain) and not cert_ok,
+                     "label": tag + "Certificate",
                      "days": days,
                      "detail": (f"{days} days remaining (auto-renew enabled)" if cert_ok
                                 else f"issued for {covers} — get one for this name" if mismatched
@@ -7720,20 +8641,11 @@ def _health_checks():
         # to check against, which locks every visitor out.
         half_auth = bool(site.username) and not site.password_hash
         rows.append({"key": "password", "site": i, "ok": not half_auth,
-                     "label": tag + "Access",
+                     "blocking": half_auth, "label": tag + "Access",
                      "detail": ("private — visitors sign in" if site.username and site.password_hash
                                 else "a username with no stored password — set one below, or make the site public"
                                 if half_auth
                                 else "public — anyone can view it (the form below makes it private)")})
-        # The pull channel reports only when it exists or is half-built. Its
-        # absence is the normal case — the admin page publishes directly —
-        # and a row saying so on every site is noise, not news.
-        half = bool(site.publish_url) != bool(site.publish_key)
-        if half or site.publish_url:
-            rows.append({"key": "channel", "site": i, "ok": not half,
-                         "label": tag + "Publish channel",
-                         "detail": ("partially configured — finish or clear it in the terminal: config publish"
-                                    if half else "configured — 'pull' fetches from it")})
     return rows
 
 
@@ -7831,24 +8743,60 @@ def _upgrade_available():
 
 
 def _swap_snapshot():
-    """Servette's own swapfile as numbers — what is active and what the
-    sizing recommends — for the page's field. None on a host with no swap
-    to speak of (macOS manages its own)."""
+    """Servette's own swapfile as numbers — what is allocated, what the
+    kernel reports active, and what the sizing recommends. None on a host
+    with no swap to speak of (macOS manages its own).
+
+    The two sizes differ by design and the difference matters. /proc/swaps
+    reports USABLE space, which is the file minus one page of header, so a
+    1100 MB swapfile reads as 1099 MB active. A field showing the active
+    number would invite an operator to type the recommended 1100, save, and
+    watch it come back 1099 — a resize that looks broken while working
+    perfectly. The field shows what was allocated; the status row keeps
+    reporting what is active, which is the honest thing for a status row."""
     if _IS_MACOS:
-        return {"active_mb": None, "recommended_mb": None}
+        return {"allocated_mb": None, "active_mb": None, "recommended_mb": None}
     mem_kb, _avail_kb, committed_kb = _meminfo()
     rec = _swap_recommendation(mem_kb, committed_kb,
                                _cache_headroom_mb(config.cache_size_mb))
     ours_mb, _foreign = _swap_sizes()
-    return {"active_mb": ours_mb,
+    allocated = None
+    try:
+        allocated = os.path.getsize(_SWAP_PATH) // (1024 * 1024)
+    except OSError:
+        pass                      # no swapfile of ours on this host
+    return {"allocated_mb": allocated, "active_mb": ours_mb,
             "recommended_mb": (rec // (1024 * 1024)) if rec else None}
+
+
+def _disk_snapshot():
+    """Free and total disk on the filesystem holding the data directory —
+    where site content, the versions kept behind it, and the config live.
+    That filesystem rather than '/' because it is the one a publish can
+    fill. None for a figure the host will not answer."""
+    try:
+        total, _used, free = shutil.disk_usage(BASE_DIR)
+    except OSError:
+        return {"free_mb": None, "total_mb": None}
+    return {"free_mb": free / (1024 * 1024), "total_mb": total / (1024 * 1024)}
+
+
+def _disk_is_low(disk):
+    """Whether free disk is low enough to say so. Two thresholds, because
+    one does not fit both a 4 GB Pi card and a 200 GB VPS: an absolute
+    floor that a publish plus its kept versions can exhaust, and a
+    fraction that catches a large disk filling steadily."""
+    if disk["free_mb"] is None:
+        return False
+    return (disk["free_mb"] < _DISK_LOW_MB
+            or disk["free_mb"] < disk["total_mb"] * _DISK_LOW_FRACTION)
 
 
 def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
     external tooling. cert_days is None when no certificate is readable;
-    `checks` is the health-row form of the same facts, and `load` the
-    utilization figures the page's Traffic tab renders."""
+    `checks` is the health-row form of the same facts, `load` the
+    utilization figures, and `disk` the space left where content lands."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
     return {
@@ -7861,6 +8809,7 @@ def _status_data():
         "checks":   _health_checks(),
         "load":     _load_snapshot(),
         "swap":     _swap_snapshot(),
+        "disk":     _disk_snapshot(),
     }
 
 
@@ -7944,7 +8893,12 @@ def cmd_setup():
             except OSError as e:
                 print(f"  Could not create {serve_path}: {e}")
         else:
-            print(f"  serve_dir {serve_path} is outside {BASE_DIR} — fix it with 'config' > 'dir' first.")
+            # Unreachable from any command: every folder Servette assigns is
+            # under BASE_DIR. It takes a hand-edited servette.toml to get
+            # here, so the sentence names the file rather than a command
+            # that no longer exists.
+            print(f"  serve_dir {serve_path} is outside {BASE_DIR}, where the publish")
+            print(f"  swap and the service sandbox both need it — fix it in {Config.CONFIG_FILE}.")
     if os.path.isdir(serve_path):
         if os.path.exists(os.path.join(serve_path, "index.html")):
             print(f"  Serving {serve_path}.")
@@ -8019,23 +8973,7 @@ def _set_site_value(target, key, value):
     """Validate one per-site pair and apply it to target (the chosen site, or
     a scratch Site during the validation pass). Returns an error string,
     empty on success."""
-    if key == "dir":
-        # The same inline-barrier discipline as _resolve_request_path, for
-        # the same reason: this value can arrive over HTTP (the admin page's
-        # Config tab — loopback and paired, but HTTP all the same), so the
-        # containment check is written out where an analyzer can see it
-        # dominate every probe below — a guard folded into a helper is, to
-        # it and strictly speaking, not a guard. Containment first, the
-        # filesystem probe last.
-        resolved = os.path.realpath(_resolve(value))
-        if not resolved.startswith(os.path.realpath(BASE_DIR) + os.sep):
-            return f"dir must live under {BASE_DIR} (the publish swap and the service sandbox depend on it)"
-        if _serve_dir_exposes_secrets(resolved):
-            return "dir would serve Servette's own config and keys — refused"
-        if not os.path.isdir(resolved):
-            return f"directory not found: {resolved}"
-        target.serve_dir = value
-    elif key == "username":
+    if key == "username":
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
         # (`set` and the page alike, since both land here) — the same rule
@@ -8044,15 +8982,28 @@ def _set_site_value(target, key, value):
         if not value:
             target.password_hash = ""
             target.password_salt = ""
-    elif key == "publish_url":
-        if value and not value.startswith("https://"):
-            return "publish_url must be https:// (or empty to clear)"
-        target.publish_url = value
-    elif key == "publish_key":
-        v = value.strip().lower()
-        if v and not (len(v) == 64 and all(c in "0123456789abcdef" for c in v)):
-            return "publish_key must be 64 hex characters (a 32-byte Ed25519 public key)"
-        target.publish_key = v
+    elif key == "redirect":
+        # One pair per token: 'redirect=/path,/target' adds or replaces,
+        # 'redirect=/path,' removes. The table is a mapping and `set` speaks
+        # in scalars, so the comma is where the two grammars meet.
+        # Validation is _clean_redirects — the same function the config load
+        # runs, so a redirect the file would refuse the command refuses too.
+        src, comma, dst = value.partition(",")
+        if not comma:
+            return ("a redirect is a pair: redirect=/path,/where-it-goes "
+                    "(or /path, to remove)")
+        src, dst = src.strip(), dst.strip()
+        table = dict(target.redirects)
+        if not dst:
+            if not table.pop(src.rstrip("/") or "/", None):
+                return f"no redirect from {src}"
+        else:
+            checked = _clean_redirects({src: dst})
+            if not checked:
+                return ("a redirect goes from a site path to a site path or an "
+                        "http(s) URL, and may not point at itself")
+            table.update(checked)
+        target.redirects = table
     elif key == "active":
         # The pause between serving and deleting: a deactivated site keeps
         # its config and files but is invisible to request routing.
@@ -8066,13 +9017,15 @@ def _set_site_value(target, key, value):
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
                   "cache_size_mb", "trusted_proxy")
-_SET_SITE_KEYS = ("dir", "username", "publish_url", "publish_key", "active")
+_SET_SITE_KEYS = ("username", "active", "redirect")
 
 
 def _set_usage():
     print("  Usage: set [n] key=value ...")
     print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
     print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
+    print("  A redirect is a pair: redirect=/path,/where-it-goes — and")
+    print("  redirect=/path, (nothing after the comma) removes it.")
 
 
 # set
@@ -8087,6 +9040,11 @@ def _apply_settings(site, pairs):
     class _ScratchHost:
         pass
     scratch_host, scratch_site = _ScratchHost(), Site()
+    # The scratch site starts blank for every scalar — each is simply
+    # overwritten — but the redirect table is edited rather than replaced,
+    # so validating a removal against an empty table would refuse a
+    # redirect that is really there.
+    scratch_site.redirects = dict(site.redirects)
     for key, value in pairs:
         if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
             return f"unknown setting: {key}"
@@ -8186,7 +9144,7 @@ def _startup_refresh():
 # owns. Read-only ones (status, sites, log) are absent deliberately — they must
 # keep working without a password prompt.
 _ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "admin",
-                  "publish", "pull", "restore-site")
+                  "restore-site")
 
 # What sudo made of the last elevated command. The one-shot `servette <command>`
 # form exits with it, so tooling driving Servette over SSH sees a refused
@@ -8244,15 +9202,18 @@ def _elevate(cmd, args):
     A child process rather than an exec, so the interactive shell survives the
     privileged command and returns to its prompt instead of vanishing.
 
-    The notices go to stderr: the child owns stdout, and `status --json` has to
-    stay parseable through an elevation."""
+    The one notice goes to stderr: the child owns stdout, and `status --json`
+    has to stay parseable through an elevation."""
     global _elevated_status
     if not shutil.which("sudo"):
         print(f"  '{cmd}' needs root, and sudo is not installed — re-run as root.",
               file=sys.stderr)
         _elevated_status = 1
         return True
-    print(f"  '{cmd}' needs root; asking sudo.", file=sys.stderr)
+    # Nothing is printed on the way in. sudo announces itself when it wants
+    # a password, and says nothing when it does not — which is the right
+    # amount either way. A line of ours ahead of it told an operator who
+    # just typed an admin command something they already knew.
     argv = ["sudo"]
     if "SERVETTE_HOME" in os.environ:
         argv.append("--preserve-env=SERVETTE_HOME")
@@ -8311,17 +9272,11 @@ def run_command(cmd, args):
         try:
             cmd_log(int(args[0]) if args else 20)
         except ValueError:
-            print("Usage: log [number]")
+            print("  Usage: log [number]")
     elif cmd == "traffic":
         cmd_traffic()
     elif cmd == "admin":
         cmd_admin()
-    elif cmd == "publish":
-        cmd_publish()
-    elif cmd == "pull":
-        site = _config_site_arg(args)
-        if site is not None:
-            cmd_pull(site)
     elif cmd == "restore-site":
         site = _config_site_arg(args)
         if site is not None:
@@ -8355,10 +9310,10 @@ def shell():
             print(HELP)
         elif cmd in ("quit", "exit"):
             stop_server()
-            print("Goodbye.")
+            print("  Goodbye.")
             break
         elif not run_command(cmd, args):
-            print(f"Unknown command: {cmd}. Type 'help' for a list of commands.")
+            print(f"  Unknown command: {cmd}. Type 'help' for a list of commands.")
 
 
 # Config is a module-level singleton, instantiated here (not at its class

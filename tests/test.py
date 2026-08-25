@@ -1348,9 +1348,21 @@ def run_dispatch_tests(s):
         conn.close()
         return r.status, data
 
+    def ui_header(path, name):
+        conn = http.client.HTTPConnection("127.0.0.1", ui_port, timeout=10)
+        conn.request("GET", path)
+        r = conn.getresponse()
+        r.read()
+        conn.close()
+        return r.getheader(name)
+
     try:
         check("The server binds loopback only",
               httpd.socket.getsockname()[0] == "127.0.0.1")
+        # The page URL carries the run passcode as ?t=; no-referrer keeps it
+        # out of the Referer when a card opens the public site in a new tab.
+        check("Every loopback response carries Referrer-Policy: no-referrer",
+              ui_header("/", "Referrer-Policy") == "no-referrer")
 
         st, body = ui_req("GET", "/")
         check("The bare URL answers the login page, never content",
@@ -3303,6 +3315,24 @@ def run_dispatch_tests(s):
             check("Oversized bundle rejected", raised)
         finally:
             s._MAX_BUNDLE_BYTES = saved_max
+
+        # The byte cap counts payload, so a bundle of many zero-size members
+        # slips under it while still burning CPU and memory. A companion
+        # count cap bounds their number.
+        saved_members = s._MAX_BUNDLE_MEMBERS
+        try:
+            s._MAX_BUNDLE_MEMBERS = 3
+            manyfiles = make_tar_gz([(f"f{n}.txt", "") for n in range(8)])
+            dest5 = os.path.join(extract_root, "manymembers")
+            raised = False
+            try:
+                s._extract_bundle(manyfiles, dest5)
+            except ValueError:
+                raised = True
+            check("A bundle with too many entries is rejected, zero-size included",
+                  raised)
+        finally:
+            s._MAX_BUNDLE_MEMBERS = saved_members
 
         # The size cap must run DURING the member walk, not after it: walking
         # a gzip stream decompresses it, and getmembers() paid the full

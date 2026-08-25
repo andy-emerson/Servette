@@ -5168,6 +5168,11 @@ def cmd_traffic():
 # not through Servette.)
 # The bundle ceiling
 _MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
+# A companion ceiling on entry COUNT: the byte cap counts payload, so a
+# bundle of millions of zero-size members (512 header bytes each,
+# ~1000:1 gzip) slips under it while still exhausting CPU and memory. A
+# static site of a million files is already absurd.
+_MAX_BUNDLE_MEMBERS = 1_000_000
 
 
 # Extracting a bundle
@@ -5202,6 +5207,11 @@ def _extract_bundle(data, dest_dir):
             total += m.size
             if total > _MAX_BUNDLE_BYTES:
                 raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
+            # The byte cap counts payload only, so zero-size members never
+            # trip it; this bounds their number, and with it the CPU the
+            # walk burns and the members list it grows.
+            if len(members) >= _MAX_BUNDLE_MEMBERS:
+                raise ValueError(f"bundle has more than {_MAX_BUNDLE_MEMBERS} entries")
             members.append(m)
         # The PEP 706 feature probe: data_filter exists exactly when
         # extractall() accepts filter=. Debian 12's 3.11.2 predates the
@@ -7985,6 +7995,11 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        # The page URL carries this run's passcode as ?t=, and a card can
+        # open the operator's public site in a new tab. no-referrer keeps
+        # the passcode out of that navigation's Referer — the public server
+        # already sends the same header on every response.
+        self.send_header("Referrer-Policy", "no-referrer")
         for name, value in extra:
             self.send_header(name, value)
         self.end_headers()

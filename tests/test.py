@@ -1089,6 +1089,13 @@ def run_dispatch_tests(s):
           and "getJSON('/status')" in s._UI_ADMIN_PAGE)
     check("...posts to the upload endpoint with the run's code",
           "api('/upload'" in s._UI_ADMIN_PAGE)
+    check("...keys card state by the site's folder, the identity that survives",
+          "siteData.dir || siteData.domain" in s._UI_ADMIN_PAGE)
+    check("...names redirected traffic and totals the unnamed remainder",
+          "'Redirected'" in s._UI_ADMIN_PAGE
+          and "row('Other'" in s._UI_ADMIN_PAGE)
+    check("...and refuses the oversized download in its own voice, not the browser's",
+          "copy it with scp instead." in s._UI_ADMIN_PAGE)
     # The passcode is attached in one place rather than at each call site,
     # so no request can be written that forgets it.
     check("...with every request's passcode attached by one helper",
@@ -6455,6 +6462,23 @@ def run_browser_tests(s, tmpdir):
                 check(f"...the {tab} tab renders",
                       page.is_visible(f"#panel-{tab if tab != 'sites' else 'sites'}"))
 
+            # The address is the deep link the tabs promise: hash carries
+            # the tab, search keeps the passcode OUTSIDE the fragment, and
+            # a reload lands on the tab the address names — the old
+            # '#tab?t=CODE' shape parsed back as no tab at all.
+            page.click("#tab-server")
+            page.wait_for_timeout(400)
+            check("...the address carries the tab beside the search, not around it",
+                  page.evaluate("() => location.hash") == "#server"
+                  and page.evaluate("() => location.search").startswith("?t="))
+            page.reload()
+            page.wait_for_timeout(1200)
+            check("...and a reload lands on the tab the address names",
+                  page.is_visible("#panel-server")
+                  and not page.is_visible("#panel-sites"))
+            page.click("#tab-sites")
+            page.wait_for_timeout(700)
+
             # The remove panel: drawn by the page, and where the button is.
             page.locator("button.del").first.click()
             page.wait_for_timeout(300)
@@ -6587,6 +6611,18 @@ def run_browser_tests(s, tmpdir):
             check("...with Save dim rather than a refusal to print",
                   page.locator("button.save-site").first.is_disabled()
                   and not page.locator(".site-card .error").first.is_visible())
+            # This card was HEALTHY when it was built, so its pill exists
+            # only because a hidden one is always emitted — a client-side
+            # fault has no rebuild to emit one, and a folded card's Status
+            # row is the pill or nothing.
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
+            pill_loc = page.locator(".site-card .badge.needs").first
+            check("...and folding a card faulted client-side still shows the pill",
+                  pill_loc.is_visible()
+                  and "Needs password" in pill_loc.inner_text())
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
             # Typing the login completes it, so the count follows.
             page.locator("#cfg-username-0").fill("someone")
             page.locator("#cfg-password-0").fill("a-password")

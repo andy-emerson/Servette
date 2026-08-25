@@ -6658,8 +6658,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
     refresh();  // every tab renders from the same /status + /config truth
     if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
+    // The full path + search + hash, in that order: a bare '#…' relative
+    // URL swallows the search into the fragment — the hash became the tab
+    // name with the whole passcode query glued on, which parses back as no
+    // tab at all, so every reload or copied link landed on Sites.
     if (location.hash !== '#' + name)
-      history.replaceState(null, '', '#' + name + location.search);
+      history.replaceState(null, '',
+                           location.pathname + location.search + '#' + name);
   }
 
   $('tab-sites').addEventListener('click', () => showTab('sites'));
@@ -6684,10 +6689,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // and a stale index would act on the wrong site.
   // Which cards are folded shut. Kept here rather than on the card,
   // because every op re-renders the list and a card that sprang open on
-  // each save would be worse than no fold at all. Keyed by domain where
-  // there is one, since dragging renumbers indexes.
+  // each save would be worse than no fold at all. Keyed by the site's
+  // Servette-assigned folder: the one identity that survives everything —
+  // a rename changes the domain, a drag or removal renumbers indexes, and
+  // a positional key would hand one site's state (or its picked folder,
+  // below) to a different site's card.
   const folded = new Set();
-  const foldKey = (siteData, idx) => siteData.domain || '#' + idx;
+  const foldKey = (siteData, idx) => siteData.dir || siteData.domain || '#' + idx;
 
   // What the operator has read into a card but the server has not been
   // given: the picked folder (and, once sent, the publish note). Kept
@@ -7051,14 +7059,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // beside it is the one publishing writes into, which is why they
           // are separate elements: overwriting the first would erase a
           // standing fault the moment a folder was read.
-          (siteNeeds.length
-            ? `<span class="badge ${siteNeeds.some((c) => c.blocking)
-                 ? 'badge-red' : 'badge-warn'} needs" title="${escapeHtml(
-                 siteNeeds.map((c) => c.detail).join(' · '))}">${
-                 siteNeeds.length === 1
-                   ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
-                   : siteNeeds.length + ' to review'}</span>`
-            : '') +
+          // Emitted even on a healthy card (hidden): a fault that arrives
+          // client-side — an unfinished login on a card built healthy —
+          // has no rebuild to emit a pill for it, and renderAttention can
+          // only fill a pill that exists.
+          `<span class="badge ${siteNeeds.some((c) => c.blocking)
+             ? 'badge-red' : 'badge-warn'} needs${
+             siteNeeds.length ? '' : ' hidden'}" title="${escapeHtml(
+             siteNeeds.map((c) => c.detail).join(' · '))}">${
+             !siteNeeds.length ? ''
+               : siteNeeds.length === 1
+                 ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
+                 : siteNeeds.length + ' to review'}</span>` +
           `<span class="badge state badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
           // Collapse, for a box serving more sites than fit on a screen.
@@ -7252,6 +7264,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     pubBtn.addEventListener('click', async () => {
       clearError(errEl);
       pubBtn.disabled = true;
+      // The index is read NOW, while the click proves the card is in the
+      // DOM: building a large bundle takes long enough for a tab switch to
+      // re-render the list and detach this card, and cardIndex on a
+      // detached card answers -1 — a publish the server rejects as no site.
+      const at = siteIndex();
+      // Any earlier sent-note is stale the moment a new attempt starts:
+      // success writes a fresh one, and a failure must not let the next
+      // re-render resurrect "is live" over its own error.
+      const pfe = pendingFolders.get(foldKey(siteData, idx));
+      if (pfe) delete pfe.doneNote;
       mark('badge-dim', 'building…');
       try {
         const { entries, gz } = await buildBundle();
@@ -7259,7 +7281,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         // Not through post(): the body is the gzipped bundle itself rather
         // than JSON, and a refused passcode earns its own sentence.
         mark('badge-dim', 'publishing…');
-        const resp = await fetch(api('/upload', { site: cardIndex(card) }),
+        const resp = await fetch(api('/upload', { site: at }),
                                  { method: 'POST', body: gz });
         let result = '';
         try { result = (await resp.json()).result; } catch (e) { result = ''; }
@@ -7293,9 +7315,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         // server swaps content in only after a complete, valid bundle has
         // landed), and the refusals thrown just above already end by saying
         // nothing was changed.
-        showError(errEl, (e instanceof TypeError)
-          ? TUNNEL_DOWN + ' Nothing was published.' : e.message);
-        mark('badge-red', '✕ failed');
+        const msg = (e instanceof TypeError)
+          ? TUNNEL_DOWN + ' Nothing was published.' : e.message;
+        if (card.isConnected) {
+          showError(errEl, msg);
+          mark('badge-red', '✕ failed');
+        } else {
+          // A mid-flight re-render detached this card; its error element
+          // is invisible DOM now. The tab-level line is not.
+          showError($('sites-error'), msg);
+        }
       }
       pubBtn.disabled = !files;
     });
@@ -7365,12 +7394,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       return i < 0 ? idx : i;
     };
 
+    let liveBytes = null;   // the live tree's size, for the download guard
     async function loadVersions() {
         const state = q('.ver-state'), list = q('.versions');
         try {
           const v = await getJSON('/versions', { site: siteIndex() });
           const rows = v.versions || [];
           const live = rows.find((r) => r.live);
+          liveBytes = live ? live.bytes : null;
           // The live version's own size is the answer to "did the right
           // folder land" — a file count off by an order of magnitude is
           // the wrong folder, however right the site looks.
@@ -7378,24 +7409,26 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // the buttons and wrapped mid-date; the switch-row still centres
           // the label and the buttons against the pair.
           // A missing folder is marked here, because publishing is what
-          // fixes it — the same rule every other fault follows. It has no
-          // row of its own and used to sit in the facts block, which is
-          // nowhere near anything that would put it right.
-          const gone = checksFor.find((c) => c.key === 'dir');
-          state.innerHTML = gone
-            ? `<span class="${faultClass(gone)}">${escapeHtml(gone.detail)}</span>`
-            : live
-              ? `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
-                `${fmtSize(live.bytes)}</span>` +
-                `<span>${escapeHtml(when(live.published))}</span>`
-              : 'nothing published yet';
+          // fixes it — and judged from THIS fetch, not from a status
+          // snapshot taken when the card was built: the terminal can
+          // publish (recreating the folder) between builds, and the
+          // Refresh button must tell the truth it just fetched. The server
+          // always reports the live tree while the folder exists, so no
+          // live row IS the folder missing.
+          state.innerHTML = !live
+            ? `<span class="warn">missing — publish to recreate it</span>`
+            : `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
+              `${fmtSize(live.bytes)}</span>` +
+              `<span>${escapeHtml(when(live.published))}</span>`;
           // Nothing published is nothing to download, and offering it
           // anyway made the card contradict itself in two adjacent words.
           const dl = q('.dl');
           dl.disabled = !live || !live.files;
-          dl.title = dl.disabled
-            ? 'Nothing published yet — there is nothing to download'
-            : 'Download the live content as a tar.gz';
+          dl.title = !live
+            ? 'The folder is missing — publish to recreate it'
+            : dl.disabled
+              ? 'Nothing published yet — there is nothing to download'
+              : 'Download the live content as a tar.gz';
           list.innerHTML = rows.length < 2 ? '' :
             rows.map((r) => row(escapeHtml(when(r.published)),
               `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
@@ -7408,6 +7441,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             b.addEventListener('click', async () => {
               b.disabled = true;
               b.textContent = 'restoring…';
+              // What goes live now is not the operator's last upload; the
+              // sent-note must not outlive the content it described.
+              const pfr = pendingFolders.get(foldKey(siteData, idx));
+              if (pfr) delete pfr.doneNote;
               const ok = await siteOp({ op: 'restore', site: siteIndex(),
                                         version: b.dataset.v }, errEl);
               if (!ok) { b.disabled = false; b.textContent = 'Restore'; }
@@ -7423,9 +7460,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     // The response carries Content-Disposition, so the browser saves it
     // rather than navigating: the operator stays on the page they were
-    // working in.
+    // working in. That holds only for the 200 — the too-large refusal is
+    // JSON with no disposition, which location.assign would NAVIGATE to,
+    // replacing the page with a bare error blob. Judged here first, from
+    // the size the version row already fetched.
     q('.dl').addEventListener('click', () => {
       clearError(errEl);
+      if (liveBytes != null && liveBytes > MAX_BUNDLE_BYTES)
+        return showError(errEl,
+          `This site is larger than ${fmtSize(MAX_BUNDLE_BYTES)} — ` +
+          'copy it with scp instead.');
       location.assign(api('/download', { site: siteIndex() }));
     });
 
@@ -7905,6 +7949,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       // count is named for what actually happened.
       const NAMED = [['Files sent', ['200', '206']],
                      ['Already cached', ['304']],
+                     ['Redirected', ['301', '302', '308']],
                      ['Nothing there', ['404']],
                      ['Refused', ['403', '405']],
                      ['Sign-in needed', ['401']],
@@ -7913,6 +7958,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         .map(([name, codes]) => [name, codes.reduce(
           (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
         .filter(([, n]) => n > 0);
+      // Whatever the names above miss (a 5xx, a bad range) still counts in
+      // the ledger — an unnamed remainder must not read as rows that fail
+      // to sum.
+      const other = total - named.reduce((n, [, c]) => n + c, 0);
       $('traffic-chart').innerHTML = total
         ? chart(lineSVG(t.days.map((d) => d[1])),
                 t.days.length ? t.days[0][0] : '',
@@ -7922,6 +7971,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       $('traffic-rows').innerHTML = !total
         ? row('Requests', 'none in this window — or no readable journal on this host')
         : named.map(([name, n]) => row(name, String(n))).join('') +
+          (other > 0 ? row('Other', String(other)) : '') +
           row('Total requests', `<b>${total}</b>`, 'ledger');
 
     } catch (e) {

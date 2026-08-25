@@ -4650,6 +4650,24 @@ def run_server_tests(s, serve_dir):
     check("XFF from untrusted source ignored — third request hits rate limit",
           req("GET", headers={"X-Forwarded-For": "9.10.11.12"}).status == 429)
 
+    # From the trusted proxy, only a value that IS an address is adopted: a
+    # passthrough proxy forwarding client-written XFF verbatim must not let
+    # arbitrary bytes mint fresh rate-limit buckets (a limiter bypass) or
+    # reach the operator's log lines as the "IP".
+    s._request_times.clear()
+    s.config.trusted_proxy = "127.0.0.1"   # the test client IS the proxy now
+
+    req("GET", headers={"X-Forwarded-For": "junk-not-an-address-one"})
+    req("GET", headers={"X-Forwarded-For": "junk-not-an-address-two"})
+    check("Junk XFF from the trusted proxy shares the proxy's own bucket → 429",
+          req("GET", headers={"X-Forwarded-For": "junk-not-an-address-three"}).status == 429)
+
+    s._request_times.clear()
+    req("GET", headers={"X-Forwarded-For": "1.2.3.4"})
+    req("GET", headers={"X-Forwarded-For": "5.6.7.8"})
+    check("...while real addresses are still adopted, each with its own bucket",
+          req("GET", headers={"X-Forwarded-For": "9.10.11.12"}).status != 429)
+
     s.config.rate_limit    = 200
     s.config.trusted_proxy = ""
     s._request_times.clear()

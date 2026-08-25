@@ -1031,7 +1031,19 @@ def _handle_request(method, url_path, headers, raw_ip):
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
         if xff and ip == config.trusted_proxy:
-            ip = _normalize_ip(xff.split(",")[-1].strip())
+            # Adopted only if it IS an address: a passthrough proxy that
+            # forwards a client-written XFF verbatim would otherwise hand
+            # arbitrary bytes a rate-limit bucket of their own (the bucket
+            # key passes non-addresses through unbucketed) and a seat in
+            # the operator's log lines, which escape the request path but
+            # print the IP field as-is. Junk keeps the proxy's own address:
+            # shared limiting beats no limiting under a misconfigured proxy.
+            forwarded = xff.split(",")[-1].strip()
+            try:
+                ipaddress.ip_address(forwarded)
+            except ValueError:
+                forwarded = ip
+            ip = _normalize_ip(forwarded)
 
     site = None  # bound by Host below; None until then, and if nothing matches
 

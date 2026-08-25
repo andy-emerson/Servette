@@ -20,4 +20,7 @@ jobs:
       - uses: github/codeql-action/init@v3
         with:
           languages: python
+          config: |
+            paths-ignore:
+              - tests
       - uses: github/codeql-action/analyze@v3

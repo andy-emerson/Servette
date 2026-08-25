@@ -1065,7 +1065,7 @@ def run_dispatch_tests(s):
           "drop-lead" in s._UI_ADMIN_PAGE
           and "q('.dropstrip').addEventListener" in s._UI_ADMIN_PAGE)
     check("...and the footer saying where more is written down",
-          "servette.org" in s._UI_ADMIN_PAGE)
+          '<a href="https://servette.org"' in s._UI_ADMIN_PAGE)
     # A card can wear two badges at once: the fault it has, and what
     # publishing is doing. They are separate elements because writing the
     # second over the first would erase a standing fault the moment a
@@ -1234,8 +1234,12 @@ def run_dispatch_tests(s):
     # Read the code, not the page text. Prose about alert() is not a call
     # to alert(), and a substring pin that cannot tell them apart fails on
     # a comment while a real call would sail through a reworded one.
-    _admin_js = "\n".join(re.findall(r"<script>(.*?)</script>",
-                                     s._UI_ADMIN_PAGE, re.S))
+    _admin_js = "\n".join(re.findall(r"<script\b[^>]*>(.*?)</script\s*>",
+                                     s._UI_ADMIN_PAGE, re.S | re.I))
+    # A silent empty extraction would make every check below pass without
+    # reading a line of the page, so it is an assertion rather than a hope.
+    check("The admin page's script is extracted before anything reads it",
+          len(_admin_js) > 10000)
     _admin_js = re.sub(r"/\*.*?\*/", "", _admin_js, flags=re.S)
     _admin_js = re.sub(r"//[^\n]*", "", _admin_js)
     check("...whose remove panel offers delete, deactivate, cancel — no browser popup",

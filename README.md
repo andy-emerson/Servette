@@ -158,7 +158,7 @@ Every site has an index, shown by `sites` and starting at `0` — the one `setup
 
 **Update each site's content** in its own folder — the path you named when you added it. The single `/var/lib/servette/site` in the quickstart above is just site `0`'s folder.
 
-### Publish without SSH (advanced, optional)
+### Publishing over SSH, and checking a site
 
 Content reaches a site one way: you publish it from the admin page, over your own SSH tunnel. Servette never accepts content pushed from the network, and there is nothing to configure — no account, no signing key, no hosted shelf. With a password set, your site also answers `GET /.well-known/servette` with `{"running": "<version>"}` to logged-in clients — the version readout the error page shows. **Check any Servette site from a browser** by asking it for a path that isn't there: the error page that answers reports the certificate, the redirect, and the headers from a real browser's vantage, on the site that served it.
 
@@ -176,7 +176,7 @@ Content reaches a site one way: you publish it from the admin page, over your ow
 |---|---|
 | `servette.py` | The entire product — server, system, and shell in one module, generated from `src/` and committed to be read. The package build regenerates it from `src/` at every install, and CI holds the committed copy equal to the sources. The error page, the connection test, and the admin page are inlined into it from `src/404.html`, `src/connection.html`, and `src/admin.html`, so an install is Python only |
 | `src/` | The source of truth: five literate Markdown files (`INIT`/`SERVER`/`SYSTEM`/`SHELL`/`MAIN`), the three embedded pages (`404.html`, `connection.html`, `admin.html`), and the build — `build.py`, plus the backend that runs it inside every package build |
-| `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 and 3.14) and Debian 12 |
+| `tests/test.py` | The whole test suite, run by CI against the pip-installed package on Ubuntu (Python 3.11 through 3.14) and Debian 12 |
 | `README.md` | This file — the user-facing introduction and deploy guide |
 | `DESIGN.md` | Developer's document: scope, invariants, architecture, and how to operate on the code |
 | `AGENTS.md` · `CLAUDE.md` | The human–agent working agreement, and the pointer to it |

@@ -24,6 +24,7 @@ import ssl
 import subprocess
 import sys
 import tarfile
+import html.parser
 import tempfile
 import threading
 import time
@@ -87,6 +88,50 @@ def section(title):
 # ─────────────────────────────────────────────────────────────────────────────
 # REQUEST HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
+
+class _PageBits(html.parser.HTMLParser):
+    """Read a page the way a browser does, instead of with a regex.
+
+    The suite needs two things out of the admin page: where its links point,
+    and what its script says. A regex over tags gets both wrong in ways that
+    pass silently rather than fail — `<SCRIPT>` or `<script type="module">`
+    matches nothing, and every check reading the extraction then succeeds
+    without having seen a line of the page. This suite shipped exactly that
+    defect, and CodeQL found it before a person did.
+
+    A parser also removes the shape those alerts were about: nothing here
+    searches a URL for a substring, so a host is compared as a host."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links, self._script, self._in_script = [], [], False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self.links += [v for k, v in attrs if k == "href" and v]
+        elif tag == "script":
+            self._in_script = True
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self._in_script = False
+
+    def handle_data(self, data):
+        if self._in_script:
+            self._script.append(data)
+
+    @property
+    def script(self):
+        return "\n".join(self._script)
+
+
+def page_bits(page):
+    """(links, script text) for one HTML page."""
+    parser = _PageBits()
+    parser.feed(page)
+    parser.close()
+    return parser.links, parser.script
+
 
 def _free_port():
     """A port the OS says is free right now — the browser check runs a
@@ -1064,13 +1109,12 @@ def run_dispatch_tests(s):
     check("...sized and clickable as a drop target, not a caption",
           "drop-lead" in s._UI_ADMIN_PAGE
           and "q('.dropstrip').addEventListener" in s._UI_ADMIN_PAGE)
-    # The host is compared exactly, not searched for. A substring test would
-    # also pass on evil-servette.org.example, which is both a weaker
-    # assertion and the shape CodeQL flags as incomplete URL sanitization.
-    _footer_hosts = {urllib.parse.urlsplit(u).netloc for u in
-                     re.findall(r'<a href="(https://[^"]+)"', s._UI_ADMIN_PAGE)}
+    # Links come from the parser, and the host is compared as a host. A
+    # substring test would also pass on evil-servette.org.example.
+    _admin_links, _admin_js = page_bits(s._UI_ADMIN_PAGE)
     check("...and the footer saying where more is written down",
-          "servette.org" in _footer_hosts)
+          any(urllib.parse.urlsplit(u).netloc == "servette.org"
+              for u in _admin_links))
     # A card can wear two badges at once: the fault it has, and what
     # publishing is doing. They are separate elements because writing the
     # second over the first would erase a standing fault the moment a
@@ -1239,13 +1283,12 @@ def run_dispatch_tests(s):
     # Read the code, not the page text. Prose about alert() is not a call
     # to alert(), and a substring pin that cannot tell them apart fails on
     # a comment while a real call would sail through a reworded one.
-    _admin_js = "\n".join(re.findall(r"<script\b[^>]*>(.*?)</script\s*>",
-                                     s._UI_ADMIN_PAGE, re.S | re.I))
-    # A silent empty extraction would make every check below pass without
-    # reading a line of the page, so it is an assertion rather than a hope.
+    # _admin_js came from the parser above; an empty extraction would make
+    # every check below pass without reading a line of the page, so it is
+    # an assertion rather than a hope.
     check("The admin page's script is extracted before anything reads it",
           len(_admin_js) > 10000)
-    _admin_js = re.sub(r"/\*.*?\*/", "", _admin_js, flags=re.S)
+    _admin_js = re.sub(r"/\*.*?\*/", "", _admin_js, flags=re.S)  # comments, not tags
     _admin_js = re.sub(r"//[^\n]*", "", _admin_js)
     check("...whose remove panel offers delete, deactivate, cancel — no browser popup",
           "do-delete" in s._UI_ADMIN_PAGE and "do-deactivate" in s._UI_ADMIN_PAGE

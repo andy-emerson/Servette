@@ -6,6 +6,8 @@
 # Runtime config — contains password hashes and cert paths
 # SSL certificate, key, and release signature files
 # Site folders the suite creates through the page's add-site door
+# Throwaway certs and keys named for a .test domain (RFC 2606), which a
+# probe script once left in the repository root and a blind stage committed
 # Viewer e2e harness (tests/viewer/)
 # macOS
 *.egg-info/
@@ -13,6 +15,7 @@
 *.pem
 *.pyc
 *.sig
+*.test
 .DS_Store
 .servette-env/
 .venv/

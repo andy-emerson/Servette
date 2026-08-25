@@ -49,7 +49,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 # Paths
 #
@@ -137,6 +137,34 @@ _MAX_REDIRECTS      = 200
 _MAX_REDIRECT_CHARS = 2000
 
 
+def _canonical_source(path):
+    """A redirect source in its one canonical spelling: decoded once, then
+    re-encoded with a fixed rule, trailing slash dropped. The stored key
+    and the serve-time lookup both pass through here, so every spelling of
+    one path — /my%20page, a literal space, mixed hex case — is one rule.
+
+    quote-after-unquote, not bare unquote, for two load-bearing reasons.
+    The canonical form is always printable ASCII, so a source written
+    /a%0d can never plant a raw control character in the config file
+    (tomllib refuses a literal CR — the next restart would find the file
+    unparseable). And it is a fixed point — canonical in, canonical out —
+    where a bare-decoded key was not: a stored space re-decoded, a %2520
+    drifted one escape per save/load cycle, and the ring check misread its
+    own shrinking output as a ring."""
+    return quote(unquote(path), safe="/").rstrip("/") or "/"
+
+
+def _redirect_next(dst):
+    """Where an internal redirect target lands as a LOOKUP key, or None for
+    an external one: the query dropped (the next request's path carries none
+    of it), then the same canonical spelling the lookup uses. The loop
+    checks below must follow the same road the visitor's browser will, or a
+    ring spelled /%62 or /b?x=1 walks free while the browser bounces."""
+    if not dst.startswith("/"):
+        return None
+    return _canonical_source(dst.partition("?")[0])
+
+
 def _clean_redirects(raw):
     """The site's redirect table, validated once at load so serving one is a
     dict lookup and nothing else.
@@ -150,9 +178,13 @@ def _clean_redirects(raw):
     Two of the checks are load-bearing rather than tidy. A target is
     narrowed to path-or-http(s) because a redirect is an open door by
     nature, and `javascript:` or `data:` in a Location is a way to run
-    script on the operator's own origin. Control characters are refused on
-    both sides because a Location carrying CR or LF is response splitting —
-    the value reaches a header, and this is where that is stopped."""
+    script on the operator's own origin. Anything outside printable ASCII
+    is refused on both sides: CR or LF in a Location is response splitting
+    (the value reaches a header, and this is where that is stopped), and a
+    non-ASCII byte would be dropped by the ASCII-only Location encoding at
+    serve time — silently sending the visitor somewhere the operator did
+    not write. An operator who wants a non-ASCII destination percent-encodes
+    the path (or punycodes the host) themselves, which is ASCII and exact."""
     out = {}
     if not isinstance(raw, dict):
         log.warning("redirects is not a table — ignoring it")
@@ -162,8 +194,8 @@ def _clean_redirects(raw):
                     _MAX_REDIRECTS, _MAX_REDIRECTS)
     for key, target in list(raw.items())[:_MAX_REDIRECTS]:
         src, dst = str(key).strip(), str(target).strip()
-        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in src + dst):
-            log.warning("redirect with a control character in it — ignored")
+        if any(not (0x20 <= ord(c) <= 0x7E) for c in src + dst):
+            log.warning("redirect with a control or non-ASCII character in it — ignored")
             continue
         if not src.startswith("/") or len(src) > _MAX_REDIRECT_CHARS:
             log.warning("redirect source %r is not a site path — ignored", src[:80])
@@ -174,12 +206,38 @@ def _clean_redirects(raw):
             log.warning("redirect target %r is not a path or http(s) URL — ignored",
                         dst[:80])
             continue
-        # One rule covers /old and /old/, on both sides of the lookup.
-        norm = src.rstrip("/") or "/"
-        if norm == (dst.rstrip("/") or "/"):
+        # One rule covers /old and /old/ and every percent-spelling of the
+        # same path, on both sides of the lookup: the key is the canonical
+        # form, so a rule written /my%20page fires for the wire's
+        # /my%20page, and /caf%C3%A9 is how an ASCII-only table spells a
+        # non-ASCII source.
+        norm = _canonical_source(src)
+        if norm in out:
+            log.warning("redirect %s is written twice (two spellings of one "
+                        "path) — the last one wins", norm)
+        if norm == _redirect_next(dst):
             log.warning("redirect %s points at itself — ignored", norm)
             continue
         out[norm] = dst
+    # A rule pointing at itself is refused above; a ring of rules
+    # (/a→/b, /b→/a) is the same trap one hop longer, and a rule that
+    # leads INTO a ring strands the visitor just as surely. The server
+    # serves one hop per request, so a ring is a browser bouncing until
+    # its redirect cap — refused here, at the same door. Only internal
+    # targets can chain; an http(s) target leaves the site and ends the
+    # walk.
+    doomed = set()
+    for src in out:
+        seen, cur = set(), src
+        while cur is not None and cur in out and cur not in seen:
+            seen.add(cur)
+            cur = _redirect_next(out[cur])
+        if cur is not None and cur in seen:
+            doomed.add(src)
+    for src in doomed:
+        log.warning("redirect %s is part of, or leads into, a ring of "
+                    "redirects — ignored", src)
+        del out[src]
     return out
 
 
@@ -1755,7 +1813,28 @@ def _handle_request(method, url_path, headers, raw_ip):
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
         if xff and ip == config.trusted_proxy:
-            ip = _normalize_ip(xff.split(",")[-1].strip())
+            # Adopted only if it IS an address: a passthrough proxy that
+            # forwards a client-written XFF verbatim would otherwise hand
+            # arbitrary bytes a rate-limit bucket of their own (the bucket
+            # key passes non-addresses through unbucketed) and a seat in
+            # the operator's log lines, which escape the request path but
+            # print the IP field as-is. Junk keeps the proxy's own address:
+            # shared limiting beats no limiting under a misconfigured proxy.
+            forwarded = xff.split(",")[-1].strip()
+            # Some stock proxies append the client as ip:port (Azure's
+            # gateway does by default) or [v6]:port — the port is theirs
+            # to add and ours to drop, or every visitor behind such a
+            # proxy would collapse into the proxy's one bucket below.
+            m = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\](?::\d+)?", forwarded)
+            if m:
+                forwarded = m.group(1)
+            elif re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}:\d+", forwarded):
+                forwarded = forwarded.rsplit(":", 1)[0]
+            try:
+                ipaddress.ip_address(forwarded)
+            except ValueError:
+                forwarded = ip
+            ip = _normalize_ip(forwarded)
 
     site = None  # bound by Host below; None until then, and if nothing matches
 
@@ -1891,7 +1970,12 @@ def _handle_request(method, url_path, headers, raw_ip):
     # query would silently break every campaign link pointed at the old one.
     if site.redirects:
         bare, sep, query = url_path.partition("?")
-        target = site.redirects.get(bare.rstrip("/") or "/")
+        # Match the canonical spelling the table's keys are stored in: a
+        # source like '/my page' arrives as '/my%20page', and a rule on
+        # '/old' must also catch an encoded '/%6fld' that resolves to the
+        # same file — otherwise the redirect silently fails to fire, or is
+        # skipped by anyone who percent-encodes a letter of the path.
+        target = site.redirects.get(_canonical_source(bare))
         if target:
             if sep and "?" not in target:
                 target += sep + query
@@ -2061,6 +2145,24 @@ def _domain_in_use(domain, excluding=None):
     other's content."""
     domain = domain.lower()
     return any(s is not excluding and s.domain and s.domain.lower() == domain for s in config.sites)
+
+
+def _domain_problem(domain):
+    """Why this string cannot be a site's domain, as one sentence — empty
+    when it can be. Syntax only, judged locally: naming a site is instant
+    and must never depend on anyone's DNS (the naming/certifying split), so
+    this refuses only what could never route or be issued for — a scheme, a
+    path, a port, spaces, a label DNS itself would reject. Host matching
+    and the SNI table compare this string against what browsers send, which
+    is why a value like 'https://example.com' can never match anything."""
+    if len(domain) > 253:
+        return "that is longer than a domain can be (253 characters)"
+    if any(not label or len(label) > 63 or label != label.strip("-")
+           or not all(c.isascii() and (c.isalnum() or c == "-") for c in label)
+           for label in domain.split(".")):
+        return ("a domain is dot-separated labels of letters, digits and "
+                "hyphens — no scheme, path, port or spaces (example.com)")
+    return ""
 
 
 # One certificate's context
@@ -2883,6 +2985,16 @@ def _obtain_trusted_cert(domain, site):
     Returns None on success, else the failure's class for the watchdog's
     backoff: "refused" (the CA answered no — retrying soon just burns its
     rate limits) or "transient" (the network ate a request — retry freely)."""
+    # Judged before the domain becomes anything else, because two lines
+    # below it becomes a PATH component (certs/<domain>): the admin page's
+    # name op refuses these shapes before issuance can run, but the
+    # terminal's prompts land here directly, and 'a/b' typed at a prompt
+    # must not mkdir its way into the tree before ACME ever answers.
+    problem = _domain_problem(domain)
+    if problem:
+        print(f"  → {problem}")
+        return "refused"
+
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
@@ -3091,7 +3203,14 @@ def _is_real_domain(s):
 def _domain_from_cert(cert_path):
     if not cert_path:
         return None
-    cert = _load_cert(cert_path)
+    return _cert_covered_domain(_load_cert(cert_path))
+
+
+def _cert_covered_domain(cert):
+    """The domain a loaded certificate names, or None — the parsed half of
+    _domain_from_cert, split out so a caller already holding the parsed
+    certificate (the health rows read two facts from one) need not load
+    and parse the PEM a second time."""
     if cert is None:
         return None
     try:
@@ -3114,7 +3233,12 @@ def _domain_from_cert(cert_path):
 
 # Days to expiry
 def _cert_days_remaining(cert_path):
-    cert = _load_cert(cert_path)
+    return _cert_days(_load_cert(cert_path))
+
+
+def _cert_days(cert):
+    """Days to a loaded certificate's expiry, or None — the parsed half of
+    _cert_days_remaining, for callers already holding the certificate."""
     if cert is None:
         return None
     try:
@@ -3480,7 +3604,7 @@ def _round_up_2sig(n):
 
 
 # The cache's share of demand
-def _cache_headroom_mb(cache_mb):
+def _cache_headroom_mb(cache_mb, running=None):
     """How much of the configured file cache is NOT already in Committed_AS.
 
     The cache holds file bytes on the Python heap, so a warm cache is
@@ -3498,8 +3622,14 @@ def _cache_headroom_mb(cache_mb):
     in the signal), so a host that accepts the offer is never afterwards told
     to resize. The old formula had this backwards: the cache entered the
     measurement between setup and status, so the check drifted upward past
-    the size the operator had just chosen, and nagged forever."""
-    return 0 if (_server_running() or _service_is_active()) else cache_mb
+    the size the operator had just chosen, and nagged forever.
+
+    `running` lets a caller hand in a fact it already holds — _status_data
+    asks systemd once and threads the answer through everything the
+    snapshot computes; None asks here."""
+    if running is None:
+        running = _server_running() or _service_is_active()
+    return 0 if running else cache_mb
 
 
 # The recommendation
@@ -4597,7 +4727,10 @@ def _remove_site(idx):
     if len(config.sites) == 1:
         return "can't remove the only site — a box needs at least one"
     victim = config.sites[idx]
-    base   = _resolve(victim.serve_dir)
+    # rstrip, exactly as every derived-tree helper does: a hand-edited
+    # trailing slash in serve_dir would otherwise aim the .bak/.new/base
+    # deletions at names that do not exist and leave the trees behind.
+    base   = _resolve(victim.serve_dir).rstrip(os.sep)
     del config.sites[idx]
     config.save()
     shared = any(os.path.realpath(_resolve(s.serve_dir)) == os.path.realpath(base)
@@ -4740,18 +4873,19 @@ def _config_cert(site):
 def _config_username(site):
     current   = site.username
     new_value = _input(f"  username [{current}]: ").strip()
-    if new_value == "" and current != "":
-        site.username      = ""
-        site.password_hash = ""
-        site.password_salt = ""
-        config.save()
-        print("  → auth disabled, password cleared")
-    elif new_value and new_value != current:
-        site.username = new_value
-        config.save()
-        print("  → saved")
-    else:
+    if new_value == current:
         print("  → unchanged")
+        return
+    # Through the shared validator, so the prompt refuses exactly what
+    # `set` and the page refuse — clearing included: an emptied username
+    # takes the stored password with it there, on every surface.
+    err = _set_site_value(site, "username", new_value)
+    if err:
+        print(f"  → {err}")
+        return
+    config.save()
+    print("  → auth disabled, password cleared" if new_value == ""
+          else "  → saved")
 
 
 def _config_password(site):
@@ -5039,10 +5173,13 @@ def _traffic_lines(days=7):
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
-def _parse_traffic(lines, days=7):
+def _parse_traffic(lines, days=7, now=None):
     """Tally journal lines into the traffic summary: requests per day,
     status counts, top paths. Pure, so the suite can feed it real log
-    lines. Each line carries two prefixes — the journal's own
+    lines (`now` pins the window's end for it; None means now). Every
+    bucket in the window is present, zeroes included — the chart's x-axis
+    is time, and a quiet day left out made two busy endpoints read as a
+    steady week. Each line carries two prefixes — the journal's own
     ('<iso> <host> servette[pid]:') and then setup_logging's format
     ('<date> <time>  LEVEL  <message>') — so the level name is the anchor
     the message begins after. Anchoring on the unit token instead was the
@@ -5071,6 +5208,15 @@ def _parse_traffic(lines, days=7):
             path = next((p for p in msg[1:] if p.startswith("/")), None)
             if path:
                 paths[path] = paths.get(path, 0) + 1
+    # The zero-fill: journalctl's -Nd window is N*24 hours ending now, so
+    # it can touch N+1 calendar days — every bucket it covers gets a row.
+    # Line-made buckets just outside the fill (clock skew, a test's fixed
+    # dates) are kept: counted traffic is never dropped over its stamp.
+    end  = now or datetime.datetime.now()
+    step = datetime.timedelta(hours=1) if days <= 2 else datetime.timedelta(days=1)
+    fmt  = "%Y-%m-%d %H" if days <= 2 else "%Y-%m-%d"
+    for i in range((days * 24 if days <= 2 else days) + 1):
+        per_day.setdefault((end - i * step).strftime(fmt), 0)
     top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
     return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
             "top_paths": top, "window_days": days,
@@ -5087,7 +5233,7 @@ def cmd_traffic():
     read from the journal. The page's Traffic tab renders this same
     summary; the raw log (IPs included) stays with `log`."""
     t = _traffic_summary()
-    if not t["days"]:
+    if not t["total"]:
         print("  No traffic in the window — or no readable journal on this host.")
         return
     _section("Traffic — last 7 days")
@@ -5110,6 +5256,11 @@ def cmd_traffic():
 # not through Servette.)
 # The bundle ceiling
 _MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
+# A companion ceiling on entry COUNT: the byte cap counts payload, so a
+# bundle of millions of zero-size members (512 header bytes each,
+# ~1000:1 gzip) slips under it while still exhausting CPU and memory. A
+# static site of a million files is already absurd.
+_MAX_BUNDLE_MEMBERS = 1_000_000
 
 
 # Extracting a bundle
@@ -5144,6 +5295,11 @@ def _extract_bundle(data, dest_dir):
             total += m.size
             if total > _MAX_BUNDLE_BYTES:
                 raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
+            # The byte cap counts payload only, so zero-size members never
+            # trip it; this bounds their number, and with it the CPU the
+            # walk burns and the members list it grows.
+            if len(members) >= _MAX_BUNDLE_MEMBERS:
+                raise ValueError(f"bundle has more than {_MAX_BUNDLE_MEMBERS} entries")
             members.append(m)
         # The PEP 706 feature probe: data_filter exists exactly when
         # extractall() accepts filter=. Debian 12's 3.11.2 predates the
@@ -5269,15 +5425,24 @@ def _swap_site_content(new_dir, serve_dir):
         # and the flip must fail just as loudly rather than serve nothing.
         raise FileNotFoundError(f"new content tree missing: {new_dir}")
     live = _resolve(serve_dir).rstrip(os.sep)
-    dest = _new_version_dir(serve_dir)
+    now  = int(time.time())
+    dest = _new_version_dir(serve_dir, now)
 
     if os.path.islink(live):
         os.rename(new_dir, dest)
-        flip = live + ".flip"
-        if os.path.lexists(flip):
-            os.remove(flip)                      # a crash's leftover, harmless
-        os.symlink(dest, flip)
-        os.replace(flip, live)                   # the swap: one atomic syscall
+        try:
+            flip = live + ".flip"
+            if os.path.lexists(flip):
+                os.remove(flip)                  # a crash's leftover, harmless
+            os.symlink(dest, flip)
+            os.replace(flip, live)               # the swap: one atomic syscall
+        except OSError:
+            # The tree was already renamed into the ring; a failed flip
+            # hands it back to staging, so a publish the caller reports
+            # 'rejected' leaves no never-published "version" behind for
+            # restore-site to offer.
+            os.rename(dest, new_dir)
+            raise
         _adopt_legacy_slots(serve_dir)
         _prune_versions(serve_dir)
         return
@@ -5287,15 +5452,19 @@ def _swap_site_content(new_dir, serve_dir):
     os.rename(new_dir, dest)
     kept = None
     if had_live:
-        # Dated by its own mtime, not by now: it is the older content, and
-        # the ring sorts on the name.
-        kept = _new_version_dir(serve_dir, os.path.getmtime(live))
+        # Dated by its own mtime, not by now — it is the older content, and
+        # the ring sorts on the name — but clamped strictly below dest's
+        # stamp: an mtime in dest's own second would collide into a higher
+        # sequence suffix, and the ring would read the OLD tree as newer.
+        kept = _new_version_dir(serve_dir,
+                                min(int(os.path.getmtime(live)), now - 1))
         os.rename(live, kept)
     try:
         os.symlink(dest, live)
     except OSError:
         if had_live:
             os.rename(kept, live)
+        os.rename(dest, new_dir)   # same hand-back as the flip above
         raise
     _adopt_legacy_slots(serve_dir)
     _prune_versions(serve_dir)
@@ -5323,12 +5492,10 @@ def _land_bundle(site, bundle, source):
             # tree goes live: the operator owns their content, the service
             # reads through its group. strip_world because the extraction's
             # own 644/755 modes are Servette's writing, not the operator's,
-            # (kept versions need nothing: each was the live tree once and
-            # keeps the ownership it already has)
-            # and must honour the never-world-bits promise. The backup needs
-            # nothing: it was the live tree a moment ago and keeps the
+            # and must honour the never-world-bits promise. Kept versions
+            # need nothing: each was the live tree once and keeps the
             # ownership it already has. A failed extraction dies here, in
-            # staging, with the live content and its backup untouched.
+            # staging, with the live content and the ring untouched.
             _chown_operator(staging, strip_world=True)
             _swap_site_content(staging, site.serve_dir)
         except Exception as e:
@@ -6526,8 +6693,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
     refresh();  // every tab renders from the same /status + /config truth
     if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
+    // The full path + search + hash, in that order: a bare '#…' relative
+    // URL swallows the search into the fragment — the hash became the tab
+    // name with the whole passcode query glued on, which parses back as no
+    // tab at all, so every reload or copied link landed on Sites.
     if (location.hash !== '#' + name)
-      history.replaceState(null, '', '#' + name + location.search);
+      history.replaceState(null, '',
+                           location.pathname + location.search + '#' + name);
   }
 
   $('tab-sites').addEventListener('click', () => showTab('sites'));
@@ -6552,10 +6724,25 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // and a stale index would act on the wrong site.
   // Which cards are folded shut. Kept here rather than on the card,
   // because every op re-renders the list and a card that sprang open on
-  // each save would be worse than no fold at all. Keyed by domain where
-  // there is one, since dragging renumbers indexes.
+  // each save would be worse than no fold at all. Keyed by the site's
+  // Servette-assigned folder: the one identity that survives everything —
+  // a rename changes the domain, a drag or removal renumbers indexes, and
+  // a positional key would hand one site's state (or its picked folder,
+  // below) to a different site's card.
   const folded = new Set();
-  const foldKey = (siteData, idx) => siteData.domain || '#' + idx;
+  // The folder, not the domain and not the position: naming a site changes
+  // its domain (and must not orphan a folder picked for it), and every
+  // structural op renumbers positions. The one shape this key cannot tell
+  // apart is two sites deliberately sharing one folder — those share fold
+  // and pending state too, a confusion the shared content already invites.
+  const foldKey = (siteData, idx) => siteData.dir || siteData.domain || '#' + idx;
+
+  // What the operator has read into a card but the server has not been
+  // given: the picked folder (and, once sent, the publish note). Kept
+  // here for the same reason as the fold set, under the same keys —
+  // every op re-renders the cards, and a re-render must never cost a
+  // folder that took a drag to pick.
+  const pendingFolders = new Map();
 
   const cardIndex = (el) =>
     [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
@@ -6861,7 +7048,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          // The reverse of Publish, on the line that says what is live: the
          // live tree as the same tar.gz the publish door accepts, so what
          // comes down can go back up.
-         `<button class="action tiny dl" type="button" ` +
+         // Born disabled: the size guard below needs the /versions answer,
+         // and a click before (or without) it must not navigate blind.
+         `<button class="action tiny dl" type="button" disabled ` +
          `title="Download the live content as a tar.gz">Download</button>` +
          `<button class="action tiny ver-refresh" type="button" ` +
          `title="Re-read this list. The page updates it after a publish or ` +
@@ -6912,14 +7101,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // beside it is the one publishing writes into, which is why they
           // are separate elements: overwriting the first would erase a
           // standing fault the moment a folder was read.
-          (siteNeeds.length
-            ? `<span class="badge ${siteNeeds.some((c) => c.blocking)
-                 ? 'badge-red' : 'badge-warn'} needs" title="${escapeHtml(
-                 siteNeeds.map((c) => c.detail).join(' · '))}">${
-                 siteNeeds.length === 1
-                   ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
-                   : siteNeeds.length + ' to review'}</span>`
-            : '') +
+          // Emitted even on a healthy card (hidden): a fault that arrives
+          // client-side — an unfinished login on a card built healthy —
+          // has no rebuild to emit a pill for it, and renderAttention can
+          // only fill a pill that exists.
+          `<span class="badge ${siteNeeds.some((c) => c.blocking)
+             ? 'badge-red' : 'badge-warn'} needs${
+             siteNeeds.length ? '' : ' hidden'}" title="${escapeHtml(
+             siteNeeds.map((c) => c.detail).join(' · '))}">${
+             !siteNeeds.length ? ''
+               : siteNeeds.length === 1
+                 ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
+                 : siteNeeds.length + ' to review'}</span>` +
           `<span class="badge state badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
           // Collapse, for a box serving more sites than fit on a screen.
@@ -7037,6 +7230,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       }
       files = kept;
       folderName = name;
+      pendingFolders.set(foldKey(siteData, idx), { files: kept, name });
       const totalBytes = kept.reduce((n, en) => n + en.file.size, 0);
       const hasIndex = kept.some((en) => en.path === 'index.html');
       summary.innerHTML =
@@ -7112,6 +7306,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     pubBtn.addEventListener('click', async () => {
       clearError(errEl);
       pubBtn.disabled = true;
+      // The index is read NOW, while the click proves the card is in the
+      // DOM: building a large bundle takes long enough for a tab switch to
+      // re-render the list and detach this card, and cardIndex on a
+      // detached card answers -1 — a publish the server rejects as no site.
+      const at = siteIndex();
+      // Any earlier sent-note is stale the moment a new attempt starts:
+      // success writes a fresh one, and a failure must not let the next
+      // re-render resurrect "is live" over its own error.
+      const pfe = pendingFolders.get(foldKey(siteData, idx));
+      if (pfe) delete pfe.doneNote;
       mark('badge-dim', 'building…');
       try {
         const { entries, gz } = await buildBundle();
@@ -7119,19 +7323,27 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         // Not through post(): the body is the gzipped bundle itself rather
         // than JSON, and a refused passcode earns its own sentence.
         mark('badge-dim', 'publishing…');
-        const resp = await fetch(api('/upload', { site: cardIndex(card) }),
+        const resp = await fetch(api('/upload', { site: at }),
                                  { method: 'POST', body: gz });
         let result = '';
         try { result = (await resp.json()).result; } catch (e) { result = ''; }
 
         if (resp.ok && result === 'published') {
-          q('.note-done').innerHTML = `<b>${escapeHtml(folderName)}/</b> is live — ` +
+          const note = `<b>${escapeHtml(folderName)}/</b> is live — ` +
             `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
             `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
             `content kept as the one-step backup.`;
+          q('.note-done').innerHTML = note;
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');
-          loadVersions();          // the tree just replaced is now restorable
+          const entry = pendingFolders.get(foldKey(siteData, idx));
+          if (entry) entry.doneNote = note;
+          // The card's facts moved with the publish — a folder-missing or
+          // stale status row must not outlive the content that cures it.
+          // refresh() rebuilds the card (versions list included, so the
+          // tree just replaced shows as restorable); the map brings the
+          // folder and this note back.
+          await refresh();
         } else if (resp.status === 403) {
           throw new Error('The server refused the passcode — close this page, ' +
                           'and open the fresh link the terminal prints for this run.');
@@ -7145,9 +7357,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         // server swaps content in only after a complete, valid bundle has
         // landed), and the refusals thrown just above already end by saying
         // nothing was changed.
-        showError(errEl, (e instanceof TypeError)
-          ? TUNNEL_DOWN + ' Nothing was published.' : e.message);
-        mark('badge-red', '✕ failed');
+        const msg = (e instanceof TypeError)
+          ? TUNNEL_DOWN + ' Nothing was published.' : e.message;
+        if (card.isConnected) {
+          showError(errEl, msg);
+          mark('badge-red', '✕ failed');
+        } else {
+          // A mid-flight re-render detached this card; its error element
+          // is invisible DOM now. The tab-level line is not.
+          showError($('sites-error'), msg);
+        }
       }
       pubBtn.disabled = !files;
     });
@@ -7217,12 +7436,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       return i < 0 ? idx : i;
     };
 
+    let liveBytes = null;   // the live tree's size, for the download guard
     async function loadVersions() {
         const state = q('.ver-state'), list = q('.versions');
         try {
           const v = await getJSON('/versions', { site: siteIndex() });
           const rows = v.versions || [];
           const live = rows.find((r) => r.live);
+          liveBytes = live ? live.bytes : null;
           // The live version's own size is the answer to "did the right
           // folder land" — a file count off by an order of magnitude is
           // the wrong folder, however right the site looks.
@@ -7230,24 +7451,26 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // the buttons and wrapped mid-date; the switch-row still centres
           // the label and the buttons against the pair.
           // A missing folder is marked here, because publishing is what
-          // fixes it — the same rule every other fault follows. It has no
-          // row of its own and used to sit in the facts block, which is
-          // nowhere near anything that would put it right.
-          const gone = checksFor.find((c) => c.key === 'dir');
-          state.innerHTML = gone
-            ? `<span class="${faultClass(gone)}">${escapeHtml(gone.detail)}</span>`
-            : live
-              ? `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
-                `${fmtSize(live.bytes)}</span>` +
-                `<span>${escapeHtml(when(live.published))}</span>`
-              : 'nothing published yet';
+          // fixes it — and judged from THIS fetch, not from a status
+          // snapshot taken when the card was built: the terminal can
+          // publish (recreating the folder) between builds, and the
+          // Refresh button must tell the truth it just fetched. The server
+          // always reports the live tree while the folder exists, so no
+          // live row IS the folder missing.
+          state.innerHTML = !live
+            ? `<span class="warn">missing — publish to recreate it</span>`
+            : `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
+              `${fmtSize(live.bytes)}</span>` +
+              `<span>${escapeHtml(when(live.published))}</span>`;
           // Nothing published is nothing to download, and offering it
           // anyway made the card contradict itself in two adjacent words.
           const dl = q('.dl');
           dl.disabled = !live || !live.files;
-          dl.title = dl.disabled
-            ? 'Nothing published yet — there is nothing to download'
-            : 'Download the live content as a tar.gz';
+          dl.title = !live
+            ? 'The folder is missing — publish to recreate it'
+            : dl.disabled
+              ? 'Nothing published yet — there is nothing to download'
+              : 'Download the live content as a tar.gz';
           list.innerHTML = rows.length < 2 ? '' :
             rows.map((r) => row(escapeHtml(when(r.published)),
               `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
@@ -7260,6 +7483,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             b.addEventListener('click', async () => {
               b.disabled = true;
               b.textContent = 'restoring…';
+              // What goes live now is not the operator's last upload; the
+              // sent-note must not outlive the content it described.
+              const pfr = pendingFolders.get(foldKey(siteData, idx));
+              if (pfr) delete pfr.doneNote;
               const ok = await siteOp({ op: 'restore', site: siteIndex(),
                                         version: b.dataset.v }, errEl);
               if (!ok) { b.disabled = false; b.textContent = 'Restore'; }
@@ -7275,9 +7502,22 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     // The response carries Content-Disposition, so the browser saves it
     // rather than navigating: the operator stays on the page they were
-    // working in.
+    // working in. That holds only for the 200 — the too-large refusal is
+    // JSON with no disposition, which location.assign would NAVIGATE to,
+    // replacing the page with a bare error blob. Judged here first, from
+    // the size the version row already fetched.
     q('.dl').addEventListener('click', () => {
       clearError(errEl);
+      // Raw bytes are the only number the page holds; the server judges
+      // the gzipped tar, so a compressible over-500 MB site is refused
+      // here that the server might have managed. Accepted: scp still
+      // works either way, and navigating the page into a JSON refusal
+      // blob is worse. The button is born disabled, so liveBytes is set
+      // by the /versions fetch before any click can land.
+      if (liveBytes != null && liveBytes > MAX_BUNDLE_BYTES)
+        return showError(errEl,
+          `This site is larger than ${fmtSize(MAX_BUNDLE_BYTES)} — ` +
+          'copy it with scp instead.');
       location.assign(api('/download', { site: siteIndex() }));
     });
 
@@ -7545,6 +7785,21 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                    cardIndex(card), badge, errEl);
     });
 
+    // A re-render never costs the operator a picked folder: the card is
+    // fresh DOM, but what was read for it waits in pendingFolders — the
+    // summary, the Publish button, and the sent note come back as they
+    // were.
+    const kept = pendingFolders.get(foldKey(siteData, idx));
+    if (kept) {
+      useFolder(kept.files, kept.name);
+      if (kept.doneNote) {
+        q('.note-done').innerHTML = kept.doneNote;
+        done.classList.remove('hidden');
+        mark('badge-green', '✓ published');
+        pendingFolders.set(foldKey(siteData, idx), kept);
+      }
+    }
+
     return card;
   }
 
@@ -7629,8 +7884,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                       ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
                       : '') });
     // Re-rendering the form under a cursor would discard what is being
-    // typed, and the meter refreshes this tab every few seconds.
-    if (document.activeElement && document.activeElement.id === 'cfg-swap_mb') return;
+    // typed — and refresh() and the upgrade check (up to four seconds
+    // after the page opens) both land here. The guard covers the whole
+    // form, email as much as the swap size: no rewrite while focus is
+    // anywhere inside it.
+    const focused = document.activeElement;
+    if (focused && focused.closest && focused.closest('#cfg-host-fields')) return;
     $('cfg-host-fields').innerHTML =
       HOST_FIELDS.map(([k, l, h]) => field(k, l, ((cfgData || {}).host || {})[k], { hint: h }))
         .join('') + swapField;
@@ -7668,16 +7927,25 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   /* ── Saving settings. One Save covers every field on a form. ── */
 
-  async function saveSettings(values, siteIdx, badge, errEl) {
+  // The one save protocol for every settings form: POST, judge, badge,
+  // report — so the site cards and the host form cannot drift on any of
+  // it. `deferDone` is for a caller whose Save carries a follow-up step
+  // (the swapfile resize): success is left unannounced for it to finish;
+  // failure reports here either way. Returns whether it saved.
+  async function saveSettings(values, siteIdx, badge, errEl, deferDone) {
     clearError(errEl);
     setBadge(badge, 'badge-dim', 'saving…');
     try {
       await post('/config', { site: siteIdx, values }, 'saved');
-      setBadge(badge, 'badge-green', '✓ saved');
-      refresh();
+      if (!deferDone) {
+        setBadge(badge, 'badge-green', '✓ saved');
+        refresh();
+      }
+      return true;
     } catch (e) {
       setBadge(badge, 'badge-red', '✕ not saved');
       showError(errEl, reason(e) + ' Nothing was changed.');
+      return false;
     }
   }
 
@@ -7697,18 +7965,23 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     if (swapEl && swapEl.value.trim() && !(want > 0))
       return showError(errEl, 'Swap file size must be a number of megabytes.');
 
-    setBadge(badge, 'badge-dim', 'saving…');
-    try {
-      await post('/config', { site: 0, values }, 'saved');
-      if (resize) {
-        setBadge(badge, 'badge-dim', 'resizing the swapfile…');
+    // The settings ride the same save path every form uses; only the
+    // resize is this button's own follow-up.
+    if (!await saveSettings(values, 0, badge, errEl, resize)) return;
+    if (resize) {
+      setBadge(badge, 'badge-dim', 'resizing the swapfile…');
+      try {
         await post('/swap', { mb: want }, 'ok');
+      } catch (e) {
+        // The settings above did save — say exactly which half failed
+        // rather than implying the whole Save was a no-op.
+        setBadge(badge, 'badge-red', '✕ swapfile not resized');
+        showError(errEl, 'The settings saved, but the swapfile was not resized: ' +
+          reason(e));
+        return;
       }
       setBadge(badge, 'badge-green', '✓ saved');
       refresh();
-    } catch (e) {
-      setBadge(badge, 'badge-red', '✕ not saved');
-      showError(errEl, reason(e));
     }
   });
 
@@ -7724,6 +7997,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       // count is named for what actually happened.
       const NAMED = [['Files sent', ['200', '206']],
                      ['Already cached', ['304']],
+                     ['Redirected', ['301', '302', '308']],
                      ['Nothing there', ['404']],
                      ['Refused', ['403', '405']],
                      ['Sign-in needed', ['401']],
@@ -7732,6 +8006,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         .map(([name, codes]) => [name, codes.reduce(
           (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
         .filter(([, n]) => n > 0);
+      // Whatever the names above miss (a 5xx, a bad range) still counts in
+      // the ledger — an unnamed remainder must not read as rows that fail
+      // to sum.
+      const other = total - named.reduce((n, [, c]) => n + c, 0);
       $('traffic-chart').innerHTML = total
         ? chart(lineSVG(t.days.map((d) => d[1])),
                 t.days.length ? t.days[0][0] : '',
@@ -7741,6 +8019,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       $('traffic-rows').innerHTML = !total
         ? row('Requests', 'none in this window — or no readable journal on this host')
         : named.map(([name, n]) => row(name, String(n))).join('') +
+          (other > 0 ? row('Other', String(other)) : '') +
           row('Total requests', `<b>${total}</b>`, 'ledger');
 
     } catch (e) {
@@ -7878,6 +8157,11 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        # The page URL carries this run's passcode as ?t=, and a card can
+        # open the operator's public site in a new tab. no-referrer keeps
+        # the passcode out of that navigation's Referer — the public server
+        # already sends the same header on every response.
+        self.send_header("Referrer-Policy", "no-referrer")
         for name, value in extra:
             self.send_header(name, value)
         self.end_headers()
@@ -8081,15 +8365,22 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             # back with it.
             if length > 512:
                 return self._respond(413, "Body too large.")
+            # A lifecycle request must say which transition it means: a
+            # garbled or unknown op is refused, never defaulted — a
+            # truncated stop must not become a start.
             try:
-                body_op = json.loads(self.rfile.read(length)).get("op", "start")
+                body_op = str(json.loads(self.rfile.read(length)).get("op") or "")
             except (ValueError, TypeError):
-                body_op = "start"
+                return self._respond(400, "Malformed body.")
+            if body_op not in ("start", "restart", "stop"):
+                return self._respond(422, json.dumps(
+                    {"error": "op must be start, restart or stop"}),
+                    "application/json")
             if not _service_file_exists():
                 return self._respond(422, json.dumps(
                     {"error": "no system service installed — run 'enable' in the terminal"}),
                     "application/json")
-            verb = str(body_op) if str(body_op) in ("start", "restart", "stop") else "start"
+            verb = body_op
             try:
                 subprocess.run(["systemctl", verb, "servette"],
                                check=True, capture_output=True)
@@ -8162,9 +8453,15 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                     if not (0 <= idx < len(config.sites)):
                         err = f"no site {idx}"
                     elif op == "name":
+                        # The one door where a domain enters config without
+                        # an issuance to vet it (the terminal assigns only on
+                        # ACME success), so syntax is judged here — locally,
+                        # keeping the name-write instant.
                         domain = str(body.get("domain") or "").strip().lower()
-                        if not domain:
-                            err = "a domain is needed"
+                        problem = ("a domain is needed" if not domain
+                                   else _domain_problem(domain))
+                        if problem:
+                            err = problem
                         elif _domain_in_use(domain, excluding=config.sites[idx]):
                             err = f"{domain} is already used by another site on this box"
                         else:
@@ -8299,6 +8596,11 @@ def _start_ui(site, page, port=_UI_PORT):
     prints the URL and later hands httpd back to _stop_ui. A port already in
     use raises OSError for the caller to report."""
     httpd = http.server.ThreadingHTTPServer((_UI_HOST, port), _UIHandler)
+    # A predecessor killed without _stop_ui (kill -9, a dropped box) never
+    # swept its drafts; the next run's door reclaims them. After the bind,
+    # deliberately: a second admin refused for the busy port must not
+    # delete the live run's staged previews on its way out.
+    _clear_previews()
     httpd.site, httpd.page = site, page
     httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
     httpd.preview_code = ""      # minted by the first staging, not before
@@ -8383,11 +8685,13 @@ def _format_uptime(seconds):
 
 
 # Production issues
-def _production_issues():
+def _production_issues(running=None):
     """Return a list of strings describing conditions that prevent production
     readiness, across every configured site. Single-site installs (still the
     common case) see exactly today's unlabeled messages; a labeled site name
-    is added only once there's more than one to tell apart."""
+    is added only once there's more than one to tell apart. `running` rides
+    to the swap check for a caller that already knows it (_status_data asks
+    systemd once for the whole snapshot); None lets the check ask itself."""
     issues  = []
     labeled = len(config.sites) > 1
     for site in config.sites:
@@ -8407,9 +8711,14 @@ def _production_issues():
         # username with nothing stored to check locks every visitor out.
         if site.username and not site.password_hash:
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
+        # Every write surface refuses a colon, but a hand-edited config
+        # file loads one — and sign-in splits the credential at the first
+        # colon, so this locks every visitor out just as surely.
+        elif ":" in site.username:
+            issues.append(f"the username contains a colon{tag} — sign-in can never match it; run 'config' to change it")
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
-                                   _cache_headroom_mb(config.cache_size_mb))
+                                   _cache_headroom_mb(config.cache_size_mb, running))
     ours_mb, foreign_mb = _swap_sizes()
     offer   = _swap_offer(rec // (1024 * 1024) if rec else None,
                           os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
@@ -8548,16 +8857,19 @@ def _site_rows():
     } for i, site in enumerate(config.sites)]
 
 
-def _health_checks():
+def _health_checks(service_active=None):
     """Every health fact as a row, green included — the admin page's Health
     checks card. The same ground _production_issues walks, saying what passes
     as plainly as what needs attention: ok True is healthy, False needs it.
     `key` is stable for consumers; `site` carries the index where the row is
     site-scoped, None where it is host-wide — the admin page splits its
-    Settings cards (This site / This server) on exactly that."""
+    Settings cards (This site / This server) on exactly that.
+    `service_active` lets _status_data hand in the one systemd probe it
+    already ran; None asks here."""
     rows = []
-    service_active = _service_is_active()
-    running        = service_active or _server_running()
+    if service_active is None:
+        service_active = _service_is_active()
+    running = service_active or _server_running()
     # Labeled Mode, because that is what its three answers describe — and
     # the page prints no second Mode row beside it.
     rows.append({"key": "service", "site": None, "ok": running,
@@ -8573,7 +8885,7 @@ def _health_checks():
                      else "not installed — 'enable' provisions it"})
         mem_kb, _avail_kb, committed_kb = _meminfo()
         rec = _swap_recommendation(mem_kb, committed_kb,
-                                   _cache_headroom_mb(config.cache_size_mb))
+                                   _cache_headroom_mb(config.cache_size_mb, running))
         ours_mb, foreign_mb = _swap_sizes()
         rec_mb = (rec // (1024 * 1024)) if rec else None
         offer  = _swap_offer(rec_mb, os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
@@ -8617,8 +8929,10 @@ def _health_checks():
             rows.append({"key": "dir", "site": i, "ok": False, "blocking": True,
                          "label": tag + "Folder",
                          "detail": "missing — publish to recreate it"})
-        days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
-        covers = _domain_from_cert(_resolve(site.cert_file)) if site.cert_file else None
+        # One PEM load answers both certificate facts for the row.
+        cert   = _load_cert(_resolve(site.cert_file)) if site.cert_file else None
+        days   = _cert_days(cert)
+        covers = _cert_covered_domain(cert)
         mismatched = bool(site.domain) and bool(covers) and covers != site.domain
         cert_ok = days is not None and days > 0 and bool(site.domain) and not mismatched
         # Severity turns on whether the site claims a public name. With a
@@ -8638,26 +8952,37 @@ def _health_checks():
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored
-        # to check against, which locks every visitor out.
+        # to check against — and the colon-username a hand-edited config
+        # file can load past the write surfaces' refusal: sign-in splits
+        # the credential at the first colon, so either locks every visitor
+        # out.
         half_auth = bool(site.username) and not site.password_hash
-        rows.append({"key": "password", "site": i, "ok": not half_auth,
-                     "blocking": half_auth, "label": tag + "Access",
-                     "detail": ("private — visitors sign in" if site.username and site.password_hash
-                                else "a username with no stored password — set one below, or make the site public"
+        bad_user  = ":" in site.username
+        rows.append({"key": "password", "site": i,
+                     "ok": not (half_auth or bad_user),
+                     "blocking": half_auth or bad_user, "label": tag + "Access",
+                     "detail": ("a username with no stored password — set one below, or make the site public"
                                 if half_auth
+                                else "the username contains a colon — sign-in can never match it; change it below"
+                                if bad_user
+                                else "private — visitors sign in" if site.username
                                 else "public — anyone can view it (the form below makes it private)")})
     return rows
 
 
-def _load_snapshot():
+def _load_snapshot(service_active=None):
     """Average CPU for this run and current memory, as numbers — the same
     facts _status_rows prints for the terminal, in the form the page
     renders. An average, not a live meter: cumulative CPU time over the
     time the server has been up, so a spike that has passed is diluted by
-    every quiet second since. None for any figure that cannot be read."""
+    every quiet second since. None for any figure that cannot be read.
+    `service_active` lets _status_data hand in the one systemd probe it
+    already ran; None asks here."""
     out = {"cpu_percent": None, "memory_mb": None, "uptime_s": None,
            "started_at": None, "cpu_ns": None, "sampled_at": time.time()}
-    if _service_is_active():
+    if service_active is None:
+        service_active = _service_is_active()
+    if service_active:
         try:
             result = subprocess.run(
                 ["systemctl", "show", "servette",
@@ -8742,10 +9067,11 @@ def _upgrade_available():
     return None
 
 
-def _swap_snapshot():
+def _swap_snapshot(running=None):
     """Servette's own swapfile as numbers — what is allocated, what the
     kernel reports active, and what the sizing recommends. None on a host
-    with no swap to speak of (macOS manages its own).
+    with no swap to speak of (macOS manages its own). `running` rides
+    through to the headroom charge, for a caller that already knows it.
 
     The two sizes differ by design and the difference matters. /proc/swaps
     reports USABLE space, which is the file minus one page of header, so a
@@ -8758,7 +9084,7 @@ def _swap_snapshot():
         return {"allocated_mb": None, "active_mb": None, "recommended_mb": None}
     mem_kb, _avail_kb, committed_kb = _meminfo()
     rec = _swap_recommendation(mem_kb, committed_kb,
-                               _cache_headroom_mb(config.cache_size_mb))
+                               _cache_headroom_mb(config.cache_size_mb, running))
     ours_mb, _foreign = _swap_sizes()
     allocated = None
     try:
@@ -8796,7 +9122,11 @@ def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
     external tooling. cert_days is None when no certificate is readable;
     `checks` is the health-row form of the same facts, `load` the
-    utilization figures, and `disk` the space left where content lands."""
+    utilization figures, and `disk` the space left where content lands.
+
+    The page's live meter polls this every few seconds, so the snapshot
+    asks systemd exactly once and hands the answer to everything below —
+    each subprocess spawn saved here is saved on every meter tick."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
     return {
@@ -8804,11 +9134,11 @@ def _status_data():
         "running":  running,
         "mode":     "service" if service_active else ("session" if running else None),
         "sites":    _site_rows(),
-        "issues":   _production_issues(),
+        "issues":   _production_issues(running),
         "warnings": _cache_warnings(),
-        "checks":   _health_checks(),
-        "load":     _load_snapshot(),
-        "swap":     _swap_snapshot(),
+        "checks":   _health_checks(service_active),
+        "load":     _load_snapshot(service_active),
+        "swap":     _swap_snapshot(running),
         "disk":     _disk_snapshot(),
     }
 
@@ -8974,10 +9304,17 @@ def _set_site_value(target, key, value):
     a scratch Site during the validation pass). Returns an error string,
     empty on success."""
     if key == "username":
+        # A colon can never reach the server in a username: sign-in joins
+        # user:password into one credential and _handle_request splits it at
+        # the first colon, so a stored username containing one locks every
+        # visitor out while the health row still reads private-and-healthy.
+        # Refused here — the one write path — so `set`, the page, and the
+        # interactive prompt judge it with the same sentence.
+        if ":" in value:
+            return "a username cannot contain a colon — sign-in splits user:password at the first one"
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
-        # (`set` and the page alike, since both land here) — the same rule
-        # the interactive prompt has always kept.
+        # (`set`, the page, and the prompt alike, since all land here).
         target.username = value
         if not value:
             target.password_hash = ""
@@ -8995,7 +9332,10 @@ def _set_site_value(target, key, value):
         src, dst = src.strip(), dst.strip()
         table = dict(target.redirects)
         if not dst:
-            if not table.pop(src.rstrip("/") or "/", None):
+            # The canonical spelling, because that is what the table's keys
+            # are stored in — the same rule the add path and the lookup
+            # follow, so the page can hand back a stored key verbatim.
+            if not table.pop(_canonical_source(src), None):
                 return f"no redirect from {src}"
         else:
             checked = _clean_redirects({src: dst})
@@ -9003,6 +9343,20 @@ def _set_site_value(target, key, value):
                 return ("a redirect goes from a site path to a site path or an "
                         "http(s) URL, and may not point at itself")
             table.update(checked)
+            # Two refusals the pair only earns in company. The cap first:
+            # past it, the load-time validator would truncate — and its
+            # shrinkage must not be misread as a ring below.
+            if len(table) > _MAX_REDIRECTS:
+                return (f"the redirect table is full ({_MAX_REDIRECTS} rules) "
+                        "— remove one first")
+            # And the ring: each pair is valid alone (/a→/b saved earlier,
+            # /b→/a now), and the load-time validator would silently drop
+            # the ring on the next reload. Judged here instead, so the
+            # answer is a refusal now rather than a rule that vanishes
+            # later.
+            if len(_clean_redirects(table)) != len(table):
+                return ("that redirect closes a ring — the chain of rules "
+                        "would send a visitor in a circle")
         target.redirects = table
     elif key == "active":
         # The pause between serving and deleting: a deactivated site keeps
@@ -9109,13 +9463,23 @@ def _startup_refresh():
     data directory or interpreter differs from this shell's is reported and
     left alone — rewriting it would repoint a live service at this shell's
     environment, which only an explicit 'enable' may do."""
-    if _stale_units():
+    stale = _stale_units()
+    # _stale_units answers empty when this environment can name no
+    # interpreter to write into a unit — but an installed service in that
+    # state is exactly the one whose pinned interpreter may have vanished
+    # (a 203/EXEC crash-loop with only the journal as a symptom), so the
+    # drift report is still owed a look.
+    orphaned = (not stale and _service_file_exists()
+                and not _unsafe_unit_path() and _unit_python_path() is None)
+    if stale or orphaned:
         drift = _service_env_drift()
         if drift:
             print("  The enabled service was set up from a different environment:")
             for d in drift:
                 print(f"    - {d}")
             print("  Leaving it untouched — run 'enable' to re-provision from this shell.")
+        elif orphaned:
+            pass   # nothing stale to rewrite and nothing drifted to report
         else:
             try:
                 _write_unit_files()

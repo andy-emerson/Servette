@@ -334,7 +334,10 @@ def _remove_site(idx):
     if len(config.sites) == 1:
         return "can't remove the only site — a box needs at least one"
     victim = config.sites[idx]
-    base   = _resolve(victim.serve_dir)
+    # rstrip, exactly as every derived-tree helper does: a hand-edited
+    # trailing slash in serve_dir would otherwise aim the .bak/.new/base
+    # deletions at names that do not exist and leave the trees behind.
+    base   = _resolve(victim.serve_dir).rstrip(os.sep)
     del config.sites[idx]
     config.save()
     shared = any(os.path.realpath(_resolve(s.serve_dir)) == os.path.realpath(base)
@@ -497,18 +500,19 @@ Clearing the username clears the password with it — auth is one switch, not tw
 def _config_username(site):
     current   = site.username
     new_value = _input(f"  username [{current}]: ").strip()
-    if new_value == "" and current != "":
-        site.username      = ""
-        site.password_hash = ""
-        site.password_salt = ""
-        config.save()
-        print("  → auth disabled, password cleared")
-    elif new_value and new_value != current:
-        site.username = new_value
-        config.save()
-        print("  → saved")
-    else:
+    if new_value == current:
         print("  → unchanged")
+        return
+    # Through the shared validator, so the prompt refuses exactly what
+    # `set` and the page refuse — clearing included: an emptied username
+    # takes the stored password with it there, on every surface.
+    err = _set_site_value(site, "username", new_value)
+    if err:
+        print(f"  → {err}")
+        return
+    config.save()
+    print("  → auth disabled, password cleared" if new_value == ""
+          else "  → saved")
 
 
 def _config_password(site):
@@ -843,10 +847,13 @@ def _traffic_lines(days=7):
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
-def _parse_traffic(lines, days=7):
+def _parse_traffic(lines, days=7, now=None):
     """Tally journal lines into the traffic summary: requests per day,
     status counts, top paths. Pure, so the suite can feed it real log
-    lines. Each line carries two prefixes — the journal's own
+    lines (`now` pins the window's end for it; None means now). Every
+    bucket in the window is present, zeroes included — the chart's x-axis
+    is time, and a quiet day left out made two busy endpoints read as a
+    steady week. Each line carries two prefixes — the journal's own
     ('<iso> <host> servette[pid]:') and then setup_logging's format
     ('<date> <time>  LEVEL  <message>') — so the level name is the anchor
     the message begins after. Anchoring on the unit token instead was the
@@ -875,6 +882,15 @@ def _parse_traffic(lines, days=7):
             path = next((p for p in msg[1:] if p.startswith("/")), None)
             if path:
                 paths[path] = paths.get(path, 0) + 1
+    # The zero-fill: journalctl's -Nd window is N*24 hours ending now, so
+    # it can touch N+1 calendar days — every bucket it covers gets a row.
+    # Line-made buckets just outside the fill (clock skew, a test's fixed
+    # dates) are kept: counted traffic is never dropped over its stamp.
+    end  = now or datetime.datetime.now()
+    step = datetime.timedelta(hours=1) if days <= 2 else datetime.timedelta(days=1)
+    fmt  = "%Y-%m-%d %H" if days <= 2 else "%Y-%m-%d"
+    for i in range((days * 24 if days <= 2 else days) + 1):
+        per_day.setdefault((end - i * step).strftime(fmt), 0)
     top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
     return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
             "top_paths": top, "window_days": days,
@@ -891,7 +907,7 @@ def cmd_traffic():
     read from the journal. The page's Traffic tab renders this same
     summary; the raw log (IPs included) stays with `log`."""
     t = _traffic_summary()
-    if not t["days"]:
+    if not t["total"]:
         print("  No traffic in the window — or no readable journal on this host.")
         return
     _section("Traffic — last 7 days")
@@ -920,6 +936,11 @@ def cmd_traffic():
 ```python
 # The bundle ceiling
 _MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
+# A companion ceiling on entry COUNT: the byte cap counts payload, so a
+# bundle of millions of zero-size members (512 header bytes each,
+# ~1000:1 gzip) slips under it while still exhausting CPU and memory. A
+# static site of a million files is already absurd.
+_MAX_BUNDLE_MEMBERS = 1_000_000
 
 
 ```
@@ -959,6 +980,11 @@ def _extract_bundle(data, dest_dir):
             total += m.size
             if total > _MAX_BUNDLE_BYTES:
                 raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
+            # The byte cap counts payload only, so zero-size members never
+            # trip it; this bounds their number, and with it the CPU the
+            # walk burns and the members list it grows.
+            if len(members) >= _MAX_BUNDLE_MEMBERS:
+                raise ValueError(f"bundle has more than {_MAX_BUNDLE_MEMBERS} entries")
             members.append(m)
         # The PEP 706 feature probe: data_filter exists exactly when
         # extractall() accepts filter=. Debian 12's 3.11.2 predates the
@@ -1094,15 +1120,24 @@ def _swap_site_content(new_dir, serve_dir):
         # and the flip must fail just as loudly rather than serve nothing.
         raise FileNotFoundError(f"new content tree missing: {new_dir}")
     live = _resolve(serve_dir).rstrip(os.sep)
-    dest = _new_version_dir(serve_dir)
+    now  = int(time.time())
+    dest = _new_version_dir(serve_dir, now)
 
     if os.path.islink(live):
         os.rename(new_dir, dest)
-        flip = live + ".flip"
-        if os.path.lexists(flip):
-            os.remove(flip)                      # a crash's leftover, harmless
-        os.symlink(dest, flip)
-        os.replace(flip, live)                   # the swap: one atomic syscall
+        try:
+            flip = live + ".flip"
+            if os.path.lexists(flip):
+                os.remove(flip)                  # a crash's leftover, harmless
+            os.symlink(dest, flip)
+            os.replace(flip, live)               # the swap: one atomic syscall
+        except OSError:
+            # The tree was already renamed into the ring; a failed flip
+            # hands it back to staging, so a publish the caller reports
+            # 'rejected' leaves no never-published "version" behind for
+            # restore-site to offer.
+            os.rename(dest, new_dir)
+            raise
         _adopt_legacy_slots(serve_dir)
         _prune_versions(serve_dir)
         return
@@ -1112,15 +1147,19 @@ def _swap_site_content(new_dir, serve_dir):
     os.rename(new_dir, dest)
     kept = None
     if had_live:
-        # Dated by its own mtime, not by now: it is the older content, and
-        # the ring sorts on the name.
-        kept = _new_version_dir(serve_dir, os.path.getmtime(live))
+        # Dated by its own mtime, not by now — it is the older content, and
+        # the ring sorts on the name — but clamped strictly below dest's
+        # stamp: an mtime in dest's own second would collide into a higher
+        # sequence suffix, and the ring would read the OLD tree as newer.
+        kept = _new_version_dir(serve_dir,
+                                min(int(os.path.getmtime(live)), now - 1))
         os.rename(live, kept)
     try:
         os.symlink(dest, live)
     except OSError:
         if had_live:
             os.rename(kept, live)
+        os.rename(dest, new_dir)   # same hand-back as the flip above
         raise
     _adopt_legacy_slots(serve_dir)
     _prune_versions(serve_dir)
@@ -1158,12 +1197,10 @@ def _land_bundle(site, bundle, source):
             # tree goes live: the operator owns their content, the service
             # reads through its group. strip_world because the extraction's
             # own 644/755 modes are Servette's writing, not the operator's,
-            # (kept versions need nothing: each was the live tree once and
-            # keeps the ownership it already has)
-            # and must honour the never-world-bits promise. The backup needs
-            # nothing: it was the live tree a moment ago and keeps the
+            # and must honour the never-world-bits promise. Kept versions
+            # need nothing: each was the live tree once and keeps the
             # ownership it already has. A failed extraction dies here, in
-            # staging, with the live content and its backup untouched.
+            # staging, with the live content and the ring untouched.
             _chown_operator(staging, strip_world=True)
             _swap_site_content(staging, site.serve_dir)
         except Exception as e:
@@ -1467,7 +1504,7 @@ _UI_LOGIN_PAGE = """<!doctype html>
 
 ```
 
-The admin page is inlined by the build exactly as the 404 page is — authored as `src/admin.html`, counted apart from the Python figures. One page, tabs per feature (Status, Publish; Config when it earns its forms), so every feature shares one scaffold, one bookmark, one code. The publish tab is the pub tool's bundle builder with every trace of key custody removed: on this page, being here is the authentication.
+The admin page is inlined by the build exactly as the 404 page is — authored as `src/admin.html`, counted apart from the Python figures. One page, three tabs — Sites (one card per site: publish, preview, download, domain, certificate, access, redirects, history), Server, Statistics — so everything shares one scaffold, one bookmark, one code. Publishing is the pub tool's bundle builder with every trace of key custody removed: on this page, being here is the authentication.
 
 ```python
 # The admin page
@@ -1497,6 +1534,11 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        # The page URL carries this run's passcode as ?t=, and a card can
+        # open the operator's public site in a new tab. no-referrer keeps
+        # the passcode out of that navigation's Referer — the public server
+        # already sends the same header on every response.
+        self.send_header("Referrer-Policy", "no-referrer")
         for name, value in extra:
             self.send_header(name, value)
         self.end_headers()
@@ -1700,15 +1742,22 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             # back with it.
             if length > 512:
                 return self._respond(413, "Body too large.")
+            # A lifecycle request must say which transition it means: a
+            # garbled or unknown op is refused, never defaulted — a
+            # truncated stop must not become a start.
             try:
-                body_op = json.loads(self.rfile.read(length)).get("op", "start")
+                body_op = str(json.loads(self.rfile.read(length)).get("op") or "")
             except (ValueError, TypeError):
-                body_op = "start"
+                return self._respond(400, "Malformed body.")
+            if body_op not in ("start", "restart", "stop"):
+                return self._respond(422, json.dumps(
+                    {"error": "op must be start, restart or stop"}),
+                    "application/json")
             if not _service_file_exists():
                 return self._respond(422, json.dumps(
                     {"error": "no system service installed — run 'enable' in the terminal"}),
                     "application/json")
-            verb = str(body_op) if str(body_op) in ("start", "restart", "stop") else "start"
+            verb = body_op
             try:
                 subprocess.run(["systemctl", verb, "servette"],
                                check=True, capture_output=True)
@@ -1781,9 +1830,15 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                     if not (0 <= idx < len(config.sites)):
                         err = f"no site {idx}"
                     elif op == "name":
+                        # The one door where a domain enters config without
+                        # an issuance to vet it (the terminal assigns only on
+                        # ACME success), so syntax is judged here — locally,
+                        # keeping the name-write instant.
                         domain = str(body.get("domain") or "").strip().lower()
-                        if not domain:
-                            err = "a domain is needed"
+                        problem = ("a domain is needed" if not domain
+                                   else _domain_problem(domain))
+                        if problem:
+                            err = problem
                         elif _domain_in_use(domain, excluding=config.sites[idx]):
                             err = f"{domain} is already used by another site on this box"
                         else:
@@ -1923,6 +1978,11 @@ def _start_ui(site, page, port=_UI_PORT):
     prints the URL and later hands httpd back to _stop_ui. A port already in
     use raises OSError for the caller to report."""
     httpd = http.server.ThreadingHTTPServer((_UI_HOST, port), _UIHandler)
+    # A predecessor killed without _stop_ui (kill -9, a dropped box) never
+    # swept its drafts; the next run's door reclaims them. After the bind,
+    # deliberately: a second admin refused for the busy port must not
+    # delete the live run's staged previews on its way out.
+    _clear_previews()
     httpd.site, httpd.page = site, page
     httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
     httpd.preview_code = ""      # minted by the first staging, not before
@@ -2024,11 +2084,13 @@ def _format_uptime(seconds):
 
 ```python
 # Production issues
-def _production_issues():
+def _production_issues(running=None):
     """Return a list of strings describing conditions that prevent production
     readiness, across every configured site. Single-site installs (still the
     common case) see exactly today's unlabeled messages; a labeled site name
-    is added only once there's more than one to tell apart."""
+    is added only once there's more than one to tell apart. `running` rides
+    to the swap check for a caller that already knows it (_status_data asks
+    systemd once for the whole snapshot); None lets the check ask itself."""
     issues  = []
     labeled = len(config.sites) > 1
     for site in config.sites:
@@ -2048,9 +2110,14 @@ def _production_issues():
         # username with nothing stored to check locks every visitor out.
         if site.username and not site.password_hash:
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
+        # Every write surface refuses a colon, but a hand-edited config
+        # file loads one — and sign-in splits the credential at the first
+        # colon, so this locks every visitor out just as surely.
+        elif ":" in site.username:
+            issues.append(f"the username contains a colon{tag} — sign-in can never match it; run 'config' to change it")
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
-                                   _cache_headroom_mb(config.cache_size_mb))
+                                   _cache_headroom_mb(config.cache_size_mb, running))
     ours_mb, foreign_mb = _swap_sizes()
     offer   = _swap_offer(rec // (1024 * 1024) if rec else None,
                           os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
@@ -2204,16 +2271,19 @@ def _site_rows():
     } for i, site in enumerate(config.sites)]
 
 
-def _health_checks():
+def _health_checks(service_active=None):
     """Every health fact as a row, green included — the admin page's Health
     checks card. The same ground _production_issues walks, saying what passes
     as plainly as what needs attention: ok True is healthy, False needs it.
     `key` is stable for consumers; `site` carries the index where the row is
     site-scoped, None where it is host-wide — the admin page splits its
-    Settings cards (This site / This server) on exactly that."""
+    Settings cards (This site / This server) on exactly that.
+    `service_active` lets _status_data hand in the one systemd probe it
+    already ran; None asks here."""
     rows = []
-    service_active = _service_is_active()
-    running        = service_active or _server_running()
+    if service_active is None:
+        service_active = _service_is_active()
+    running = service_active or _server_running()
     # Labeled Mode, because that is what its three answers describe — and
     # the page prints no second Mode row beside it.
     rows.append({"key": "service", "site": None, "ok": running,
@@ -2229,7 +2299,7 @@ def _health_checks():
                      else "not installed — 'enable' provisions it"})
         mem_kb, _avail_kb, committed_kb = _meminfo()
         rec = _swap_recommendation(mem_kb, committed_kb,
-                                   _cache_headroom_mb(config.cache_size_mb))
+                                   _cache_headroom_mb(config.cache_size_mb, running))
         ours_mb, foreign_mb = _swap_sizes()
         rec_mb = (rec // (1024 * 1024)) if rec else None
         offer  = _swap_offer(rec_mb, os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
@@ -2273,8 +2343,10 @@ def _health_checks():
             rows.append({"key": "dir", "site": i, "ok": False, "blocking": True,
                          "label": tag + "Folder",
                          "detail": "missing — publish to recreate it"})
-        days = _cert_days_remaining(_resolve(site.cert_file)) if site.cert_file else None
-        covers = _domain_from_cert(_resolve(site.cert_file)) if site.cert_file else None
+        # One PEM load answers both certificate facts for the row.
+        cert   = _load_cert(_resolve(site.cert_file)) if site.cert_file else None
+        days   = _cert_days(cert)
+        covers = _cert_covered_domain(cert)
         mismatched = bool(site.domain) and bool(covers) and covers != site.domain
         cert_ok = days is not None and days > 0 and bool(site.domain) and not mismatched
         # Severity turns on whether the site claims a public name. With a
@@ -2294,26 +2366,37 @@ def _health_checks():
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored
-        # to check against, which locks every visitor out.
+        # to check against — and the colon-username a hand-edited config
+        # file can load past the write surfaces' refusal: sign-in splits
+        # the credential at the first colon, so either locks every visitor
+        # out.
         half_auth = bool(site.username) and not site.password_hash
-        rows.append({"key": "password", "site": i, "ok": not half_auth,
-                     "blocking": half_auth, "label": tag + "Access",
-                     "detail": ("private — visitors sign in" if site.username and site.password_hash
-                                else "a username with no stored password — set one below, or make the site public"
+        bad_user  = ":" in site.username
+        rows.append({"key": "password", "site": i,
+                     "ok": not (half_auth or bad_user),
+                     "blocking": half_auth or bad_user, "label": tag + "Access",
+                     "detail": ("a username with no stored password — set one below, or make the site public"
                                 if half_auth
+                                else "the username contains a colon — sign-in can never match it; change it below"
+                                if bad_user
+                                else "private — visitors sign in" if site.username
                                 else "public — anyone can view it (the form below makes it private)")})
     return rows
 
 
-def _load_snapshot():
+def _load_snapshot(service_active=None):
     """Average CPU for this run and current memory, as numbers — the same
     facts _status_rows prints for the terminal, in the form the page
     renders. An average, not a live meter: cumulative CPU time over the
     time the server has been up, so a spike that has passed is diluted by
-    every quiet second since. None for any figure that cannot be read."""
+    every quiet second since. None for any figure that cannot be read.
+    `service_active` lets _status_data hand in the one systemd probe it
+    already ran; None asks here."""
     out = {"cpu_percent": None, "memory_mb": None, "uptime_s": None,
            "started_at": None, "cpu_ns": None, "sampled_at": time.time()}
-    if _service_is_active():
+    if service_active is None:
+        service_active = _service_is_active()
+    if service_active:
         try:
             result = subprocess.run(
                 ["systemctl", "show", "servette",
@@ -2398,10 +2481,11 @@ def _upgrade_available():
     return None
 
 
-def _swap_snapshot():
+def _swap_snapshot(running=None):
     """Servette's own swapfile as numbers — what is allocated, what the
     kernel reports active, and what the sizing recommends. None on a host
-    with no swap to speak of (macOS manages its own).
+    with no swap to speak of (macOS manages its own). `running` rides
+    through to the headroom charge, for a caller that already knows it.
 
     The two sizes differ by design and the difference matters. /proc/swaps
     reports USABLE space, which is the file minus one page of header, so a
@@ -2414,7 +2498,7 @@ def _swap_snapshot():
         return {"allocated_mb": None, "active_mb": None, "recommended_mb": None}
     mem_kb, _avail_kb, committed_kb = _meminfo()
     rec = _swap_recommendation(mem_kb, committed_kb,
-                               _cache_headroom_mb(config.cache_size_mb))
+                               _cache_headroom_mb(config.cache_size_mb, running))
     ours_mb, _foreign = _swap_sizes()
     allocated = None
     try:
@@ -2452,7 +2536,11 @@ def _status_data():
     """The status snapshot as data — the shape `status --json` prints, for
     external tooling. cert_days is None when no certificate is readable;
     `checks` is the health-row form of the same facts, `load` the
-    utilization figures, and `disk` the space left where content lands."""
+    utilization figures, and `disk` the space left where content lands.
+
+    The page's live meter polls this every few seconds, so the snapshot
+    asks systemd exactly once and hands the answer to everything below —
+    each subprocess spawn saved here is saved on every meter tick."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
     return {
@@ -2460,11 +2548,11 @@ def _status_data():
         "running":  running,
         "mode":     "service" if service_active else ("session" if running else None),
         "sites":    _site_rows(),
-        "issues":   _production_issues(),
+        "issues":   _production_issues(running),
         "warnings": _cache_warnings(),
-        "checks":   _health_checks(),
-        "load":     _load_snapshot(),
-        "swap":     _swap_snapshot(),
+        "checks":   _health_checks(service_active),
+        "load":     _load_snapshot(service_active),
+        "swap":     _swap_snapshot(running),
         "disk":     _disk_snapshot(),
     }
 
@@ -2653,10 +2741,17 @@ def _set_site_value(target, key, value):
     a scratch Site during the validation pass). Returns an error string,
     empty on success."""
     if key == "username":
+        # A colon can never reach the server in a username: sign-in joins
+        # user:password into one credential and _handle_request splits it at
+        # the first colon, so a stored username containing one locks every
+        # visitor out while the health row still reads private-and-healthy.
+        # Refused here — the one write path — so `set`, the page, and the
+        # interactive prompt judge it with the same sentence.
+        if ":" in value:
+            return "a username cannot contain a colon — sign-in splits user:password at the first one"
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
-        # (`set` and the page alike, since both land here) — the same rule
-        # the interactive prompt has always kept.
+        # (`set`, the page, and the prompt alike, since all land here).
         target.username = value
         if not value:
             target.password_hash = ""
@@ -2674,7 +2769,10 @@ def _set_site_value(target, key, value):
         src, dst = src.strip(), dst.strip()
         table = dict(target.redirects)
         if not dst:
-            if not table.pop(src.rstrip("/") or "/", None):
+            # The canonical spelling, because that is what the table's keys
+            # are stored in — the same rule the add path and the lookup
+            # follow, so the page can hand back a stored key verbatim.
+            if not table.pop(_canonical_source(src), None):
                 return f"no redirect from {src}"
         else:
             checked = _clean_redirects({src: dst})
@@ -2682,6 +2780,20 @@ def _set_site_value(target, key, value):
                 return ("a redirect goes from a site path to a site path or an "
                         "http(s) URL, and may not point at itself")
             table.update(checked)
+            # Two refusals the pair only earns in company. The cap first:
+            # past it, the load-time validator would truncate — and its
+            # shrinkage must not be misread as a ring below.
+            if len(table) > _MAX_REDIRECTS:
+                return (f"the redirect table is full ({_MAX_REDIRECTS} rules) "
+                        "— remove one first")
+            # And the ring: each pair is valid alone (/a→/b saved earlier,
+            # /b→/a now), and the load-time validator would silently drop
+            # the ring on the next reload. Judged here instead, so the
+            # answer is a refusal now rather than a rule that vanishes
+            # later.
+            if len(_clean_redirects(table)) != len(table):
+                return ("that redirect closes a ring — the chain of rules "
+                        "would send a visitor in a circle")
         target.redirects = table
     elif key == "active":
         # The pause between serving and deleting: a deactivated site keeps
@@ -2805,13 +2917,23 @@ def _startup_refresh():
     data directory or interpreter differs from this shell's is reported and
     left alone — rewriting it would repoint a live service at this shell's
     environment, which only an explicit 'enable' may do."""
-    if _stale_units():
+    stale = _stale_units()
+    # _stale_units answers empty when this environment can name no
+    # interpreter to write into a unit — but an installed service in that
+    # state is exactly the one whose pinned interpreter may have vanished
+    # (a 203/EXEC crash-loop with only the journal as a symptom), so the
+    # drift report is still owed a look.
+    orphaned = (not stale and _service_file_exists()
+                and not _unsafe_unit_path() and _unit_python_path() is None)
+    if stale or orphaned:
         drift = _service_env_drift()
         if drift:
             print("  The enabled service was set up from a different environment:")
             for d in drift:
                 print(f"    - {d}")
             print("  Leaving it untouched — run 'enable' to re-provision from this shell.")
+        elif orphaned:
+            pass   # nothing stale to rewrite and nothing drifted to report
         else:
             try:
                 _write_unit_files()

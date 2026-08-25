@@ -637,6 +637,16 @@ def _obtain_trusted_cert(domain, site):
     Returns None on success, else the failure's class for the watchdog's
     backoff: "refused" (the CA answered no — retrying soon just burns its
     rate limits) or "transient" (the network ate a request — retry freely)."""
+    # Judged before the domain becomes anything else, because two lines
+    # below it becomes a PATH component (certs/<domain>): the admin page's
+    # name op refuses these shapes before issuance can run, but the
+    # terminal's prompts land here directly, and 'a/b' typed at a prompt
+    # must not mkdir its way into the tree before ACME ever answers.
+    problem = _domain_problem(domain)
+    if problem:
+        print(f"  → {problem}")
+        return "refused"
+
     from cryptography import x509 as _x509
     from cryptography.x509.oid import NameOID as _NameOID
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
@@ -857,7 +867,14 @@ def _is_real_domain(s):
 def _domain_from_cert(cert_path):
     if not cert_path:
         return None
-    cert = _load_cert(cert_path)
+    return _cert_covered_domain(_load_cert(cert_path))
+
+
+def _cert_covered_domain(cert):
+    """The domain a loaded certificate names, or None — the parsed half of
+    _domain_from_cert, split out so a caller already holding the parsed
+    certificate (the health rows read two facts from one) need not load
+    and parse the PEM a second time."""
     if cert is None:
         return None
     try:
@@ -885,7 +902,12 @@ Days to expiry, the number the watchdog and the startup warnings key on.
 ```python
 # Days to expiry
 def _cert_days_remaining(cert_path):
-    cert = _load_cert(cert_path)
+    return _cert_days(_load_cert(cert_path))
+
+
+def _cert_days(cert):
+    """Days to a loaded certificate's expiry, or None — the parsed half of
+    _cert_days_remaining, for callers already holding the certificate."""
     if cert is None:
         return None
     try:
@@ -1310,7 +1332,7 @@ Servette's own file cache is the one part of demand Servette knows the ceiling o
 
 ```python
 # The cache's share of demand
-def _cache_headroom_mb(cache_mb):
+def _cache_headroom_mb(cache_mb, running=None):
     """How much of the configured file cache is NOT already in Committed_AS.
 
     The cache holds file bytes on the Python heap, so a warm cache is
@@ -1328,8 +1350,14 @@ def _cache_headroom_mb(cache_mb):
     in the signal), so a host that accepts the offer is never afterwards told
     to resize. The old formula had this backwards: the cache entered the
     measurement between setup and status, so the check drifted upward past
-    the size the operator had just chosen, and nagged forever."""
-    return 0 if (_server_running() or _service_is_active()) else cache_mb
+    the size the operator had just chosen, and nagged forever.
+
+    `running` lets a caller hand in a fact it already holds — _status_data
+    asks systemd once and threads the answer through everything the
+    snapshot computes; None asks here."""
+    if running is None:
+        running = _server_running() or _service_is_active()
+    return 0 if running else cache_mb
 
 
 ```

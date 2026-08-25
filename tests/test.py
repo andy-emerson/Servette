@@ -9,6 +9,7 @@ Run with any Python 3.11+ that has the one dependency:
 
 import base64
 import contextlib
+import datetime
 import gzip
 import http.client
 import http.server
@@ -1088,6 +1089,13 @@ def run_dispatch_tests(s):
           and "getJSON('/status')" in s._UI_ADMIN_PAGE)
     check("...posts to the upload endpoint with the run's code",
           "api('/upload'" in s._UI_ADMIN_PAGE)
+    check("...keys card state by the site's folder, the identity that survives",
+          "siteData.dir || siteData.domain" in s._UI_ADMIN_PAGE)
+    check("...names redirected traffic and totals the unnamed remainder",
+          "'Redirected'" in s._UI_ADMIN_PAGE
+          and "row('Other'" in s._UI_ADMIN_PAGE)
+    check("...and refuses the oversized download in its own voice, not the browser's",
+          "copy it with scp instead." in s._UI_ADMIN_PAGE)
     # The passcode is attached in one place rather than at each call site,
     # so no request can be written that forgets it.
     check("...with every request's passcode attached by one helper",
@@ -1252,16 +1260,23 @@ def run_dispatch_tests(s):
     ]
     check("A real log line carries the formatter's timestamp and level",
           "INFO" in tlines[0] and tlines[0].endswith("200 /index.html to 1.2.3.4"))
-    tt = s._parse_traffic(tlines)
+    tt = s._parse_traffic(tlines, now=datetime.datetime(2026, 8, 21, 12, 0))
     check("Traffic tallies days, statuses, and top paths from response lines only",
-          tt["days"] == [("2026-08-20", 2), ("2026-08-21", 4)]
+          tt["days"][-2:] == [("2026-08-20", 2), ("2026-08-21", 4)]
           and tt["statuses"] == {"200": 2, "304": 1, "404": 3}
           and tt["top_paths"][0] == ("/index.html", 2)
           and tt["bucket"] == "day")
-    hourly = s._parse_traffic(tlines, days=1)
-    check("...and buckets by hour on a short window, where a day is one point",
+    check("...zero-filling the window's quiet days, so the x-axis is real time",
+          len(tt["days"]) == 8
+          and all(n == 0 for _, n in tt["days"][:-2]))
+    hourly = s._parse_traffic(tlines, days=1,
+                              now=datetime.datetime(2026, 8, 21, 12, 0))
+    hd = dict(hourly["days"])
+    check("...and buckets by hour on a short window, quiet hours included",
           hourly["bucket"] == "hour"
-          and hourly["days"] == [("2026-08-20 09", 2), ("2026-08-21 09", 4)])
+          and hd["2026-08-20 09"] == 2 and hd["2026-08-21 09"] == 4
+          and len(hourly["days"]) >= 25
+          and sum(hd.values()) == 6)
     check("...and never carries a visitor's IP",
           "1.2.3.4" not in json.dumps(tt) and "5.6.7.8" not in json.dumps(tt))
     saved_tl = s._traffic_lines
@@ -1340,9 +1355,21 @@ def run_dispatch_tests(s):
         conn.close()
         return r.status, data
 
+    def ui_header(path, name):
+        conn = http.client.HTTPConnection("127.0.0.1", ui_port, timeout=10)
+        conn.request("GET", path)
+        r = conn.getresponse()
+        r.read()
+        conn.close()
+        return r.getheader(name)
+
     try:
         check("The server binds loopback only",
               httpd.socket.getsockname()[0] == "127.0.0.1")
+        # The page URL carries the run passcode as ?t=; no-referrer keeps it
+        # out of the Referer when a card opens the public site in a new tab.
+        check("Every loopback response carries Referrer-Policy: no-referrer",
+              ui_header("/", "Referrer-Policy") == "no-referrer")
 
         st, body = ui_req("GET", "/")
         check("The bare URL answers the login page, never content",
@@ -1372,8 +1399,12 @@ def run_dispatch_tests(s):
         check("The status snapshot carries free and total disk",
               set(disk) == {"free_mb", "total_mb"}
               and disk["free_mb"] is not None and disk["total_mb"] > 0)
-        check("...low by the absolute floor",
-              s._disk_is_low({"free_mb": 100.0, "total_mb": 100000.0}))
+        # Each clause isolated: this case is low ONLY by the floor (400 MB
+        # is 40% of a 1 GB disk, well above the fraction), so deleting the
+        # floor clause would fail it — the old case (100 MB of 100 GB) was
+        # under both and proved neither alone.
+        check("...low by the absolute floor, on a small disk with headroom by fraction",
+              s._disk_is_low({"free_mb": 400.0, "total_mb": 1000.0}))
         check("...low by the fraction, on a disk with plenty left in MB",
               s._disk_is_low({"free_mb": 5000.0, "total_mb": 200000.0}))
         check("...and roomy is not low",
@@ -1449,6 +1480,21 @@ def run_dispatch_tests(s):
                             "started_at", "cpu_ns", "sampled_at"}
               and load["sampled_at"] > 0)
 
+        # The page's live meter polls the snapshot every few seconds, so
+        # what it costs is paid on every tick: systemd is asked once, and
+        # each site's certificate is parsed at most twice (rows + health),
+        # not once per fact.
+        saved_probe, saved_load_cert = s._service_is_active, s._load_cert
+        probe_calls, cert_loads = [], []
+        s._service_is_active = lambda: (probe_calls.append(1), False)[1]
+        s._load_cert = lambda p: (cert_loads.append(p), saved_load_cert(p))[1]
+        s._status_data()
+        s._service_is_active, s._load_cert = saved_probe, saved_load_cert
+        check("One snapshot asks systemd exactly once, however many rows it feeds",
+              len(probe_calls) == 1)
+        check("...and parses a site's certificate at most twice, not once per fact",
+              cert_loads and len(cert_loads) <= 2 * len(s.config.sites))
+
         # The pull channel is retired, so it can no longer be a row at all —
         # and no site row may carry a stale key the page still has a word for.
         check("The retired publish channel is not a health row",
@@ -1470,6 +1516,18 @@ def run_dispatch_tests(s):
         check("...and the terminal lists that same half-state as the issue",
               any("locked out" in i for i in s._production_issues())
               and not any("no password" in i for i in s._production_issues()))
+        # Every write surface refuses a colon, but a hand-edited config
+        # file loads one — and that locks every visitor out just as
+        # surely, so both readouts must name it rather than reading
+        # private-and-healthy.
+        s.config.sites[0].username = "team:alpha"
+        s.config.sites[0].password_hash = "not-empty"
+        pw = [r for r in s._health_checks()
+              if r["key"] == "password" and r["site"] == 0][0]
+        check("A colon-username loaded from a hand-edited file is flagged, not healthy",
+              not pw["ok"] and "colon" in pw["detail"])
+        check("...and the terminal lists it too",
+              any("colon" in i for i in s._production_issues()))
         (s.config.sites[0].username, s.config.sites[0].password_hash) = saved_hc
         st, _ = ui_req("GET", "/status")
         check("GET /status without the code is refused", st == 403)
@@ -1510,6 +1568,22 @@ def run_dispatch_tests(s):
         check("...and is code-gated like every other route", st == 403)
         s._latest_release = saved_latest
 
+        # /download hands the live site back as the same tar.gz the publish
+        # door takes, so what comes down can go back up.
+        st, _ = ui_req("GET", "/download?site=0")
+        check("GET /download is code-gated like every other route", st == 403)
+        st, _ = ui_req("GET", f"/download?t={ui_code}&site=abc")
+        check("...refusing a site index that is not a number", st == 400)
+        st, _ = ui_req("GET", f"/download?t={ui_code}&site=99")
+        check("...and one off the end of the list", st == 404)
+        st, blob = ui_req("GET", f"/download?t={ui_code}&site=0")
+        dl_dest = os.path.join(ui_dir, "roundtrip")
+        s._extract_bundle(blob, dl_dest)
+        check("...and the downloaded bundle round-trips back through extraction",
+              st == 200
+              and os.path.isfile(os.path.join(dl_dest, "old.html"))
+              and open(os.path.join(dl_dest, "old.html")).read() == "old")
+
         # The swap size the terminal has always asked for, asked for here —
         # the same core underneath, guarded before it can reach the disk.
         # Allocated and active are different numbers on purpose: /proc/swaps
@@ -1544,9 +1618,19 @@ def run_dispatch_tests(s):
         # The page may move the service toward serving and no further.
         st, _ = ui_req("POST", "/service", body=b"{}")
         check("The service endpoint is code-gated like every other", st == 403)
+        # A lifecycle request must say which transition it means: a garbled
+        # request defaulting to 'start' was the fail-open bug — a truncated
+        # stop performing the opposite transition with a 200.
+        st, _ = ui_req("POST", f"/service?t={ui_code}", body=b"not json{")
+        check("...refuses a body it cannot parse instead of defaulting", st == 400)
+        st, body = ui_req("POST", f"/service?t={ui_code}", body=b'{"op": "stopp"}')
+        check("...and an op it does not know",
+              st == 422 and b"start, restart or stop" in body)
+        st, _ = ui_req("POST", f"/service?t={ui_code}", body=b"{}")
+        check("...and a body naming no op at all", st == 422)
         saved_unit = s._service_file_exists
         s._service_file_exists = lambda: False
-        st, body = ui_req("POST", f"/service?t={ui_code}", body=b"{}")
+        st, body = ui_req("POST", f"/service?t={ui_code}", body=b'{"op": "start"}')
         check("...and refuses to start a service that was never installed",
               st == 422 and b"enable" in body)
         s._service_file_exists = saved_unit
@@ -1562,6 +1646,18 @@ def run_dispatch_tests(s):
                                         "values": {"username": "cfg-probe"}}).encode())
         check("POST /config applies through the same path as `set`",
               st == 200 and s.config.sites[0].username == "cfg-probe")
+        # Sign-in joins user:password and the server splits at the first
+        # colon, so a stored username containing one locks every visitor
+        # out while the health row still reads private-and-healthy.
+        st, body = ui_req("POST", f"/config?t={ui_code}",
+                          body=json.dumps({"site": 0,
+                                           "values": {"username": "team:alpha"}}).encode())
+        check("...refuses a colon in a username — sign-in could never match it",
+              st == 422 and b"colon" in body
+              and s.config.sites[0].username == "cfg-probe")
+        check("...with the same judgment on every surface that writes one",
+              s._set_site_value(s.Site(), "username", "a:b") != ""
+              and s._set_site_value(s.Site(), "username", "alpha") == "")
         st, body = ui_req("POST", f"/config?t={ui_code}",
                           body=json.dumps({"values": {"port": "99999"}}).encode())
         check("...refuses what `set` refuses, with `set`'s own sentence",
@@ -1733,6 +1829,17 @@ def run_dispatch_tests(s):
                                             "domain": "card.example"}).encode())
             check("op=name is a config write, no authority involved",
                   st == 200 and s.config.sites[n0].domain == "card.example")
+            # The one door where a domain enters config without an issuance
+            # to vet it, so syntax is judged there — locally, no DNS asked.
+            bad_names = ["https://card.example", "card example.com",
+                         "card.example.", "-card.example", "a" * 254 + ".com"]
+            bad_results = [ui_req("POST", f"/sites?t={ui_code}",
+                                  body=json.dumps({"op": "name", "site": n0,
+                                                   "domain": bad}).encode())
+                           for bad in bad_names]
+            check("...refusing a string that could never route or be issued for",
+                  all(st == 422 for st, _ in bad_results)
+                  and s.config.sites[n0].domain == "card.example")
             st, body = ui_req("POST", f"/sites?t={ui_code}",
                               body=json.dumps({"op": "name", "site": 0,
                                                "domain": "card.example"}).encode())
@@ -1932,6 +2039,18 @@ def run_dispatch_tests(s):
         check("Five wrong guesses end the run's authentication — even for the right code",
               st == 403 and st2 == 403
               and not os.path.exists(os.path.join(ui_dir, "live", "late.html")))
+
+        # A predecessor killed without _stop_ui never swept its drafts; the
+        # next run's door reclaims them on the way in.
+        stale_pv = s._preview_dir(s.config.sites[0])
+        os.makedirs(stale_pv, exist_ok=True)
+        httpd2, _code2 = s._start_ui(s.config.sites[0], "x", port=0)
+        try:
+            check("Starting the page sweeps a dead run's staged previews",
+                  not os.path.exists(stale_pv))
+        finally:
+            httpd2.shutdown()
+            httpd2.server_close()
     finally:
         s._stop_ui(httpd)
         s.config.sites[0].serve_dir = saved_ui_serve
@@ -2168,6 +2287,26 @@ def run_dispatch_tests(s):
             f.write("[Unit]\n[Service]\nExecStart=/usr/bin/python3 /root/servette.py --serve\n")
         check("A pre-data-dir unit reads as drift",
               any("predates" in d for d in s._service_env_drift()))
+
+        # A pinned interpreter that vanished, in an environment that can
+        # name no replacement: _stale_units answers empty (nothing it could
+        # write), and the crash-loop report used to be silenced with it.
+        with open(s.SERVICE_PATH, "w") as f:
+            f.write(f"# generated by servette {s.__version__}\n[Unit]\n[Service]\n"
+                    f"Environment=SERVETTE_HOME={s.BASE_DIR}\n"
+                    "ExecStart=/nonexistent/python3 -m servette --serve\n")
+        saved_upp = s._unit_python_path
+        s._unit_python_path = lambda: None
+        try:
+            check("No writable interpreter: nothing reads as stale",
+                  s._stale_units() == [])
+            with contextlib.redirect_stdout(io.StringIO()) as obuf:
+                s._startup_refresh()
+        finally:
+            s._unit_python_path = saved_upp
+        check("...yet a vanished service interpreter is still reported at launch",
+              "no longer exists" in obuf.getvalue()
+              and "cannot start" in obuf.getvalue())
 
         # Stale with matching environment but no root: fails soft with a hint.
         for path, unit_text in texts.items():
@@ -2963,6 +3102,17 @@ def run_dispatch_tests(s):
 
     section("ACME failures are classified: a refusal is not retried, a blip is")
 
+    # The shared issuance core vets the domain's own syntax first: the
+    # page's name op refuses these shapes before issuance can run, but the
+    # terminal's prompts pass their input straight here — where two lines
+    # later it becomes a PATH component (certs/<domain>).
+    with contextlib.redirect_stdout(io.StringIO()) as gate_buf:
+        gate_verdict = s._obtain_trusted_cert("../../escape", s.config.sites[0])
+    check("The issuance core refuses an unroutable domain before touching disk",
+          gate_verdict == "refused" and "domain" in gate_buf.getvalue()
+          and not os.path.exists(
+              os.path.normpath(os.path.join(s.BASE_DIR, "certs", "../../escape"))))
+
     # "Let's Encrypt answered no" and "the network ate a request" used to get
     # identical treatment — three full orders each. Retrying a refusal burns
     # fresh validation attempts against LE's per-hostname limits while the
@@ -3247,6 +3397,24 @@ def run_dispatch_tests(s):
             check("Oversized bundle rejected", raised)
         finally:
             s._MAX_BUNDLE_BYTES = saved_max
+
+        # The byte cap counts payload, so a bundle of many zero-size members
+        # slips under it while still burning CPU and memory. A companion
+        # count cap bounds their number.
+        saved_members = s._MAX_BUNDLE_MEMBERS
+        try:
+            s._MAX_BUNDLE_MEMBERS = 3
+            manyfiles = make_tar_gz([(f"f{n}.txt", "") for n in range(8)])
+            dest5 = os.path.join(extract_root, "manymembers")
+            raised = False
+            try:
+                s._extract_bundle(manyfiles, dest5)
+            except ValueError:
+                raised = True
+            check("A bundle with too many entries is rejected, zero-size included",
+                  raised)
+        finally:
+            s._MAX_BUNDLE_MEMBERS = saved_members
 
         # The size cap must run DURING the member walk, not after it: walking
         # a gzip stream decompresses it, and getmembers() paid the full
@@ -3533,9 +3701,91 @@ def run_dispatch_tests(s):
               >= {"slot-a", "slot-b", "post-slots"})
         check("...and the single-shot .bak marker is gone",
               not os.path.lexists(two + ".bak"))
+
+        # A failed flip hands the staged tree back: it was already renamed
+        # into the ring, and without the hand-back a publish the caller
+        # reports 'rejected' would leave never-published content for
+        # restore-site to offer as the newest version.
+        s.config.sites[0].serve_dir = link
+        ring_before = [p for p, _ in s._version_dirs(link)]
+        live_before = os.path.realpath(link)
+        stage = os.path.join(swap_root, "doomed")
+        os.makedirs(stage)
+        with open(os.path.join(stage, "marker.txt"), "w") as f:
+            f.write("never-live")
+        real_replace = os.replace
+        def _failing_replace(a, b, *args, **kw):
+            if os.path.abspath(b) == os.path.abspath(link):
+                raise OSError(28, "No space left on device")
+            return real_replace(a, b, *args, **kw)
+        os.replace = _failing_replace
+        try:
+            flip_raised = False
+            try:
+                s._swap_site_content(stage, link)
+            except OSError:
+                flip_raised = True
+        finally:
+            os.replace = real_replace
+        check("A failed flip raises instead of reporting success", flip_raised)
+        check("...leaves the old content live",
+              os.path.realpath(link) == live_before
+              and _marker(link) != "never-live")
+        check("...and hands the staged tree back — the ring gained nothing",
+              [p for p, _ in s._version_dirs(link)] == ring_before
+              and os.path.isdir(stage) and _marker(stage) == "never-live")
+
+        # Legacy conversion where the old tree's mtime sits in the new
+        # publish's own second (or later — a skewed clock): the kept tree's
+        # stamp is clamped strictly below the new one's, or the ring would
+        # read the OLD content as the newest version.
+        same = os.path.join(swap_root, "same-second")
+        os.makedirs(same)
+        with open(os.path.join(same, "marker.txt"), "w") as f:
+            f.write("old-now")
+        ahead = time.time() + 5
+        os.utime(same, (ahead, ahead))
+        s.config.sites[0].serve_dir = same
+        _publish(swap_root, "new-now", "new-now", same)
+        vd_same = s._version_dirs(same)
+        check("Same-second legacy conversion keeps the new tree newest in the ring",
+              len(vd_same) == 2
+              and os.path.realpath(same) == os.path.realpath(vd_same[0][0])
+              and _marker(vd_same[1][0]) == "old-now")
     finally:
         s.config.sites[0].serve_dir = saved_serve_dir
         shutil.rmtree(swap_root, ignore_errors=True)
+
+    section("remove-site reclaims the trees behind a trailing-slash serve_dir")
+
+    # The derived-tree helpers all rstrip serve_dir; the removal's own base
+    # must too, or a hand-edited 'site/' aims the .bak/.new/base deletions
+    # at names that do not exist and leaves the trees behind.
+    ts_base = os.path.join(s.BASE_DIR, "slash-probe")
+    os.makedirs(ts_base)
+    os.makedirs(ts_base + ".bak")
+    os.makedirs(ts_base + ".new")
+    probe_site = s.Site()
+    probe_site.serve_dir = "slash-probe/"          # the hand-edited shape
+    s.config.sites.append(probe_site)
+    saved_run_ts, saved_act_ts = s._server_running, s._service_is_active
+    s._server_running = s._service_is_active = lambda: False
+    try:
+        ts_err  = s._remove_site(len(s.config.sites) - 1)
+        # Judged before the belt-cleanup below, which would otherwise make
+        # these checks pass vacuously.
+        ts_gone = (not os.path.exists(ts_base),
+                   not os.path.exists(ts_base + ".bak"),
+                   not os.path.exists(ts_base + ".new"))
+    finally:
+        s._server_running, s._service_is_active = saved_run_ts, saved_act_ts
+        shutil.rmtree(ts_base, ignore_errors=True)      # belt, if a check fails
+        shutil.rmtree(ts_base + ".bak", ignore_errors=True)
+        shutil.rmtree(ts_base + ".new", ignore_errors=True)
+    check("The removal deletes the base tree despite the trailing slash",
+          ts_err == "" and ts_gone[0])
+    check("...and its .bak and .new siblings with it",
+          ts_gone[1] and ts_gone[2])
 
     section("Landing a bundle — the tail every content channel shares")
 
@@ -4013,6 +4263,7 @@ def run_server_tests(s, serve_dir):
             "/old": "/index.html",
             "/blog/": "/writing",
             "/gone": "https://example.com/moved",
+            "/my%20page": "/index.html",
         })
 
         st, loc = hop("/old")
@@ -4035,6 +4286,14 @@ def run_server_tests(s, serve_dir):
               hop("/blog") == (301, "/writing") and hop("/blog/") == (301, "/writing"))
         check("...an absolute http(s) target is sent as written",
               hop("/gone") == (301, "https://example.com/moved"))
+        # The lookup matches the DECODED path, the same one file resolution
+        # sees — so a source with a space fires when the browser sends it
+        # percent-encoded, and a rule cannot be skipped by encoding a letter.
+        check("...a rule fires for the percent-encoded form of its source",
+              hop("/old/") == (301, "/index.html")
+              and hop("/%6fld") == (301, "/index.html"))
+        check("...and a rule WRITTEN percent-encoded fires for its wire form",
+              hop("/my%20page") == (301, "/index.html"))
         # A campaign link points at the OLD path with its query attached;
         # dropping it would silently break every one of them.
         check("...and the query string rides along",
@@ -4059,6 +4318,38 @@ def run_server_tests(s, serve_dir):
               s._clean_redirects({"/x": "data:text/html,<script>"}) == {})
         check("A CR or LF in a target is refused — that is response splitting",
               s._clean_redirects({"/x": "/y\r\nX-Evil: 1"}) == {})
+        # A non-ASCII target would be dropped byte-by-byte by the ASCII-only
+        # Location encoding at serve time, sending the visitor to a mangled
+        # path. Refused at the one validating door, so `set` and the page
+        # refuse it too; the operator percent-encodes it themselves.
+        check("A non-ASCII character in a target is refused, not silently mangled",
+              s._clean_redirects({"/x": "/café"}) == {}
+              and s._clean_redirects({"/x": "/caf%C3%A9"}) == {"/x": "/caf%C3%A9"})
+        check("...and one in a source is refused the same way",
+              s._clean_redirects({"/café": "/x"}) == {})
+        # Sources are stored in ONE canonical percent-encoded spelling, the
+        # same one the lookup computes from the wire: a rule written
+        # /my%20page (or with a literal space, or lowercase hex) is one
+        # rule, and /caf%C3%A9 is how an ASCII-only table spells a
+        # non-ASCII source.
+        check("Every spelling of a source canonicalizes to one stored key",
+              s._clean_redirects({"/my%20page": "/x"}) == {"/my%20page": "/x"}
+              and s._clean_redirects({"/my page": "/x"}) == {"/my%20page": "/x"}
+              and s._clean_redirects({"/caf%c3%a9": "/x"}) == {"/caf%C3%A9": "/x"})
+        # The canonical form is a fixed point. Bare decoding was not: a
+        # stored space re-decoded on the next load, a %2520 drifted one
+        # escape per save/load cycle, the ring check misread its own
+        # shrinking output as a ring, and /a%0d planted a literal CR in
+        # the TOML file — unparseable on the next restart.
+        once = s._clean_redirects({"/my%20page": "/x", "/x%2520y": "/q",
+                                   "/caf%C3%A9": "/z"})
+        check("The table is a fixed point of its own validator",
+              s._clean_redirects(once) == once)
+        cr = s._clean_redirects({"/a%0d": "/x"})
+        check("An encoded control character stays encoded — no raw CR ever "
+              "reaches the config file",
+              cr == {"/a%0D": "/x"}
+              and not any(ord(c) < 0x20 for k in cr for c in k))
         check("...and one buried inside a source, where strip() cannot reach it",
               s._clean_redirects({"/x\ny": "/z"}) == {})
         check("...while a trailing newline is simply stripped away",
@@ -4068,6 +4359,25 @@ def run_server_tests(s, serve_dir):
               and s._clean_redirects({"https://elsewhere/x": "/new"}) == {})
         check("A redirect pointing at itself is refused",
               s._clean_redirects({"/loop": "/loop/"}) == {})
+        # A ring of rules is the self-loop one hop longer: the server serves
+        # one hop per request, so a ring is a browser bouncing to its cap.
+        check("A ring of redirects is refused whole, like the self-loop it is",
+              s._clean_redirects({"/a": "/b", "/b": "/a"}) == {})
+        # The walk follows targets the way the browser will — decoded, query
+        # dropped — or a ring spelled /%62 or /b?x=1 walks free while the
+        # visitor bounces.
+        check("...a ring spelled with a percent-escape is still a ring",
+              s._clean_redirects({"/a": "/%62", "/b": "/a"}) == {}
+              and s._clean_redirects({"/x": "/%78"}) == {})
+        check("...and one whose target carries a query string",
+              s._clean_redirects({"/a": "/b?x=1", "/b": "/a"}) == {})
+        check("...however many hops the ring takes",
+              s._clean_redirects({"/a": "/b", "/b": "/c", "/c": "/a"}) == {})
+        check("...and a rule that leads into a ring goes with it",
+              s._clean_redirects({"/x": "/a", "/a": "/b", "/b": "/a"}) == {})
+        check("...while a chain that ends somewhere real is kept whole",
+              s._clean_redirects({"/a": "/b", "/b": "/c"})
+              == {"/a": "/b", "/b": "/c"})
         check("A non-table redirects value is ignored, not fatal",
               s._clean_redirects("nonsense") == {})
         check("The table is capped",
@@ -4092,6 +4402,29 @@ def run_server_tests(s, serve_dir):
               "a pair" in s._set_site_value(probe, "redirect", "/a"))
         check("...and refuses what the config load would refuse",
               s._set_site_value(probe, "redirect", "/a,javascript:x") != "")
+        # Each pair is valid alone; only the table shows the ring. Refused
+        # at set time, not silently dropped at the next config load.
+        check("...and refuses the pair that closes a ring with a saved rule",
+              s._set_site_value(probe, "redirect", "/r1,/r2") == ""
+              and "closes a ring" in s._set_site_value(probe, "redirect", "/r2,/r1")
+              and probe.redirects == {"/r1": "/r2"})
+        # A percent-spelled source through the set door: accepted, no false
+        # ring from re-validating its own stored form, removable by its
+        # stored key or any spelling of it, and later rules unaffected.
+        check("...accepts a percent-spelled source and stays self-consistent",
+              s._set_site_value(probe, "redirect", "/caf%C3%A9,/x") == ""
+              and s._set_site_value(probe, "redirect", "/plain,/y") == ""
+              and s._set_site_value(probe, "redirect", "/caf%c3%a9,") == ""
+              and "/caf%C3%A9" not in probe.redirects
+              and s._set_site_value(probe, "redirect", "/plain,") == "")
+        # At the cap, the refusal names the cap — the load validator's
+        # truncation shrinks the table too, and that is not a ring.
+        full_probe = s.Site()
+        full_probe.redirects = s._clean_redirects(
+            {f"/p{n}": "/q" for n in range(s._MAX_REDIRECTS)})
+        check("...and a table at the cap refuses with the cap's own sentence",
+              "full" in s._set_site_value(full_probe, "redirect", "/p-extra,/q")
+              and len(full_probe.redirects) == s._MAX_REDIRECTS)
 
         # Removing through _apply_settings must validate against the site's
         # real table, not against a blank scratch object.
@@ -4417,6 +4750,33 @@ def run_server_tests(s, serve_dir):
     req("GET", headers={"X-Forwarded-For": "5.6.7.8"})
     check("XFF from untrusted source ignored — third request hits rate limit",
           req("GET", headers={"X-Forwarded-For": "9.10.11.12"}).status == 429)
+
+    # From the trusted proxy, only a value that IS an address is adopted: a
+    # passthrough proxy forwarding client-written XFF verbatim must not let
+    # arbitrary bytes mint fresh rate-limit buckets (a limiter bypass) or
+    # reach the operator's log lines as the "IP".
+    s._request_times.clear()
+    s.config.trusted_proxy = "127.0.0.1"   # the test client IS the proxy now
+
+    req("GET", headers={"X-Forwarded-For": "junk-not-an-address-one"})
+    req("GET", headers={"X-Forwarded-For": "junk-not-an-address-two"})
+    check("Junk XFF from the trusted proxy shares the proxy's own bucket → 429",
+          req("GET", headers={"X-Forwarded-For": "junk-not-an-address-three"}).status == 429)
+
+    s._request_times.clear()
+    req("GET", headers={"X-Forwarded-For": "1.2.3.4"})
+    req("GET", headers={"X-Forwarded-For": "5.6.7.8"})
+    check("...while real addresses are still adopted, each with its own bucket",
+          req("GET", headers={"X-Forwarded-For": "9.10.11.12"}).status != 429)
+
+    # Stock proxies (Azure's gateway among them) append the client as
+    # ip:port or [v6]:port; the port is theirs to add and ours to drop —
+    # or every visitor behind such a proxy would share the proxy's bucket.
+    s._request_times.clear()
+    req("GET", headers={"X-Forwarded-For": "1.2.3.4:1111"})
+    req("GET", headers={"X-Forwarded-For": "5.6.7.8:2222"})
+    check("An ip:port XFF is adopted as its address, not lumped as junk",
+          req("GET", headers={"X-Forwarded-For": "[2001:db8::7]:443"}).status != 429)
 
     s.config.rate_limit    = 200
     s.config.trusted_proxy = ""
@@ -6180,6 +6540,23 @@ def run_browser_tests(s, tmpdir):
                 check(f"...the {tab} tab renders",
                       page.is_visible(f"#panel-{tab if tab != 'sites' else 'sites'}"))
 
+            # The address is the deep link the tabs promise: hash carries
+            # the tab, search keeps the passcode OUTSIDE the fragment, and
+            # a reload lands on the tab the address names — the old
+            # '#tab?t=CODE' shape parsed back as no tab at all.
+            page.click("#tab-server")
+            page.wait_for_timeout(400)
+            check("...the address carries the tab beside the search, not around it",
+                  page.evaluate("() => location.hash") == "#server"
+                  and page.evaluate("() => location.search").startswith("?t="))
+            page.reload()
+            page.wait_for_timeout(1200)
+            check("...and a reload lands on the tab the address names",
+                  page.is_visible("#panel-server")
+                  and not page.is_visible("#panel-sites"))
+            page.click("#tab-sites")
+            page.wait_for_timeout(700)
+
             # The remove panel: drawn by the page, and where the button is.
             page.locator("button.del").first.click()
             page.wait_for_timeout(300)
@@ -6312,6 +6689,18 @@ def run_browser_tests(s, tmpdir):
             check("...with Save dim rather than a refusal to print",
                   page.locator("button.save-site").first.is_disabled()
                   and not page.locator(".site-card .error").first.is_visible())
+            # This card was HEALTHY when it was built, so its pill exists
+            # only because a hidden one is always emitted — a client-side
+            # fault has no rebuild to emit one, and a folded card's Status
+            # row is the pill or nothing.
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
+            pill_loc = page.locator(".site-card .badge.needs").first
+            check("...and folding a card faulted client-side still shows the pill",
+                  pill_loc.is_visible()
+                  and "Needs password" in pill_loc.inner_text())
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
             # Typing the login completes it, so the count follows.
             page.locator("#cfg-username-0").fill("someone")
             page.locator("#cfg-password-0").fill("a-password")
@@ -6367,6 +6756,35 @@ def run_browser_tests(s, tmpdir):
             page.wait_for_timeout(1500)
             check("...a redirect added through the form reaches the config",
                   "/browser-check" in s.config.sites[0].redirects)
+
+            # A picked folder must survive the re-render that follows
+            # every op. The redirect save above just re-rendered the
+            # cards, and the draft was picked before it — losing it here
+            # was the regression: summary reset, Publish dim, the drag to
+            # be done again.
+            check("...and the folder picked before that save is still read in",
+                  not page.locator("button.pub").first.is_disabled()
+                  and "2 files" in page.locator(".summary").first.inner_text())
+            page.click("#tab-server")
+            page.wait_for_timeout(500)
+            page.click("#tab-sites")
+            page.wait_for_timeout(900)
+            check("...and it survives a tab round-trip, ready to publish",
+                  not page.locator("button.pub").first.is_disabled()
+                  and "2 files" in page.locator(".summary").first.inner_text())
+
+            # The host form is never rewritten under the operator's
+            # fingers: a refresh landing mid-edit must not discard typed
+            # text or focus — for any field, not only the swap size.
+            page.click("#tab-server")
+            page.wait_for_timeout(600)
+            page.locator("#cfg-email").click()
+            page.locator("#cfg-email").fill("half-typed@exam")
+            page.evaluate("() => renderHostFields()")
+            check("...typing in any host field holds off the form rewrite",
+                  page.locator("#cfg-email").input_value() == "half-typed@exam"
+                  and page.evaluate(
+                      "() => document.activeElement.id === 'cfg-email'"))
 
             browser.close()
 

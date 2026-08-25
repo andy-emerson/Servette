@@ -76,6 +76,34 @@ _MAX_REDIRECTS      = 200
 _MAX_REDIRECT_CHARS = 2000
 
 
+def _canonical_source(path):
+    """A redirect source in its one canonical spelling: decoded once, then
+    re-encoded with a fixed rule, trailing slash dropped. The stored key
+    and the serve-time lookup both pass through here, so every spelling of
+    one path — /my%20page, a literal space, mixed hex case — is one rule.
+
+    quote-after-unquote, not bare unquote, for two load-bearing reasons.
+    The canonical form is always printable ASCII, so a source written
+    /a%0d can never plant a raw control character in the config file
+    (tomllib refuses a literal CR — the next restart would find the file
+    unparseable). And it is a fixed point — canonical in, canonical out —
+    where a bare-decoded key was not: a stored space re-decoded, a %2520
+    drifted one escape per save/load cycle, and the ring check misread its
+    own shrinking output as a ring."""
+    return quote(unquote(path), safe="/").rstrip("/") or "/"
+
+
+def _redirect_next(dst):
+    """Where an internal redirect target lands as a LOOKUP key, or None for
+    an external one: the query dropped (the next request's path carries none
+    of it), then the same canonical spelling the lookup uses. The loop
+    checks below must follow the same road the visitor's browser will, or a
+    ring spelled /%62 or /b?x=1 walks free while the browser bounces."""
+    if not dst.startswith("/"):
+        return None
+    return _canonical_source(dst.partition("?")[0])
+
+
 def _clean_redirects(raw):
     """The site's redirect table, validated once at load so serving one is a
     dict lookup and nothing else.
@@ -89,9 +117,13 @@ def _clean_redirects(raw):
     Two of the checks are load-bearing rather than tidy. A target is
     narrowed to path-or-http(s) because a redirect is an open door by
     nature, and `javascript:` or `data:` in a Location is a way to run
-    script on the operator's own origin. Control characters are refused on
-    both sides because a Location carrying CR or LF is response splitting —
-    the value reaches a header, and this is where that is stopped."""
+    script on the operator's own origin. Anything outside printable ASCII
+    is refused on both sides: CR or LF in a Location is response splitting
+    (the value reaches a header, and this is where that is stopped), and a
+    non-ASCII byte would be dropped by the ASCII-only Location encoding at
+    serve time — silently sending the visitor somewhere the operator did
+    not write. An operator who wants a non-ASCII destination percent-encodes
+    the path (or punycodes the host) themselves, which is ASCII and exact."""
     out = {}
     if not isinstance(raw, dict):
         log.warning("redirects is not a table — ignoring it")
@@ -101,8 +133,8 @@ def _clean_redirects(raw):
                     _MAX_REDIRECTS, _MAX_REDIRECTS)
     for key, target in list(raw.items())[:_MAX_REDIRECTS]:
         src, dst = str(key).strip(), str(target).strip()
-        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in src + dst):
-            log.warning("redirect with a control character in it — ignored")
+        if any(not (0x20 <= ord(c) <= 0x7E) for c in src + dst):
+            log.warning("redirect with a control or non-ASCII character in it — ignored")
             continue
         if not src.startswith("/") or len(src) > _MAX_REDIRECT_CHARS:
             log.warning("redirect source %r is not a site path — ignored", src[:80])
@@ -113,12 +145,38 @@ def _clean_redirects(raw):
             log.warning("redirect target %r is not a path or http(s) URL — ignored",
                         dst[:80])
             continue
-        # One rule covers /old and /old/, on both sides of the lookup.
-        norm = src.rstrip("/") or "/"
-        if norm == (dst.rstrip("/") or "/"):
+        # One rule covers /old and /old/ and every percent-spelling of the
+        # same path, on both sides of the lookup: the key is the canonical
+        # form, so a rule written /my%20page fires for the wire's
+        # /my%20page, and /caf%C3%A9 is how an ASCII-only table spells a
+        # non-ASCII source.
+        norm = _canonical_source(src)
+        if norm in out:
+            log.warning("redirect %s is written twice (two spellings of one "
+                        "path) — the last one wins", norm)
+        if norm == _redirect_next(dst):
             log.warning("redirect %s points at itself — ignored", norm)
             continue
         out[norm] = dst
+    # A rule pointing at itself is refused above; a ring of rules
+    # (/a→/b, /b→/a) is the same trap one hop longer, and a rule that
+    # leads INTO a ring strands the visitor just as surely. The server
+    # serves one hop per request, so a ring is a browser bouncing until
+    # its redirect cap — refused here, at the same door. Only internal
+    # targets can chain; an http(s) target leaves the site and ends the
+    # walk.
+    doomed = set()
+    for src in out:
+        seen, cur = set(), src
+        while cur is not None and cur in out and cur not in seen:
+            seen.add(cur)
+            cur = _redirect_next(out[cur])
+        if cur is not None and cur in seen:
+            doomed.add(src)
+    for src in doomed:
+        log.warning("redirect %s is part of, or leads into, a ring of "
+                    "redirects — ignored", src)
+        del out[src]
     return out
 
 
@@ -1007,7 +1065,28 @@ def _handle_request(method, url_path, headers, raw_ip):
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
         if xff and ip == config.trusted_proxy:
-            ip = _normalize_ip(xff.split(",")[-1].strip())
+            # Adopted only if it IS an address: a passthrough proxy that
+            # forwards a client-written XFF verbatim would otherwise hand
+            # arbitrary bytes a rate-limit bucket of their own (the bucket
+            # key passes non-addresses through unbucketed) and a seat in
+            # the operator's log lines, which escape the request path but
+            # print the IP field as-is. Junk keeps the proxy's own address:
+            # shared limiting beats no limiting under a misconfigured proxy.
+            forwarded = xff.split(",")[-1].strip()
+            # Some stock proxies append the client as ip:port (Azure's
+            # gateway does by default) or [v6]:port — the port is theirs
+            # to add and ours to drop, or every visitor behind such a
+            # proxy would collapse into the proxy's one bucket below.
+            m = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\](?::\d+)?", forwarded)
+            if m:
+                forwarded = m.group(1)
+            elif re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}:\d+", forwarded):
+                forwarded = forwarded.rsplit(":", 1)[0]
+            try:
+                ipaddress.ip_address(forwarded)
+            except ValueError:
+                forwarded = ip
+            ip = _normalize_ip(forwarded)
 
     site = None  # bound by Host below; None until then, and if nothing matches
 
@@ -1143,7 +1222,12 @@ def _handle_request(method, url_path, headers, raw_ip):
     # query would silently break every campaign link pointed at the old one.
     if site.redirects:
         bare, sep, query = url_path.partition("?")
-        target = site.redirects.get(bare.rstrip("/") or "/")
+        # Match the canonical spelling the table's keys are stored in: a
+        # source like '/my page' arrives as '/my%20page', and a rule on
+        # '/old' must also catch an encoded '/%6fld' that resolves to the
+        # same file — otherwise the redirect silently fails to fire, or is
+        # skipped by anyone who percent-encodes a letter of the path.
+        target = site.redirects.get(_canonical_source(bare))
         if target:
             if sep and "?" not in target:
                 target += sep + query
@@ -1325,6 +1409,24 @@ def _domain_in_use(domain, excluding=None):
     other's content."""
     domain = domain.lower()
     return any(s is not excluding and s.domain and s.domain.lower() == domain for s in config.sites)
+
+
+def _domain_problem(domain):
+    """Why this string cannot be a site's domain, as one sentence — empty
+    when it can be. Syntax only, judged locally: naming a site is instant
+    and must never depend on anyone's DNS (the naming/certifying split), so
+    this refuses only what could never route or be issued for — a scheme, a
+    path, a port, spaces, a label DNS itself would reject. Host matching
+    and the SNI table compare this string against what browsers send, which
+    is why a value like 'https://example.com' can never match anything."""
+    if len(domain) > 253:
+        return "that is longer than a domain can be (253 characters)"
+    if any(not label or len(label) > 63 or label != label.strip("-")
+           or not all(c.isascii() and (c.isalnum() or c == "-") for c in label)
+           for label in domain.split(".")):
+        return ("a domain is dot-separated labels of letters, digits and "
+                "hyphens — no scheme, path, port or spaces (example.com)")
+    return ""
 
 
 ```

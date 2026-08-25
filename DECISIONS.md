@@ -6,6 +6,25 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A redirect rule is printable ASCII, in one canonical spelling; refusal beats encoding
+
+**Ruled (Human):** both sides of a redirect rule must be printable
+ASCII, refused at every door — load, `set`, the page — rather than
+percent-encoded on the operator's behalf. Sources are stored under one
+canonical percent-encoded spelling (`_canonical_source`, the same
+function the serve-time lookup runs), so every way of writing one path
+is one rule and the stored key is TOML-safe and stable across reloads.
+**Why:** the ASCII-only `Location` encoding silently drops non-ASCII
+bytes at serve time (`/café` became `/caf`), and encoding on the
+operator's behalf is inexact — a unicode host corrupts differently
+than a path. A loud refusal is exact; the operator percent-encodes the
+path or punycodes the host, and the table spells it one way forever.
+**Rejected:** percent-encoding at serve time (the silent mangling
+above); storing bare-decoded keys (not a fixed point of the validator —
+a stored space re-decoded on the next load, a `%2520` drifted one
+escape per save/load cycle, and an encoded CR reached the config file
+as a literal control byte tomllib refuses). *(2026-08-25)*
+
 ## A printed line earns its place only if the reader cannot already see it
 
 **Ruled (Human):** one rule over every command's output, arrived at by

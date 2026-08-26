@@ -1231,6 +1231,14 @@ def run_dispatch_tests(s):
           "panel-server" in s._UI_ADMIN_PAGE
           and "getJSON('/config')" in s._UI_ADMIN_PAGE
           and "post('/config'" in s._UI_ADMIN_PAGE)
+    # The Settings card names its two families — the two-bucket principle
+    # applied to the card's own layout, so a performance knob never wears
+    # a security heading.
+    check("...its Settings card splitting Security from Performance",
+          '<div class="cfg-group">Security</div>' in s._UI_ADMIN_PAGE
+          and '<div class="cfg-group">Performance</div>' in s._UI_ADMIN_PAGE
+          and "SECURITY_FIELDS" in s._UI_ADMIN_PAGE
+          and "PERFORMANCE_FIELDS" in s._UI_ADMIN_PAGE)
     check("...with every site's facts on its own card and the server's on the server tab",
           "auth-switch" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
           and "attention" in s._UI_ADMIN_PAGE

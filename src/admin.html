@@ -350,6 +350,16 @@
       color: var(--muted);
     }
     .cfg-field .cfg-hint { grid-column: 2; }
+    /* The two families inside the Settings card — what defends the server,
+       and what tunes it — named so neither wears the other's label. */
+    .cfg-group {
+      margin: 1.1rem 0 0.45rem;
+      font-size: 0.72rem;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .cfg-group:first-child { margin-top: 0.2rem; }
     .cfg-hint {
       font-size: 0.68rem;
       color: var(--muted);
@@ -621,7 +631,7 @@
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Server status</span>
+        <span class="card-title">Status</span>
       </div>
       <div class="card-body">
         <div class="switch-row">
@@ -649,7 +659,7 @@
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Security settings</span>
+        <span class="card-title">Settings</span>
         <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
       </div>
       <div class="card-body">
@@ -1996,7 +2006,11 @@
      deployments) and every lifecycle verb. The domain is not a form either
      — naming a site belongs on that site's card. ══ */
 
-  const HOST_FIELDS = [
+  // Two families in one card, each under its own label: what defends the
+  // server, and what tunes it. Cache size is a performance knob and must
+  // not wear a security heading — the two-bucket principle applied to the
+  // card's own layout.
+  const SECURITY_FIELDS = [
     ['email', 'Email',
      'This server registers a single account with the certificate ' +
      'authority; certificates for every site are issued through it. ' +
@@ -2005,9 +2019,12 @@
      'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
     ['auth_rate_limit', 'Auth rate limit',
      'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
+  ];
+  const PERFORMANCE_FIELDS = [
     ['cache_size_mb', 'File cache size (MB)',
      'Memory set aside to serve frequently requested files without re-reading the disk.'],
   ];
+  const HOST_FIELDS = SECURITY_FIELDS.concat(PERFORMANCE_FIELDS);
 
   function renderServer() {
     const d = statusData || {};
@@ -2076,9 +2093,13 @@
     // anywhere inside it.
     const focused = document.activeElement;
     if (focused && focused.closest && focused.closest('#cfg-host-fields')) return;
+    const one = ([k, l, h]) =>
+      field(k, l, ((cfgData || {}).host || {})[k], { hint: h });
     $('cfg-host-fields').innerHTML =
-      HOST_FIELDS.map(([k, l, h]) => field(k, l, ((cfgData || {}).host || {})[k], { hint: h }))
-        .join('') + swapField;
+      '<div class="cfg-group">Security</div>' +
+      SECURITY_FIELDS.map(one).join('') +
+      '<div class="cfg-group">Performance</div>' +
+      PERFORMANCE_FIELDS.map(one).join('') + swapField;
   }
 
   /* ── The service's lifecycle: start, restart, stop. The page runs the

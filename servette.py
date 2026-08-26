@@ -4554,6 +4554,7 @@ _COMMANDS = [
     ("log [n]",          "show the last n log entries"),
     ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
+    ("publish [n] <folder>", "publish a folder on this box as a site's content"),
     ("restore-site [n]", "roll back a site's content to a kept version"),
     ("help",             "show this message"),
     ("quit",             "exit"),
@@ -5279,7 +5280,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Status</span>
+        <span class="card-title">Server status</span>
       </div>
       <div class="card-body">
         <div class="switch-row">
@@ -5307,7 +5308,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Settings</span>
+        <span class="card-title">Security settings</span>
         <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
       </div>
       <div class="card-body">
@@ -6656,8 +6657,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   const HOST_FIELDS = [
     ['email', 'Email',
-     'Registers this server with the certificate authority — one account for ' +
-     'every site here, not one per domain. Where renewal and expiry notices go.'],
+     'This server registers a single account with the certificate ' +
+     'authority; certificates for every site are issued through it. ' +
+     'Renewal and expiry notices all come to this address.'],
     ['rate_limit', 'Rate limit',
      'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
     ['auth_rate_limit', 'Auth rate limit',
@@ -7748,6 +7750,70 @@ def _land_bundle(site, bundle, source):
 
     log.info("Published new content for %s from %s", site.domain or site.serve_dir, source)
     return "published"
+
+
+# publish
+def _tar_folder(root, cap=_MAX_BUNDLE_BYTES):
+    """A folder as the gzipped tar bundle the publish door takes —
+    (bytes, "") — or (None, sentence) where it cannot be one. Hidden paths
+    are excluded on the way in by the rule the server serves by: a
+    dot-path is never served, so it is never published."""
+    buf, files = io.BytesIO(), 0
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for base, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs
+                       if not d.startswith(".") or d == ".well-known"]
+            for name in sorted(names):
+                if name.startswith("."):
+                    continue
+                full = os.path.join(base, name)
+                if os.path.islink(full) or not os.path.isfile(full):
+                    continue    # regular files only, as the extractor accepts
+                try:
+                    tf.add(full, arcname=os.path.relpath(full, root),
+                           recursive=False)
+                except OSError:
+                    continue
+                files += 1
+                if buf.tell() > cap:
+                    return None, (f"more than {cap // (1024 * 1024)} MB — "
+                                  "too large to publish as one bundle")
+    if not files:
+        return None, ("no publishable files (hidden paths are not served, "
+                      "so they are not published)")
+    return buf.getvalue(), ""
+
+
+def cmd_publish(args):
+    """Publish a folder on this box as a site's content — the terminal half
+    of the pair whose browser half is the page's Publish button."""
+    if not args:
+        print("  Usage: publish [n] <folder>")
+        return
+    if len(args) >= 2:
+        site, folder = _config_site_arg([args[0]]), args[1]
+    else:
+        site, folder = _config_site_arg([]), args[0]
+    if site is None:
+        return
+    root = os.path.realpath(os.path.abspath(folder))
+    if not os.path.isdir(root):
+        print(f"  {folder} is not a folder on this box.")
+        return
+    if _serve_dir_exposes_secrets(root):
+        print("  That folder holds Servette's own config or TLS keys — "
+              "publishing it would publish them.")
+        return
+    blob, problem = _tar_folder(root)
+    if problem:
+        print(f"  {folder}: {problem}")
+        return
+    result = _land_bundle(site, blob, "terminal publish")
+    if result == "published":
+        print(f"  Published to {site.domain or site.serve_dir}.")
+    else:
+        print("  Publish rejected — the log has the reason; the live "
+              "content and the kept versions are untouched.")
 
 
 # preview
@@ -9454,7 +9520,7 @@ def _startup_refresh():
 # owns. Read-only ones (status, sites, log) are absent deliberately — they must
 # keep working without a password prompt.
 _ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "admin",
-                  "restore-site")
+                  "publish", "restore-site")
 
 # What sudo made of the last elevated command. The one-shot `servette <command>`
 # form exits with it, so tooling driving Servette over SSH sees a refused
@@ -9587,6 +9653,8 @@ def run_command(cmd, args):
         cmd_traffic()
     elif cmd == "admin":
         cmd_admin()
+    elif cmd == "publish":
+        cmd_publish(args)
     elif cmd == "restore-site":
         site = _config_site_arg(args)
         if site is not None:

@@ -999,24 +999,24 @@ def run_dispatch_tests(s):
     restore_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "restore-site"]
     check("'restore-site 99' (bad site index) does not call the command",
           len(restore_calls) == 1)
-    # Both are retired words now. The shell must say so rather than
-    # silently accepting a verb it dropped — 'publish' especially, since it
-    # was a real command until the sub-shell it opened was removed.
-    check("neither 'pull' nor 'publish' is a command any more",
-          not {"pull", "publish"} & {c.split()[0] for c, _ in s._COMMANDS})
-    check("...and neither is in the elevation set",
-          not any(s._needs_root(c) for c in ("pull", "publish")))
+    # 'pull' is a retired word; the shell must say so rather than silently
+    # accepting a verb it dropped. 'publish' returned as a different thing:
+    # the publish-from-folder command the tunnel channel's ruling promised,
+    # not the old sub-shell.
+    check("'pull' is not a command any more, and never elevates",
+          "pull" not in {c.split()[0] for c, _ in s._COMMANDS}
+          and not s._needs_root("pull"))
     check("'quit' stops server and exits", calls[-1] == "stop")
 
 
-    # The publish sub-shell is gone. It existed to gather the content
-    # channel's scattered verbs; the pull channel's removal left it holding
-    # one verb that was already a top-level command, so the wrapper went too.
-    # Everything it did now has exactly one home.
-    check("The publish sub-shell is gone from the program",
+    # The publish sub-shell stays gone: cmd_publish is the folder command
+    # (it takes args), and none of the sub-shell's scaffolding — the menu
+    # table, the help, the display — ever came back with it.
+    check("The publish sub-shell has not returned with the publish command",
           not any(hasattr(s, n) for n in
-                  ("cmd_publish", "_publish_show", "_PUBLISH_COMMANDS", "PUBLISH_HELP")))
-    check("...and its one verb kept its top-level home",
+                  ("_publish_show", "_PUBLISH_COMMANDS", "PUBLISH_HELP"))
+          and "folder" in (s.cmd_publish.__doc__ or ""))
+    check("...and restore-site kept its top-level home",
           "restore-site" in [c.split()[0] for c, _ in s._COMMANDS]
           and s._needs_root("restore-site"))
 
@@ -3867,6 +3867,61 @@ def run_dispatch_tests(s):
                   max(max_concurrent) == 1)
         finally:
             s._swap_site_content = saved_swap
+
+        section("publish — the terminal half of the pair")
+
+        # `publish [n] <folder>` tars a folder under the same cap, hidden
+        # paths excluded by the serving rule, and hands it to the identical
+        # _land_bundle — the core never knows which door called it.
+        pubsrc = tempfile.mkdtemp(dir=swap_root2)
+        with open(os.path.join(pubsrc, "index.html"), "w") as f:
+            f.write("from the terminal")
+        os.makedirs(os.path.join(pubsrc, ".git"), exist_ok=True)
+        with open(os.path.join(pubsrc, ".git", "secret"), "w") as f:
+            f.write("history")
+        with open(os.path.join(pubsrc, ".env"), "w") as f:
+            f.write("secret")
+        with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+            s.cmd_publish([pubsrc])
+        check("publish lands a folder as the site's live content",
+              "Published to" in pbuf.getvalue()
+              and open(os.path.join(s.config.sites[0].serve_dir,
+                                    "index.html")).read() == "from the terminal")
+        check("...hidden paths are not published, by the serving rule",
+              not os.path.exists(os.path.join(s.config.sites[0].serve_dir,
+                                              ".git"))
+              and not os.path.exists(os.path.join(s.config.sites[0].serve_dir,
+                                                  ".env")))
+        check("...and the content it replaced is in the ring",
+              any(not r["live"] for r in
+                  s._site_versions(s.config.sites[0])))
+        with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+            s.cmd_publish([os.path.join(pubsrc, "index.html")])
+        check("...a path that is not a folder is refused with a sentence",
+              "not a folder" in pbuf.getvalue())
+        empty_src = tempfile.mkdtemp(dir=swap_root2)
+        with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+            s.cmd_publish([empty_src])
+        check("...an empty folder is refused, not published as a blank site",
+              "no publishable files" in pbuf.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+            s.cmd_publish(["3", pubsrc])
+        check("...and a bad site index is the [n] convention's own refusal",
+              "No site 3" in pbuf.getvalue())
+        # The one guard on the source: Servette's own config and keys never
+        # go out through the publish door, however root the caller is.
+        saved_exposes = s._serve_dir_exposes_secrets
+        s._serve_dir_exposes_secrets = lambda path: True
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+                s.cmd_publish([pubsrc])
+        finally:
+            s._serve_dir_exposes_secrets = saved_exposes
+        check("...a folder holding Servette's secrets is refused",
+              "publishing it would publish them" in pbuf.getvalue())
+        check("...the command is offered, and it elevates like restore-site",
+              any(c.startswith("publish") for c, _ in s._COMMANDS)
+              and "publish" in s._ROOT_COMMANDS)
 
         section("The retired pull channel leaves nothing behind")
 

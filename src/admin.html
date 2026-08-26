@@ -621,7 +621,7 @@
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Status</span>
+        <span class="card-title">Server status</span>
       </div>
       <div class="card-body">
         <div class="switch-row">
@@ -649,7 +649,7 @@
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">Settings</span>
+        <span class="card-title">Security settings</span>
         <span class="badge badge-dim hidden" id="cfg-host-badge"></span>
       </div>
       <div class="card-body">
@@ -1998,8 +1998,9 @@
 
   const HOST_FIELDS = [
     ['email', 'Email',
-     'Registers this server with the certificate authority — one account for ' +
-     'every site here, not one per domain. Where renewal and expiry notices go.'],
+     'This server registers a single account with the certificate ' +
+     'authority; certificates for every site are issued through it. ' +
+     'Renewal and expiry notices all come to this address.'],
     ['rate_limit', 'Rate limit',
      'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
     ['auth_rate_limit', 'Auth rate limit',

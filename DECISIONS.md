@@ -6,6 +6,30 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The staging place is a documented convention, not a mechanism
+
+**Ruled (Human):** where site folders wait to be published is a
+convention the documentation recommends — `~/sites/`, one complete site
+per folder — and nothing the code knows about. `publish` keeps taking an
+explicit path; the operator remains the completeness signal, running it
+when the copy has finished.
+**Why:** a directory whose existence *means* "publishable" hands
+Servette an assumption it cannot verify — a filesystem tree carries no
+signal that the `scp` writing into it is done, so any machinery built on
+the convention inherits the half-copied-site hazard permanently, where
+the explicit command dodges it structurally. And by [the two-bucket
+principle](#a-function-earns-its-place-by-making-the-server-work-or-by-making-it-safe)
+a conventional directory is convenience — neither bucket — so it earns
+documentation, not code.
+**Rejected:** a default search path (`publish blog` resolving against
+`~/sites/` — cheap, but the first step onto the magic-directory road);
+a watched auto-publishing directory (machinery, and it makes the
+completeness hazard structural); a root-owned drop zone like
+`/root/site/` (the operator owns their content — a root-owned staging
+directory fights the least-privilege story for no gain).
+**Reopen:** the bare-name form returns as a deliberate decision if the
+long path proves a real irritation in practice. *(2026-08-26)*
+
 ## A function earns its place by making the server work, or by making it safe
 
 **Ruled (Human, principle):** every function on either surface belongs to

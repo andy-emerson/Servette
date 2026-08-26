@@ -2174,6 +2174,17 @@ def cmd_enable():
             print("  Servette enabled as a system service.")
             print("  It will start automatically on boot and survive SSH disconnects.")
             print("  A watchdog timer recovers a dropped default route.")
+        # The unit just written grants writes under BASE_DIR only, so a
+        # hand-edited serve_dir outside it will serve fine and refuse every
+        # publish under the service — a trap that never shows in a manual
+        # run. Said here, at the moment the sandbox comes into being; the
+        # health row carries it from now on (#123, ruled: reported, never
+        # refused).
+        for outside_site in config.sites:
+            if not _is_within_base_dir(_resolve(outside_site.serve_dir)):
+                print(f"  Note: {outside_site.domain or outside_site.serve_dir} "
+                      f"serves from outside {BASE_DIR} — the sandboxed "
+                      "service cannot publish there.")
         log.info("Enabled as systemd service")
 
         _ensure_swap()

@@ -4454,6 +4454,17 @@ def cmd_enable():
             print("  Servette enabled as a system service.")
             print("  It will start automatically on boot and survive SSH disconnects.")
             print("  A watchdog timer recovers a dropped default route.")
+        # The unit just written grants writes under BASE_DIR only, so a
+        # hand-edited serve_dir outside it will serve fine and refuse every
+        # publish under the service — a trap that never shows in a manual
+        # run. Said here, at the moment the sandbox comes into being; the
+        # health row carries it from now on (#123, ruled: reported, never
+        # refused).
+        for outside_site in config.sites:
+            if not _is_within_base_dir(_resolve(outside_site.serve_dir)):
+                print(f"  Note: {outside_site.domain or outside_site.serve_dir} "
+                      f"serves from outside {BASE_DIR} — the sandboxed "
+                      "service cannot publish there.")
         log.info("Enabled as systemd service")
 
         _ensure_swap()
@@ -8367,11 +8378,16 @@ def _config_sites():
 # serve_dir containment
 def _is_within_base_dir(path):
     """True if path (already resolved) is BASE_DIR itself or somewhere under
-    it. serve_dir must satisfy this: the publish pipeline's atomic swap
-    renames within the same filesystem, and the systemd unit's
-    ReadWritePaths only grants write access under BASE_DIR — a serve_dir
-    outside it breaks the swap silently under the sandboxed service even
-    though a manual, unsandboxed run would never show the problem.
+    it. What actually turns on this: the systemd unit's ReadWritePaths only
+    grants write access under BASE_DIR, so a serve_dir outside it SERVES
+    fine but cannot take a publish under the sandboxed service — a failure
+    a manual, unsandboxed run never shows. (The atomic swap itself is
+    indifferent to where serve_dir lives: staging and every kept version
+    are its siblings, so they share its filesystem anywhere.) Containment
+    is an implementation fact, not an enforced guarantee (#123, ruled):
+    every folder Servette assigns satisfies it by construction, and a
+    hand-edited config pointing outside is reported as a blocking health
+    row rather than refused.
 
     Defers to _within so containment is decided in exactly one place: two
     implementations of the same security predicate can drift apart, and only
@@ -8380,12 +8396,15 @@ def _is_within_base_dir(path):
 
 
 def _serve_dir_exposes_secrets(path):
-    """True when serving `path` would hand out Servette's own secrets. serve_dir
-    is already required to sit inside BASE_DIR (see _is_within_base_dir); the
-    danger left is a folder that also holds the config (password hashes), the
-    ACME account key, or the TLS private keys under certs/. BASE_DIR itself holds
-    all three; the certs tree is the keys. Either would be served as plain file
-    reads, so both are refused as a serve_dir."""
+    """True when serving `path` would hand out Servette's own secrets — the
+    config (password hashes), the ACME account key, or the TLS private keys
+    under certs/. BASE_DIR itself holds all three; the certs tree is the
+    keys. Either would be served as plain file reads, so both are refused as
+    a serve_dir wherever the value came from — the load door's security
+    floor, fatal where containment is merely reported, because a config
+    that would publish the keys must not run at all. Containment inside
+    BASE_DIR is deliberately NOT assumed here: a hand-edited serve_dir may
+    point anywhere, which is why this judges the resolved path alone."""
     real  = os.path.realpath(path)
     base  = os.path.realpath(BASE_DIR)
     certs = os.path.join(base, "certs")
@@ -8945,6 +8964,10 @@ def _production_issues(running=None):
         tag = f" ({site.domain or site.serve_dir})" if labeled else ""
         if not site.serve_dir or not os.path.exists(_resolve(site.serve_dir)):
             issues.append(f"serve directory not configured{tag} — run 'config'")
+        elif (os.path.exists(SERVICE_PATH)
+                and not _is_within_base_dir(_resolve(site.serve_dir))):
+            issues.append(f"serve directory outside {BASE_DIR}{tag} — the "
+                          "sandboxed service cannot publish there")
         if not site.cert_file or not os.path.exists(_resolve(site.cert_file)):
             issues.append(f"certificate not configured{tag} — run 'config cert'")
         elif not site.domain:
@@ -9167,15 +9190,29 @@ def _health_checks(service_active=None):
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""
-        # The folder reports only when it is missing. Where content lives is
-        # Servette's business, not the operator's (the folder-retirement
-        # ruling) — but a serve directory that has vanished is a defect the
-        # operator must hear about.
-        dir_ok = bool(site.serve_dir) and os.path.exists(_resolve(site.serve_dir))
+        # The folder reports only when something is wrong. Where content
+        # lives is Servette's business, not the operator's (the
+        # folder-retirement ruling) — but a serve directory that has
+        # vanished, or one a hand-edited config points outside the data
+        # directory, is a defect the operator must hear about. Outside is
+        # reported, not refused (#123, ruled), and only where the
+        # consequence exists: the site serves from anywhere, and only the
+        # systemd sandbox — ReadWritePaths under BASE_DIR — makes publishing
+        # fail there, working in a manual run and dying under the service.
+        # A session server (no unit) has no sandbox and no trap to name;
+        # `enable`, which writes the unit, is where that box is warned.
+        resolved_dir = _resolve(site.serve_dir)
+        dir_ok = bool(site.serve_dir) and os.path.exists(resolved_dir)
         if not dir_ok:
             rows.append({"key": "dir", "site": i, "ok": False, "blocking": True,
                          "label": tag + "Folder",
                          "detail": "missing — publish to recreate it"})
+        elif (os.path.exists(SERVICE_PATH)
+                and not _is_within_base_dir(resolved_dir)):
+            rows.append({"key": "dir", "site": i, "ok": False, "blocking": True,
+                         "label": tag + "Folder",
+                         "detail": f"outside {BASE_DIR} — the sandboxed "
+                                   "service cannot publish here"})
         # One PEM load answers both certificate facts for the row.
         cert   = _load_cert(_resolve(site.cert_file)) if site.cert_file else None
         days   = _cert_days(cert)

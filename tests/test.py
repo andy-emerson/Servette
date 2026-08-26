@@ -1450,6 +1450,40 @@ def run_dispatch_tests(s):
             dir_row = [r for r in s._health_checks() if r["key"] == "dir"][0]
             check("...a missing folder blocks: nothing is served at all",
                   dir_row["blocking"])
+            # #123, ruled: a hand-edited serve_dir outside the data
+            # directory is observed, not refused — and only where the
+            # consequence exists. The site serves from anywhere; it is the
+            # systemd sandbox (writes under BASE_DIR only) that makes
+            # publishing fail there, working in a manual run and dying
+            # under the service. So the row fires where the unit exists,
+            # a session server carries no trap to name, and the config
+            # loads either way: the value is valid, its circumstances are
+            # the problem.
+            outside = tempfile.mkdtemp()
+            saved_sp = s.SERVICE_PATH
+            try:
+                s.config.sites[0].serve_dir = outside
+                unit_marker = os.path.join(outside, "unit-present")
+                open(unit_marker, "w").close()
+                s.SERVICE_PATH = unit_marker
+                dir_row = [r for r in s._health_checks()
+                           if r["key"] == "dir"][0]
+                check("...a folder outside the data directory, under the "
+                      "service, blocks and says why",
+                      dir_row["blocking"]
+                      and "outside" in dir_row["detail"]
+                      and "publish" in dir_row["detail"])
+                check("...and the terminal's readiness list names it too",
+                      any("outside" in i and "publish" in i
+                          for i in s._production_issues()))
+                s.SERVICE_PATH = os.path.join(outside, "no-unit-here")
+                check("...while a session server, with no sandbox, has no "
+                      "trap to name",
+                      not [r for r in s._health_checks()
+                           if r["key"] == "dir"])
+            finally:
+                s.SERVICE_PATH = saved_sp
+                shutil.rmtree(outside, ignore_errors=True)
         finally:
             s.config.sites[0].serve_dir = saved_sd
         check("...while swap, disk, and the watchdog do not",

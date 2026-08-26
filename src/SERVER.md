@@ -1459,6 +1459,22 @@ def _domain_problem(domain):
     return ""
 
 
+def _email_problem(email):
+    """Why this string cannot be the ACME contact address, as one sentence —
+    empty when it can be. Empty itself is allowed: the account registers
+    with no contact and simply gets no expiry mail. Syntax only, the same
+    local judgment the domain gets: the authority is the real arbiter, and
+    this refuses only what could never be a mailbox — which otherwise
+    surfaces as an issuance failure months from the typo that caused it."""
+    if not email:
+        return ""
+    local, at, host = email.rpartition("@")
+    if not at or not local or "@" in local or " " in email or not email.isascii():
+        return "an email is name@host — one @, no spaces (or empty to clear)"
+    problem = _domain_problem(host)
+    return f"after the @, {problem}" if problem else ""
+
+
 ```
 
 One certificate, one TLS context — minimum version enforced, ALPN pinned to HTTP/1.1, unreadable material raising so startup fails closed.

@@ -4528,6 +4528,93 @@ def run_server_tests(s, serve_dir):
         s.config.sites[0].redirects_temp = saved_redirects_temp
         s.config.save()
 
+    section("Fields refuse what they cannot save")
+
+    # The ruled principle: no wrong answer is saved — every field states
+    # what a valid entry looks like (or what invalidates one) and refuses
+    # the rest, at every door, rather than repairing it quietly or letting
+    # it surface as a failure far from the typo.
+    import builtins
+    _scratch = type("S", (), {})()
+    check("The email door refuses what could never be a mailbox",
+          s._set_host_value(_scratch, "email", "not-an-email") != ""
+          and s._set_host_value(_scratch, "email", "two@ats@example.com") != ""
+          and s._set_host_value(_scratch, "email", "a b@example.com") != "")
+    check("...naming the half after the @ when that is the wrong half",
+          "after the @" in s._set_host_value(_scratch, "email", "you@-bad-.com"))
+    check("...and accepts a mailbox, or empty to clear",
+          s._set_host_value(_scratch, "email", "you@example.com") == ""
+          and _scratch.email == "you@example.com"
+          and s._set_host_value(_scratch, "email", "") == ""
+          and _scratch.email == "")
+
+    # The cipher string's only arbiter is OpenSSL, asked at the prompt —
+    # the alternative was a refusal at the next server start, which fails
+    # closed: the site down over a typo saved months earlier.
+    saved_input_v = builtins.input
+    _saved_ciphers = s.config.ciphers
+    try:
+        _answers = iter(["", "GARBAGE-THAT-SELECTS-NOTHING"])
+        builtins.input = lambda prompt="": next(_answers)
+        with contextlib.redirect_stdout(io.StringIO()) as _tlsbuf:
+            s._config_tls()
+    finally:
+        builtins.input = saved_input_v
+    check("The cipher prompt asks OpenSSL before saving",
+          "unchanged" in _tlsbuf.getvalue()
+          and s.config.ciphers == _saved_ciphers)
+
+    # The interactive limit prompts hold the same positive floor `set`
+    # holds: a zero rate limit refuses every request on the next start.
+    _saved_rl, _saved_arl = s.config.rate_limit, s.config.auth_rate_limit
+    try:
+        _answers = iter(["0", "-5"])
+        builtins.input = lambda prompt="": next(_answers)
+        with contextlib.redirect_stdout(io.StringIO()) as _limbuf:
+            s._config_limits()
+    finally:
+        builtins.input = saved_input_v
+    check("The limit prompts refuse zero and negatives, like set does",
+          _limbuf.getvalue().count("must be a positive integer") == 2
+          and s.config.rate_limit == _saved_rl
+          and s.config.auth_rate_limit == _saved_arl)
+
+    # The certificate prompt judges domain syntax locally — the same
+    # sentence as the page's name door — instead of handing garbage to the
+    # authority for a network round trip that could only ever fail.
+    _issuance_calls = []
+    _saved_obtain = s._obtain_trusted_cert
+    _saved_domain = s.config.sites[0].domain
+    try:
+        s._obtain_trusted_cert = lambda *a, **k: _issuance_calls.append(a)
+        builtins.input = lambda prompt="": "https://example.com"
+        with contextlib.redirect_stdout(io.StringIO()) as _certbuf:
+            s._config_cert(s.config.sites[0])
+    finally:
+        s._obtain_trusted_cert = _saved_obtain
+        builtins.input = saved_input_v
+    check("The certificate prompt judges domain syntax before any network",
+          "no scheme" in _certbuf.getvalue() and not _issuance_calls
+          and s.config.sites[0].domain == _saved_domain)
+
+    # The swap prompt refuses out-of-bounds sizes with the page's own
+    # sentence — it used to round 10 up to a 64 MB file silently, a wrong
+    # answer repaired instead of refused.
+    if not s._IS_MACOS:
+        _swap_calls = []
+        _saved_apply, _saved_offer = s._apply_swapfile, s._swap_offer
+        try:
+            s._apply_swapfile = lambda mb: _swap_calls.append(mb) or ""
+            s._swap_offer = lambda *a: ("no swap configured", "skip")
+            builtins.input = lambda prompt="": "10"
+            with contextlib.redirect_stdout(io.StringIO()) as _swapbuf:
+                s._ensure_swap()
+        finally:
+            s._apply_swapfile, s._swap_offer = _saved_apply, _saved_offer
+            builtins.input = saved_input_v
+        check("The swap prompt refuses a size below 64 MB instead of rounding it up",
+              "64-65536" in _swapbuf.getvalue() and not _swap_calls)
+
     section("404 and custom 404.html")
 
     check("Non-existent path returns 404",

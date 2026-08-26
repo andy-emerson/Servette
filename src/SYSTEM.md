@@ -1512,9 +1512,15 @@ def _ensure_swap():
     mb = rec_mb
     if resp:
         try:
-            mb = max(64, int(resp))
+            mb = int(resp)
         except ValueError:
             print("  Not a number — skipping swap setup.")
+            return
+        # The page's own bounds, refused with the same sentence — not
+        # silently rounded up, which answered "10" with a 64 MB file the
+        # operator never asked for.
+        if not (64 <= mb <= 65536):
+            print("  Swap size must be 64-65536 MB — skipping swap setup.")
             return
     err = _apply_swapfile(mb)
     if err:

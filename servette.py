@@ -2195,6 +2195,22 @@ def _domain_problem(domain):
     return ""
 
 
+def _email_problem(email):
+    """Why this string cannot be the ACME contact address, as one sentence —
+    empty when it can be. Empty itself is allowed: the account registers
+    with no contact and simply gets no expiry mail. Syntax only, the same
+    local judgment the domain gets: the authority is the real arbiter, and
+    this refuses only what could never be a mailbox — which otherwise
+    surfaces as an issuance failure months from the typo that caused it."""
+    if not email:
+        return ""
+    local, at, host = email.rpartition("@")
+    if not at or not local or "@" in local or " " in email or not email.isascii():
+        return "an email is name@host — one @, no spaces (or empty to clear)"
+    problem = _domain_problem(host)
+    return f"after the @, {problem}" if problem else ""
+
+
 # One certificate's context
 def _build_ssl_context(cert_path, key_path):
     """TLS context for one certificate — minimum version enforced, optional cipher
@@ -3799,9 +3815,15 @@ def _ensure_swap():
     mb = rec_mb
     if resp:
         try:
-            mb = max(64, int(resp))
+            mb = int(resp)
         except ValueError:
             print("  Not a number — skipping swap setup.")
+            return
+        # The page's own bounds, refused with the same sentence — not
+        # silently rounded up, which answered "10" with a 64 MB file the
+        # operator never asked for.
+        if not (64 <= mb <= 65536):
+            print("  Swap size must be 64-65536 MB — skipping swap setup.")
             return
     err = _apply_swapfile(mb)
     if err:
@@ -4876,6 +4898,15 @@ def _config_cert(site):
 
     domain = _input("  Domain name (leave blank for self-signed): ").strip()
 
+    if domain:
+        # The same syntax judgment the page's name door runs — refused here,
+        # instantly, rather than by the authority after a network round trip
+        # that could only ever fail.
+        problem = _domain_problem(domain)
+        if problem:
+            print(f"  → {problem}, unchanged")
+            return
+
     if domain and _domain_in_use(domain, excluding=site):
         print(f"  → {domain} is already used by another site on this box, unchanged")
         return
@@ -4941,8 +4972,12 @@ def _config_password(site):
 
 # limits and cache
 def _config_limits():
-    _config_set("rate_limit",      "rate_limit",      int, error="invalid number", hint="Requests per minute per IP")
-    _config_set("auth_rate_limit", "auth_rate_limit", int, error="invalid number", hint="Failed login attempts per minute per IP")
+    # Positive, the same floor `set` holds: zero would refuse every request
+    # (or every login) on the next start, and a negative limit means nothing.
+    _config_set("rate_limit",      "rate_limit",      int, lambda v: v > 0,
+                error="must be a positive integer", hint="Requests per minute per IP")
+    _config_set("auth_rate_limit", "auth_rate_limit", int, lambda v: v > 0,
+                error="must be a positive integer", hint="Failed login attempts per minute per IP")
 
 
 def _config_cache():
@@ -5025,6 +5060,15 @@ def _config_tls():
     if ciphers == config.ciphers:
         print("  → unchanged")
         return
+    if ciphers:
+        # Judged by the only arbiter there is — OpenSSL itself. A string it
+        # refuses would otherwise be refused at the next server start, which
+        # fails closed: the site down over a typo saved months earlier.
+        try:
+            ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).set_ciphers(ciphers)
+        except ssl.SSLError:
+            print("  → not a cipher string OpenSSL accepts, unchanged")
+            return
     config.ciphers = ciphers
     config.save()
     print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
@@ -5093,7 +5137,11 @@ def cmd_config():
             if site is not None:
                 _config_password(site)
         elif cmd == "email":
-            _config_set("email", "email")
+            # The same judgment the `set` door runs, so the prompt cannot
+            # save what set would refuse.
+            _config_set("email", "email", str,
+                        lambda v: not _email_problem(v),
+                        "an email is name@host — one @, no spaces")
         elif cmd == "limits":
             _config_limits()
         elif cmd == "cache":
@@ -9323,6 +9371,12 @@ def _set_host_value(target, key, value):
             return "port must be 1-65535"
         target.port = int(value)
     elif key == "email":
+        # Judged at the one write door `set`, the page, and the prompt
+        # share; the alternative was the authority refusing the account at
+        # issuance time, far from the typo.
+        err = _email_problem(value)
+        if err:
+            return err
         target.email = value
     elif key in ("rate_limit", "auth_rate_limit"):
         if not (value.isdigit() and int(value) > 0):

@@ -6,6 +6,34 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## publish is the terminal half of the pair, and the cores are caller-blind
+
+**Ruled (Human):** `publish [n] <folder>` publishes a folder on the box as
+a site's content — the terminal half whose browser half is the page's
+Publish button, closing the "terminal publish-from-folder to follow" the
+folder ruling promised. The folder is tarred in memory under the same cap,
+hidden paths excluded by the rule the server serves by, and handed to the
+identical `_land_bundle`: same ceilings, same extraction guards, same
+atomic swap, same version ring. The one guard on the source is the secrets
+predicate every serve_dir runs — a sys admin may publish any folder they
+can name, except one that would publish Servette's own config or TLS keys;
+beyond that the admin is trusted on their own box. A non-folder, an empty
+folder, and a bad index are refused with their own sentences.
+**With it, two conventions the Human set:** the shared cores are
+**caller-blind** — callable from either surface without being told where
+the call came from; the audit found twelve of thirteen already are, and the
+two acknowledged exceptions stand as they are: `_land_bundle`'s `source`
+parameter, which changes no behavior and exists so the content log names
+the door (an audit trail, kept), and the loopback server's `on_publish`
+callback, the UI server's own affordance the core never sees. And the
+paired-surfaces principle is **narrowed to features both surfaces can
+serve**: preview needs a renderer, so it pairs with nothing and stays a
+page feature rather than owing a terminal twin.
+**Rejected:** a path allowlist on the source (the operator owns root
+already — a list would be theater); staging by direct copy instead of
+through the tar door (a second content path with its own guards to keep
+in step). *(2026-08-26)*
+
 ## The page offers no download; the terminal already knows how
 
 **Ruled (Human):** the Download button, its `/download` route, and the

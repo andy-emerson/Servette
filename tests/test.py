@@ -1239,6 +1239,11 @@ def run_dispatch_tests(s):
           and '<div class="cfg-group">Performance</div>' in s._UI_ADMIN_PAGE
           and "SECURITY_FIELDS" in s._UI_ADMIN_PAGE
           and "PERFORMANCE_FIELDS" in s._UI_ADMIN_PAGE)
+    check("...with the browser-cache pair among the performance fields",
+          "'cache_policy'" in s._UI_ADMIN_PAGE
+          and "'cache_max_age'" in s._UI_ADMIN_PAGE
+          and "choices: ['no-store', 'no-cache', 'max-age']"
+              in s._UI_ADMIN_PAGE)
     check("...with every site's facts on its own card and the server's on the server tab",
           "auth-switch" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
           and "attention" in s._UI_ADMIN_PAGE
@@ -7036,6 +7041,28 @@ def run_browser_tests(s, tmpdir):
                   page.locator("#cfg-email").input_value() == "half-typed@exam"
                   and page.evaluate(
                       "() => document.activeElement.id === 'cfg-email'"))
+
+            # The browser-cache pair on the Performance group: a select
+            # for the policy (what cannot be typed cannot need refusing),
+            # and the seconds field existing only while max-age makes the
+            # seconds mean anything.
+            check("...the browser-cache seconds appear only under max-age",
+                  page.evaluate("""() => {
+                    const pol = document.getElementById('cfg-cache_policy');
+                    const age = document.getElementById('cfg-cache_max_age');
+                    if (!pol || !age || pol.tagName !== 'SELECT') return false;
+                    const row = age.closest('.cfg-field');
+                    const was = pol.value;
+                    pol.value = 'no-store';
+                    pol.dispatchEvent(new Event('change'));
+                    const hiddenOff = row.classList.contains('hidden');
+                    pol.value = 'max-age';
+                    pol.dispatchEvent(new Event('change'));
+                    const shownOn = !row.classList.contains('hidden');
+                    pol.value = was;
+                    pol.dispatchEvent(new Event('change'));
+                    return hiddenOff && shownOn;
+                  }"""))
 
             browser.close()
 

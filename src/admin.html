@@ -800,10 +800,18 @@
   // <b>), never server text; the value is escaped because it is.
   const field = (key, label, value, opts) => {
     const o = opts || {};
+    // A field with stated choices renders as a select: what cannot be
+    // typed cannot need refusing.
+    const control = o.choices
+      ? `<select id="cfg-${key}">` +
+        o.choices.map((c) =>
+          `<option value="${c}"${String(value) === c ? ' selected' : ''}>` +
+          `${c}</option>`).join('') +
+        `</select>`
+      : `<input id="cfg-${key}" type="${o.type || 'text'}"` +
+        ` value="${escapeHtml(value)}">`;
     return `<div class="cfg-field">` +
-      `<label for="cfg-${key}">${label}</label>` +
-      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
-      ` value="${escapeHtml(value)}">` +
+      `<label for="cfg-${key}">${label}</label>` + control +
       (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
       `</div>`;
   };
@@ -2023,6 +2031,14 @@
   const PERFORMANCE_FIELDS = [
     ['cache_size_mb', 'File cache size (MB)',
      'Memory set aside to serve frequently requested files without re-reading the disk.'],
+    ['cache_policy', 'Browser cache',
+     'What a visitor keeps: no-store always downloads fresh, no-cache ' +
+     'keeps a copy but re-checks it every time (a quick ETag check), ' +
+     'max-age trusts the copy for the seconds below.',
+     { choices: ['no-store', 'no-cache', 'max-age'] }],
+    ['cache_max_age', 'Cache seconds',
+     'How long a browser trusts its copy without checking back. Applies ' +
+     'to max-age only, which is why this field appears with it.'],
   ];
   const HOST_FIELDS = SECURITY_FIELDS.concat(PERFORMANCE_FIELDS);
 
@@ -2093,13 +2109,26 @@
     // anywhere inside it.
     const focused = document.activeElement;
     if (focused && focused.closest && focused.closest('#cfg-host-fields')) return;
-    const one = ([k, l, h]) =>
-      field(k, l, ((cfgData || {}).host || {})[k], { hint: h });
+    const one = ([k, l, h, x]) =>
+      field(k, l, ((cfgData || {}).host || {})[k],
+            Object.assign({ hint: h }, x || {}));
     $('cfg-host-fields').innerHTML =
       '<div class="cfg-group">Security</div>' +
       SECURITY_FIELDS.map(one).join('') +
       '<div class="cfg-group">Performance</div>' +
       PERFORMANCE_FIELDS.map(one).join('') + swapField;
+    // The seconds only mean anything under max-age, so the field exists
+    // only while the select says so — the same only-while-relevant rule
+    // the login fields follow.
+    const pol = $('cfg-cache_policy');
+    const ageEl = $('cfg-cache_max_age');
+    if (pol && ageEl) {
+      const ageRow = ageEl.closest('.cfg-field');
+      const showAge = () =>
+        ageRow.classList.toggle('hidden', pol.value !== 'max-age');
+      pol.addEventListener('change', showAge);
+      showAge();
+    }
   }
 
   /* ── The service's lifecycle: start, restart, stop. The page runs the

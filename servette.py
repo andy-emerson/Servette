@@ -165,15 +165,20 @@ def _redirect_next(dst):
     return _canonical_source(dst.partition("?")[0])
 
 
-def _clean_redirects(raw):
-    """The site's redirect table, validated once at load so serving one is a
-    dict lookup and nothing else.
+def _clean_redirects(raw, strict=False):
+    """The site's redirect table, validated once so serving one is a dict
+    lookup and nothing else.
 
     A source is a site-absolute path; a target is another site-absolute path
-    or an absolute http(s) URL. Anything else is dropped with a log line
-    rather than raised: one bad entry in a hand-edited table must not take a
-    whole site down, and a redirect that quietly did something other than
-    what it said would be worse than one that does nothing.
+    or an absolute http(s) URL. What happens to anything else depends on the
+    door. As the write doors' filter (strict=False), a bad entry is dropped
+    with a log line and the caller turns an empty result into its own
+    refusal sentence. At the load door (strict=True), a bad entry refuses
+    the whole file — _ConfigInvalid, fatal at startup with the sentence
+    naming the rule, last good config kept on the live reload — per the
+    load-door principle: a rule silently dropped is a path the operator
+    wrote a redirect for answering 404, discovered by visitors far from
+    the edit.
 
     Two of the checks are load-bearing rather than tidy. A target is
     narrowed to path-or-http(s) because a redirect is an open door by
@@ -185,26 +190,32 @@ def _clean_redirects(raw):
     serve time — silently sending the visitor somewhere the operator did
     not write. An operator who wants a non-ASCII destination percent-encodes
     the path (or punycodes the host) themselves, which is ASCII and exact."""
+    def refuse(sentence):
+        # True = drop this entry; a strict caller never gets that far.
+        if strict:
+            raise _ConfigInvalid(f"servette.toml: redirects — {sentence}")
+        log.warning("redirect %s", sentence)
+        return True
+
     out = {}
     if not isinstance(raw, dict):
-        log.warning("redirects is not a table — ignoring it")
+        refuse("is not a table of \"/path\" = \"/target\" pairs")
         return out
     if len(raw) > _MAX_REDIRECTS:
-        log.warning("more than %d redirects — only the first %d are loaded",
-                    _MAX_REDIRECTS, _MAX_REDIRECTS)
+        refuse(f"table holds more than {_MAX_REDIRECTS} rules — only the "
+               f"first {_MAX_REDIRECTS} are loaded")
     for key, target in list(raw.items())[:_MAX_REDIRECTS]:
         src, dst = str(key).strip(), str(target).strip()
         if any(not (0x20 <= ord(c) <= 0x7E) for c in src + dst):
-            log.warning("redirect with a control or non-ASCII character in it — ignored")
+            refuse(f"{src[:80]!r} carries a control or non-ASCII character")
             continue
         if not src.startswith("/") or len(src) > _MAX_REDIRECT_CHARS:
-            log.warning("redirect source %r is not a site path — ignored", src[:80])
+            refuse(f"source {src[:80]!r} is not a site path")
             continue
         if len(dst) > _MAX_REDIRECT_CHARS or not (
                 dst.startswith("/") or dst.startswith("http://")
                 or dst.startswith("https://")):
-            log.warning("redirect target %r is not a path or http(s) URL — ignored",
-                        dst[:80])
+            refuse(f"target {dst[:80]!r} is not a path or http(s) URL")
             continue
         # One rule covers /old and /old/ and every percent-spelling of the
         # same path, on both sides of the lookup: the key is the canonical
@@ -213,10 +224,10 @@ def _clean_redirects(raw):
         # non-ASCII source.
         norm = _canonical_source(src)
         if norm in out:
-            log.warning("redirect %s is written twice (two spellings of one "
-                        "path) — the last one wins", norm)
+            refuse(f"{norm} is written twice (two spellings of one path) — "
+                   "the last one wins")
         if norm == _redirect_next(dst):
-            log.warning("redirect %s points at itself — ignored", norm)
+            refuse(f"{norm} points at itself")
             continue
         out[norm] = dst
     # A rule pointing at itself is refused above; a ring of rules
@@ -235,8 +246,7 @@ def _clean_redirects(raw):
         if cur is not None and cur in seen:
             doomed.add(src)
     for src in doomed:
-        log.warning("redirect %s is part of, or leads into, a ring of "
-                    "redirects — ignored", src)
+        refuse(f"{src} is part of, or leads into, a ring of redirects")
         del out[src]
     return out
 
@@ -277,14 +287,39 @@ class Site:
 
     def __init__(self, data=None):
         data = data or {}
-        self.domain         = data.get("domain",         "")
+        # The load-door principle: a value the write doors would refuse
+        # never takes effect. Every Site is built before Config._load
+        # mutates anything of its own, so a raise here refuses the file
+        # whole — fatal at startup with the sentence naming the field,
+        # last good config kept on the live reload.
+        for field in ("domain", "serve_dir", "cert_file", "key_file",
+                      "username", "password_hash", "password_salt"):
+            if field in data and not isinstance(data[field], str):
+                raise _ConfigInvalid(f"servette.toml: {field} must be text")
+        domain = data.get("domain", "")
+        if domain:
+            problem = _domain_problem(domain)
+            if problem:
+                raise _ConfigInvalid(f"servette.toml: domain — {problem}")
+        active = data.get("active", True)
+        if not isinstance(active, bool):
+            raise _ConfigInvalid("servette.toml: active must be true or false")
+        username = data.get("username", "")
+        if ":" in username:
+            # The same sentence the write doors refuse with: sign-in joins
+            # user:password and splits at the first colon, so this username
+            # could never match and locks every visitor out.
+            raise _ConfigInvalid("servette.toml: username — a username "
+                                 "cannot contain a colon (sign-in splits "
+                                 "user:password at the first one)")
+        self.domain         = domain
         # Deactivated sites keep their config and files but are invisible to
         # request routing — the pause between serving and deleting.
-        self.active         = bool(data.get("active",    True))
+        self.active         = active
         self.serve_dir      = data.get("serve_dir",      "site")
         self.cert_file      = data.get("cert_file",      "cert.pem")
         self.key_file       = data.get("key_file",       "key.pem")
-        self.username       = data.get("username",       "")
+        self.username       = username
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
         # Old path -> new path, validated once here so the request path is a
@@ -292,18 +327,18 @@ class Site:
         # content, and content is read at request time — which is the whole
         # reason this is a setting. Two tables, one per answer: redirects is
         # permanent (301), redirects_temporary is 302 — the ruled per-rule
-        # choice, default permanent. Validated together, so a ring hopping
-        # between the tables is still a ring and the rule cap covers their
-        # sum.
-        perm = _clean_redirects(data.get("redirects", {}))
-        temp = _clean_redirects(data.get("redirects_temporary", {}))
-        for src in set(perm) & set(temp):
-            # The temporary rule wins: a 301 handed out by mistake transfers
-            # the path's standing and is the harder one to take back.
-            log.warning("redirect %s is in both tables — the temporary rule "
-                        "wins", src)
-            del perm[src]
-        combined = _clean_redirects({**perm, **temp})
+        # choice, default permanent. Validated together and strictly: a bad
+        # rule, a source written twice or in both tables, or a ring hopping
+        # between them refuses the file, per the load-door principle.
+        perm = _clean_redirects(data.get("redirects", {}), strict=True)
+        temp = _clean_redirects(data.get("redirects_temporary", {}),
+                                strict=True)
+        both = set(perm) & set(temp)
+        if both:
+            raise _ConfigInvalid(f"servette.toml: redirects — "
+                                 f"{sorted(both)[0]} is in both tables; a "
+                                 "rule is permanent or temporary, not both")
+        combined = _clean_redirects({**perm, **temp}, strict=True)
         self.redirects      = {k: v for k, v in combined.items()
                                if k not in temp}
         self.redirects_temp = {k: v for k, v in combined.items() if k in temp}
@@ -312,10 +347,13 @@ class Site:
 
 # The invalid-config signal
 class _ConfigInvalid(Exception):
-    """servette.toml cannot be safely applied — unparseable TOML, or a
-    serve_dir that would publish Servette's own secrets. At startup this is
-    fatal (fail closed); on the per-request reload the previous configuration
-    stays in force — see reload_if_changed."""
+    """servette.toml cannot be safely applied: unparseable TOML, any value
+    the write doors would refuse (the load-door principle — valid or
+    refused, judged by the same shared validators `set` and the page run),
+    or a serve_dir that would publish Servette's own secrets. At startup
+    this is fatal (fail closed), with the message naming the field; on the
+    per-request reload the previous configuration stays in force — see
+    reload_if_changed."""
 
 
 class _ConfigUnreadable(_ConfigInvalid):
@@ -435,21 +473,34 @@ class Config:
                 raise _ConfigInvalid(
                     f"serve_dir {site.serve_dir!r} holds Servette's own config or TLS keys — "
                     "serving it would publish them")
-        self.sites = sites
+        # Host scalars: defaults first, then every key the file carries runs
+        # through the same shared validator the write doors use — one
+        # criteria set per key, whichever door the value came through (the
+        # load-door principle: a value `set` would refuse never takes
+        # effect; the whole file is refused with the sentence naming the
+        # key, fatally at startup, last good config on the live reload).
+        # Validated on a scratch object BEFORE any attribute of self
+        # changes, for the reload-path reason at the top of _load.
+        class _ScratchHost:
+            pass
+        scratch = _ScratchHost()
+        scratch.port, scratch.rate_limit, scratch.auth_rate_limit = 443, 120, 6
+        scratch.cache_policy, scratch.cache_max_age = "no-cache", 3600
+        scratch.cache_size_mb = 128
+        scratch.email = scratch.trusted_proxy = scratch.health_path = ""
+        scratch.tls_min_version, scratch.ciphers = "1.2", ""
+        scratch.csp                = "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'"
+        scratch.permissions_policy = "camera=(), microphone=(), usb=(), midi=(), serial=()"
+        for key in _SET_HOST_KEYS:
+            if key in data:
+                err = _set_host_value(scratch, key, str(data[key]))
+                if err:
+                    raise _ConfigInvalid(f"servette.toml: {key} — {err}")
 
-        self.port            = data.get("port",            443)
-        self.rate_limit      = data.get("rate_limit",      120)
-        self.auth_rate_limit = data.get("auth_rate_limit", 6)
-        self.cache_policy       = data.get("cache_policy",       "no-cache")
-        self.cache_max_age      = data.get("cache_max_age",      3600)
-        self.cache_size_mb      = data.get("cache_size_mb",      128)
-        self.email              = data.get("email",              "")
-        self.trusted_proxy      = data.get("trusted_proxy",      "")
-        self.health_path        = data.get("health_path",        "")
-        self.tls_min_version    = data.get("tls_min_version",    "1.2")
-        self.ciphers            = data.get("ciphers",            "")
-        self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
-        self.permissions_policy = data.get("permissions_policy", "camera=(), microphone=(), usb=(), midi=(), serial=()")
+        # Nothing below raises: adopt the validated whole.
+        self.sites = sites
+        for key in _SET_HOST_KEYS:
+            setattr(self, key, getattr(scratch, key))
 
         self.unreadable = unreadable
         if read_mtime is not None:
@@ -8981,11 +9032,9 @@ def _production_issues(running=None):
         # username with nothing stored to check locks every visitor out.
         if site.username and not site.password_hash:
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
-        # Every write surface refuses a colon, but a hand-edited config
-        # file loads one — and sign-in splits the credential at the first
-        # colon, so this locks every visitor out just as surely.
-        elif ":" in site.username:
-            issues.append(f"the username contains a colon{tag} — sign-in can never match it; run 'config' to change it")
+        # A colon username no longer needs a line here: the load door
+        # refuses it like every other door, so it cannot reach a running
+        # config from any direction.
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
                                    _cache_headroom_mb(config.cache_size_mb, running))
@@ -9236,19 +9285,17 @@ def _health_checks(service_active=None):
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored
-        # to check against — and the colon-username a hand-edited config
-        # file can load past the write surfaces' refusal: sign-in splits
-        # the credential at the first colon, so either locks every visitor
-        # out.
+        # to check against, which locks every visitor out. (A colon
+        # username used to be flagged here as the one defect a hand-edited
+        # file could load past the write surfaces; the load door now
+        # refuses it like every other door, so there is nothing left for
+        # this row to catch.)
         half_auth = bool(site.username) and not site.password_hash
-        bad_user  = ":" in site.username
         rows.append({"key": "password", "site": i,
-                     "ok": not (half_auth or bad_user),
-                     "blocking": half_auth or bad_user, "label": tag + "Access",
+                     "ok": not half_auth,
+                     "blocking": half_auth, "label": tag + "Access",
                      "detail": ("a username with no stored password — set one below, or make the site public"
                                 if half_auth
-                                else "the username contains a colon — sign-in can never match it; change it below"
-                                if bad_user
                                 else "private — visitors sign in" if site.username
                                 else "public — anyone can view it (the form below makes it private)")})
     return rows

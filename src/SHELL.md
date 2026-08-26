@@ -2296,11 +2296,9 @@ def _production_issues(running=None):
         # username with nothing stored to check locks every visitor out.
         if site.username and not site.password_hash:
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
-        # Every write surface refuses a colon, but a hand-edited config
-        # file loads one — and sign-in splits the credential at the first
-        # colon, so this locks every visitor out just as surely.
-        elif ":" in site.username:
-            issues.append(f"the username contains a colon{tag} — sign-in can never match it; run 'config' to change it")
+        # A colon username no longer needs a line here: the load door
+        # refuses it like every other door, so it cannot reach a running
+        # config from any direction.
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
                                    _cache_headroom_mb(config.cache_size_mb, running))
@@ -2566,19 +2564,17 @@ def _health_checks(service_active=None):
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored
-        # to check against — and the colon-username a hand-edited config
-        # file can load past the write surfaces' refusal: sign-in splits
-        # the credential at the first colon, so either locks every visitor
-        # out.
+        # to check against, which locks every visitor out. (A colon
+        # username used to be flagged here as the one defect a hand-edited
+        # file could load past the write surfaces; the load door now
+        # refuses it like every other door, so there is nothing left for
+        # this row to catch.)
         half_auth = bool(site.username) and not site.password_hash
-        bad_user  = ":" in site.username
         rows.append({"key": "password", "site": i,
-                     "ok": not (half_auth or bad_user),
-                     "blocking": half_auth or bad_user, "label": tag + "Access",
+                     "ok": not half_auth,
+                     "blocking": half_auth, "label": tag + "Access",
                      "detail": ("a username with no stored password — set one below, or make the site public"
                                 if half_auth
-                                else "the username contains a colon — sign-in can never match it; change it below"
-                                if bad_user
                                 else "private — visitors sign in" if site.username
                                 else "public — anyone can view it (the form below makes it private)")})
     return rows

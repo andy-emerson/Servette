@@ -402,6 +402,43 @@ serve_dir = "b"
         check("Secret-exposing serve_dir on reload keeps the previous configuration",
               [site.domain for site in c3.sites] == good_sites)
 
+        # The load-door principle: a scalar the write doors would refuse
+        # refuses the file — last good config on the live reload, and no
+        # attribute of the live config half-changes on the way to the raise.
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write('port = "abc"\nrate_limit = 200\n')
+        good_port, good_rl = c3.port, c3.rate_limit
+        c3._mtime = None
+        c3.reload_if_changed()
+        check("An invalid scalar on reload keeps the previous configuration whole",
+              [site.domain for site in c3.sites] == good_sites
+              and c3.port == good_port and c3.rate_limit == good_rl)
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write("rate_limit = 0\n")
+        c3._mtime = None
+        c3.reload_if_changed()
+        check("...a zero rate limit is refused the same way, never adopted",
+              c3.rate_limit == good_rl)
+        # And the raise carries the write door's own sentence, naming the key.
+        _load_err = ""
+        try:
+            with open(s.Config.CONFIG_FILE, "w") as f:
+                f.write('tls_min_version = "1.1"\n')
+            c3._mtime = None
+            c3._load()
+        except s._ConfigInvalid as e:
+            _load_err = str(e)
+        check("...and the refusal names the key with set's own sentence",
+              "tls_min_version" in _load_err and "1.2 or 1.3" in _load_err)
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write('[[site]]\nserve_dir = "x"\n'
+                    '[site.redirects]\n"/a" = "/b"\n"/b" = "/a"\n')
+        c3._mtime = None
+        c3.reload_if_changed()
+        check("A redirect ring in a hand-edited file keeps the previous "
+              "configuration — refused whole, not loaded minus the ring",
+              [site.domain for site in c3.sites] == good_sites)
+
         # At startup the same conditions are fatal — fail closed, matching the
         # shell's edit-time refusal of these exact values.
         raised = False
@@ -459,11 +496,15 @@ serve_dir = "b"
         # A value carrying control characters must survive save→load rather than
         # corrupt the file into something tomllib refuses (which would stop
         # Servette from starting on the next run).
+        # username, because it is the one field whose stated criteria leave
+        # the charset open (only the colon is refused) — email and the
+        # header values now refuse control characters at every door, the
+        # load door included, so they can no longer carry one to save().
         nasty = "a\x00b\tc\x1bd\ne\rf\x7fg"
-        c.email = nasty
+        c.sites[0].username = nasty
         c.save()
         check("A control-char value round-trips through save/load",
-              s.Config().email == nasty)
+              s.Config().sites[0].username == nasty)
         check("The saved file is valid TOML (reloaded without error)",
               "[[site]]" in open(s.Config.CONFIG_FILE).read())
     finally:
@@ -1574,18 +1615,16 @@ def run_dispatch_tests(s):
         check("...and the terminal lists that same half-state as the issue",
               any("locked out" in i for i in s._production_issues())
               and not any("no password" in i for i in s._production_issues()))
-        # Every write surface refuses a colon, but a hand-edited config
-        # file loads one — and that locks every visitor out just as
-        # surely, so both readouts must name it rather than reading
-        # private-and-healthy.
-        s.config.sites[0].username = "team:alpha"
-        s.config.sites[0].password_hash = "not-empty"
-        pw = [r for r in s._health_checks()
-              if r["key"] == "password" and r["site"] == 0][0]
-        check("A colon-username loaded from a hand-edited file is flagged, not healthy",
-              not pw["ok"] and "colon" in pw["detail"])
-        check("...and the terminal lists it too",
-              any("colon" in i for i in s._production_issues()))
+        # Every door refuses a colon username now, the load door included —
+        # a hand-edited file cannot carry one into a running config, so the
+        # health surface has nothing left to flag for it.
+        _colon_raised = False
+        try:
+            s.Site({"username": "team:alpha"})
+        except s._ConfigInvalid as e:
+            _colon_raised = "colon" in str(e)
+        check("A colon-username in a hand-edited file refuses the file",
+              _colon_raised)
         (s.config.sites[0].username, s.config.sites[0].password_hash) = saved_hc
         st, _ = ui_req("GET", "/status")
         check("GET /status without the code is refused", st == 403)
@@ -4519,16 +4558,35 @@ def run_server_tests(s, serve_dir):
         check("...and both survive a save/load round trip",
               _back.redirects == _rt.redirects
               and _back.redirects_temp == _rt.redirects_temp)
-        # Temporary wins the duplicate: a mistaken 301 transfers the path's
-        # standing and is the harder answer to take back.
-        _dup = s.Site({"redirects": {"/x": "/y"},
-                       "redirects_temporary": {"/x": "/z"}})
-        check("A source written in both tables goes temporary",
-              _dup.redirects == {} and _dup.redirects_temp == {"/x": "/z"})
-        _ring = s.Site({"redirects": {"/a": "/b"},
-                        "redirects_temporary": {"/b": "/a"}})
-        check("A ring that hops between the tables is refused whole",
-              _ring.redirects == {} and _ring.redirects_temp == {})
+        # The load door is strict (the load-door principle): a rule the
+        # write doors would refuse does not load minus the rule — it
+        # refuses the file, with the sentence naming what is wrong.
+        def _site_refuses(data, word):
+            try:
+                s.Site(data)
+            except s._ConfigInvalid as e:
+                return word in str(e)
+            return False
+        check("A source written in both tables refuses the file",
+              _site_refuses({"redirects": {"/x": "/y"},
+                             "redirects_temporary": {"/x": "/z"}},
+                            "both tables"))
+        check("A ring that hops between the tables refuses the file",
+              _site_refuses({"redirects": {"/a": "/b"},
+                             "redirects_temporary": {"/b": "/a"}}, "ring"))
+        check("A bad rule in a hand-edited table refuses the file, not the rule",
+              _site_refuses({"redirects": {"/x": "javascript:alert(1)"}},
+                            "not a path")
+              and _site_refuses({"redirects": {"/café": "/x"}}, "non-ASCII")
+              and _site_refuses({"redirects": "nonsense"}, "not a table"))
+        check("...while the write doors' filter still drops and reports",
+              s._clean_redirects({"/x": "javascript:alert(1)"}) == {})
+        check("A hand-edited domain is judged by the same syntax door",
+              _site_refuses({"domain": "https://example.com"}, "no scheme"))
+        check("...and active must be a real TOML boolean",
+              _site_refuses({"active": "yes"}, "true or false"))
+        check("...and a non-text field is named, not crashed on",
+              _site_refuses({"serve_dir": 5}, "must be text"))
         check("The table is capped",
               len(s._clean_redirects({f"/p{n}": "/q" for n in range(400)}))
               == s._MAX_REDIRECTS)

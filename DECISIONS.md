@@ -6,6 +6,57 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## No wrong answer is saved: a field states its criteria and refuses the rest
+
+**Ruled (Human, principle):** Servette never saves an entry that would break
+the system, and never repairs one on the operator's behalf. Every field —
+page and terminal alike — states what a valid entry looks like, or what
+invalidates one, and anything outside the stated criteria is refused with
+the sentence that names the problem, at every door that writes. Refusal
+beats encoding, refusal beats rounding, and refusal beats
+accepting-and-failing-later, because the failure then lands far from the
+typo that caused it.
+**Instances of the one principle:** the redirect ASCII refusal
+[below](#a-redirect-rule-is-printable-ascii-in-one-canonical-spelling-refusal-beats-encoding);
+the username colon rule; and the five doors the audit fixed when the
+principle was applied — the ACME email judged at the door instead of by the
+authority months later, cipher strings asked of OpenSSL before saving, the
+interactive limit prompts holding `set`'s positive floor, domain syntax
+judged before any network round trip, and the swap size refused rather than
+silently rounded up to 64 MB.
+**Scope:** the doors that write. A hand-edited `servette.toml` is read, not
+saved: its load door keeps the standing conventions — warn and drop one bad
+entry (redirects), or refuse the whole file where obeying it would be worse
+(a serve_dir over Servette's own secrets). What the load door should do
+with a hand-edited scalar the write doors would refuse is an open question
+this principle deliberately does not settle. *(2026-08-26)*
+
+## A redirect is permanent or temporary, per rule, and permanent by default
+
+**Ruled (Human):** each rule chooses its answer. Permanent — 301 — moves
+the old path's standing to the new address: browsers and search engines
+learn that the new address is the real one. Temporary — 302 — sends
+visitors on while the old path stays the site's real address, and nothing
+memorizes the new one. Permanent is the default on both surfaces; the page
+offers the choice in a select, the terminal as a third token
+(`redirect=/path,/target,temporary`), and temporary rules live in a sibling
+`[site.redirects_temporary]` table so one validator covers both — the cap
+counts the tables' sum, a ring hopping between them is still a ring, and a
+source written in both goes temporary, the softer answer to take back. Both
+statuses carry `Cache-Control: no-cache`, so a wrong rule stays fixable
+either way.
+**Supersedes** the always-301 clause of [redirects are a
+setting](#redirects-are-a-setting-not-a-file-in-the-site), which the Agent
+had recorded as "settled, not open" — a call that was not the Agent's to
+make: [#117](https://github.com/andy-emerson/Servette/issues/117)'s own
+sketch carried a per-rule permanent/temporary column, and the Human had
+deferred the decision. Re-put to the Human, the ruling is the sketch's:
+both statuses exist for a reason, and always-one means never the other.
+**Rejected:** always-301 with no-cache (the header fixes only the browser
+half of a wrong permanent answer — search engines still move the old
+path's standing, and hand it back slowly); always-302 (never carries
+standing to a path that really moved). *(2026-08-26)*
+
 ## A redirect rule is printable ASCII, in one canonical spelling; refusal beats encoding
 
 **Ruled (Human):** both sides of a redirect rule must be printable
@@ -306,15 +357,11 @@ up on every migration from those platforms, so the reason is recorded
 rather than re-argued.
 **Rejected:** the `_redirects` file (above); wildcards and splats for now
 (exact paths first, which is where these systems stay simple).
-**Settled, not open — the Agent raised this as a question it should not
-have:** the status is **301**, permanent, which is what the feature is
-for and what carries a link's standing to the new path. The hazard of a
-301 is that browsers cache it hard, and a wrong one outlives fixing it —
-but the response is sent `Cache-Control: no-cache`, which overrides that
-default, so a browser re-asks and a corrected rule takes effect. 302 buys
-nothing that the header has not already bought, and costs the thing the
-feature exists for.
-**Rejected:** 302 as a safer default (it is not safer; it is weaker).
+**Superseded on the status question** (2026-08-26): an always-301 clause
+recorded here by the Agent as "settled, not open" — against the Human's
+recorded deferral in #117, whose sketch carried a per-rule
+permanent/temporary column — is replaced by the Human's per-rule ruling
+[above](#a-redirect-is-permanent-or-temporary-per-rule-and-permanent-by-default).
 *(2026-08-24)*
 
 ## A preview is content over the tunnel, not a deployment

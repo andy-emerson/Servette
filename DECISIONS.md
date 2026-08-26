@@ -6,6 +6,49 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## Valid or refused; viable or reported — the load-door principle
+
+**Ruled (Human, principle):** a config value is judged twice, and the two
+judgments get different answers.
+**Validity** — does the value parse, and is it inside its stated domain? —
+is judged the same at every door, the load door included: a value the
+write doors would refuse never takes effect. At the load door, refusal
+means the *whole file* — fatal at cold start with the sentence naming the
+key, last good config kept on the live reload. Never dropped, never
+defaulted, never repaired: a config partially obeyed is a config the
+operator can no longer reason about.
+**Viability** — is this valid value's real-world circumstance sound? — is
+never a refusal. A folder the sandbox cannot write, DNS not pointing
+here, an expired certificate: the server runs and the health surface
+reports it, severity by consequence.
+**One exception:** a valid config that would breach the security posture
+(a serve_dir over Servette's own keys) is refused like an invalid one —
+secure-by-default is a floor, not a viability question.
+**What it settled, and reversed:** hand-edited scalars stop being adopted
+unvalidated (`port = "abc"` no longer crashes at the next bind; a zero
+rate limit no longer silently refuses all traffic; a wrong TLS floor is
+no longer silently repaired to 1.2) — every one now refuses with `set`'s
+own sentence, through the same shared validators, so the load door can
+never drift from the write doors. And the redirect warn-and-drop is
+**reversed, the Human correcting the Human's own earlier call**: a rule
+silently dropped is a path the operator wrote a redirect for answering
+404, discovered by visitors far from the edit — the
+accepting-and-failing-later shape the refusal principle exists to kill.
+The availability argument that justified dropping is answered by the
+reload half: a running site never goes down over a bad edit, because
+last-good stays live; the only moment a bad line stops anything is a
+cold start, when the operator who just edited is at the keyboard and a
+sentence naming the line is worth the most. The colon-username health
+row went with it, unreachable once no door can load one.
+**Cost accepted:** a box restarted months after a bad hand-edit refuses
+to start until the line is fixed — a loud stop at the operator's moment
+over a quiet wrongness discovered later.
+**Edge deliberately untouched:** an unknown key in the file is ignored,
+as ever — its value never takes effect, and the legacy migration keys
+make a strict allowlist brittle. **Reopen:** a legitimate config shape
+the shared validators cannot express — extend the validator, never
+special-case the load door. *(2026-08-26)*
+
 ## Containment is an implementation fact, observed where it breaks — not a guarantee
 
 **Ruled (Human, closing
@@ -205,11 +248,11 @@ interactive limit prompts holding `set`'s positive floor, domain syntax
 judged before any network round trip, and the swap size refused rather than
 silently rounded up to 64 MB.
 **Scope:** the doors that write. A hand-edited `servette.toml` is read, not
-saved: its load door keeps the standing conventions — warn and drop one bad
-entry (redirects), or refuse the whole file where obeying it would be worse
-(a serve_dir over Servette's own secrets). What the load door should do
-with a hand-edited scalar the write doors would refuse is an open question
-this principle deliberately does not settle. *(2026-08-26)*
+saved; what its load door does with a value the write doors would refuse
+was left open here and is settled by [the load-door
+principle](#valid-or-refused-viable-or-reported--the-load-door-principle)
+above: the same judgment, through the same shared validators, refusing the
+file whole. *(2026-08-26)*
 
 ## A redirect is permanent or temporary, per rule, and permanent by default
 

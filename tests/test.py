@@ -1213,6 +1213,16 @@ def run_dispatch_tests(s):
           "redir-save" in s._UI_ADMIN_PAGE
           and "redirect: from + ',' + to" in s._UI_ADMIN_PAGE
           and "_redirects" not in s._UI_ADMIN_PAGE)
+    # The ruled per-rule choice on the page: a Permanent/Temporary select
+    # whose first (default) option is Permanent, saved as the terminal's own
+    # third token, with temporary rules saying so on their row.
+    check("...offering the per-rule permanence choice, permanent first",
+          '<option value="">Permanent</option>' in s._UI_ADMIN_PAGE
+          and '<option value="temporary">Temporary</option>'
+              in s._UI_ADMIN_PAGE
+          and "(kind ? ',' + kind : '')" in s._UI_ADMIN_PAGE
+          and "redirects_temporary" in s._UI_ADMIN_PAGE
+          and "' (temporary)'" in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
           "outside" in s._UI_ADMIN_PAGE
           and "servette-check" in s._UI_ADMIN_PAGE)
@@ -4258,6 +4268,7 @@ def run_server_tests(s, serve_dir):
             return e.code, e.headers.get("Location")
 
     saved_redirects = s.config.sites[0].redirects
+    saved_redirects_temp = s.config.sites[0].redirects_temp
     try:
         s.config.sites[0].redirects = s._clean_redirects({
             "/old": "/index.html",
@@ -4272,7 +4283,8 @@ def run_server_tests(s, serve_dir):
         # A 301 is cacheable by default and browsers hold it hard — which is
         # what makes a wrong one frightening. Explicit no-cache overrides
         # that default, so the browser re-asks and a corrected rule takes
-        # effect. This header is why 301 needs no 302 escape hatch.
+        # effect. The header is recoverability; permanence-vs-temporary is
+        # the separate, ruled per-rule choice tested below.
         try:
             _r = _nofollow.open(BASE_URL + "/old")
             _cache = _r.headers.get("Cache-Control")
@@ -4302,6 +4314,23 @@ def run_server_tests(s, serve_dir):
               hop("/index.html")[0] == 200)
         check("A missing path with no rule is still a 404",
               hop("/nope-not-here")[0] == 404)
+
+        # The ruled per-rule choice (DECISIONS.md): a rule is permanent (301,
+        # the default — the old path's standing moves to the new address) or
+        # temporary (302 — the old path stays the real one), held in a
+        # sibling table so one validator covers both.
+        s.config.sites[0].redirects_temp = s._clean_redirects(
+            {"/away": "/index.html"})
+        st, loc = hop("/away")
+        check("A temporary rule answers 302 with the new location",
+              st == 302 and loc == "/index.html")
+        try:
+            _r = _nofollow.open(BASE_URL + "/away")
+            _tcache = _r.headers.get("Cache-Control")
+        except urllib.error.HTTPError as _e:
+            _tcache = _e.headers.get("Cache-Control")
+        check("...and is sent no-cache, exactly like the permanent one",
+              _tcache == "no-cache")
 
         # The invariant this feature could have broken: a redirect is a dict
         # lookup on the loaded config, never a read of anything on disk.
@@ -4380,6 +4409,31 @@ def run_server_tests(s, serve_dir):
               == {"/a": "/b", "/b": "/c"})
         check("A non-table redirects value is ignored, not fatal",
               s._clean_redirects("nonsense") == {})
+
+        # The two tables load and validate together: one source lives in one
+        # table, a ring hopping between them is still a ring, and what the
+        # config writes it reads back unchanged.
+        _rt = s.Site({"redirects": {"/p": "/q"},
+                      "redirects_temporary": {"/t": "/u"}})
+        check("A site loads both redirect tables",
+              _rt.redirects == {"/p": "/q"}
+              and _rt.redirects_temp == {"/t": "/u"})
+        import tomllib as _tomllib
+        _back = s.Site(_tomllib.loads("[[site]]\n"
+                                      + s._redirect_toml(_rt))["site"][0])
+        check("...and both survive a save/load round trip",
+              _back.redirects == _rt.redirects
+              and _back.redirects_temp == _rt.redirects_temp)
+        # Temporary wins the duplicate: a mistaken 301 transfers the path's
+        # standing and is the harder answer to take back.
+        _dup = s.Site({"redirects": {"/x": "/y"},
+                       "redirects_temporary": {"/x": "/z"}})
+        check("A source written in both tables goes temporary",
+              _dup.redirects == {} and _dup.redirects_temp == {"/x": "/z"})
+        _ring = s.Site({"redirects": {"/a": "/b"},
+                        "redirects_temporary": {"/b": "/a"}})
+        check("A ring that hops between the tables is refused whole",
+              _ring.redirects == {} and _ring.redirects_temp == {})
         check("The table is capped",
               len(s._clean_redirects({f"/p{n}": "/q" for n in range(400)}))
               == s._MAX_REDIRECTS)
@@ -4425,6 +4479,38 @@ def run_server_tests(s, serve_dir):
         check("...and a table at the cap refuses with the cap's own sentence",
               "full" in s._set_site_value(full_probe, "redirect", "/p-extra,/q")
               and len(full_probe.redirects) == s._MAX_REDIRECTS)
+        # The third token is the ruled per-rule choice: nothing means
+        # permanent, ',temporary' is the 302, and re-adding a source moves
+        # it between the tables rather than doubling it.
+        tprobe = s.Site()
+        check("set's third token lands a rule in the temporary table",
+              s._set_site_value(tprobe, "redirect", "/t1,/t2,temporary") == ""
+              and tprobe.redirects_temp == {"/t1": "/t2"}
+              and tprobe.redirects == {})
+        check("...an explicit ',permanent' is the default said out loud",
+              s._set_site_value(tprobe, "redirect", "/t3,/t4,permanent") == ""
+              and tprobe.redirects == {"/t3": "/t4"})
+        check("...re-adding a source moves it between the tables",
+              s._set_site_value(tprobe, "redirect", "/t1,/t2") == ""
+              and tprobe.redirects.get("/t1") == "/t2"
+              and "/t1" not in tprobe.redirects_temp)
+        check("...removal reaches whichever table holds the rule",
+              s._set_site_value(tprobe, "redirect", "/t5,/t6,temporary") == ""
+              and s._set_site_value(tprobe, "redirect", "/t5,") == ""
+              and tprobe.redirects_temp == {})
+        check("...a ring closed across the two tables is refused",
+              "closes a ring"
+              in s._set_site_value(tprobe, "redirect", "/t4,/t3,temporary"))
+        # The cap covers the tables' sum, or 200 permanent plus 200
+        # temporary would sail past what the load validator keeps.
+        check("...and the cap counts both tables together",
+              "full" in s._set_site_value(full_probe, "redirect",
+                                          "/p-extra,/q,temporary"))
+        # ',,temporary' is not a flag on an empty pair — the empty target is
+        # judged as written and refused, never misread as a removal.
+        check("...and a flag on an empty target is refused, not a removal",
+              s._set_site_value(tprobe, "redirect", "/t1,,temporary") != ""
+              and tprobe.redirects.get("/t1") == "/t2")
 
         # Removing through _apply_settings must validate against the site's
         # real table, not against a blank scratch object.
@@ -4439,6 +4525,7 @@ def run_server_tests(s, serve_dir):
             s.config.save()
     finally:
         s.config.sites[0].redirects = saved_redirects
+        s.config.sites[0].redirects_temp = saved_redirects_temp
         s.config.save()
 
     section("404 and custom 404.html")

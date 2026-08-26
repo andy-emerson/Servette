@@ -1290,11 +1290,15 @@
            `<input class="redir-from" type="text" placeholder="/talk"></div>` +
            `<div class="cfg-field"><label>Sends visitors to</label>` +
            `<input class="redir-to" type="text" placeholder="/2026/keynote"></div>` +
+           `<div class="cfg-field"><label>Answered as</label>` +
+           `<select class="redir-kind"><option value="">Permanent</option>` +
+           `<option value="temporary">Temporary</option></select></div>` +
            `<p class="cfg-hint">Any path on this site: one that moved, a short ` +
            `link worth remembering, a name you want to keep working. It can ` +
-           `point at another path here or at a full https:// address. Visitors ` +
-           `are sent on with a <b>permanent</b> redirect, which browsers ` +
-           `remember — so a wrong one outlives fixing it here.</p>` +
+           `point at another path here or at a full https:// address. ` +
+           `<b>Permanent</b> tells browsers and search engines the new address ` +
+           `is the real one now; <b>temporary</b> sends visitors on while the ` +
+           `old path stays the real address.</p>` +
            `<div class="btn-row" style="margin-top:0.75rem">` +
            `<button class="action redir-save" type="button">Add redirect</button>` +
            `<button class="action redir-cancel" type="button">Cancel</button>` +
@@ -1743,13 +1747,18 @@
        refuses with the same sentence. ── */
 
     const renderRedirects = () => {
+      // Two tables, one list: permanent rules answer 301, temporary ones
+      // 302, and a row says which only when it is the odd one out.
       const table = siteData.redirects || {};
-      const keys = Object.keys(table).sort();
+      const temp  = siteData.redirects_temporary || {};
+      const keys = Object.keys(table).concat(Object.keys(temp)).sort();
       q('.redir-state').textContent = keys.length
         ? keys.length + (keys.length === 1 ? ' rule' : ' rules') : 'none';
       q('.redirects').innerHTML = keys.map((k) =>
         row(escapeHtml(k),
-            `→ ${escapeHtml(table[k])} <button class="action tiny redir-del" ` +
+            `→ ${escapeHtml(k in table ? table[k] : temp[k])}` +
+            `${k in temp ? ' (temporary)' : ''}` +
+            ` <button class="action tiny redir-del" ` +
             `type="button" data-k="${escapeHtml(k)}">Remove</button>`)).join('');
       for (const b of q('.redirects').querySelectorAll('.redir-del'))
         b.addEventListener('click', () => {
@@ -1768,6 +1777,7 @@
     q('.redir-save').addEventListener('click', () => {
       const from = q('.redir-from').value.trim();
       const to   = q('.redir-to').value.trim();
+      const kind = q('.redir-kind').value;
       clearError(errEl);
       if (!from || !to)
         return errAt(q('.redir-form'),
@@ -1778,7 +1788,10 @@
       if (from.includes(','))
         return errAt(q('.redir-form'), 'A path containing a comma has to be set by ' +
                      'editing servette.toml — the comma separates the pair here.');
-      saveSettings({ redirect: from + ',' + to }, siteIndex(), badge, errEl);
+      // The terminal's own third token: nothing for the permanent default,
+      // ',temporary' for a 302.
+      saveSettings({ redirect: from + ',' + to + (kind ? ',' + kind : '') },
+                   siteIndex(), badge, errEl);
     });
 
     /* ── The site's facts and the controls that change them. ── */

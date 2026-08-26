@@ -242,21 +242,29 @@ def _clean_redirects(raw):
 
 
 def _redirect_toml(site):
-    """The site's redirect table as TOML, or nothing at all when it is empty.
+    """The site's redirect tables as TOML, or nothing at all when both are
+    empty.
 
     Written LAST inside each [[site]] block, because a TOML sub-table
     swallows every key that follows it: a scalar written after
     [site.redirects] would be read back as part of the table, not as a
     field of the site."""
-    if not site.redirects:
-        return ""
     def q(value):
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    lines = "\n".join(f"{q(src)} = {q(dst)}"
-                      for src, dst in sorted(site.redirects.items()))
-    return ("\n# A path on this site = where a visitor asking for it is sent.\n"
-            "# Answered with a 301, before any file is looked for.\n"
-            "[site.redirects]\n" + lines + "\n")
+    def block(header, comment, table):
+        if not table:
+            return ""
+        lines = "\n".join(f"{q(src)} = {q(dst)}"
+                          for src, dst in sorted(table.items()))
+        return "\n" + comment + f"[{header}]\n" + lines + "\n"
+    return (block("site.redirects",
+                  "# A path on this site = where a visitor asking for it is sent.\n"
+                  "# Answered with a permanent 301, before any file is looked for.\n",
+                  site.redirects)
+            + block("site.redirects_temporary",
+                    "# The same pairs, answered with a temporary 302: the old path\n"
+                    "# stays the site's real address, nothing memorizes the new one.\n",
+                    site.redirects_temp))
 
 
 class Site:
@@ -282,8 +290,23 @@ class Site:
         # Old path -> new path, validated once here so the request path is a
         # dict lookup and nothing more. A file in the site folder would be
         # content, and content is read at request time — which is the whole
-        # reason this is a setting.
-        self.redirects      = _clean_redirects(data.get("redirects", {}))
+        # reason this is a setting. Two tables, one per answer: redirects is
+        # permanent (301), redirects_temporary is 302 — the ruled per-rule
+        # choice, default permanent. Validated together, so a ring hopping
+        # between the tables is still a ring and the rule cap covers their
+        # sum.
+        perm = _clean_redirects(data.get("redirects", {}))
+        temp = _clean_redirects(data.get("redirects_temporary", {}))
+        for src in set(perm) & set(temp):
+            # The temporary rule wins: a 301 handed out by mistake transfers
+            # the path's standing and is the harder one to take back.
+            log.warning("redirect %s is in both tables — the temporary rule "
+                        "wins", src)
+            del perm[src]
+        combined = _clean_redirects({**perm, **temp})
+        self.redirects      = {k: v for k, v in combined.items()
+                               if k not in temp}
+        self.redirects_temp = {k: v for k, v in combined.items() if k in temp}
         self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
@@ -1968,19 +1991,26 @@ def _handle_request(method, url_path, headers, raw_ip):
     # (DECISIONS.md, "Redirects are a setting, not a file in the site").
     # Query strings ride along: a redirect names a path, and dropping the
     # query would silently break every campaign link pointed at the old one.
-    if site.redirects:
+    if site.redirects or site.redirects_temp:
         bare, sep, query = url_path.partition("?")
-        # Match the canonical spelling the table's keys are stored in: a
+        # Match the canonical spelling the tables' keys are stored in: a
         # source like '/my page' arrives as '/my%20page', and a rule on
         # '/old' must also catch an encoded '/%6fld' that resolves to the
         # same file — otherwise the redirect silently fails to fire, or is
         # skipped by anyone who percent-encodes a letter of the path.
-        target = site.redirects.get(_canonical_source(bare))
+        key = _canonical_source(bare)
+        # 301 for the permanent table, 302 for the temporary one: permanent
+        # carries the old path's standing to the new address, temporary
+        # keeps the old path the real one. Both no-cache, so a corrected
+        # rule reaches a browser that already saw the wrong answer.
+        target, status = site.redirects.get(key), 301
+        if target is None:
+            target, status = site.redirects_temp.get(key), 302
         if target:
             if sep and "?" not in target:
                 target += sep + query
-            log.info("301 %s to %s", log_path, ip)
-            return resp(301, [
+            log.info("%d %s to %s", status, log_path, ip)
+            return resp(status, [
                 (b"location",       target.encode("ascii", "ignore")),
                 (b"content-length", b"0"),
                 (b"cache-control",  b"no-cache"),
@@ -7073,11 +7103,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
            `<input class="redir-from" type="text" placeholder="/talk"></div>` +
            `<div class="cfg-field"><label>Sends visitors to</label>` +
            `<input class="redir-to" type="text" placeholder="/2026/keynote"></div>` +
+           `<div class="cfg-field"><label>Answered as</label>` +
+           `<select class="redir-kind"><option value="">Permanent</option>` +
+           `<option value="temporary">Temporary</option></select></div>` +
            `<p class="cfg-hint">Any path on this site: one that moved, a short ` +
            `link worth remembering, a name you want to keep working. It can ` +
-           `point at another path here or at a full https:// address. Visitors ` +
-           `are sent on with a <b>permanent</b> redirect, which browsers ` +
-           `remember — so a wrong one outlives fixing it here.</p>` +
+           `point at another path here or at a full https:// address. ` +
+           `<b>Permanent</b> tells browsers and search engines the new address ` +
+           `is the real one now; <b>temporary</b> sends visitors on while the ` +
+           `old path stays the real address.</p>` +
            `<div class="btn-row" style="margin-top:0.75rem">` +
            `<button class="action redir-save" type="button">Add redirect</button>` +
            `<button class="action redir-cancel" type="button">Cancel</button>` +
@@ -7526,13 +7560,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
        refuses with the same sentence. ── */
 
     const renderRedirects = () => {
+      // Two tables, one list: permanent rules answer 301, temporary ones
+      // 302, and a row says which only when it is the odd one out.
       const table = siteData.redirects || {};
-      const keys = Object.keys(table).sort();
+      const temp  = siteData.redirects_temporary || {};
+      const keys = Object.keys(table).concat(Object.keys(temp)).sort();
       q('.redir-state').textContent = keys.length
         ? keys.length + (keys.length === 1 ? ' rule' : ' rules') : 'none';
       q('.redirects').innerHTML = keys.map((k) =>
         row(escapeHtml(k),
-            `→ ${escapeHtml(table[k])} <button class="action tiny redir-del" ` +
+            `→ ${escapeHtml(k in table ? table[k] : temp[k])}` +
+            `${k in temp ? ' (temporary)' : ''}` +
+            ` <button class="action tiny redir-del" ` +
             `type="button" data-k="${escapeHtml(k)}">Remove</button>`)).join('');
       for (const b of q('.redirects').querySelectorAll('.redir-del'))
         b.addEventListener('click', () => {
@@ -7551,6 +7590,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     q('.redir-save').addEventListener('click', () => {
       const from = q('.redir-from').value.trim();
       const to   = q('.redir-to').value.trim();
+      const kind = q('.redir-kind').value;
       clearError(errEl);
       if (!from || !to)
         return errAt(q('.redir-form'),
@@ -7561,7 +7601,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       if (from.includes(','))
         return errAt(q('.redir-form'), 'A path containing a comma has to be set by ' +
                      'editing servette.toml — the comma separates the pair here.');
-      saveSettings({ redirect: from + ',' + to }, siteIndex(), badge, errEl);
+      // The terminal's own third token: nothing for the permanent default,
+      // ',temporary' for a 302.
+      saveSettings({ redirect: from + ',' + to + (kind ? ',' + kind : '') },
+                   siteIndex(), badge, errEl);
     });
 
     /* ── The site's facts and the controls that change them. ── */
@@ -8271,6 +8314,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                            "active": s.active,
                            "username": s.username,
                            "redirects": s.redirects,
+                           "redirects_temporary": s.redirects_temp,
                            "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
@@ -9320,44 +9364,63 @@ def _set_site_value(target, key, value):
             target.password_hash = ""
             target.password_salt = ""
     elif key == "redirect":
-        # One pair per token: 'redirect=/path,/target' adds or replaces,
-        # 'redirect=/path,' removes. The table is a mapping and `set` speaks
-        # in scalars, so the comma is where the two grammars meet.
-        # Validation is _clean_redirects — the same function the config load
-        # runs, so a redirect the file would refuse the command refuses too.
-        src, comma, dst = value.partition(",")
+        # One rule per token: 'redirect=/path,/target' adds or replaces a
+        # permanent (301) rule, a trailing ',temporary' makes it a 302, and
+        # 'redirect=/path,' removes the rule from whichever table holds it.
+        # The tables are mappings and `set` speaks in scalars, so commas are
+        # where the two grammars meet — which prices a target literally
+        # ending in ',temporary' out of this grammar (servette.toml still
+        # spells it). Validation is _clean_redirects — the same function the
+        # config load runs, so a redirect the file would refuse the command
+        # refuses too.
+        src, comma, rest = value.partition(",")
         if not comma:
             return ("a redirect is a pair: redirect=/path,/where-it-goes "
-                    "(or /path, to remove)")
-        src, dst = src.strip(), dst.strip()
-        table = dict(target.redirects)
+                    "(or /path, to remove; add ,temporary for a 302)")
+        head, c2, tail = rest.rpartition(",")
+        temp = False
+        if c2 and head and tail.strip().lower() in ("temporary", "permanent"):
+            temp, rest = tail.strip().lower() == "temporary", head
+        src, dst = src.strip(), rest.strip()
+        perm_table = dict(target.redirects)
+        temp_table = dict(target.redirects_temp)
         if not dst:
-            # The canonical spelling, because that is what the table's keys
+            # The canonical spelling, because that is what the tables' keys
             # are stored in — the same rule the add path and the lookup
             # follow, so the page can hand back a stored key verbatim.
-            if not table.pop(_canonical_source(src), None):
+            norm = _canonical_source(src)
+            if not (perm_table.pop(norm, None) or temp_table.pop(norm, None)):
                 return f"no redirect from {src}"
         else:
             checked = _clean_redirects({src: dst})
             if not checked:
                 return ("a redirect goes from a site path to a site path or an "
                         "http(s) URL, and may not point at itself")
-            table.update(checked)
-            # Two refusals the pair only earns in company. The cap first:
-            # past it, the load-time validator would truncate — and its
-            # shrinkage must not be misread as a ring below.
-            if len(table) > _MAX_REDIRECTS:
+            # Replacing a rule replaces its permanence with it: one source
+            # lives in exactly one table.
+            norm = next(iter(checked))
+            perm_table.pop(norm, None)
+            temp_table.pop(norm, None)
+            (temp_table if temp else perm_table).update(checked)
+            # Two refusals the pair only earns in company. The cap first —
+            # it covers the two tables' sum: past it, the load-time
+            # validator would truncate, and its shrinkage must not be
+            # misread as a ring below.
+            if len(perm_table) + len(temp_table) > _MAX_REDIRECTS:
                 return (f"the redirect table is full ({_MAX_REDIRECTS} rules) "
                         "— remove one first")
-            # And the ring: each pair is valid alone (/a→/b saved earlier,
-            # /b→/a now), and the load-time validator would silently drop
-            # the ring on the next reload. Judged here instead, so the
-            # answer is a refusal now rather than a rule that vanishes
-            # later.
-            if len(_clean_redirects(table)) != len(table):
+            # And the ring, judged over both tables at once — a 302 hop
+            # bounces a browser exactly as a 301 does. Each pair is valid
+            # alone (/a→/b saved earlier, /b→/a now), and the load-time
+            # validator would silently drop the ring on the next reload.
+            # Judged here instead, so the answer is a refusal now rather
+            # than a rule that vanishes later.
+            merged = {**perm_table, **temp_table}
+            if len(_clean_redirects(merged)) != len(merged):
                 return ("that redirect closes a ring — the chain of rules "
                         "would send a visitor in a circle")
-        target.redirects = table
+        target.redirects      = perm_table
+        target.redirects_temp = temp_table
     elif key == "active":
         # The pause between serving and deleting: a deactivated site keeps
         # its config and files but is invisible to request routing.
@@ -9379,7 +9442,9 @@ def _set_usage():
     print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
     print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
     print("  A redirect is a pair: redirect=/path,/where-it-goes — and")
-    print("  redirect=/path, (nothing after the comma) removes it.")
+    print("  redirect=/path, (nothing after the comma) removes it. A third")
+    print("  token, redirect=/path,/target,temporary, answers a temporary")
+    print("  302 instead of the permanent 301.")
 
 
 # set
@@ -9398,7 +9463,8 @@ def _apply_settings(site, pairs):
     # overwritten — but the redirect table is edited rather than replaced,
     # so validating a removal against an empty table would refuse a
     # redirect that is really there.
-    scratch_site.redirects = dict(site.redirects)
+    scratch_site.redirects      = dict(site.redirects)
+    scratch_site.redirects_temp = dict(site.redirects_temp)
     for key, value in pairs:
         if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
             return f"unknown setting: {key}"

@@ -6,6 +6,40 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## Containment is an implementation fact, observed where it breaks — not a guarantee
+
+**Ruled (Human, closing
+[#123](https://github.com/andy-emerson/Servette/issues/123)):** a
+serve_dir outside the data directory is reported, never refused. The
+invariant that every site folder sits under `BASE_DIR` holds because
+Servette assigns every folder (`_invent_site_dir`); the one way out is a
+hand-edited `servette.toml`, and that case is observed at the edge where
+its consequence lives: the site serves from anywhere — only the systemd
+sandbox, granting writes under `BASE_DIR` alone, makes publishing fail
+there, working in a manual run and dying under the service. So the site
+card carries a blocking Folder row and `status` a readiness line when the
+unit exists; a session server, with no sandbox, has no trap to name; and
+`enable` — the moment the sandbox comes into being — says the note for
+any site serving outside. Severity by consequence throughout: the config
+is *valid*, its circumstances are the problem, which is what separates
+this from the secrets guard (fatal: a config that would serve the TLS
+keys must not run at all).
+**Rejected:** refusing at load like the secrets guard (borrows fatal
+severity without its stakes — a working box would stop starting after an
+upgrade over a publishing defect); repairing on load (forbidden outright
+by the refusal principle: it would silently swap what is being served);
+supporting outside paths properly (reopens the folder ruling, and
+generating `ReadWritePaths` from config would let a hand-edit to a 0640
+file widen the systemd sandbox); leaving it unguarded (the
+environment-dependent silent failure is the #98 class this project
+exists to kill). **Reopen (option E):** if the row proves insufficient in
+practice, replace inference with evidence — a privilege-dropped write
+probe per site, the `_verify_runtime` method at the publish boundary.
+**Closed with it:** the two docstrings that claimed containment was
+required or that the atomic swap needed it — staging and every kept
+version are serve_dir's siblings, on its filesystem wherever it lives.
+*(#123, 2026-08-26)*
+
 ## The staging place is a documented convention, not a mechanism
 
 **Ruled (Human):** where site folders wait to be published is a

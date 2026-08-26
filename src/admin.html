@@ -280,9 +280,8 @@
     }
     .rows b { color: var(--text); font-weight: 500; }
     .rows .ok { color: var(--brand); }
-    /* Not scoped to .rows: the running dot moved onto the status switch-row
-       when the service controls joined it, and a `.rows .dot` rule stopped
-       matching — the dot was still in the markup and simply invisible. */
+    /* Not scoped to .rows: the running dot sits on the status switch-row,
+       outside any .rows block — a scoped rule silently never matches. */
     .dot {
       display: inline-block;
       width: 7px;
@@ -303,9 +302,8 @@
     .hint b { color: var(--text); font-weight: 500; }
     .warn  { color: var(--amber); }
     .fault { color: var(--red); }
-    /* Not a fault at all — a change typed and not yet saved. It used to
-       borrow .warn, which made an unsaved intention look like something
-       broken. */
+    /* Not a fault at all — a change typed and not yet saved. It must not
+       borrow .warn: an unsaved intention is not something broken. */
     .pending { color: var(--muted); font-style: italic; }
     .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
 
@@ -1206,7 +1204,7 @@
 
       // ── What this site IS, at the top: its state, the address it
       // answers at, and the three things that decide both. What you DO to
-      // it — publish, preview, download, redirect — follows underneath.
+      // it — publish, preview, restore, redirect — follows underneath.
       : (`<div class="rows info"></div>` +
 
          `<div class="switch-row"><span class="k">Domain</span>` +
@@ -1324,13 +1322,11 @@
           // beside it is the one publishing writes into, which is why they
           // are separate elements: overwriting the first would erase a
           // standing fault the moment a folder was read.
-          // The pill mirrors the Status line exactly — the count when
-          // anything needs attention, the green all-clear when nothing
-          // does — so a folded healthy card says it is well rather than
-          // saying nothing. Emitted on every card: a fault that arrives
-          // client-side — an unfinished login on a card built healthy —
-          // has no rebuild to emit a pill for it, and renderAttention can
-          // only fill a pill that exists.
+          // Emitted on every card (the mirror rule itself lives in
+          // renderAttention): a fault that arrives client-side — an
+          // unfinished login on a card built healthy — has no rebuild to
+          // emit a pill for it, and renderAttention can only fill a pill
+          // that exists.
           `<span class="badge ${!siteNeeds.length ? 'badge-green'
              : siteNeeds.some((c) => c.blocking) ? 'badge-red'
              : 'badge-warn'} needs" title="${escapeHtml(
@@ -1936,9 +1932,8 @@
 
     q('.auth-switch').addEventListener('change', (e) => {
       // A refusal describes the form as it stood when Save was pressed.
-      // Move the switch and it is about a form that no longer exists, so it
-      // goes with the state that produced it — it used to sit there in red
-      // through every subsequent flip.
+      // Move the switch and it is about a form that no longer exists, so
+      // it goes with the state that produced it.
       clearError(errEl);
       authDesired = e.target.checked;
       renderInfo();
@@ -2010,9 +2005,11 @@
      What the box is doing, and how it is set. The settings forms run over
      the same validators the `set` command runs, so a value the terminal
      refuses the page refuses with the same sentence. Deliberately absent
-     (the terminal keeps them): port and trusted proxy (behind-a-balancer
-     deployments) and every lifecycle verb. The domain is not a form either
-     — naming a site belongs on that site's card. ══ */
+     from this form (the terminal keeps them): port, trusted proxy, and the
+     health path (behind-a-balancer deployments), the TLS knobs and the two
+     header strings — and installation (enable/disable). The lifecycle
+     verbs live on the Status card above, not in this form; the domain is
+     not a form either — naming a site belongs on that site's card. ══ */
 
   // Two families in one card, each under its own label: what defends the
   // server, and what tunes it. Cache size is a performance knob and must

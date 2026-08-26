@@ -15,7 +15,8 @@ and essential security headers. Run it:
 Architecture:
     Server              — config, rate limiting, file cache, the request handler, and the HTTP servers
     System              — server lifecycle, certificate management, and service management
-    Shell               — the interactive terminal interface
+    Shell               — the operator's side: the loopback admin page, content
+                          publishing, the settings doors, and the terminal shell
 """
 
 __version__ = "0.26.234"
@@ -174,11 +175,9 @@ def _clean_redirects(raw, strict=False):
     door. As the write doors' filter (strict=False), a bad entry is dropped
     with a log line and the caller turns an empty result into its own
     refusal sentence. At the load door (strict=True), a bad entry refuses
-    the whole file — _ConfigInvalid, fatal at startup with the sentence
-    naming the rule, last good config kept on the live reload — per the
-    load-door principle: a rule silently dropped is a path the operator
-    wrote a redirect for answering 404, discovered by visitors far from
-    the edit.
+    the whole file (the load-door principle — see _ConfigInvalid): a rule
+    silently dropped is a path the operator wrote a redirect for answering
+    404, discovered by visitors far from the edit.
 
     Two of the checks are load-bearing rather than tidy. A target is
     narrowed to path-or-http(s) because a redirect is an open door by
@@ -296,11 +295,10 @@ class Site:
 
     def __init__(self, data=None):
         data = data or {}
-        # The load-door principle: a value the write doors would refuse
-        # never takes effect. Every Site is built before Config._load
-        # mutates anything of its own, so a raise here refuses the file
-        # whole — fatal at startup with the sentence naming the field,
-        # last good config kept on the live reload.
+        # Site fields are judged here, at the load door (the load-door
+        # principle — see _ConfigInvalid). Every Site is built before
+        # Config._load mutates anything of its own, so a raise here
+        # refuses the file whole.
         for field in ("domain", "serve_dir", "cert_file", "key_file",
                       "username", "password_hash", "password_salt"):
             if field in data and (not isinstance(data[field], str) or any(
@@ -337,14 +335,11 @@ class Site:
         self.username       = username
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
-        # Old path -> new path, validated once here so the request path is a
-        # dict lookup and nothing more. A file in the site folder would be
-        # content, and content is read at request time — which is the whole
-        # reason this is a setting. Two tables, one per answer: redirects is
-        # permanent (301), redirects_temporary is 302 — the ruled per-rule
-        # choice, default permanent. Validated together and strictly: a bad
-        # rule, a source written twice or in both tables, or a ring hopping
-        # between them refuses the file, per the load-door principle.
+        # Two tables, one per answer: redirects → 301, redirects_temporary
+        # → 302 (the ruled per-rule choice, default permanent). Validated
+        # strictly and together — criteria in _clean_redirects, principle
+        # in _ConfigInvalid: a bad rule, a source written twice or in both
+        # tables, or a ring hopping between them refuses the file.
         perm = _clean_redirects(data.get("redirects", {}), strict=True)
         temp = _clean_redirects(data.get("redirects_temporary", {}),
                                 strict=True)
@@ -498,11 +493,9 @@ class Config:
         # Host scalars: defaults first, then every key the file carries runs
         # through the same shared validator the write doors use — one
         # criteria set per key, whichever door the value came through (the
-        # load-door principle: a value `set` would refuse never takes
-        # effect; the whole file is refused with the sentence naming the
-        # key, fatally at startup, last good config on the live reload).
-        # Validated on a scratch object BEFORE any attribute of self
-        # changes, for the reload-path reason at the top of _load.
+        # load-door principle — see _ConfigInvalid). Validated on a scratch
+        # object BEFORE any attribute of self changes, for the reload-path
+        # reason at the top of _load.
         class _ScratchHost:
             pass
         scratch = _ScratchHost()
@@ -632,7 +625,7 @@ password_salt = {s(site.password_salt)}
 #
 # Host-level settings below apply to every site on this box. Each [[site]]
 # block below is one hosted domain — its own folder, certificate, auth, and
-# publish channel.
+# redirects.
 
 port = {self.port}
 
@@ -1745,9 +1738,8 @@ _CONNECTION_PAGE = """<!DOCTYPE html>
   const seen = (v) => v || '(absent)';
 
   // Each row is a finding in the reader's language, with the evidence that
-  // earned it underneath. The requests are the same ones as ever; what
-  // changed is that the report leads with what they mean, and several
-  // probes that answer one question now share one row.
+  // earned it underneath; several probes that answer one question share
+  // one row.
   const checks = [
     { name: 'Encrypted', run: async () => {
         const r = await fetch(here, { cache: 'no-store' });
@@ -2046,8 +2038,8 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
 
-    # Version discovery: what this box is running — the embedded error page
-    # reads this to show the served version. Deliberately
+    # Version discovery: what this box is running, for remote tooling that
+    # holds the site's password — no shipped page consumes it. Deliberately
     # reports only what THIS box knows; "latest available" is the package
     # index's business, not Servette's. Host-level (one process, one version).
     #
@@ -2136,19 +2128,13 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
-        # Every server needs an error page, and a bare "Not found." spends a
-        # whole response telling the reader only that they were wrong. This one
-        # leads with the path, says the server is up and answered, and links
-        # the connection test on its reserved path above — the split that
-        # keeps this a real 404 while the diagnosis survives an operator's
-        # own 404.html, which wins this role by simply existing.
-        #
-        # It also covers a site's own root while nothing is published there: no
-        # index.html means the root is itself a miss, so the domain reports on
-        # itself instead of answering with ten bytes of text.
-        #
-        # The response keeps the caching contract (ETag, Cache-Control, 304),
-        # with any positive lifetime downgraded below.
+        # The miss body is the embedded diagnostic page (its own rationale
+        # lives in src/404.html's header) unless the operator's 404.html
+        # exists, which wins this role by simply existing. Covers a site's
+        # own root while nothing is published there — no index.html means
+        # the root is itself a miss. The response keeps the caching
+        # contract (ETag, Cache-Control, 304), with any positive lifetime
+        # downgraded below.
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
         if not os.path.isfile(custom_404):
@@ -2323,6 +2309,9 @@ def _build_ssl_context(cert_path, key_path):
     override, ALPN pinned to HTTP/1.1. Raises if the cert or key is unreadable, so
     startup can fail closed rather than serve nothing."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # .get, belt-and-braces: every door validates tls_min_version to
+    # {1.2, 1.3}, so the default fires only on a code bug — which then
+    # fails SAFE at 1.2 rather than crashing the serve path.
     ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
     if config.ciphers:
         ctx.set_ciphers(config.ciphers)
@@ -2794,11 +2783,9 @@ def _watch_server(poll=2, grace=5):
     Under --serve nothing ever restarts the server in-process — a certificate
     reload deliberately stops it and lets systemd relaunch — so every dead
     thread this sees ends in an exit, and the grace only sets how long the
-    site stays down before the restart begins. It was 30 seconds, justified
-    by an in-process reload window that cannot occur in this mode: every
-    certificate rotation cost ~35 seconds of downtime where stop, exit, and
-    RestartSec add up to well under ten. The small grace that remains
-    absorbs stop_server's own teardown ordering, nothing more."""
+    site stays down before the restart begins — every second of it is
+    downtime a certificate rotation pays. Keep it small: it exists to
+    absorb stop_server's own teardown ordering, nothing more."""
     deadline = None
     while True:
         t = _https_thread
@@ -3444,9 +3431,9 @@ def _servette_gid():
 
 def _serve_dir_readable(path):
     """Whether the service could plausibly read this serve_dir: world r+x, or
-    group r+x where the group actually is servette. The old check demanded
-    world bits and told the operator to add them with a+rX — advice that undid
-    the deliberate group-only grant _operator_chown_plan had just applied."""
+    group r+x where the group actually is servette. Group access MUST count:
+    demanding world bits would tell the operator to undo the deliberate
+    group-only grant _operator_chown_plan applies."""
     st = os.stat(path)
     if st.st_mode & 0o005 == 0o005:
         return True
@@ -3458,38 +3445,28 @@ def _chown_config(path):
     """Give the config to the service user, readable by the operator: owner
     servette, group the operator's own, mode 0640.
 
-    servette.toml is the operator's file about the operator's box, and the
-    read-only commands (status, sites, log) read it to report a URL and a
-    certificate expiry. Owning it 0600 to the service user made those commands
-    elevate on every configured host — a password to look at your own server —
-    and left config.unreadable permanently true, so the fail-closed reload
-    guard fired during correct operation. A guard that trips in normal use is
-    one people learn to ignore.
+    Why a group at all: the read-only commands (status, sites, log) report
+    the operator's own box, and a 0600-to-servette file makes them elevate
+    for every read — a password to look at your own server — while keeping
+    the fail-closed unreadable guard permanently tripped. The widening is
+    exactly one user. World bits stay off: the file carries a password HASH
+    and salt, material for an offline attack.
 
-    The group is the operator's, so the widening is from one system user to
-    exactly one more: them. World bits stay off, as they do for site content —
-    the file carries a password HASH and salt, which is material for an offline
-    attack and never something to hand to every local account.
+    Failure degrades toward the service, never away from it. The chown can
+    fail (a SUDO_USER deleted since the sudo, an NSS outage), and the file
+    save()'s os.replace leaves behind is root:root — unreadable by the
+    service, which kills the reload and the next restart. So a failed
+    operator chown falls back to servette:servette: the operator loses the
+    no-password read until the next enable; the service, whose reload and
+    restart depend on reading the file, loses nothing. The chmod runs
+    unconditionally, and everything here is best-effort — save() runs at
+    import, and a raise would crash unprivileged runs over a write they
+    were never going to make.
 
-    Failure must degrade toward the service, not away from it. The chown can
-    fail — a SUDO_USER deleted since the sudo, an NSS outage naming a group
-    that doesn't resolve — and the file it would leave behind is whatever
-    save()'s os.replace installed: root:root, which the service cannot read,
-    which kills the per-request reload and makes the next restart refuse to
-    serve. So a failed operator chown falls back to servette:servette — the
-    operator loses their no-password read until the next enable, the service
-    loses nothing, and the site stays up. The chmod runs unconditionally
-    (0640 under servette:servette grants read to a user that already had it).
-
-    The service user is a legitimate caller — a deferred config migration on
-    a host where it can write — but not one that can grant the operator
-    anything: a non-root owner may only chgrp to groups it belongs to, and
-    servette belongs only to servette. Its saves therefore leave
-    servette:servette 0640, and the operator's group read returns with the
-    next root-elevated save or enable, both of which run this function as
-    root. save() runs at import on every configured host — check=True
-    anywhere here would be the crash _chown_servette already learned to
-    avoid."""
+    The service user is a legitimate caller (a deferred config migration)
+    but cannot chgrp to a group it doesn't belong to, so its saves leave
+    servette:servette 0640 until the next root-elevated save or enable
+    restores the operator's group read."""
     if not (_servette_user_exists() and os.path.exists(path)):
         return
     if os.geteuid() != 0 and os.geteuid() != _servette_uid():
@@ -3673,7 +3650,7 @@ def _netwatch_units():
     NetworkManager on Raspberry Pi OS, dhcpcd on older Pi OS) exactly one acts;
     the whole check is a no-op while the route is healthy.
 
-    One minute rather than the original five because the check costs nothing
+    One minute, because the check costs nothing
     to run often: despite appearances, `ip route get` sends no packets — it
     asks the local routing table which route it WOULD use — so the interval
     buys only recovery time, and the route drill measured the cost of five
@@ -3775,9 +3752,8 @@ def _cache_headroom_mb(cache_mb, running=None):
     keeps the two callers ordered. The offer (service down, ceiling charged)
     can only ever be larger than the later status check (service up, ceiling
     in the signal), so a host that accepts the offer is never afterwards told
-    to resize. The old formula had this backwards: the cache entered the
-    measurement between setup and status, so the check drifted upward past
-    the size the operator had just chosen, and nagged forever.
+    to resize — the ordering IS the property; charge the ceiling on both
+    sides and the check drifts past whatever size the operator just chose.
 
     `running` lets a caller hand in a fact it already holds — _status_data
     asks systemd once and threads the answer through everything the
@@ -5041,9 +5017,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
     .rows b { color: var(--text); font-weight: 500; }
     .rows .ok { color: var(--brand); }
-    /* Not scoped to .rows: the running dot moved onto the status switch-row
-       when the service controls joined it, and a `.rows .dot` rule stopped
-       matching — the dot was still in the markup and simply invisible. */
+    /* Not scoped to .rows: the running dot sits on the status switch-row,
+       outside any .rows block — a scoped rule silently never matches. */
     .dot {
       display: inline-block;
       width: 7px;
@@ -5064,9 +5039,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .hint b { color: var(--text); font-weight: 500; }
     .warn  { color: var(--amber); }
     .fault { color: var(--red); }
-    /* Not a fault at all — a change typed and not yet saved. It used to
-       borrow .warn, which made an unsaved intention look like something
-       broken. */
+    /* Not a fault at all — a change typed and not yet saved. It must not
+       borrow .warn: an unsaved intention is not something broken. */
     .pending { color: var(--muted); font-style: italic; }
     .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
 
@@ -5967,7 +5941,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
       // ── What this site IS, at the top: its state, the address it
       // answers at, and the three things that decide both. What you DO to
-      // it — publish, preview, download, redirect — follows underneath.
+      // it — publish, preview, restore, redirect — follows underneath.
       : (`<div class="rows info"></div>` +
 
          `<div class="switch-row"><span class="k">Domain</span>` +
@@ -6085,13 +6059,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // beside it is the one publishing writes into, which is why they
           // are separate elements: overwriting the first would erase a
           // standing fault the moment a folder was read.
-          // The pill mirrors the Status line exactly — the count when
-          // anything needs attention, the green all-clear when nothing
-          // does — so a folded healthy card says it is well rather than
-          // saying nothing. Emitted on every card: a fault that arrives
-          // client-side — an unfinished login on a card built healthy —
-          // has no rebuild to emit a pill for it, and renderAttention can
-          // only fill a pill that exists.
+          // Emitted on every card (the mirror rule itself lives in
+          // renderAttention): a fault that arrives client-side — an
+          // unfinished login on a card built healthy — has no rebuild to
+          // emit a pill for it, and renderAttention can only fill a pill
+          // that exists.
           `<span class="badge ${!siteNeeds.length ? 'badge-green'
              : siteNeeds.some((c) => c.blocking) ? 'badge-red'
              : 'badge-warn'} needs" title="${escapeHtml(
@@ -6697,9 +6669,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     q('.auth-switch').addEventListener('change', (e) => {
       // A refusal describes the form as it stood when Save was pressed.
-      // Move the switch and it is about a form that no longer exists, so it
-      // goes with the state that produced it — it used to sit there in red
-      // through every subsequent flip.
+      // Move the switch and it is about a form that no longer exists, so
+      // it goes with the state that produced it.
       clearError(errEl);
       authDesired = e.target.checked;
       renderInfo();
@@ -6771,9 +6742,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
      What the box is doing, and how it is set. The settings forms run over
      the same validators the `set` command runs, so a value the terminal
      refuses the page refuses with the same sentence. Deliberately absent
-     (the terminal keeps them): port and trusted proxy (behind-a-balancer
-     deployments) and every lifecycle verb. The domain is not a form either
-     — naming a site belongs on that site's card. ══ */
+     from this form (the terminal keeps them): port, trusted proxy, and the
+     health path (behind-a-balancer deployments), the TLS knobs and the two
+     header strings — and installation (enable/disable). The lifecycle
+     verbs live on the Status card above, not in this form; the domain is
+     not a form either — naming a site belongs on that site's card. ══ */
 
   // Two families in one card, each under its own label: what defends the
   // server, and what tunes it. Cache size is a performance knob and must
@@ -7138,10 +7111,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
 # The loopback handler
 class _UIHandler(http.server.BaseHTTPRequestHandler):
-    """The loopback server's one handler. GET / is the page (login page
-    until the code is presented); POST /upload lands a content bundle. After
-    _UI_MAX_BAD_CODES wrong guesses the run stops authenticating anyone,
-    including the right code — re-run the command for a fresh one."""
+    """The loopback server's one handler. GET is the page and its read half
+    (/status /config /traffic /update /versions, and /preview on its own
+    per-staging token); POST is the write half (/upload /preview /config
+    /sites /service /swap). Everything but the login page and /preview
+    requires this run's passcode; after _UI_MAX_BAD_CODES wrong guesses
+    the run stops authenticating anyone, including the right code —
+    re-run the command for a fresh one."""
 
     def log_message(self, fmt, *args):
         log.info("ui: " + fmt % args)  # the default writes to stderr, past the log
@@ -7238,11 +7214,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
 
-        # Preview content, on its own token. NOT the run's passcode: a
-        # previewed page can read its own URL, and a draft with a script in
-        # it must not be able to lift the credential that publishes. The
-        # preview token buys exactly one thing — reading the staged tree —
-        # and it is minted fresh by each staging.
+        # Preview content, on its own per-staging token — why it is not the
+        # run's passcode, and why it rides the path: see _serve_preview.
         if path == "/preview" or path.startswith("/preview/"):
             return self._serve_preview(path)
 
@@ -7253,13 +7226,14 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         if auth == "locked":
             return self._respond(403, "Too many wrong passcodes. Close this page and re-run the command.")
         if path == "/status":
-            # The inside view, for the page's Status tab: exactly what
+            # The inside view, for the Server tab's Status card: exactly what
             # `status --json` prints, because it is the same function.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps(_status_data()), "application/json")
         if path == "/config":
-            # The Config tab's read half: exactly the vocabulary `set`
+            # The settings read half, for the Server tab and the site cards:
+            # exactly the vocabulary `set`
             # accepts, plus current values to fill the forms — and
             # has_password, a boolean only, so the page can show whether
             # protection is on without the hash ever crossing the wire.
@@ -7284,9 +7258,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                  "application/json")
 
         if path == "/versions":
-            # One site's kept trees. Its own endpoint rather than a field on
-            # /status because answering it walks every tree on disk, and
-            # /status is polled every few seconds while the page is open.
+            # One site's kept trees — its own endpoint for the cost reason
+            # in _site_versions.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
             try:
@@ -7300,7 +7273,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                  "keep": _KEEP_VERSIONS}), "application/json")
 
         if path == "/traffic":
-            # The Analytics tab's feed: the journal re-read as counts, and
+            # The Statistics tab's feed: the journal re-read as counts, and
             # never carrying a visitor's IP. The window is the reader's
             # choice, bounded — a request for a year would read a year of
             # journal to draw a chart nobody asked for.
@@ -7485,7 +7458,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                  "application/json")
 
         if path == "/config":
-            # The Config tab's write half: the same validate-then-apply path
+            # The settings write half: the same validate-then-apply path
             # `set` runs, so a value the terminal refuses the page refuses
             # with the same sentence. The password travels only here — never
             # on argv, which is why `set` excludes it — and mirrors the
@@ -7651,8 +7624,9 @@ def cmd_admin():
 # uploads over their own SSH tunnel, extracted into a staging tree and made
 # live with one atomic link flip, the tree it replaces kept in the ring for
 # 'restore-site' to flip back to. Nothing arrives from the network unasked —
-# the door is the loopback page, reachable only through the operator's
-# tunnel. (Servette's own code updates travel through the package manager,
+# the doors are the loopback page, reachable only through the operator's
+# tunnel, and the terminal's `publish`, taring a folder already on this
+# box. (Servette's own code updates travel through the package manager,
 # not through Servette.)
 # The bundle ceiling
 _MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
@@ -8037,7 +8011,9 @@ def _tree_size(path):
 def _site_versions(site):
     """The kept trees of one site as rows both surfaces render: the name to
     restore by, when it was published, how many files and bytes it holds, and
-    which one is live.
+    which one is live. Answering walks every tree on disk — which is why the
+    page fetches it as its own /versions call instead of a field on the
+    /status it polls every few seconds.
 
     The live tree is ALWAYS reported, ring member or not. A site published
     before the ring existed serves a tree the ring does not hold — it joins
@@ -8320,19 +8296,17 @@ def _set_site_value(target, key, value):
             perm_table.pop(norm, None)
             temp_table.pop(norm, None)
             (temp_table if temp else perm_table).update(checked)
-            # Two refusals the pair only earns in company. The cap first —
-            # it covers the two tables' sum: past it, the load-time
-            # validator would truncate, and its shrinkage must not be
-            # misread as a ring below.
+            # Two refusals the pair only earns in company, judged here so
+            # the operator gets a sentence at the door — written into the
+            # file, either would make the strict load door refuse the whole
+            # config at the next restart. The cap first, over the two
+            # tables' sum:
             if len(perm_table) + len(temp_table) > _MAX_REDIRECTS:
                 return (f"the redirect table is full ({_MAX_REDIRECTS} rules) "
                         "— remove one first")
-            # And the ring, judged over both tables at once — a 302 hop
-            # bounces a browser exactly as a 301 does. Each pair is valid
-            # alone (/a→/b saved earlier, /b→/a now), and the load-time
-            # validator would silently drop the ring on the next reload.
-            # Judged here instead, so the answer is a refusal now rather
-            # than a rule that vanishes later.
+            # And the ring, over both tables at once — a 302 hop bounces a
+            # browser exactly as a 301 does, and each pair is valid alone
+            # (/a→/b saved earlier, /b→/a now).
             merged = {**perm_table, **temp_table}
             if len(_clean_redirects(merged)) != len(merged):
                 return ("that redirect closes a ring — the chain of rules "
@@ -8817,10 +8791,10 @@ def _config_password(site):
 
 # The site-index argument
 def _config_site_arg(args):
-    """Resolve dir/cert/username/password/publish's optional site-index
-    argument to a Site, defaulting to site 0 — same [n] convention as the
-    top-level 'log [n]'. Prints its own error and returns None if given but
-    invalid, so callers can just no-op on None."""
+    """Resolve cert/username/password/publish/restore-site's optional
+    site-index argument to a Site, defaulting to site 0 — same [n]
+    convention as the top-level 'log [n]'. Prints its own error and returns
+    None if given but invalid, so callers can just no-op on None."""
     if not args:
         return config.sites[0]
     try:
@@ -9036,7 +9010,7 @@ def _traffic_summary(days=7):
 
 def cmd_traffic():
     """`traffic` — requests, statuses, and top paths from the last 7 days,
-    read from the journal. The page's Traffic tab renders this same
+    read from the journal. The page's Statistics tab renders this same
     summary; the raw log (IPs included) stays with `log`."""
     t = _traffic_summary()
     if not t["total"]:
@@ -9097,9 +9071,8 @@ def _production_issues(running=None):
         # username with nothing stored to check locks every visitor out.
         if site.username and not site.password_hash:
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
-        # A colon username no longer needs a line here: the load door
-        # refuses it like every other door, so it cannot reach a running
-        # config from any direction.
+        # No colon-username line: every door refuses one, so it cannot
+        # reach a running config.
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
                                    _cache_headroom_mb(config.cache_size_mb, running))
@@ -9282,7 +9255,7 @@ def _health_checks(service_active=None):
         # The recommendation is named by the field that sets it, so this row
         # states the size and speaks up only when it falls short. `offer` is
         # a (description, hint) pair for the terminal's prompt — never a
-        # number, which is what it used to be interpolated as here.
+        # number; do not interpolate it.
         if offer is None:
             detail = f"{have} MB active" if have else "not needed at this host's memory"
         elif have:
@@ -9359,11 +9332,7 @@ def _health_checks(service_active=None):
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored
-        # to check against, which locks every visitor out. (A colon
-        # username used to be flagged here as the one defect a hand-edited
-        # file could load past the write surfaces; the load door now
-        # refuses it like every other door, so there is nothing left for
-        # this row to catch.)
+        # to check against, which locks every visitor out.
         half_auth = bool(site.username) and not site.password_hash
         rows.append({"key": "password", "site": i,
                      "ok": not half_auth,

@@ -3,13 +3,14 @@
 *The operator's side of Servette: the loopback page server, the content
 pipeline, the settings doors, and the terminal commands that drive them.*
 
-*Ordered for the reader auditing the attack surface. First the one network
-door — the loopback page server, what authenticates it, and every request it
-answers. Then the content pipeline an accepted upload runs through: the
-ceilings, the extraction guards, the atomic swap, the version ring. Then the
-write doors every setting passes, whichever surface it came from. The
-interactive commands follow — they drive the same cores, in a guided voice —
-and the shell loop with its root elevation closes the file.*
+*Ordered for the reader auditing the attack surface. After the shared menu
+furniture, the one network door — the loopback page server, what
+authenticates it, and every request it answers. Then the content pipeline an
+accepted upload runs through: the ceilings, the extraction guards, the
+atomic swap, the version ring. Then the write doors every setting passes,
+whichever surface it came from. The interactive commands follow — they
+drive the same cores, in a guided voice — and the shell loop with its root
+elevation closes the file.*
 
 *Authored here. `servette.py` is generated from the Markdown sources in `src/` — by the package build itself ([`_literate_backend.py`](_literate_backend.py)), or by hand with [`build.py`](build.py). Edit the Markdown, never the module; the committed copy exists to be read, and `--check` holds it equal to the sources.*
 
@@ -204,15 +205,18 @@ _UI_ADMIN_PAGE = """@@ADMIN_HTML@@"""
 
 ```
 
-One page, one upload endpoint, one passcode. Requests without the run's passcode get the login page or a refusal — never content, and never a write. The code is compared in constant time; the upload is capped before it is read and lands through the same `_land_bundle` as every other channel.
+One page, one passcode, and every endpoint behind it: requests without the run's passcode get the login page or a refusal — never content, and never a write. The code is compared in constant time; the upload is capped before it is read and lands through the same `_land_bundle` as every other channel.
 
 ```python
 # The loopback handler
 class _UIHandler(http.server.BaseHTTPRequestHandler):
-    """The loopback server's one handler. GET / is the page (login page
-    until the code is presented); POST /upload lands a content bundle. After
-    _UI_MAX_BAD_CODES wrong guesses the run stops authenticating anyone,
-    including the right code — re-run the command for a fresh one."""
+    """The loopback server's one handler. GET is the page and its read half
+    (/status /config /traffic /update /versions, and /preview on its own
+    per-staging token); POST is the write half (/upload /preview /config
+    /sites /service /swap). Everything but the login page and /preview
+    requires this run's passcode; after _UI_MAX_BAD_CODES wrong guesses
+    the run stops authenticating anyone, including the right code —
+    re-run the command for a fresh one."""
 
     def log_message(self, fmt, *args):
         log.info("ui: " + fmt % args)  # the default writes to stderr, past the log
@@ -309,11 +313,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
 
-        # Preview content, on its own token. NOT the run's passcode: a
-        # previewed page can read its own URL, and a draft with a script in
-        # it must not be able to lift the credential that publishes. The
-        # preview token buys exactly one thing — reading the staged tree —
-        # and it is minted fresh by each staging.
+        # Preview content, on its own per-staging token — why it is not the
+        # run's passcode, and why it rides the path: see _serve_preview.
         if path == "/preview" or path.startswith("/preview/"):
             return self._serve_preview(path)
 
@@ -324,13 +325,14 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         if auth == "locked":
             return self._respond(403, "Too many wrong passcodes. Close this page and re-run the command.")
         if path == "/status":
-            # The inside view, for the page's Status tab: exactly what
+            # The inside view, for the Server tab's Status card: exactly what
             # `status --json` prints, because it is the same function.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps(_status_data()), "application/json")
         if path == "/config":
-            # The Config tab's read half: exactly the vocabulary `set`
+            # The settings read half, for the Server tab and the site cards:
+            # exactly the vocabulary `set`
             # accepts, plus current values to fill the forms — and
             # has_password, a boolean only, so the page can show whether
             # protection is on without the hash ever crossing the wire.
@@ -355,9 +357,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                  "application/json")
 
         if path == "/versions":
-            # One site's kept trees. Its own endpoint rather than a field on
-            # /status because answering it walks every tree on disk, and
-            # /status is polled every few seconds while the page is open.
+            # One site's kept trees — its own endpoint for the cost reason
+            # in _site_versions.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
             try:
@@ -371,7 +372,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                  "keep": _KEEP_VERSIONS}), "application/json")
 
         if path == "/traffic":
-            # The Analytics tab's feed: the journal re-read as counts, and
+            # The Statistics tab's feed: the journal re-read as counts, and
             # never carrying a visitor's IP. The window is the reader's
             # choice, bounded — a request for a year would read a year of
             # journal to draw a chart nobody asked for.
@@ -556,7 +557,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                  "application/json")
 
         if path == "/config":
-            # The Config tab's write half: the same validate-then-apply path
+            # The settings write half: the same validate-then-apply path
             # `set` runs, so a value the terminal refuses the page refuses
             # with the same sentence. The password travels only here — never
             # on argv, which is why `set` excludes it — and mirrors the
@@ -736,8 +737,9 @@ def cmd_admin():
 > uploads over their own SSH tunnel, extracted into a staging tree and made
 > live with one atomic link flip, the tree it replaces kept in the ring for
 > 'restore-site' to flip back to. Nothing arrives from the network unasked —
-> the door is the loopback page, reachable only through the operator's
-> tunnel. (Servette's own code updates travel through the package manager,
+> the doors are the loopback page, reachable only through the operator's
+> tunnel, and the terminal's `publish`, taring a folder already on this
+> box. (Servette's own code updates travel through the package manager,
 > not through Servette.)
 
 ```python
@@ -985,7 +987,7 @@ _publish_lock = threading.Lock()  # serializes site-content mutation across ever
 
 ```
 
-Every publish lands here — validated extraction into staging, atomic swap, ownership repair, under the publish lock. The bundle arrives one way: the loopback page hands it over the operator's own SSH tunnel, carrying no signature, because the transport already proved the identity ([tunnel uploads are authenticated by SSH](../DECISIONS.md#tunnel-uploads-are-authenticated-by-ssh-the-pull-channel-is-removed)). `source` names the door in the log line.
+Every publish lands here — validated extraction into staging, atomic swap, ownership repair, under the publish lock. Two doors, one tail: the page's upload over the operator's SSH tunnel, and the terminal's `publish` taring a folder on this box. Neither carries a signature, because the operator's identity is already proven — SSH for the tunnel, holding the shell for the terminal ([tunnel uploads are authenticated by SSH](../DECISIONS.md#tunnel-uploads-are-authenticated-by-ssh-the-pull-channel-is-removed)). `source` names the door in the log line.
 
 ```python
 # Landing a bundle
@@ -1102,7 +1104,7 @@ def cmd_publish(args):
 
 ```
 
-`_restore_site` is the core both surfaces run — the terminal's numbered list and the page's Restore button reach the same flip, so the two cannot disagree about what restoring means.
+Preview staging, the version rows both surfaces render, and restoring. `_stage_preview` runs the same extractor a publish runs, into a sibling the public server never sees; `_restore_site` is the core both surfaces run — the terminal's numbered list and the page's Restore button reach the same flip, so the two cannot disagree about what restoring means.
 
 ```python
 # preview
@@ -1159,7 +1161,9 @@ def _tree_size(path):
 def _site_versions(site):
     """The kept trees of one site as rows both surfaces render: the name to
     restore by, when it was published, how many files and bytes it holds, and
-    which one is live.
+    which one is live. Answering walks every tree on disk — which is why the
+    page fetches it as its own /versions call instead of a field on the
+    /status it polls every few seconds.
 
     The live tree is ALWAYS reported, ring member or not. A site published
     before the ring existed serves a tree the ring does not hold — it joins
@@ -1453,19 +1457,17 @@ def _set_site_value(target, key, value):
             perm_table.pop(norm, None)
             temp_table.pop(norm, None)
             (temp_table if temp else perm_table).update(checked)
-            # Two refusals the pair only earns in company. The cap first —
-            # it covers the two tables' sum: past it, the load-time
-            # validator would truncate, and its shrinkage must not be
-            # misread as a ring below.
+            # Two refusals the pair only earns in company, judged here so
+            # the operator gets a sentence at the door — written into the
+            # file, either would make the strict load door refuse the whole
+            # config at the next restart. The cap first, over the two
+            # tables' sum:
             if len(perm_table) + len(temp_table) > _MAX_REDIRECTS:
                 return (f"the redirect table is full ({_MAX_REDIRECTS} rules) "
                         "— remove one first")
-            # And the ring, judged over both tables at once — a 302 hop
-            # bounces a browser exactly as a 301 does. Each pair is valid
-            # alone (/a→/b saved earlier, /b→/a now), and the load-time
-            # validator would silently drop the ring on the next reload.
-            # Judged here instead, so the answer is a refusal now rather
-            # than a rule that vanishes later.
+            # And the ring, over both tables at once — a 302 hop bounces a
+            # browser exactly as a 301 does, and each pair is valid alone
+            # (/a→/b saved earlier, /b→/a now).
             merged = {**perm_table, **temp_table}
             if len(_clean_redirects(merged)) != len(merged):
                 return ("that redirect closes a ring — the chain of rules "
@@ -1507,7 +1509,7 @@ def _set_usage():
 
 ```
 
-The command itself. Two keys are deliberately absent: password (a secret on argv leaks into shell history and the process table) and domain (bound up with certificate issuance).
+The command itself; its docstring names the two deliberately absent keys.
 
 ```python
 # set
@@ -2002,10 +2004,10 @@ The `[n]` site-index convention, resolved in one place.
 ```python
 # The site-index argument
 def _config_site_arg(args):
-    """Resolve dir/cert/username/password/publish's optional site-index
-    argument to a Site, defaulting to site 0 — same [n] convention as the
-    top-level 'log [n]'. Prints its own error and returns None if given but
-    invalid, so callers can just no-op on None."""
+    """Resolve cert/username/password/publish/restore-site's optional
+    site-index argument to a Site, defaulting to site 0 — same [n]
+    convention as the top-level 'log [n]'. Prints its own error and returns
+    None if given but invalid, so callers can just no-op on None."""
     if not args:
         return config.sites[0]
     try:
@@ -2248,7 +2250,7 @@ def _traffic_summary(days=7):
 
 def cmd_traffic():
     """`traffic` — requests, statuses, and top paths from the last 7 days,
-    read from the journal. The page's Traffic tab renders this same
+    read from the journal. The page's Statistics tab renders this same
     summary; the raw log (IPs included) stays with `log`."""
     t = _traffic_summary()
     if not t["total"]:
@@ -2321,9 +2323,8 @@ def _production_issues(running=None):
         # username with nothing stored to check locks every visitor out.
         if site.username and not site.password_hash:
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
-        # A colon username no longer needs a line here: the load door
-        # refuses it like every other door, so it cannot reach a running
-        # config from any direction.
+        # No colon-username line: every door refuses one, so it cannot
+        # reach a running config.
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
                                    _cache_headroom_mb(config.cache_size_mb, running))
@@ -2521,7 +2522,7 @@ def _health_checks(service_active=None):
         # The recommendation is named by the field that sets it, so this row
         # states the size and speaks up only when it falls short. `offer` is
         # a (description, hint) pair for the terminal's prompt — never a
-        # number, which is what it used to be interpolated as here.
+        # number; do not interpolate it.
         if offer is None:
             detail = f"{have} MB active" if have else "not needed at this host's memory"
         elif have:
@@ -2598,11 +2599,7 @@ def _health_checks(service_active=None):
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored
-        # to check against, which locks every visitor out. (A colon
-        # username used to be flagged here as the one defect a hand-edited
-        # file could load past the write surfaces; the load door now
-        # refuses it like every other door, so there is nothing left for
-        # this row to catch.)
+        # to check against, which locks every visitor out.
         half_auth = bool(site.username) and not site.password_hash
         rows.append({"key": "password", "site": i,
                      "ok": not half_auth,

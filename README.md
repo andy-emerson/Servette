@@ -14,7 +14,7 @@
 
 ---
 
-Servette is a production nanoserver. The `http.server` module in Python's standard library is the canonical nanoserver: it serves a folder in one command and, by its own documentation, is not built for production. Servette builds on that same `http.server` and adds everything the public internet demands: a trusted certificate that renews itself, HTTP redirected up to HTTPS, security headers on every response, rate limiting, password protection (optional), and a hardened service that survives reboots. No configuration language to learn, automatic certificate management, and a single dependency the install brings with it. Install the package, run `servette`, follow the wizard, done.
+Servette is a production nanoserver. The `http.server` module in Python's standard library is the canonical nanoserver: it serves a folder in one command and, by its own documentation, is not built for production. Servette builds on that same `http.server` and adds everything the public internet demands: a trusted certificate that renews itself, HTTP redirected up to HTTPS, security headers on every response, rate limiting, password protection (optional), and a hardened service that survives reboots. No configuration language to learn, one dependency the install brings with it. Install the package, run `servette`, follow the wizard, done.
 
 Most ways to serve a website sit at an extreme. **General-purpose servers** (nginx, Apache, Caddy) do *everything*: any site at any scale, once you have configured them. **Development servers** (`http.server`) do *one thing*: serve a folder right now, and stop there. **Managed platforms** (GitHub Pages, Netlify, Vercel) do it *for* you, on infrastructure and terms that are theirs, not yours.
 
@@ -31,7 +31,7 @@ The tools closest in spirit are small and focused, like Servette. Here is how a 
 | Actively maintained | ✓ | ✓ | ✗ | ✓ |
 | Runs on a Raspberry Pi out of the box | ✓ | ✓ | ✗ | ✗ |
 
-All of these are excellent at what they are built for. None of them do what Servette does: serve a static site you own, securely, on the public internet, from a single module you can read.
+All of these are excellent at what they are built for. None of them do what Servette does: serve a static site you own, securely, on the public internet, from a single module you can read. (Peer columns as checked 2026-08; only Servette's own figures are gated by CI.)
 
 ---
 
@@ -54,15 +54,15 @@ All of these are excellent at what they are built for. None of them do what Serv
 | HTTPS by default | Your site is encrypted, browsers show the padlock, and plain-HTTP requests are redirected up to HTTPS |
 | Public or private sites | A site is public by default; make it private with a username and password, and visitors sign in to view it |
 | Rate limiting | Stops bots from hammering the server; makes password guessing impractical |
-| Instant content updates | New content is served the moment it lands — files are read fresh from disk on every request, so publishing needs no restart and drops no connections |
+| Instant content updates | New content is served the moment it lands — every request re-checks the file on disk, so publishing needs no restart and drops no connections |
 | Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |
-| Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent on every response |
+| Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent by default on every response |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 | Automatic recovery | A dead server process is restarted by systemd within seconds; a watchdog timer recovers a dropped network route |
-| A browser admin page | `servette admin` serves an admin page to your browser over your own SSH tunnel — one card per site (publish, preview, domain, certificate, access, redirects, history), the server's own status and settings, and traffic statistics read from its log. It never exists on the public internet, and your SSH key is the login |
-| Publishing keeps a history | Every publish keeps the content it replaced. The five most recent are held, and any of them goes live again in one click — or one `restore-site` — with the same atomic swap a publish uses, so a rollback has no window either |
+| A browser admin page | `servette admin` serves an admin page to your browser over your own SSH tunnel — one card per site (publish, preview, domain, certificate, access, redirects, history), the server's own status and settings, and traffic statistics read from its log. It never exists on the public internet: the tunnel is the road in, and a one-time code per session is the login |
+| Publishing keeps a history | Every publish keeps the content it replaced. The five most recent are held, and any of them goes live again in one click, or one `restore-site`, as instantly as a publish |
 | Preview before you publish | Look at the folder you chose, served over your own tunnel and not published: links and stylesheets resolve, so you see what landed before anyone else does |
-| Redirects | Point an old path at a new one, per site, from either surface — permanently, or temporarily while the old path stays the real address. Held as a setting rather than a file in your content, so serving one costs a request nothing but a table lookup |
+| Redirects | Point an old path at a new one, per site, from either surface — permanently, or temporarily while the old path stays the real address. Stored as a setting, not as a file in your site |
 | A connection test built in | Every site serves a live check page at `/.well-known/servette-check`: the encryption, the security headers, and whether your site root is published at all, reported from a real browser's vantage. The default 404 page links it — and your own `404.html` can take the error page over without ever losing the check |
 
 **Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette), and that is by design, not a limitation to work around; see [Scope & non-goals](DESIGN.md#scope--non-goals) for what is out of scope and why.
@@ -117,7 +117,7 @@ The example is Lightsail; DigitalOcean, Linode, and Vultr are the same idea.
 
 ### Run setup
 
-Servette keeps everything it serves and everything it saves in its data directory, `/var/lib/servette` — setup creates the `site/` folder there and owns it to *you* (the service only reads it), leaving it empty — an empty folder still answers, because a site with nothing published answers with Servette's error page, which reports that the server is up and what the connection is actually sending. From the server:
+Servette keeps everything it serves and everything it saves in its data directory, `/var/lib/servette`. Setup creates the `site/` folder there, owned by you (the service only reads it), and leaves it empty — an empty site still answers: visitors get Servette's error page, which reports that the server is up. From the server:
 
 ```
 servette   # then, at the prompt: setup
@@ -125,7 +125,7 @@ servette   # then, at the prompt: setup
 
 Setup asks for your password when it reaches the work that needs root: writing the systemd unit and creating the restricted `servette` user — the server runs as that user, never as root. If Servette is installed under your home directory, setup also says it is copying itself into `/var/lib/servette/runtime`; that is deliberate, and it is what lets the service keep running when your home directory is unreadable to it. The wizard sets up a certificate (trusted Let's Encrypt if you gave a domain, else self-signed), sets an optional password, then enables and starts the service. Close your terminal — Servette keeps running, restarts on reboot, and renews its certificate automatically.
 
-To put your site on it, use the admin page: add the one-time line setup printed to `~/.ssh/config` on your own computer (inside the entry you already use to reach the server — it makes every SSH session carry the page), then run `servette admin` and open the printed link. The page runs in your browser but is served by your server over that SSH connection — it exists nowhere on the public internet. Drop your site's folder on its card (or pick it), press Publish, and the content is staged, checked, and swapped in atomically; `restore-site` undoes it.
+To put your site on it, use the admin page: on your own computer, add the one-time line setup printed to `~/.ssh/config`, inside the host entry you already use to reach the server. Then run `servette admin` and open the printed link. The page runs in your browser but is served by your server over that SSH connection — it exists nowhere on the public internet. Drop your site's folder on its card (or pick it), press Publish, and the content is staged, checked, and swapped in atomically; `restore-site` undoes it.
 
 ### Operate it
 
@@ -147,7 +147,11 @@ Re-run `servette` any time for the interactive shell — or run any command belo
 | `restore-site [n]` | Roll back a site's content to a kept version |
 | `help` · `quit` | Command list · exit |
 
-**Update your site** with `admin` — pick the folder in the browser, publish, done — or from the terminal: copy the folder to the server and run `publish 0 ~/sites/blog`. A tidy convention (a convention only — Servette attaches no meaning to the path): keep site folders under `~/sites/`, one complete site per folder, and publish when the copy has finished — `publish` reads the folder as it stands, so a half-copied tree publishes half a site. Either way the content swaps in atomically, and the tree it replaced is kept: `restore-site` rolls back to it. **Update Servette** with `pipx upgrade servette`; the next `servette` notices the service unit is stale and says so — run `enable` to refresh the service onto the new version. **Roll back** by installing the version you want (`pipx install --force servette==x.y.z`). Your `servette.toml` is never touched by an update.
+**Update your site** with `admin` — pick the folder in the browser, publish, done — or from the terminal: copy the folder to the server and run `publish 0 ~/sites/blog`. A tidy convention (a convention only — Servette attaches no meaning to the path): keep site folders under `~/sites/`, one complete site per folder, and publish when the copy has finished — `publish` reads the folder as it stands, so a half-copied tree publishes half a site. Either way the content swaps in atomically, and the tree it replaced is kept: `restore-site` rolls back to it.
+
+**Update Servette** with `pipx upgrade servette`; the next `servette` notices the service unit is stale and says so — run `enable` to refresh the service onto the new version.
+
+**Roll back Servette** by installing the version you want (`pipx install --force servette==x.y.z`). Your `servette.toml` is never touched by an update.
 
 > If you set a password, `servette.toml` holds its hash — sharing the file gives a recipient material for an offline cracking attempt.
 
@@ -157,11 +161,11 @@ One machine can serve several sites, each with its own certificate and optional 
 
 Every site has an index, shown by `sites` and starting at `0` — the one `setup` created. Commands that act on a single site take that index and default to `0`: `cert [n]` and `username [n]` / `password [n]` under `config`, plus `restore-site [n]` from the main shell. So `cert 1` requests a certificate for the second site, and `restore-site 2` rolls the third site's content back.
 
-**Update each site's content** in its own folder — the path you named when you added it. The single `/var/lib/servette/site` in the quickstart above is just site `0`'s folder.
+**Update each site's content by publishing to it** — the card's Publish button, or `publish <n> <folder>` — never by editing the served folder in place: where content lives is Servette's business, and publishing is what keeps the version history that makes `restore-site` possible.
 
 ### Publishing over SSH, and checking a site
 
-Content reaches a site one way: you publish it from the admin page, over your own SSH tunnel. Servette never accepts content pushed from the network, and there is nothing to configure — no account, no signing key, no hosted shelf. With a password set, your site also answers `GET /.well-known/servette` with `{"running": "<version>"}` to logged-in clients — the version readout the error page shows. **Check any Servette site from a browser** by asking it for a path that isn't there: the error page that answers reports the certificate, the redirect, and the headers from a real browser's vantage, on the site that served it.
+Content reaches a site only by your own publish: the admin page over your SSH tunnel, or `publish` on the server itself. Servette never accepts content pushed from the network, and there is nothing to configure — no account, no signing key, no hosted shelf. With a password set, your site also answers `GET /.well-known/servette` with `{"running": "<version>"}` to logged-in clients. **Check any Servette site from a browser** by asking it for a path that isn't there: the error page that answers reports the certificate, the redirect, and the headers from a real browser's vantage, on the site that served it.
 
 ### If something's wrong
 

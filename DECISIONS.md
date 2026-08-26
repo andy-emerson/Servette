@@ -779,6 +779,11 @@ compounding, and a re-add collision waiting to happen; a green Cancel
 
 ## The domain is granted from the Publish card
 
+*Superseded by [Naming a site and certifying it are two
+acts](#naming-a-site-and-certifying-it-are-two-acts); the Publish tab is
+now the Sites tab ([The page is three
+tabs](#the-page-is-three-tabs-a-site-is-one-card-the-server-is-its-own-page)).*
+
 **Ruled (Human):** naming a site is a Publish-card act. A domainless
 card carries a Domain field and one button that runs the same
 certificate issuance the terminal runs (`_obtain_trusted_cert`) — DNS
@@ -800,6 +805,10 @@ names other sites hold are refused.
 are born and published). *(2026-08-23)*
 
 ## The page is two tabs: Publish lands, Settings scopes
+
+*Superseded by [The page is three tabs: a site is one card, the server
+is its own
+page](#the-page-is-three-tabs-a-site-is-one-card-the-server-is-its-own-page).*
 
 **Ruled (Human):** the admin page is Publish and Settings. Publish is
 the landing tab — the site cards, the thing the operator came to do.
@@ -844,6 +853,13 @@ open question the ruling's developer-pov note anticipated. *(2026-08-22)*
 
 ## The Publish tab is the site list: cards add, move, and remove sites
 
+*Amended by [The page is three
+tabs](#the-page-is-three-tabs-a-site-is-one-card-the-server-is-its-own-page):
+the Publish tab is now the Sites tab, and the domain clause fell to
+[Naming a site and certifying it are two
+acts](#naming-a-site-and-certifying-it-are-two-acts); the
+cards-are-the-list substance stands.*
+
 **Ruled (Human):** one card per configured site — the drop strip with
 the folder picker as a link inside it, and the card's own Publish
 button — and the cards are the list itself: add, delete, and reorder in
@@ -861,6 +877,12 @@ multi-site surface (settings editable for sites the page couldn't
 publish — the asymmetry the ruling started from). *(2026-08-22)*
 
 ## The Config tab is a password switch; the advanced knobs stay in the terminal
+
+*Amended by [The page is three
+tabs](#the-page-is-three-tabs-a-site-is-one-card-the-server-is-its-own-page):
+the Config tab is gone — the access switch lives on each site's card,
+the host settings on the Server tab. The substance stands: one visible
+switch, `has_password` over the wire, the advanced knobs terminal-kept.*
 
 **Ruled (Human):** password protection is one visible switch — a toggle
 that dims the username/password fields when off, states what saving
@@ -1174,6 +1196,11 @@ staleness, and evidence of it changes the balance. *(#99, 2026-08-17)*
 
 ## The cryptography floor is 48.0.1
 
+*Amended 2026-08: Ed25519 verification left with the pull channel
+([ruling](#tunnel-uploads-are-authenticated-by-ssh-the-pull-channel-is-removed)),
+so the call-graph is narrower than listed below — which only strengthens
+the floor's scoping.*
+
 **Ruled (Human):** `dependencies = ["cryptography>=48.0.1"]`, no ceiling. The
 floor tracks Servette's actual exposure, not the dependency's total advisory
 count: 48.0.1 is the lowest release whose statically-linked OpenSSL carries no
@@ -1391,6 +1418,11 @@ considers untrue — in which case the conflict is recorded, not resolved by
 quietly bending one. *(2026-08-16)*
 
 ## The default error page diagnoses; the placeholder is retired
+
+*The "second role at `/selftest/`" clause is superseded by
+[The connection test is its own reserved page; the 404 is a real
+404](#the-connection-test-is-its-own-reserved-page-the-404-is-a-real-404);
+the placeholder's retirement stands.*
 
 **Ruled:** every server needs an error page, so Servette's earns the
 response it spends. Where the operator has written no `404.html`, a miss

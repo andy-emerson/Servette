@@ -113,11 +113,9 @@ def _clean_redirects(raw, strict=False):
     door. As the write doors' filter (strict=False), a bad entry is dropped
     with a log line and the caller turns an empty result into its own
     refusal sentence. At the load door (strict=True), a bad entry refuses
-    the whole file — _ConfigInvalid, fatal at startup with the sentence
-    naming the rule, last good config kept on the live reload — per the
-    load-door principle: a rule silently dropped is a path the operator
-    wrote a redirect for answering 404, discovered by visitors far from
-    the edit.
+    the whole file (the load-door principle — see _ConfigInvalid): a rule
+    silently dropped is a path the operator wrote a redirect for answering
+    404, discovered by visitors far from the edit.
 
     Two of the checks are load-bearing rather than tidy. A target is
     narrowed to path-or-http(s) because a redirect is an open door by
@@ -235,11 +233,10 @@ class Site:
 
     def __init__(self, data=None):
         data = data or {}
-        # The load-door principle: a value the write doors would refuse
-        # never takes effect. Every Site is built before Config._load
-        # mutates anything of its own, so a raise here refuses the file
-        # whole — fatal at startup with the sentence naming the field,
-        # last good config kept on the live reload.
+        # Site fields are judged here, at the load door (the load-door
+        # principle — see _ConfigInvalid). Every Site is built before
+        # Config._load mutates anything of its own, so a raise here
+        # refuses the file whole.
         for field in ("domain", "serve_dir", "cert_file", "key_file",
                       "username", "password_hash", "password_salt"):
             if field in data and (not isinstance(data[field], str) or any(
@@ -276,14 +273,11 @@ class Site:
         self.username       = username
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
-        # Old path -> new path, validated once here so the request path is a
-        # dict lookup and nothing more. A file in the site folder would be
-        # content, and content is read at request time — which is the whole
-        # reason this is a setting. Two tables, one per answer: redirects is
-        # permanent (301), redirects_temporary is 302 — the ruled per-rule
-        # choice, default permanent. Validated together and strictly: a bad
-        # rule, a source written twice or in both tables, or a ring hopping
-        # between them refuses the file, per the load-door principle.
+        # Two tables, one per answer: redirects → 301, redirects_temporary
+        # → 302 (the ruled per-rule choice, default permanent). Validated
+        # strictly and together — criteria in _clean_redirects, principle
+        # in _ConfigInvalid: a bad rule, a source written twice or in both
+        # tables, or a ring hopping between them refuses the file.
         perm = _clean_redirects(data.get("redirects", {}), strict=True)
         temp = _clean_redirects(data.get("redirects_temporary", {}),
                                 strict=True)
@@ -447,11 +441,9 @@ class Config:
         # Host scalars: defaults first, then every key the file carries runs
         # through the same shared validator the write doors use — one
         # criteria set per key, whichever door the value came through (the
-        # load-door principle: a value `set` would refuse never takes
-        # effect; the whole file is refused with the sentence naming the
-        # key, fatally at startup, last good config on the live reload).
-        # Validated on a scratch object BEFORE any attribute of self
-        # changes, for the reload-path reason at the top of _load.
+        # load-door principle — see _ConfigInvalid). Validated on a scratch
+        # object BEFORE any attribute of self changes, for the reload-path
+        # reason at the top of _load.
         class _ScratchHost:
             pass
         scratch = _ScratchHost()
@@ -581,7 +573,7 @@ password_salt = {s(site.password_salt)}
 #
 # Host-level settings below apply to every site on this box. Each [[site]]
 # block below is one hosted domain — its own folder, certificate, auth, and
-# publish channel.
+# redirects.
 
 port = {self.port}
 
@@ -1154,7 +1146,7 @@ def _loggable(s):
 
 ```
 
-The request core is one function, transport-agnostic and ordered deliberately: reload, site selection (bound before the limiter so a matched host's 429 carries HSTS like every other response), rate limit (still ahead of the closed-system miss, so unmatched Hosts throttle too), the undifferentiated 404 for an unmatched Host (deliberately ahead of the method check, so no 405 leaks that something is here), method check, per-site auth with the scrypt gate, the reserved paths, then file resolution and the caching/range/gzip protocol. Every inline comment below marks one of those decisions where it takes effect.
+The request core is one function, transport-agnostic and ordered deliberately: reload, the balancer health check (before everything — no Host match gates it, no limiter starves it), site selection (bound before the limiter so a matched host's 429 carries HSTS like every other response), rate limit (still ahead of the closed-system miss, so unmatched Hosts throttle too), the undifferentiated 404 for an unmatched Host (deliberately ahead of the method check, so no 405 leaks that something is here), method check, per-site auth with the scrypt gate, the reserved paths, redirects (a dict lookup before the filesystem is touched), then file resolution and the caching/range/gzip protocol. Every inline comment below marks one of those decisions where it takes effect.
 
 ```python
 # The request core
@@ -1298,8 +1290,8 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
 
-    # Version discovery: what this box is running — the embedded error page
-    # reads this to show the served version. Deliberately
+    # Version discovery: what this box is running, for remote tooling that
+    # holds the site's password — no shipped page consumes it. Deliberately
     # reports only what THIS box knows; "latest available" is the package
     # index's business, not Servette's. Host-level (one process, one version).
     #
@@ -1388,19 +1380,13 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
-        # Every server needs an error page, and a bare "Not found." spends a
-        # whole response telling the reader only that they were wrong. This one
-        # leads with the path, says the server is up and answered, and links
-        # the connection test on its reserved path above — the split that
-        # keeps this a real 404 while the diagnosis survives an operator's
-        # own 404.html, which wins this role by simply existing.
-        #
-        # It also covers a site's own root while nothing is published there: no
-        # index.html means the root is itself a miss, so the domain reports on
-        # itself instead of answering with ten bytes of text.
-        #
-        # The response keeps the caching contract (ETag, Cache-Control, 304),
-        # with any positive lifetime downgraded below.
+        # The miss body is the embedded diagnostic page (its own rationale
+        # lives in src/404.html's header) unless the operator's 404.html
+        # exists, which wins this role by simply existing. Covers a site's
+        # own root while nothing is published there — no index.html means
+        # the root is itself a miss. The response keeps the caching
+        # contract (ETag, Cache-Control, 304), with any positive lifetime
+        # downgraded below.
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
         if not os.path.isfile(custom_404):
@@ -1592,6 +1578,9 @@ def _build_ssl_context(cert_path, key_path):
     override, ALPN pinned to HTTP/1.1. Raises if the cert or key is unreadable, so
     startup can fail closed rather than serve nothing."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # .get, belt-and-braces: every door validates tls_min_version to
+    # {1.2, 1.3}, so the default fires only on a code bug — which then
+    # fails SAFE at 1.2 rather than crashing the serve path.
     ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
     if config.ciphers:
         ctx.set_ciphers(config.ciphers)

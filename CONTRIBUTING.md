@@ -10,10 +10,12 @@ not who or what typed it. Three things to know before you push:
   [Building](DESIGN.md#building).
 - **The bar.** One scoped change, a test that can fail, the suite green
   (and CodeQL clean for security-relevant work), docs updated in the same
-  branch as their own doc-pass commit. Scope questions are settled by
+  branch, in their own commit. Scope questions are settled by
   [Scope & non-goals](DESIGN.md#scope--non-goals): most features other
   servers carry are *deliberately* absent, and a change earns its
-  complexity only by serving one of the stated principles.
+  complexity only by serving one of the stated principles. Design choices
+  that outlive a change are recorded in [`DECISIONS.md`](DECISIONS.md) —
+  check it before proposing to reverse one.
 - **AI work is first-class — credited and owned.** Credit an agent's
   substantial work with a co-author trailer (format in
   [`AGENTS.md`](AGENTS.md)). You, the human, remain the author of record:

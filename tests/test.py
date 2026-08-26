@@ -4615,6 +4615,44 @@ def run_server_tests(s, serve_dir):
         check("The swap prompt refuses a size below 64 MB instead of rounding it up",
               "64-65536" in _swapbuf.getvalue() and not _swap_calls)
 
+    section("The opt-in balancer health check")
+
+    # Terminal-only by ruling: a host setting, off by default, answering an
+    # unauthenticated 204 to any Host — before the limiter, which must not
+    # starve a probe into a false dead — and absent from the admin page.
+    check("The health path door refuses what could shadow or mangle",
+          s._set_host_value(_scratch, "health_path", "healthz") != ""
+          and s._set_host_value(_scratch, "health_path", "/café") != ""
+          and "reserved" in s._set_host_value(_scratch, "health_path",
+                                              "/.well-known/x"))
+    check("...and accepts a plain path, or empty to turn the check off",
+          s._set_host_value(_scratch, "health_path", "/healthz") == ""
+          and _scratch.health_path == "/healthz"
+          and s._set_host_value(_scratch, "health_path", "") == ""
+          and _scratch.health_path == "")
+    check("With no health path configured, the path is an ordinary miss",
+          req("GET", path="/lb-health").status == 404)
+    s.config.health_path = "/lb-health"
+    try:
+        _hr = req("GET", path="/lb-health")
+        check("A configured health path answers 204 with no body",
+              _hr.status == 204 and _hr.body == b"")
+        check("...to HEAD as well, and with the query string ignored",
+              req("HEAD", path="/lb-health").status == 204
+              and req("GET", path="/lb-health?probe=1").status == 204)
+        _core_src = inspect.getsource(s._handle_request)
+        check("...answered before the limiter and before site selection",
+              _core_src.index("config.health_path")
+              < _core_src.index("_rate_limit_exceeded")
+              and _core_src.index("config.health_path")
+              < _core_src.index("_select_site("))
+        check("...and no neighbouring path borrows the answer",
+              req("GET", path="/lb-health2").status == 404)
+        check("...while the page never renders the setting",
+              "health_path" not in s._UI_ADMIN_PAGE)
+    finally:
+        s.config.health_path = ""
+
     section("404 and custom 404.html")
 
     check("Non-existent path returns 404",

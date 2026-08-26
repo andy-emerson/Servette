@@ -394,6 +394,7 @@ class Config:
         self.cache_size_mb      = data.get("cache_size_mb",      128)
         self.email              = data.get("email",              "")
         self.trusted_proxy      = data.get("trusted_proxy",      "")
+        self.health_path        = data.get("health_path",        "")
         self.tls_min_version    = data.get("tls_min_version",    "1.2")
         self.ciphers            = data.get("ciphers",            "")
         self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
@@ -521,6 +522,10 @@ cache_size_mb = {self.cache_size_mb}
 # Let's Encrypt registration email and optional reverse proxy IP
 email = {s(self.email)}
 trusted_proxy = {s(self.trusted_proxy)}
+
+# Optional load-balancer health check: a path answering 204 to anyone,
+# exempt from rate limiting. Empty = off (the default).
+health_path = {s(self.health_path)}
 
 # TLS settings
 tls_min_version = {s(self.tls_min_version)}
@@ -1121,6 +1126,18 @@ def _handle_request(method, url_path, headers, raw_ip):
         return status, _security_headers(site) + hdrs, (b"" if method == "HEAD" else body)
 
     config.reload_if_changed()
+
+    # The balancer's health check, where one is configured — off by default,
+    # so the closed system stays closed. Answered before site selection and
+    # the rate limiter: a probe asks "is this backend process up", which no
+    # Host match should gate and no limiter should starve into a false dead.
+    # 204, no body, no file I/O — and deliberately no per-probe log line: an
+    # endpoint exempt from rate limiting that logged each hit would hand
+    # anyone who finds it an unmetered disk-filler, and a balancer's own
+    # heartbeat is not traffic (DECISIONS.md, "a balancer gets one fitting").
+    if (config.health_path and method in ("GET", "HEAD")
+            and url_path.partition("?")[0] == config.health_path):
+        return resp(204, [(b"content-length", b"0")])
 
     # Site selection — uniform regardless of site count (see _select_site).
     # Selected BEFORE the rate limiter, deliberately: selection is a cheap

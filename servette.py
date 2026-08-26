@@ -445,6 +445,7 @@ class Config:
         self.cache_size_mb      = data.get("cache_size_mb",      128)
         self.email              = data.get("email",              "")
         self.trusted_proxy      = data.get("trusted_proxy",      "")
+        self.health_path        = data.get("health_path",        "")
         self.tls_min_version    = data.get("tls_min_version",    "1.2")
         self.ciphers            = data.get("ciphers",            "")
         self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
@@ -572,6 +573,10 @@ cache_size_mb = {self.cache_size_mb}
 # Let's Encrypt registration email and optional reverse proxy IP
 email = {s(self.email)}
 trusted_proxy = {s(self.trusted_proxy)}
+
+# Optional load-balancer health check: a path answering 204 to anyone,
+# exempt from rate limiting. Empty = off (the default).
+health_path = {s(self.health_path)}
 
 # TLS settings
 tls_min_version = {s(self.tls_min_version)}
@@ -1869,6 +1874,18 @@ def _handle_request(method, url_path, headers, raw_ip):
         return status, _security_headers(site) + hdrs, (b"" if method == "HEAD" else body)
 
     config.reload_if_changed()
+
+    # The balancer's health check, where one is configured — off by default,
+    # so the closed system stays closed. Answered before site selection and
+    # the rate limiter: a probe asks "is this backend process up", which no
+    # Host match should gate and no limiter should starve into a false dead.
+    # 204, no body, no file I/O — and deliberately no per-probe log line: an
+    # endpoint exempt from rate limiting that logged each hit would hand
+    # anyone who finds it an unmetered disk-filler, and a balancer's own
+    # heartbeat is not traffic (DECISIONS.md, "a balancer gets one fitting").
+    if (config.health_path and method in ("GET", "HEAD")
+            and url_path.partition("?")[0] == config.health_path):
+        return resp(204, [(b"content-length", b"0")])
 
     # Site selection — uniform regardless of site count (see _select_site).
     # Selected BEFORE the rate limiter, deliberately: selection is a cheap
@@ -4599,6 +4616,7 @@ def _config_show():
         ("Cache policy",       cache_display),
         ("Cache size",         f"{config.cache_size_mb} MB"),
         ("Trusted proxy",      val(config.trusted_proxy)),
+        ("Health check path",  config.health_path or "(off)"),
         ("TLS min version",    config.tls_min_version),
         ("Cipher suites",      config.ciphers or "(system default)"),
         ("CSP",                config.csp or "(disabled)"),
@@ -9393,6 +9411,21 @@ def _set_host_value(target, key, value):
             except ValueError:
                 return "trusted_proxy must be an IP address (or empty to clear)"
         target.trusted_proxy = value
+    elif key == "health_path":
+        # The balancer fitting, terminal-only by ruling. The criteria are
+        # the redirect source's — site-absolute, printable ASCII — plus one
+        # of its own: /.well-known/ stays out of reach, or a health path
+        # could shadow the connection test and the ACME challenges that
+        # live there, for every visitor.
+        if value:
+            if (not value.startswith("/") or len(value) > _MAX_REDIRECT_CHARS
+                    or any(not (0x20 <= ord(c) <= 0x7E) for c in value)):
+                return ("a health path is a site-absolute printable-ASCII "
+                        "path like /healthz (or empty to turn the check off)")
+            if value.startswith("/.well-known/"):
+                return ("/.well-known/ is reserved — the connection test and "
+                        "ACME challenges live there")
+        target.health_path = value
     return ""
 
 
@@ -9487,7 +9520,7 @@ def _set_site_value(target, key, value):
 
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
-                  "cache_size_mb", "trusted_proxy")
+                  "cache_size_mb", "trusted_proxy", "health_path")
 _SET_SITE_KEYS = ("username", "active", "redirect")
 
 

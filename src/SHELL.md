@@ -139,6 +139,7 @@ def _config_show():
         ("Cache policy",       cache_display),
         ("Cache size",         f"{config.cache_size_mb} MB"),
         ("Trusted proxy",      val(config.trusted_proxy)),
+        ("Health check path",  config.health_path or "(off)"),
         ("TLS min version",    config.tls_min_version),
         ("Cipher suites",      config.ciphers or "(system default)"),
         ("CSP",                config.csp or "(disabled)"),
@@ -2762,6 +2763,21 @@ def _set_host_value(target, key, value):
             except ValueError:
                 return "trusted_proxy must be an IP address (or empty to clear)"
         target.trusted_proxy = value
+    elif key == "health_path":
+        # The balancer fitting, terminal-only by ruling. The criteria are
+        # the redirect source's — site-absolute, printable ASCII — plus one
+        # of its own: /.well-known/ stays out of reach, or a health path
+        # could shadow the connection test and the ACME challenges that
+        # live there, for every visitor.
+        if value:
+            if (not value.startswith("/") or len(value) > _MAX_REDIRECT_CHARS
+                    or any(not (0x20 <= ord(c) <= 0x7E) for c in value)):
+                return ("a health path is a site-absolute printable-ASCII "
+                        "path like /healthz (or empty to turn the check off)")
+            if value.startswith("/.well-known/"):
+                return ("/.well-known/ is reserved — the connection test and "
+                        "ACME challenges live there")
+        target.health_path = value
     return ""
 
 
@@ -2864,7 +2880,7 @@ The vocabulary `set` accepts, and its usage line.
 ```python
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
-                  "cache_size_mb", "trusted_proxy")
+                  "cache_size_mb", "trusted_proxy", "health_path")
 _SET_SITE_KEYS = ("username", "active", "redirect")
 
 

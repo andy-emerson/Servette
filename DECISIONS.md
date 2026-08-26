@@ -6,6 +6,30 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A function earns its place by making the server work, or by making it safe
+
+**Ruled (Human, principle):** every function on either surface belongs to
+one of two buckets, and a proposed feature that fits neither is out.
+**Working as a server** is the minimal bucket: serve correctly, stay up
+across reboots and spikes, carry content in (publish, swap, ring,
+restore), and prove it is doing so (status, log, traffic, the connection
+test) — with as many defaults as possible, so the process stays easy and
+fast. **Security** is everything deliberately stacked on top: TLS and its
+renewal, headers, rate limiting, auth, containment, the tunnel-only admin
+model, least privilege, and the refusal doors — not a minimal thing, but
+reading as one because the attack surface it defends is small. Simplicity
+and security are both load-bearing here: the first bucket is kept lean by
+defaults, and everything added beyond it must be defending something.
+What remains outside both buckets is presentation — folds, pills,
+ordering, color — which is the legibility of the two buckets, never a
+capability of its own.
+**First applications:** download failed the test and is removed
+([below](#the-page-offers-no-download-the-terminal-already-knows-how));
+the Server tab's Settings card groups its fields under Security and
+Performance headings rather than wearing one family's name over the
+other's knobs. **Reopen:** none foreseen — a feature that seems to demand
+a third bucket is the signal to re-argue it here first. *(2026-08-26)*
+
 ## publish is the terminal half of the pair, and the cores are caller-blind
 
 **Ruled (Human):** `publish [n] <folder>` publishes a folder on the box as

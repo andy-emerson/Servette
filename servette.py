@@ -202,8 +202,10 @@ def _clean_redirects(raw, strict=False):
         refuse("is not a table of \"/path\" = \"/target\" pairs")
         return out
     if len(raw) > _MAX_REDIRECTS:
-        refuse(f"table holds more than {_MAX_REDIRECTS} rules — only the "
-               f"first {_MAX_REDIRECTS} are loaded")
+        # Sentence stays mode-neutral: strict raises before anything loads,
+        # non-strict truncates below — naming either behavior here would
+        # tell one of the two doors the opposite of what it did.
+        refuse(f"table holds more than {_MAX_REDIRECTS} rules")
     for key, target in list(raw.items())[:_MAX_REDIRECTS]:
         src, dst = str(key).strip(), str(target).strip()
         if any(not (0x20 <= ord(c) <= 0x7E) for c in src + dst):
@@ -223,9 +225,16 @@ def _clean_redirects(raw, strict=False):
         # /my%20page, and /caf%C3%A9 is how an ASCII-only table spells a
         # non-ASCII source.
         norm = _canonical_source(src)
+        if len(norm) > _MAX_REDIRECT_CHARS:
+            # The canonical spelling percent-expands, so a raw source under
+            # the cap can canonicalize past it — judged here so canonical
+            # output is a fixed point of this validator, not refused later
+            # with a sentence about something else.
+            refuse(f"source {src[:80]!r} exceeds {_MAX_REDIRECT_CHARS} "
+                   "characters in its canonical spelling")
+            continue
         if norm in out:
-            refuse(f"{norm} is written twice (two spellings of one path) — "
-                   "the last one wins")
+            refuse(f"{norm} is written twice (two spellings of one path)")
         if norm == _redirect_next(dst):
             refuse(f"{norm} points at itself")
             continue
@@ -294,8 +303,14 @@ class Site:
         # last good config kept on the live reload.
         for field in ("domain", "serve_dir", "cert_file", "key_file",
                       "username", "password_hash", "password_salt"):
-            if field in data and not isinstance(data[field], str):
-                raise _ConfigInvalid(f"servette.toml: {field} must be text")
+            if field in data and (not isinstance(data[field], str) or any(
+                    ord(c) < 0x20 or ord(c) == 0x7F for c in data[field])):
+                # Control characters included NUL, which TOML permits in a
+                # string but the filesystem calls downstream refuse with a
+                # bare ValueError — outside the _ConfigInvalid family the
+                # reload's last-good handling keys on.
+                raise _ConfigInvalid(f"servette.toml: {field} must be text "
+                                     "without control characters")
         domain = data.get("domain", "")
         if domain:
             problem = _domain_problem(domain)
@@ -427,6 +442,13 @@ class Config:
                 unreadable = True
 
         site_tables = data.get("site", [])
+        # Typed before iterated: `site = 1` is valid TOML, and building Sites
+        # from a non-table would raise a bare TypeError — escaping the
+        # _ConfigInvalid family that reload_if_changed's last-good handling
+        # and startup's fix-or-delete sentence both key on.
+        if not isinstance(site_tables, list) or not all(
+                isinstance(t, dict) for t in site_tables):
+            raise _ConfigInvalid("servette.toml: site must be [[site]] tables")
         migrating   = existed and not site_tables and not unreadable
         if site_tables:
             sites = [Site(t) for t in site_tables]
@@ -558,12 +580,15 @@ class Config:
             if mtime != self._warned_mtime:
                 self._warned_mtime = mtime
                 log.warning("Config NOT reloaded (%s) — retrying on the next request", e)
-        except _ConfigInvalid as e:
+        except Exception as e:
             # A bad edit, by contrast, stays bad until someone edits again.
             # Keep serving on the last good configuration: this runs on
             # request threads, where an escape would kill the request
             # mid-flight and a process exit would take the whole server down
-            # over a typo. Stamp the mtime so the bad file isn't re-parsed —
+            # over a typo. Broad deliberately — the doors raise
+            # _ConfigInvalid for everything they judge, but a hand-edit that
+            # finds a way past them must degrade to last-good too, never to
+            # an outage. Stamp the mtime so the bad file isn't re-parsed —
             # and the warning isn't repeated — on every request until the
             # file changes again.
             self._mtime = mtime
@@ -840,6 +865,9 @@ def _get_cached_file(path):
     with _file_cache_lock:
         entry = _file_cache.get(path)
         if entry and entry["stamp"] == stamp:
+            # A hit refreshes recency, or the "LRU" is really FIFO and a
+            # hot index.html is evicted as readily as a file served once.
+            _file_cache.move_to_end(path)
             return entry["raw"], entry["compressed"], entry["etag"]
 
     # Two threads can race here: both miss the cache check and both read the file. The fix is
@@ -1891,7 +1919,11 @@ def _handle_request(method, url_path, headers, raw_ip):
         # Rightmost XFF value is what the single trusted proxy appended.
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
-        if xff and ip == config.trusted_proxy:
+        # Both sides normalized: the socket address collapses mapped
+        # ::ffff:a.b.c.d spellings, so the configured value must too, or a
+        # proxy declared in the mapped form never matches and every visitor
+        # silently shares its one rate-limit bucket.
+        if xff and ip == _normalize_ip(config.trusted_proxy):
             # Adopted only if it IS an address: a passthrough proxy that
             # forwards a client-written XFF verbatim would otherwise hand
             # arbitrary bytes a rate-limit bucket of their own (the bucket
@@ -2076,7 +2108,13 @@ def _handle_request(method, url_path, headers, raw_ip):
             target, status = site.redirects_temp.get(key), 302
         if target:
             if sep and "?" not in target:
-                target += sep + query
+                # The stored target is door-validated printable ASCII; the
+                # client's query is not, and it lands in a header. Whitespace
+                # can't reach here (http.server 400s a split request line),
+                # but other control bytes can — filtered to the same
+                # printable range every header value in the program holds.
+                target += sep + "".join(c for c in query
+                                        if 0x20 <= ord(c) <= 0x7E)
             log.info("%d %s to %s", status, log_path, ip)
             return resp(status, [
                 (b"location",       target.encode("ascii", "ignore")),
@@ -2330,8 +2368,11 @@ def _build_site_ssl_contexts():
             # configured as www.<domain> keeps its own context regardless of
             # which order the two sites appear in.
             domain_ctx.setdefault(f"www.{d}", ctx)
-        elif default_ctx is None:
-            default_ctx = ctx  # first domainless site is the catch-all/default
+        elif site.active and default_ctx is None:
+            # First ACTIVE domainless site, matching _select_site's catch-all
+            # election — a deactivated site must not present the certificate
+            # for content another site is serving.
+            default_ctx = ctx
 
     if default_ctx is None:
         cert_path, key_path = _ensure_default_cert()
@@ -3866,7 +3907,6 @@ def _ensure_swap():
     rec_mb    = rec // (1024 * 1024) if rec else None
     ours      = os.path.exists(_SWAP_PATH)
     ours_mb, foreign_mb = _swap_sizes()
-    active_mb = ours_mb or 0            # OUR file's active size, not the host total
     offer     = _swap_offer(rec_mb, ours, ours_mb, foreign_mb)
     if offer is None:
         return
@@ -5907,7 +5947,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const confirmHtml =
       `<div class="confirm hidden">` +
       `<p class="hint"><b>Delete</b> removes this server's copies — the ` +
-      `published files and their backup. Your originals in local storage ` +
+      `published files and every kept version. Your originals in local storage ` +
       `are untouched; publishing again rebuilds the site.</p>` +
       (inactive ? '' :
         `<p class="hint"><b>Deactivate</b> keeps everything on the server ` +
@@ -6276,8 +6316,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         if (resp.ok && result === 'published') {
           const note = `<b>${escapeHtml(folderName)}/</b> is live — ` +
             `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
-            `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
-            `content kept as the one-step backup.`;
+            `${fmtSize(gz.length)} sent, swapped in atomically — the previous ` +
+            `content stays in the kept versions below, one click to restore.`;
           q('.note-done').innerHTML = note;
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');
@@ -7182,7 +7222,10 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         counted; a missing one is not. Compared as bytes so any input gets
         the constant-time path rather than a TypeError."""
         qs   = parse_qs(urlsplit(self.path).query)
-        code = (qs.get("t") or [""])[0] or self.headers.get("X-Servette-Code", "")
+        # The passcode travels one way: the ?t= query every api() call
+        # carries. A second door for the run credential is a second thing
+        # to audit, so there is none.
+        code = (qs.get("t") or [""])[0]
         if self.server.bad_codes >= _UI_MAX_BAD_CODES:
             return "locked"
         if not code:
@@ -7870,7 +7913,7 @@ def _tar_folder(root, cap=_MAX_BUNDLE_BYTES):
     (bytes, "") — or (None, sentence) where it cannot be one. Hidden paths
     are excluded on the way in by the rule the server serves by: a
     dot-path is never served, so it is never published."""
-    buf, files = io.BytesIO(), 0
+    buf, files, total = io.BytesIO(), 0, 0
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
         for base, dirs, names in os.walk(root):
             dirs[:] = [d for d in dirs
@@ -7882,14 +7925,22 @@ def _tar_folder(root, cap=_MAX_BUNDLE_BYTES):
                 if os.path.islink(full) or not os.path.isfile(full):
                     continue    # regular files only, as the extractor accepts
                 try:
+                    size = os.path.getsize(full)
                     tf.add(full, arcname=os.path.relpath(full, root),
                            recursive=False)
                 except OSError:
                     continue
                 files += 1
-                if buf.tell() > cap:
-                    return None, (f"more than {cap // (1024 * 1024)} MB — "
-                                  "too large to publish as one bundle")
+                # The cap counts UNCOMPRESSED bytes — the same quantity
+                # _extract_bundle enforces and the page's builder sums. A
+                # compressed count would wave a well-compressing 8 GB folder
+                # through this door only for the core to refuse it with a
+                # log line instead of this sentence.
+                total += size
+                if total > cap:
+                    return None, (f"more than {cap // (1024 * 1024)} MB of "
+                                  "content — too large to publish as one "
+                                  "bundle")
     if not files:
         return None, ("no publishable files (hidden paths are not served, "
                       "so they are not published)")
@@ -7911,6 +7962,10 @@ def cmd_publish(args):
     root = os.path.realpath(os.path.abspath(folder))
     if not os.path.isdir(root):
         print(f"  {folder} is not a folder on this box.")
+        if folder.isdigit():
+            # 'publish 2' alone reads as a site index missing its folder,
+            # not as a folder named 2 — say so instead of the bare miss.
+            print(f"  (A site index needs the folder too: publish {folder} <folder>)")
         return
     if _serve_dir_exposes_secrets(root):
         print("  That folder holds Servette's own config or TLS keys — "
@@ -8139,7 +8194,11 @@ def _set_host_value(target, key, value):
     elif key == "trusted_proxy":
         if value:
             try:
-                ipaddress.ip_address(value)
+                # Stored in the one canonical spelling (the redirect-source
+                # precedent): the request path compares this against a
+                # normalized socket address, and "2001:0DB8::1" typed here
+                # would never equal the lowercase form the socket yields.
+                value = str(ipaddress.ip_address(value))
             except ValueError:
                 return "trusted_proxy must be an IP address (or empty to clear)"
         target.trusted_proxy = value
@@ -8210,6 +8269,11 @@ def _set_site_value(target, key, value):
         # interactive prompt judge it with the same sentence.
         if ":" in value:
             return "a username cannot contain a colon — sign-in splits user:password at the first one"
+        # The load door refuses control characters in every text field, and
+        # a door that saved one would be saving an answer the next restart
+        # refuses — the same judgment at every door, or no principle at all.
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+            return "a username cannot contain control characters"
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
         # (`set`, the page, and the prompt alike, since all land here).
@@ -8559,7 +8623,8 @@ def _config_add_site():
     if site.username:
         _config_password(site)
 
-    print(f"\n  Site {idx} added. Run 'publish {idx}' to set up its publish channel.")
+    print(f"\n  Site {idx} added. Run 'publish {idx} <folder>' — or use the")
+    print("  admin page — to put content on it.")
     if not reloaded and (_server_running() or _service_is_active()):
         _reload_server()
 
@@ -9047,6 +9112,11 @@ def _production_issues(running=None):
             # total printed a size the swapfile does not have.
             issues.append(f"swapfile {ours_mb} MB but {rec // (1024 * 1024)} MB "
                           "recommended — run 'enable' to resize")
+        elif os.path.exists(_SWAP_PATH):
+            # The file is on disk but not swapped on — "no swap" would be
+            # untrue on this host, and the fix is activation, not creation.
+            issues.append("swapfile present but inactive — run 'enable' to "
+                          "re-activate it")
         else:
             issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'enable' to add a swapfile")
     # Both surfaces say the same thing about disk: the page reads the health
@@ -9218,6 +9288,10 @@ def _health_checks(service_active=None):
         elif have:
             detail = (f"{have} MB active, below the {rec_mb} MB recommendation"
                       if rec_mb else f"{have} MB active")
+        elif os.path.exists(_SWAP_PATH):
+            # On disk but not swapped on: "none" would be untrue, and the
+            # fix is activation, not creation.
+            detail = "swapfile present but inactive — 'enable' re-activates it"
         else:
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
         rows.append({"key": "swap", "site": None, "ok": offer is None,

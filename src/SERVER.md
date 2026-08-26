@@ -141,8 +141,10 @@ def _clean_redirects(raw, strict=False):
         refuse("is not a table of \"/path\" = \"/target\" pairs")
         return out
     if len(raw) > _MAX_REDIRECTS:
-        refuse(f"table holds more than {_MAX_REDIRECTS} rules — only the "
-               f"first {_MAX_REDIRECTS} are loaded")
+        # Sentence stays mode-neutral: strict raises before anything loads,
+        # non-strict truncates below — naming either behavior here would
+        # tell one of the two doors the opposite of what it did.
+        refuse(f"table holds more than {_MAX_REDIRECTS} rules")
     for key, target in list(raw.items())[:_MAX_REDIRECTS]:
         src, dst = str(key).strip(), str(target).strip()
         if any(not (0x20 <= ord(c) <= 0x7E) for c in src + dst):
@@ -162,9 +164,16 @@ def _clean_redirects(raw, strict=False):
         # /my%20page, and /caf%C3%A9 is how an ASCII-only table spells a
         # non-ASCII source.
         norm = _canonical_source(src)
+        if len(norm) > _MAX_REDIRECT_CHARS:
+            # The canonical spelling percent-expands, so a raw source under
+            # the cap can canonicalize past it — judged here so canonical
+            # output is a fixed point of this validator, not refused later
+            # with a sentence about something else.
+            refuse(f"source {src[:80]!r} exceeds {_MAX_REDIRECT_CHARS} "
+                   "characters in its canonical spelling")
+            continue
         if norm in out:
-            refuse(f"{norm} is written twice (two spellings of one path) — "
-                   "the last one wins")
+            refuse(f"{norm} is written twice (two spellings of one path)")
         if norm == _redirect_next(dst):
             refuse(f"{norm} points at itself")
             continue
@@ -233,8 +242,14 @@ class Site:
         # last good config kept on the live reload.
         for field in ("domain", "serve_dir", "cert_file", "key_file",
                       "username", "password_hash", "password_salt"):
-            if field in data and not isinstance(data[field], str):
-                raise _ConfigInvalid(f"servette.toml: {field} must be text")
+            if field in data and (not isinstance(data[field], str) or any(
+                    ord(c) < 0x20 or ord(c) == 0x7F for c in data[field])):
+                # Control characters included NUL, which TOML permits in a
+                # string but the filesystem calls downstream refuse with a
+                # bare ValueError — outside the _ConfigInvalid family the
+                # reload's last-good handling keys on.
+                raise _ConfigInvalid(f"servette.toml: {field} must be text "
+                                     "without control characters")
         domain = data.get("domain", "")
         if domain:
             problem = _domain_problem(domain)
@@ -376,6 +391,13 @@ class Config:
                 unreadable = True
 
         site_tables = data.get("site", [])
+        # Typed before iterated: `site = 1` is valid TOML, and building Sites
+        # from a non-table would raise a bare TypeError — escaping the
+        # _ConfigInvalid family that reload_if_changed's last-good handling
+        # and startup's fix-or-delete sentence both key on.
+        if not isinstance(site_tables, list) or not all(
+                isinstance(t, dict) for t in site_tables):
+            raise _ConfigInvalid("servette.toml: site must be [[site]] tables")
         migrating   = existed and not site_tables and not unreadable
         if site_tables:
             sites = [Site(t) for t in site_tables]
@@ -507,12 +529,15 @@ class Config:
             if mtime != self._warned_mtime:
                 self._warned_mtime = mtime
                 log.warning("Config NOT reloaded (%s) — retrying on the next request", e)
-        except _ConfigInvalid as e:
+        except Exception as e:
             # A bad edit, by contrast, stays bad until someone edits again.
             # Keep serving on the last good configuration: this runs on
             # request threads, where an escape would kill the request
             # mid-flight and a process exit would take the whole server down
-            # over a typo. Stamp the mtime so the bad file isn't re-parsed —
+            # over a typo. Broad deliberately — the doors raise
+            # _ConfigInvalid for everything they judge, but a hand-edit that
+            # finds a way past them must degrade to last-good too, never to
+            # an outage. Stamp the mtime so the bad file isn't re-parsed —
             # and the warning isn't repeated — on every request until the
             # file changes again.
             self._mtime = mtime
@@ -816,7 +841,7 @@ def _entry_bytes(entry):
 
 ```
 
-The read-through path: mtime-validated hits, one gzip per file change, and two protections for the bound — a file too large for the cache is served but never stored (so it can't purge everything else), and eviction is oldest-first.
+The read-through path: mtime-validated hits, one gzip per file change, and two protections for the bound — a file too large for the cache is served but never stored (so it can't purge everything else), and eviction is least-recently-served first.
 
 ```python
 # Reading through the cache
@@ -844,6 +869,9 @@ def _get_cached_file(path):
     with _file_cache_lock:
         entry = _file_cache.get(path)
         if entry and entry["stamp"] == stamp:
+            # A hit refreshes recency, or the "LRU" is really FIFO and a
+            # hot index.html is evicted as readily as a file served once.
+            _file_cache.move_to_end(path)
             return entry["raw"], entry["compressed"], entry["etag"]
 
     # Two threads can race here: both miss the cache check and both read the file. The fix is
@@ -1143,7 +1171,11 @@ def _handle_request(method, url_path, headers, raw_ip):
         # Rightmost XFF value is what the single trusted proxy appended.
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
-        if xff and ip == config.trusted_proxy:
+        # Both sides normalized: the socket address collapses mapped
+        # ::ffff:a.b.c.d spellings, so the configured value must too, or a
+        # proxy declared in the mapped form never matches and every visitor
+        # silently shares its one rate-limit bucket.
+        if xff and ip == _normalize_ip(config.trusted_proxy):
             # Adopted only if it IS an address: a passthrough proxy that
             # forwards a client-written XFF verbatim would otherwise hand
             # arbitrary bytes a rate-limit bucket of their own (the bucket
@@ -1328,7 +1360,13 @@ def _handle_request(method, url_path, headers, raw_ip):
             target, status = site.redirects_temp.get(key), 302
         if target:
             if sep and "?" not in target:
-                target += sep + query
+                # The stored target is door-validated printable ASCII; the
+                # client's query is not, and it lands in a header. Whitespace
+                # can't reach here (http.server 400s a split request line),
+                # but other control bytes can — filtered to the same
+                # printable range every header value in the program holds.
+                target += sep + "".join(c for c in query
+                                        if 0x20 <= ord(c) <= 0x7E)
             log.info("%d %s to %s", status, log_path, ip)
             return resp(status, [
                 (b"location",       target.encode("ascii", "ignore")),
@@ -1609,8 +1647,11 @@ def _build_site_ssl_contexts():
             # configured as www.<domain> keeps its own context regardless of
             # which order the two sites appear in.
             domain_ctx.setdefault(f"www.{d}", ctx)
-        elif default_ctx is None:
-            default_ctx = ctx  # first domainless site is the catch-all/default
+        elif site.active and default_ctx is None:
+            # First ACTIVE domainless site, matching _select_site's catch-all
+            # election — a deactivated site must not present the certificate
+            # for content another site is serving.
+            default_ctx = ctx
 
     if default_ctx is None:
         cert_path, key_path = _ensure_default_cert()

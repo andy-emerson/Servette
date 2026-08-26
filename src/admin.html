@@ -1186,7 +1186,7 @@
     const confirmHtml =
       `<div class="confirm hidden">` +
       `<p class="hint"><b>Delete</b> removes this server's copies — the ` +
-      `published files and their backup. Your originals in local storage ` +
+      `published files and every kept version. Your originals in local storage ` +
       `are untouched; publishing again rebuilds the site.</p>` +
       (inactive ? '' :
         `<p class="hint"><b>Deactivate</b> keeps everything on the server ` +
@@ -1555,8 +1555,8 @@
         if (resp.ok && result === 'published') {
           const note = `<b>${escapeHtml(folderName)}/</b> is live — ` +
             `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
-            `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
-            `content kept as the one-step backup.`;
+            `${fmtSize(gz.length)} sent, swapped in atomically — the previous ` +
+            `content stays in the kept versions below, one click to restore.`;
           q('.note-done').innerHTML = note;
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');

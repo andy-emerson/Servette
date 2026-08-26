@@ -1495,7 +1495,6 @@ def _ensure_swap():
     rec_mb    = rec // (1024 * 1024) if rec else None
     ours      = os.path.exists(_SWAP_PATH)
     ours_mb, foreign_mb = _swap_sizes()
-    active_mb = ours_mb or 0            # OUR file's active size, not the host total
     offer     = _swap_offer(rec_mb, ours, ours_mb, foreign_mb)
     if offer is None:
         return

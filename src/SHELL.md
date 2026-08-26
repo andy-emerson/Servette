@@ -293,7 +293,10 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         counted; a missing one is not. Compared as bytes so any input gets
         the constant-time path rather than a TypeError."""
         qs   = parse_qs(urlsplit(self.path).query)
-        code = (qs.get("t") or [""])[0] or self.headers.get("X-Servette-Code", "")
+        # The passcode travels one way: the ?t= query every api() call
+        # carries. A second door for the run credential is a second thing
+        # to audit, so there is none.
+        code = (qs.get("t") or [""])[0]
         if self.server.bad_codes >= _UI_MAX_BAD_CODES:
             return "locked"
         if not code:
@@ -1027,7 +1030,7 @@ def _tar_folder(root, cap=_MAX_BUNDLE_BYTES):
     (bytes, "") — or (None, sentence) where it cannot be one. Hidden paths
     are excluded on the way in by the rule the server serves by: a
     dot-path is never served, so it is never published."""
-    buf, files = io.BytesIO(), 0
+    buf, files, total = io.BytesIO(), 0, 0
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
         for base, dirs, names in os.walk(root):
             dirs[:] = [d for d in dirs
@@ -1039,14 +1042,22 @@ def _tar_folder(root, cap=_MAX_BUNDLE_BYTES):
                 if os.path.islink(full) or not os.path.isfile(full):
                     continue    # regular files only, as the extractor accepts
                 try:
+                    size = os.path.getsize(full)
                     tf.add(full, arcname=os.path.relpath(full, root),
                            recursive=False)
                 except OSError:
                     continue
                 files += 1
-                if buf.tell() > cap:
-                    return None, (f"more than {cap // (1024 * 1024)} MB — "
-                                  "too large to publish as one bundle")
+                # The cap counts UNCOMPRESSED bytes — the same quantity
+                # _extract_bundle enforces and the page's builder sums. A
+                # compressed count would wave a well-compressing 8 GB folder
+                # through this door only for the core to refuse it with a
+                # log line instead of this sentence.
+                total += size
+                if total > cap:
+                    return None, (f"more than {cap // (1024 * 1024)} MB of "
+                                  "content — too large to publish as one "
+                                  "bundle")
     if not files:
         return None, ("no publishable files (hidden paths are not served, "
                       "so they are not published)")
@@ -1068,6 +1079,10 @@ def cmd_publish(args):
     root = os.path.realpath(os.path.abspath(folder))
     if not os.path.isdir(root):
         print(f"  {folder} is not a folder on this box.")
+        if folder.isdigit():
+            # 'publish 2' alone reads as a site index missing its folder,
+            # not as a folder named 2 — say so instead of the bare miss.
+            print(f"  (A site index needs the folder too: publish {folder} <folder>)")
         return
     if _serve_dir_exposes_secrets(root):
         print("  That folder holds Servette's own config or TLS keys — "
@@ -1309,7 +1324,11 @@ def _set_host_value(target, key, value):
     elif key == "trusted_proxy":
         if value:
             try:
-                ipaddress.ip_address(value)
+                # Stored in the one canonical spelling (the redirect-source
+                # precedent): the request path compares this against a
+                # normalized socket address, and "2001:0DB8::1" typed here
+                # would never equal the lowercase form the socket yields.
+                value = str(ipaddress.ip_address(value))
             except ValueError:
                 return "trusted_proxy must be an IP address (or empty to clear)"
         target.trusted_proxy = value
@@ -1383,6 +1402,11 @@ def _set_site_value(target, key, value):
         # interactive prompt judge it with the same sentence.
         if ":" in value:
             return "a username cannot contain a colon — sign-in splits user:password at the first one"
+        # The load door refuses control characters in every text field, and
+        # a door that saved one would be saving an answer the next restart
+        # refuses — the same judgment at every door, or no principle at all.
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+            return "a username cannot contain control characters"
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
         # (`set`, the page, and the prompt alike, since all land here).
@@ -1759,7 +1783,8 @@ def _config_add_site():
     if site.username:
         _config_password(site)
 
-    print(f"\n  Site {idx} added. Run 'publish {idx}' to set up its publish channel.")
+    print(f"\n  Site {idx} added. Run 'publish {idx} <folder>' — or use the")
+    print("  admin page — to put content on it.")
     if not reloaded and (_server_running() or _service_is_active()):
         _reload_server()
 
@@ -2311,6 +2336,11 @@ def _production_issues(running=None):
             # total printed a size the swapfile does not have.
             issues.append(f"swapfile {ours_mb} MB but {rec // (1024 * 1024)} MB "
                           "recommended — run 'enable' to resize")
+        elif os.path.exists(_SWAP_PATH):
+            # The file is on disk but not swapped on — "no swap" would be
+            # untrue on this host, and the fix is activation, not creation.
+            issues.append("swapfile present but inactive — run 'enable' to "
+                          "re-activate it")
         else:
             issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'enable' to add a swapfile")
     # Both surfaces say the same thing about disk: the page reads the health
@@ -2497,6 +2527,10 @@ def _health_checks(service_active=None):
         elif have:
             detail = (f"{have} MB active, below the {rec_mb} MB recommendation"
                       if rec_mb else f"{have} MB active")
+        elif os.path.exists(_SWAP_PATH):
+            # On disk but not swapped on: "none" would be untrue, and the
+            # fix is activation, not creation.
+            detail = "swapfile present but inactive — 'enable' re-activates it"
         else:
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
         rows.append({"key": "swap", "site": None, "ok": offer is None,

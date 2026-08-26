@@ -3,17 +3,19 @@
 # to its own repository, so the rules that kept site/ and its end-to-end harness
 # out of the bar named paths that no longer exist here.
 #
-# The bar reads Python because the program is Python: servette/__init__.py (the
+# The bar reads Python because the program is Python: servette.py (the
 # module, generated from the literate sources in src/), src/build.py, and
 # tests/test.py. src/*.md is where that module is authored, but it is left as
 # Markdown deliberately — counting it as Python too would count the same code
 # twice, once as source and once as generated output.
 #
-# src/404.html is the authored form of the default error page, inlined into the
-# module by build.py. Excluded for the same reason src/*.md is not counted as
-# Python: its content is already counted once, inside the generated module.
-# Counting the source too would count the same bytes twice.
+# The three authored pages are inlined into the module by build.py. Excluded
+# for the same reason src/*.md is not counted as Python: their content is
+# already counted once, inside the generated module. Counting the sources too
+# would count the same bytes twice.
 src/404.html linguist-documentation
+src/admin.html linguist-documentation
+src/connection.html linguist-documentation
 
 # The module is generated, but it IS the program — committed to be read, and
 # regenerated from src/ by the package build at every install — so it must stay

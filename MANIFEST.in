@@ -6,6 +6,6 @@ graft src
 # The build reads the mark from here to inline it as the pages' favicon, so
 # an sdist without it cannot build.
 include assets/servette-mark.svg
-include MANIFEST.in
-recursive-exclude src __pycache__
+# The backend's own import writes src/__pycache__/*.pyc during every sdist
+# build, and `graft src` would ship them; this line alone keeps them out.
 recursive-exclude src *.pyc

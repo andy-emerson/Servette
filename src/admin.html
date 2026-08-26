@@ -928,14 +928,6 @@
      site list: their order is config — the first domainless site answers
      unmatched Hosts — so reordering them is a config write. ══ */
 
-  // What a site's unhealthy row is called on its card — the fault named,
-  // rather than an exclamation mark standing in for the name.
-  const NEEDS_WORD = {
-    cert:     'Needs certificate',
-    password: 'Needs password',
-    dir:      'Folder missing',
-  };
-
   // A card's index is its position in the DOM, read at the moment it is
   // needed: adding, removing, or dragging a card renumbers its neighbours,
   // and a stale index would act on the wrong site.
@@ -1232,8 +1224,7 @@
          `<p class="hint summary">The folder to drop is the one holding the ` +
          `site's <b>index.html</b>.</p>` +
          // Both of these act on the folder you chose, so both are dim until
-         // you have chosen one. Download is not here: it acts on what is
-         // live, and sits on the line that reports it.
+         // you have chosen one.
          `<div class="btn-row" style="margin-top:0.75rem">` +
            `<button class="action pub" type="button" disabled ` +
            `title="Choose a folder first">Publish</button>` +
@@ -1262,13 +1253,6 @@
          `<div class="switch-row"><span class="k">Published</span>` +
          `<span class="switch-value"><span class="ver-state">reading…</span>` +
          `<span class="switch-act">` +
-         // The reverse of Publish, on the line that says what is live: the
-         // live tree as the same tar.gz the publish door accepts, so what
-         // comes down can go back up.
-         // Born disabled: the size guard below needs the /versions answer,
-         // and a click before (or without) it must not navigate blind.
-         `<button class="action tiny dl" type="button" disabled ` +
-         `title="Download the live content as a tar.gz">Download</button>` +
          `<button class="action tiny ver-refresh" type="button" ` +
          `title="Re-read this list. The page updates it after a publish or ` +
          `restore of its own — this is for one done in the terminal.">` +
@@ -1322,18 +1306,19 @@
           // beside it is the one publishing writes into, which is why they
           // are separate elements: overwriting the first would erase a
           // standing fault the moment a folder was read.
-          // Emitted even on a healthy card (hidden): a fault that arrives
+          // The pill mirrors the Status line exactly — the count when
+          // anything needs attention, the green all-clear when nothing
+          // does — so a folded healthy card says it is well rather than
+          // saying nothing. Emitted on every card: a fault that arrives
           // client-side — an unfinished login on a card built healthy —
           // has no rebuild to emit a pill for it, and renderAttention can
           // only fill a pill that exists.
-          `<span class="badge ${siteNeeds.some((c) => c.blocking)
-             ? 'badge-red' : 'badge-warn'} needs${
-             siteNeeds.length ? '' : ' hidden'}" title="${escapeHtml(
+          `<span class="badge ${!siteNeeds.length ? 'badge-green'
+             : siteNeeds.some((c) => c.blocking) ? 'badge-red'
+             : 'badge-warn'} needs" title="${escapeHtml(
              siteNeeds.map((c) => c.detail).join(' · '))}">${
-             !siteNeeds.length ? ''
-               : siteNeeds.length === 1
-                 ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
-                 : siteNeeds.length + ' to review'}</span>` +
+             siteNeeds.length ? siteNeeds.length + ' to review'
+               : '✓ healthy'}</span>` +
           `<span class="badge state badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
           // Collapse, for a box serving more sites than fit on a screen.
@@ -1657,14 +1642,12 @@
       return i < 0 ? idx : i;
     };
 
-    let liveBytes = null;   // the live tree's size, for the download guard
     async function loadVersions() {
         const state = q('.ver-state'), list = q('.versions');
         try {
           const v = await getJSON('/versions', { site: siteIndex() });
           const rows = v.versions || [];
           const live = rows.find((r) => r.live);
-          liveBytes = live ? live.bytes : null;
           // The live version's own size is the answer to "did the right
           // folder land" — a file count off by an order of magnitude is
           // the wrong folder, however right the site looks.
@@ -1683,15 +1666,6 @@
             : `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
               `${fmtSize(live.bytes)}</span>` +
               `<span>${escapeHtml(when(live.published))}</span>`;
-          // Nothing published is nothing to download, and offering it
-          // anyway made the card contradict itself in two adjacent words.
-          const dl = q('.dl');
-          dl.disabled = !live || !live.files;
-          dl.title = !live
-            ? 'The folder is missing — publish to recreate it'
-            : dl.disabled
-              ? 'Nothing published yet — there is nothing to download'
-              : 'Download the live content as a tar.gz';
           list.innerHTML = rows.length < 2 ? '' :
             rows.map((r) => row(escapeHtml(when(r.published)),
               `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
@@ -1720,27 +1694,6 @@
 
     q('.ver-refresh').addEventListener('click', loadVersions);
     loadVersions();
-
-    // The response carries Content-Disposition, so the browser saves it
-    // rather than navigating: the operator stays on the page they were
-    // working in. That holds only for the 200 — the too-large refusal is
-    // JSON with no disposition, which location.assign would NAVIGATE to,
-    // replacing the page with a bare error blob. Judged here first, from
-    // the size the version row already fetched.
-    q('.dl').addEventListener('click', () => {
-      clearError(errEl);
-      // Raw bytes are the only number the page holds; the server judges
-      // the gzipped tar, so a compressible over-500 MB site is refused
-      // here that the server might have managed. Accepted: scp still
-      // works either way, and navigating the page into a JSON refusal
-      // blob is worse. The button is born disabled, so liveBytes is set
-      // by the /versions fetch before any click can land.
-      if (liveBytes != null && liveBytes > MAX_BUNDLE_BYTES)
-        return showError(errEl,
-          `This site is larger than ${fmtSize(MAX_BUNDLE_BYTES)} — ` +
-          'copy it with scp instead.');
-      location.assign(api('/download', { site: siteIndex() }));
-    });
 
     /* ── Redirects. Both halves of the pair reach _set_site_value through
        the same settings write, so a rule the terminal refuses the page
@@ -1862,15 +1815,17 @@
       const blocking = needs.some((c) => c.blocking);
 
       // The head pill is the Status line for a folded card, so it reads the
-      // same list rather than a snapshot taken when the card was built.
+      // same list rather than a snapshot taken when the card was built —
+      // and mirrors that line both ways: the count, or the green all-clear.
       const pill = q('.badge.needs');
       if (pill) {
-        pill.textContent = needs.length === 1
-          ? (NEEDS_WORD[needs[0].key] || 'Needs attention')
-          : needs.length + ' to review';
+        pill.textContent = needs.length
+          ? needs.length + ' to review' : '✓ healthy';
+        pill.title = needs.map((c) => c.detail).join(' · ');
         pill.classList.toggle('badge-red', blocking);
-        pill.classList.toggle('badge-warn', !blocking);
-        pill.classList.toggle('hidden', !needs.length);
+        pill.classList.toggle('badge-warn', !!needs.length && !blocking);
+        pill.classList.toggle('badge-green', !needs.length);
+        pill.classList.remove('hidden');
       }
 
       info.innerHTML =

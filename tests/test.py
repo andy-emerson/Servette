@@ -1094,8 +1094,6 @@ def run_dispatch_tests(s):
     check("...names redirected traffic and totals the unnamed remainder",
           "'Redirected'" in s._UI_ADMIN_PAGE
           and "row('Other'" in s._UI_ADMIN_PAGE)
-    check("...and refuses the oversized download in its own voice, not the browser's",
-          "copy it with scp instead." in s._UI_ADMIN_PAGE)
     # The passcode is attached in one place rather than at each call site,
     # so no request can be written that forgets it.
     check("...with every request's passcode attached by one helper",
@@ -1161,8 +1159,11 @@ def run_dispatch_tests(s):
           and "api('/preview'" in s._UI_ADMIN_PAGE)
     check("...whose frame URL carries the preview token, never the passcode",
           "'/preview/' + encodeURIComponent(data.token)" in s._UI_ADMIN_PAGE)
-    check("...and a download on the line that reports what is live",
-          "api('/download'" in s._UI_ADMIN_PAGE)
+    # Download is removed by ruling: a sys admin already knows how to copy
+    # a folder off their own box, and the terminal's own tools do it better.
+    check("...and offers no download — the terminal already knows how",
+          "/download" not in s._UI_ADMIN_PAGE
+          and "Download" not in s._UI_ADMIN_PAGE)
     # The running dot lost its styling when the status row moved onto a
     # switch-row and a `.rows .dot` rule stopped matching: still in the
     # markup, simply invisible. The rule is unscoped now.
@@ -1578,21 +1579,11 @@ def run_dispatch_tests(s):
         check("...and is code-gated like every other route", st == 403)
         s._latest_release = saved_latest
 
-        # /download hands the live site back as the same tar.gz the publish
-        # door takes, so what comes down can go back up.
-        st, _ = ui_req("GET", "/download?site=0")
-        check("GET /download is code-gated like every other route", st == 403)
-        st, _ = ui_req("GET", f"/download?t={ui_code}&site=abc")
-        check("...refusing a site index that is not a number", st == 400)
-        st, _ = ui_req("GET", f"/download?t={ui_code}&site=99")
-        check("...and one off the end of the list", st == 404)
-        st, blob = ui_req("GET", f"/download?t={ui_code}&site=0")
-        dl_dest = os.path.join(ui_dir, "roundtrip")
-        s._extract_bundle(blob, dl_dest)
-        check("...and the downloaded bundle round-trips back through extraction",
-              st == 200
-              and os.path.isfile(os.path.join(dl_dest, "old.html"))
-              and open(os.path.join(dl_dest, "old.html")).read() == "old")
+        # Download is removed by ruling — the route must be gone, not
+        # merely unlinked from the page.
+        st, _ = ui_req("GET", f"/download?t={ui_code}&site=0")
+        check("The removed /download route answers 404 like any unknown path",
+              st == 404)
 
         # The swap size the terminal has always asked for, asked for here —
         # the same core underneath, guarded before it can reach the disk.
@@ -3437,45 +3428,47 @@ def run_dispatch_tests(s):
     finally:
         shutil.rmtree(extract_root, ignore_errors=True)
 
-    section("Config sub-shell validates what 'set' validates")
+    section("Every scalar knob has one terminal door: set")
 
-    # The two write surfaces must enforce the same rules. A typo'd
-    # trusted_proxy saved by the sub-shell was worse than a refusal: the peer
-    # comparison never matches, XFF is never trusted, and every proxied
-    # visitor lands in the proxy's single rate-limit bucket.
-    saved_proxy_v = s.config.trusted_proxy
-    saved_input_v = builtins.input
-    saved_save_v  = s.Config.save
-    try:
-        s.Config.save = lambda self: None
-        s.config.trusted_proxy = ""
-        builtins.input = lambda prompt="": "not-an-ip"
-        with contextlib.redirect_stdout(io.StringIO()) as vbuf:
-            s._config_trusted_proxy()
-        check("Sub-shell refuses a non-IP trusted_proxy",
-              s.config.trusted_proxy == "" and "must be an IP" in vbuf.getvalue())
-        builtins.input = lambda prompt="": "203.0.113.7"
-        with contextlib.redirect_stdout(io.StringIO()):
-            s._config_trusted_proxy()
-        check("...and accepts a real one", s.config.trusted_proxy == "203.0.113.7")
-
-        # A negative max-age is not a shorter cache, it is a malformed
-        # Cache-Control header on every response.
-        saved_age_v    = s.config.cache_max_age
-        saved_policy_v = s.config.cache_policy
-        answers = iter(["max-age", "-5"])
-        builtins.input = lambda prompt="": next(answers, "")  # "" = leave the
-        #                       trailing cache_size_mb prompt unchanged
-        with contextlib.redirect_stdout(io.StringIO()):
-            s._config_cache()
-        check("Sub-shell refuses a negative cache_max_age",
-              s.config.cache_max_age == saved_age_v)
-        s.config.cache_max_age = saved_age_v
-        s.config.cache_policy  = saved_policy_v
-    finally:
-        s.config.trusted_proxy = saved_proxy_v
-        builtins.input = saved_input_v
-        s.Config.save = saved_save_v
+    # The prompt layer that wrapped `set` is gone by ruling; the knobs it
+    # carried live in the set vocabulary now, each behind the same shared
+    # validator every surface uses.
+    import builtins
+    _sc = type("S", (), {})()
+    check("trusted_proxy refuses a non-IP at the one door",
+          "must be an IP" in s._set_host_value(_sc, "trusted_proxy", "not-an-ip")
+          and s._set_host_value(_sc, "trusted_proxy", "203.0.113.7") == ""
+          and _sc.trusted_proxy == "203.0.113.7")
+    check("cache_policy is a choice, stated and refused outside it",
+          "no-store" in s._set_host_value(_sc, "cache_policy", "weird")
+          and s._set_host_value(_sc, "cache_policy", "max-age") == ""
+          and _sc.cache_policy == "max-age")
+    # A negative max-age is not a shorter cache, it is a malformed
+    # Cache-Control header on every response.
+    check("cache_max_age refuses negatives and takes zero",
+          s._set_host_value(_sc, "cache_max_age", "-5") != ""
+          and s._set_host_value(_sc, "cache_max_age", "0") == ""
+          and _sc.cache_max_age == 0)
+    check("tls_min_version is 1.2 or 1.3, nothing else",
+          s._set_host_value(_sc, "tls_min_version", "1.1") != ""
+          and s._set_host_value(_sc, "tls_min_version", "1.3") == "")
+    # The cipher string's only arbiter is OpenSSL, asked at the door — the
+    # alternative was a refusal at the next server start, which fails
+    # closed: the site down over a typo saved months earlier.
+    check("ciphers are judged by OpenSSL before saving",
+          s._set_host_value(_sc, "ciphers", "GARBAGE-THAT-SELECTS-NOTHING") != ""
+          and s._set_host_value(_sc, "ciphers", "DEFAULT") == ""
+          and s._set_host_value(_sc, "ciphers", "") == "")
+    # csp and permissions_policy go out verbatim as header values; a
+    # control character there is header injection.
+    check("header-valued settings refuse control characters",
+          s._set_host_value(_sc, "csp", "default-src 'self'\r\nX-Evil: 1") != ""
+          and s._set_host_value(_sc, "csp", "default-src 'self'") == ""
+          and s._set_host_value(_sc, "permissions_policy", "camera=()") == "")
+    check("...and the sub-shell no longer carries a second door for any of them",
+          not any(hasattr(s, f) for f in
+                  ("_config_limits", "_config_cache", "_config_trusted_proxy",
+                   "_config_tls", "_config_set")))
 
     section("Ownership plans")
 
@@ -4548,36 +4541,7 @@ def run_server_tests(s, serve_dir):
           and s._set_host_value(_scratch, "email", "") == ""
           and _scratch.email == "")
 
-    # The cipher string's only arbiter is OpenSSL, asked at the prompt —
-    # the alternative was a refusal at the next server start, which fails
-    # closed: the site down over a typo saved months earlier.
     saved_input_v = builtins.input
-    _saved_ciphers = s.config.ciphers
-    try:
-        _answers = iter(["", "GARBAGE-THAT-SELECTS-NOTHING"])
-        builtins.input = lambda prompt="": next(_answers)
-        with contextlib.redirect_stdout(io.StringIO()) as _tlsbuf:
-            s._config_tls()
-    finally:
-        builtins.input = saved_input_v
-    check("The cipher prompt asks OpenSSL before saving",
-          "unchanged" in _tlsbuf.getvalue()
-          and s.config.ciphers == _saved_ciphers)
-
-    # The interactive limit prompts hold the same positive floor `set`
-    # holds: a zero rate limit refuses every request on the next start.
-    _saved_rl, _saved_arl = s.config.rate_limit, s.config.auth_rate_limit
-    try:
-        _answers = iter(["0", "-5"])
-        builtins.input = lambda prompt="": next(_answers)
-        with contextlib.redirect_stdout(io.StringIO()) as _limbuf:
-            s._config_limits()
-    finally:
-        builtins.input = saved_input_v
-    check("The limit prompts refuse zero and negatives, like set does",
-          _limbuf.getvalue().count("must be a positive integer") == 2
-          and s.config.rate_limit == _saved_rl
-          and s.config.auth_rate_limit == _saved_arl)
 
     # The certificate prompt judges domain syntax locally — the same
     # sentence as the page's name door — instead of handing garbage to the
@@ -6839,6 +6803,18 @@ def run_browser_tests(s, tmpdir):
                 page.click("#tab-sites")
                 page.wait_for_timeout(800)
 
+            # The pill mirrors the Status line both ways (the ruled shape):
+            # a healthy folded card wears the green all-clear rather than
+            # nothing, so an empty head never has to mean two things.
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
+            _pill = page.locator(".badge.needs").first
+            check("A healthy folded card wears the green all-clear pill",
+                  _pill.is_visible() and "healthy" in _pill.inner_text()
+                  and "badge-green" in (_pill.get_attribute("class") or ""))
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
+
             # An unfinished login is treated as exactly what every other
             # thing to review is treated as: counted once, marked once on
             # the row that fixes it, with no third register anywhere. The
@@ -6910,7 +6886,7 @@ def run_browser_tests(s, tmpdir):
             pill_loc = page.locator(".site-card .badge.needs").first
             check("...and folding a card faulted client-side still shows the pill",
                   pill_loc.is_visible()
-                  and "Needs password" in pill_loc.inner_text())
+                  and "1 to review" in pill_loc.inner_text())
             page.locator("button.fold").first.click()
             page.wait_for_timeout(300)
             # Typing the login completes it, so the count follows.
@@ -6945,7 +6921,7 @@ def run_browser_tests(s, tmpdir):
                     if (rows.length !== 2) return false;
                     const a = rows[0].getBoundingClientRect();
                     const b = rows[1].getBoundingClientRect();
-                    const btn = document.querySelector('.switch-act button.dl')
+                    const btn = document.querySelector('.switch-act button.ver-refresh')
                                         .getBoundingClientRect();
                     const mid = (a.top + b.bottom) / 2;
                     return b.top >= a.bottom - 1 &&

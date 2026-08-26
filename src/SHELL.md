@@ -75,7 +75,7 @@ HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d i
 
 ```
 
-The config sub-shell's commands, ordered: sites first (list/add/remove/move — the multi-site entry points), then how a site is reached (port/cert/email — email is the ACME registration address, grouped with the certificate it belongs to), then access control, then traffic shaping, then advanced security tuning, then meta. `cert`/`username`/`password` take an optional site index (default 0) — the same `[n]` convention as the top-level `log [n]`.
+The config sub-shell holds the flows that genuinely need a guided prompt: the site list, certificate issuance, and the login pair (the password is excluded from `set` because a secret on argv leaks into shell history and the process table). Every scalar knob has exactly one terminal door — `set key=value` — rather than a prompt that re-asks what `set` already validates. `cert`/`username`/`password` take an optional site index (default 0) — the same `[n]` convention as the top-level `log [n]`.
 
 Absent by ruling: the folder. Where a site's content lives is Servette-assigned, not a question with a wrong answer for the operator to get wrong ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-has-left-the-vocabulary)). `show` and `sites` still report the path — knowing where the files are is not the same as choosing it.
 
@@ -86,21 +86,16 @@ _CONFIG_COMMANDS = [
     ("add-site",        "add a new site (domain and password)"),
     ("remove-site <n>", "remove a site"),
     ("move-site <n> <to>", "reorder sites (the first domainless one answers unmatched Hosts)"),
-    ("port",            "HTTPS port"),
     ("cert [n]",        "SSL certificate and key"),
-    ("email",           "email address"),
     ("username [n]",    "login username"),
     ("password [n]",    "login password"),
-    ("limits",          "rate limits"),
-    ("cache",           "browser cache policy"),
-    ("proxy",           "trusted proxy IP for X-Forwarded-For"),
-    ("tls",             "minimum TLS version and cipher suites"),
-    ("csp",             "Content-Security-Policy header"),
-    ("perms",           "Permissions-Policy header"),
     ("show",            "show current settings"),
     ("back",            "return to main shell"),
 ]
-CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
+CONFIG_HELP = (_section_text("Commands")
+               + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
+               + "  Every scalar setting is one door: set [n] key=value, from "
+                 "the main shell.\n")
 
 
 ```
@@ -199,7 +194,7 @@ _UI_LOGIN_PAGE = """<!doctype html>
 
 ```
 
-The admin page is inlined by the build exactly as the 404 page is — authored as `src/admin.html`, counted apart from the Python figures. One page, three tabs — Sites (one card per site: publish, preview, download, domain, certificate, access, redirects, history), Server, Statistics — so everything shares one scaffold, one bookmark, one code. Publishing is the pub tool's bundle builder with every trace of key custody removed: on this page, being here is the authentication.
+The admin page is inlined by the build exactly as the 404 page is — authored as `src/admin.html`, counted apart from the Python figures. One page, three tabs — Sites (one card per site: publish, preview, domain, certificate, access, redirects, history), Server, Statistics — so everything shares one scaffold, one bookmark, one code. Publishing is the pub tool's bundle builder with every trace of key custody removed: on this page, being here is the authentication.
 
 ```python
 # The admin page
@@ -222,8 +217,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         log.info("ui: " + fmt % args)  # the default writes to stderr, past the log
 
     def _respond(self, status, body, ctype="text/html; charset=utf-8", extra=()):
-        # `body` is text for every JSON and message answer, and bytes for the
-        # two that hand back a file: the site download and a preview asset.
+        # `body` is text for every JSON and message answer, and bytes for
+        # the one that hands back a file: a preview asset.
         data = body if isinstance(body, bytes) else body.encode()
         self.send_response(status)
         self.send_header("Content-Type", ctype)
@@ -319,7 +314,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._serve_preview(path)
 
         if path not in ("/", "/status", "/config", "/traffic", "/update",
-                        "/versions", "/download"):
+                        "/versions"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -354,31 +349,6 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps({"latest": _upgrade_available()}),
                                  "application/json")
-
-        if path == "/download":
-            # Content leaves the box the way it arrived: the same tar.gz the
-            # publish door takes, so what comes down can go back up. A site
-            # too large to hold in memory says so rather than half-sending.
-            if auth != "ok":
-                return self._respond(403, "Not logged in.")
-            try:
-                idx = int(parse_qs(urlsplit(self.path).query).get("site", ["0"])[0])
-            except ValueError:
-                return self._respond(400, "site must be a whole number.")
-            if not (0 <= idx < len(config.sites)):
-                return self._respond(404, "No such site.")
-            target = config.sites[idx]
-            blob = _tar_live_site(target)
-            if blob is None:
-                return self._respond(413, json.dumps(
-                    {"error": f"this site is larger than {_MAX_BUNDLE_BYTES // (1024 * 1024)} MB "
-                              "— copy it with scp instead"}), "application/json")
-            # The filename is built from the site's own name, never from
-            # anything a request supplied.
-            stem = re.sub(r"[^a-z0-9.-]", "-", (target.domain or f"site-{idx}").lower())
-            return self._respond(200, blob, "application/gzip",
-                                 [("Content-Disposition",
-                                   f'attachment; filename="{stem}.tar.gz"')])
 
         if path == "/versions":
             # One site's kept trees. Its own endpoint rather than a field on
@@ -1086,38 +1056,6 @@ def _clear_previews():
         shutil.rmtree(_preview_dir(site), ignore_errors=True)
 
 
-def _tar_live_site(site, cap=_MAX_BUNDLE_BYTES):
-    """The site's live tree as gzipped tar bytes, or None if it is too big to
-    hold in memory. Content leaves the box the same way it arrived — same
-    format, same cap — so a downloaded archive is a bundle the publish door
-    would accept back.
-
-    Paths are relative to the site root and the hidden-path rule applies on
-    the way out as it does on the way in: a dot-directory is not served, so
-    it is not handed over either."""
-    root = os.path.realpath(_resolve(site.serve_dir).rstrip(os.sep))
-    if not os.path.isdir(root):
-        return None
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for base, dirs, names in os.walk(root):
-            dirs[:] = [d for d in dirs if not d.startswith(".") or d == ".well-known"]
-            for name in sorted(names):
-                if name.startswith("."):
-                    continue
-                full = os.path.join(base, name)
-                if os.path.islink(full) or not os.path.isfile(full):
-                    continue        # only regular files, as _extract_bundle accepts
-                rel = os.path.relpath(full, root)
-                try:
-                    tf.add(full, arcname=rel, recursive=False)
-                except OSError:
-                    continue
-                if buf.tell() > cap:
-                    return None
-    return buf.getvalue()
-
-
 def _tree_size(path):
     """(files, bytes) under path. A file that vanishes mid-walk is skipped,
     not raised: this is a description, and a racing publish must not make
@@ -1320,6 +1258,41 @@ def _set_host_value(target, key, value):
                 return ("/.well-known/ is reserved — the connection test and "
                         "ACME challenges live there")
         target.health_path = value
+    elif key == "cache_policy":
+        v = value.strip().lower()
+        if v not in ("no-store", "no-cache", "max-age"):
+            return "cache_policy is no-store, no-cache, or max-age"
+        target.cache_policy = v
+    elif key == "cache_max_age":
+        # Non-negative: a negative max-age is not a shorter cache, it is a
+        # malformed Cache-Control header sent on every response.
+        if not value.isdigit():
+            return "cache_max_age is seconds — a whole number, 0 or more"
+        target.cache_max_age = int(value)
+    elif key == "tls_min_version":
+        if value not in ("1.2", "1.3"):
+            return "tls_min_version is 1.2 or 1.3"
+        target.tls_min_version = value
+    elif key == "ciphers":
+        if value:
+            # Judged by the only arbiter there is — OpenSSL itself. A string
+            # it refuses would otherwise be refused at the next server
+            # start, which fails closed: the site down over a typo saved
+            # months earlier.
+            try:
+                ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).set_ciphers(value)
+            except ssl.SSLError:
+                return ("not a cipher string OpenSSL accepts "
+                        "(or empty for the system default)")
+        target.ciphers = value
+    elif key in ("csp", "permissions_policy"):
+        # Sent verbatim as a header value on every response: a control or
+        # non-ASCII character is header injection, refused at the door.
+        # Empty disables the header.
+        if any(not (0x20 <= ord(c) <= 0x7E) for c in value):
+            return (f"{key} is a header value — printable ASCII only "
+                    "(or empty to disable the header)")
+        setattr(target, key, value)
     return ""
 
 
@@ -1422,7 +1395,9 @@ The vocabulary `set` accepts, and its usage line.
 ```python
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
-                  "cache_size_mb", "trusted_proxy", "health_path")
+                  "cache_size_mb", "cache_policy", "cache_max_age",
+                  "trusted_proxy", "health_path", "tls_min_version",
+                  "ciphers", "csp", "permissions_policy")
 _SET_SITE_KEYS = ("username", "active", "redirect")
 
 
@@ -1822,31 +1797,6 @@ def _config_move_site(args):
 
 ```
 
-One generic prompt-validate-save for the simple host-level settings; the settings with more shape get their own functions below.
-
-```python
-# The generic setter
-def _config_set(attr, label, cast=str, validate=None, error="invalid value", hint=None):
-    current = getattr(config, attr)
-    if hint:
-        print(f"  {hint}")
-    new_value = _input(f"  {label} [{current}]: ").strip()
-    if not new_value or new_value == str(current):
-        print("  → unchanged")
-        return
-    try:
-        value = cast(new_value)
-        if validate and not validate(value):
-            raise ValueError
-        setattr(config, attr, value)
-        config.save()
-        print("  → saved")
-    except ValueError:
-        print(f"  → {error}, unchanged")
-
-
-```
-
 The certificate prompt: a domain means ACME issuance; blank means a fresh self-signed pair.
 
 ```python
@@ -1944,125 +1894,6 @@ def _config_password(site):
 
 ```
 
-The traffic and caching prompts.
-
-```python
-# limits and cache
-def _config_limits():
-    # Positive, the same floor `set` holds: zero would refuse every request
-    # (or every login) on the next start, and a negative limit means nothing.
-    _config_set("rate_limit",      "rate_limit",      int, lambda v: v > 0,
-                error="must be a positive integer", hint="Requests per minute per IP")
-    _config_set("auth_rate_limit", "auth_rate_limit", int, lambda v: v > 0,
-                error="must be a positive integer", hint="Failed login attempts per minute per IP")
-
-
-def _config_cache():
-    print(f"\n  Current: {config.cache_policy}" +
-          (f" ({config.cache_max_age}s)" if config.cache_policy == "max-age" else "") + "\n")
-    print("    no-store  — never cache, always download fresh")
-    print("    no-cache  — cache but always revalidate (ETag makes this a quick check)")
-    print("    max-age   — trust cached copy for N seconds without checking\n")
-    choice = _input("  cache_policy [no-store / no-cache / max-age]: ").strip().lower()
-    if not choice:
-        print("  → unchanged")
-        return
-    if choice not in ("no-store", "no-cache", "max-age"):
-        print("  → invalid option, unchanged")
-        return
-    config.cache_policy = choice
-    if choice == "max-age":
-        age_str = _input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
-        if age_str:
-            try:
-                # Non-negative, same rule 'set' enforces: a negative max-age
-                # is not a shorter cache, it is a malformed Cache-Control
-                # header sent on every response.
-                age = int(age_str)
-                if age < 0:
-                    raise ValueError
-                config.cache_max_age = age
-            except ValueError:
-                print("  → invalid number, keeping current max-age")
-    config.save()
-    print("  → saved")
-    _config_set("cache_size_mb", "cache_size_mb", int, lambda v: v > 0,
-                "invalid number", hint="In-memory file cache limit in MB (e.g. 32 on a Raspberry Pi)")
-
-
-```
-
-The reverse-proxy setting explains its own default: blank means X-Forwarded-For is ignored, which is correct when Servette faces the internet directly.
-
-```python
-# proxy
-def _config_trusted_proxy():
-    current = config.trusted_proxy
-    print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
-    print("  Set to the IP of your reverse proxy to trust its X-Forwarded-For header.")
-    print("  Leave blank to ignore XFF entirely (correct when Servette faces the internet directly).\n")
-    new_value = _input("  trusted_proxy IP: ").strip()
-    if new_value == current:
-        print("  → unchanged")
-        return
-    if new_value:
-        # The same rule 'set' enforces. A typo saved here was worse than a
-        # refusal: the peer-address comparison then never matches, XFF is
-        # never trusted, and every proxied visitor shares the proxy's single
-        # rate-limit bucket — the whole site throttles as one client.
-        try:
-            ipaddress.ip_address(new_value)
-        except ValueError:
-            print("  → must be an IP address, unchanged")
-            return
-    config.trusted_proxy = new_value
-    config.save()
-    print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
-
-
-```
-
-TLS floor and optional cipher override; both take effect on the next server start.
-
-```python
-# tls
-def _config_tls():
-    print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
-    print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
-    print("    1.3 — TLS 1.3 only; drops support for older clients\n")
-    ver = _input("  tls_min_version [1.2 / 1.3]: ").strip()
-    if ver and ver not in ("1.2", "1.3"):
-        print("  → invalid, unchanged")
-    elif ver and ver != config.tls_min_version:
-        config.tls_min_version = ver
-        config.save()
-        print("  → saved (takes effect on next server start)")
-    else:
-        print("  → unchanged")
-
-    print(f"\n  Current cipher suites: {config.ciphers or '(system default)'}")
-    print("  OpenSSL cipher string, e.g.: ECDHE+AESGCM:DHE+AESGCM")
-    print("  Leave blank to use the system default (recommended unless you have specific requirements).\n")
-    ciphers = _input("  ciphers: ").strip()
-    if ciphers == config.ciphers:
-        print("  → unchanged")
-        return
-    if ciphers:
-        # Judged by the only arbiter there is — OpenSSL itself. A string it
-        # refuses would otherwise be refused at the next server start, which
-        # fails closed: the site down over a typo saved months earlier.
-        try:
-            ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).set_ciphers(ciphers)
-        except ssl.SSLError:
-            print("  → not a cipher string OpenSSL accepts, unchanged")
-            return
-    config.ciphers = ciphers
-    config.save()
-    print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
-
-
-```
-
 The `[n]` site-index convention, resolved in one place.
 
 ```python
@@ -2119,8 +1950,6 @@ def cmd_config():
             _config_remove_site(args)
         elif cmd == "move-site":
             _config_move_site(args)
-        elif cmd == "port":
-            _config_set("port", "port", int, lambda v: 1 <= v <= 65535, "invalid port number")
         elif cmd == "cert":
             site = _config_site_arg(args)
             if site is not None:
@@ -2133,24 +1962,13 @@ def cmd_config():
             site = _config_site_arg(args)
             if site is not None:
                 _config_password(site)
-        elif cmd == "email":
-            # The same judgment the `set` door runs, so the prompt cannot
-            # save what set would refuse.
-            _config_set("email", "email", str,
-                        lambda v: not _email_problem(v),
-                        "an email is name@host — one @, no spaces")
-        elif cmd == "limits":
-            _config_limits()
-        elif cmd == "cache":
-            _config_cache()
-        elif cmd in ("proxy", "trusted_proxy"):
-            _config_trusted_proxy()
-        elif cmd == "tls":
-            _config_tls()
-        elif cmd == "csp":
-            _config_set("csp", "csp", hint="  Block what static sites never need; allow what they might. Leave blank to disable.")
-        elif cmd in ("perms", "permissions_policy"):
-            _config_set("permissions_policy", "permissions_policy", hint="  Deny hardware APIs static sites never need. Leave blank to disable.")
+        elif cmd in _SET_HOST_KEYS:
+            # Every scalar knob has exactly one terminal door: `set`. The
+            # prompt layer that wrapped it re-implemented the same
+            # validations in a guided voice for an audience that has moved
+            # to the admin page; the reader who remains knows key=value.
+            print(f"  Scalars are set non-interactively: set {cmd}=<value>")
+            print("  (from the main shell — 'back' first)")
         elif cmd in ("back", "done", "exit", "quit"):
             break
         elif cmd in ("help", "?"):

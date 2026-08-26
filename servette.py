@@ -4566,21 +4566,16 @@ _CONFIG_COMMANDS = [
     ("add-site",        "add a new site (domain and password)"),
     ("remove-site <n>", "remove a site"),
     ("move-site <n> <to>", "reorder sites (the first domainless one answers unmatched Hosts)"),
-    ("port",            "HTTPS port"),
     ("cert [n]",        "SSL certificate and key"),
-    ("email",           "email address"),
     ("username [n]",    "login username"),
     ("password [n]",    "login password"),
-    ("limits",          "rate limits"),
-    ("cache",           "browser cache policy"),
-    ("proxy",           "trusted proxy IP for X-Forwarded-For"),
-    ("tls",             "minimum TLS version and cipher suites"),
-    ("csp",             "Content-Security-Policy header"),
-    ("perms",           "Permissions-Policy header"),
     ("show",            "show current settings"),
     ("back",            "return to main shell"),
 ]
-CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
+CONFIG_HELP = (_section_text("Commands")
+               + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
+               + "  Every scalar setting is one door: set [n] key=value, from "
+                 "the main shell.\n")
 
 
 # Safe input
@@ -5591,14 +5586,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
      site list: their order is config — the first domainless site answers
      unmatched Hosts — so reordering them is a config write. ══ */
 
-  // What a site's unhealthy row is called on its card — the fault named,
-  // rather than an exclamation mark standing in for the name.
-  const NEEDS_WORD = {
-    cert:     'Needs certificate',
-    password: 'Needs password',
-    dir:      'Folder missing',
-  };
-
   // A card's index is its position in the DOM, read at the moment it is
   // needed: adding, removing, or dragging a card renumbers its neighbours,
   // and a stale index would act on the wrong site.
@@ -5895,8 +5882,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<p class="hint summary">The folder to drop is the one holding the ` +
          `site's <b>index.html</b>.</p>` +
          // Both of these act on the folder you chose, so both are dim until
-         // you have chosen one. Download is not here: it acts on what is
-         // live, and sits on the line that reports it.
+         // you have chosen one.
          `<div class="btn-row" style="margin-top:0.75rem">` +
            `<button class="action pub" type="button" disabled ` +
            `title="Choose a folder first">Publish</button>` +
@@ -5925,13 +5911,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<div class="switch-row"><span class="k">Published</span>` +
          `<span class="switch-value"><span class="ver-state">reading…</span>` +
          `<span class="switch-act">` +
-         // The reverse of Publish, on the line that says what is live: the
-         // live tree as the same tar.gz the publish door accepts, so what
-         // comes down can go back up.
-         // Born disabled: the size guard below needs the /versions answer,
-         // and a click before (or without) it must not navigate blind.
-         `<button class="action tiny dl" type="button" disabled ` +
-         `title="Download the live content as a tar.gz">Download</button>` +
          `<button class="action tiny ver-refresh" type="button" ` +
          `title="Re-read this list. The page updates it after a publish or ` +
          `restore of its own — this is for one done in the terminal.">` +
@@ -5985,18 +5964,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // beside it is the one publishing writes into, which is why they
           // are separate elements: overwriting the first would erase a
           // standing fault the moment a folder was read.
-          // Emitted even on a healthy card (hidden): a fault that arrives
+          // The pill mirrors the Status line exactly — the count when
+          // anything needs attention, the green all-clear when nothing
+          // does — so a folded healthy card says it is well rather than
+          // saying nothing. Emitted on every card: a fault that arrives
           // client-side — an unfinished login on a card built healthy —
           // has no rebuild to emit a pill for it, and renderAttention can
           // only fill a pill that exists.
-          `<span class="badge ${siteNeeds.some((c) => c.blocking)
-             ? 'badge-red' : 'badge-warn'} needs${
-             siteNeeds.length ? '' : ' hidden'}" title="${escapeHtml(
+          `<span class="badge ${!siteNeeds.length ? 'badge-green'
+             : siteNeeds.some((c) => c.blocking) ? 'badge-red'
+             : 'badge-warn'} needs" title="${escapeHtml(
              siteNeeds.map((c) => c.detail).join(' · '))}">${
-             !siteNeeds.length ? ''
-               : siteNeeds.length === 1
-                 ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
-                 : siteNeeds.length + ' to review'}</span>` +
+             siteNeeds.length ? siteNeeds.length + ' to review'
+               : '✓ healthy'}</span>` +
           `<span class="badge state badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
           // Collapse, for a box serving more sites than fit on a screen.
@@ -6320,14 +6300,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       return i < 0 ? idx : i;
     };
 
-    let liveBytes = null;   // the live tree's size, for the download guard
     async function loadVersions() {
         const state = q('.ver-state'), list = q('.versions');
         try {
           const v = await getJSON('/versions', { site: siteIndex() });
           const rows = v.versions || [];
           const live = rows.find((r) => r.live);
-          liveBytes = live ? live.bytes : null;
           // The live version's own size is the answer to "did the right
           // folder land" — a file count off by an order of magnitude is
           // the wrong folder, however right the site looks.
@@ -6346,15 +6324,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             : `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
               `${fmtSize(live.bytes)}</span>` +
               `<span>${escapeHtml(when(live.published))}</span>`;
-          // Nothing published is nothing to download, and offering it
-          // anyway made the card contradict itself in two adjacent words.
-          const dl = q('.dl');
-          dl.disabled = !live || !live.files;
-          dl.title = !live
-            ? 'The folder is missing — publish to recreate it'
-            : dl.disabled
-              ? 'Nothing published yet — there is nothing to download'
-              : 'Download the live content as a tar.gz';
           list.innerHTML = rows.length < 2 ? '' :
             rows.map((r) => row(escapeHtml(when(r.published)),
               `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
@@ -6383,27 +6352,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     q('.ver-refresh').addEventListener('click', loadVersions);
     loadVersions();
-
-    // The response carries Content-Disposition, so the browser saves it
-    // rather than navigating: the operator stays on the page they were
-    // working in. That holds only for the 200 — the too-large refusal is
-    // JSON with no disposition, which location.assign would NAVIGATE to,
-    // replacing the page with a bare error blob. Judged here first, from
-    // the size the version row already fetched.
-    q('.dl').addEventListener('click', () => {
-      clearError(errEl);
-      // Raw bytes are the only number the page holds; the server judges
-      // the gzipped tar, so a compressible over-500 MB site is refused
-      // here that the server might have managed. Accepted: scp still
-      // works either way, and navigating the page into a JSON refusal
-      // blob is worse. The button is born disabled, so liveBytes is set
-      // by the /versions fetch before any click can land.
-      if (liveBytes != null && liveBytes > MAX_BUNDLE_BYTES)
-        return showError(errEl,
-          `This site is larger than ${fmtSize(MAX_BUNDLE_BYTES)} — ` +
-          'copy it with scp instead.');
-      location.assign(api('/download', { site: siteIndex() }));
-    });
 
     /* ── Redirects. Both halves of the pair reach _set_site_value through
        the same settings write, so a rule the terminal refuses the page
@@ -6525,15 +6473,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const blocking = needs.some((c) => c.blocking);
 
       // The head pill is the Status line for a folded card, so it reads the
-      // same list rather than a snapshot taken when the card was built.
+      // same list rather than a snapshot taken when the card was built —
+      // and mirrors that line both ways: the count, or the green all-clear.
       const pill = q('.badge.needs');
       if (pill) {
-        pill.textContent = needs.length === 1
-          ? (NEEDS_WORD[needs[0].key] || 'Needs attention')
-          : needs.length + ' to review';
+        pill.textContent = needs.length
+          ? needs.length + ' to review' : '✓ healthy';
+        pill.title = needs.map((c) => c.detail).join(' · ');
         pill.classList.toggle('badge-red', blocking);
-        pill.classList.toggle('badge-warn', !blocking);
-        pill.classList.toggle('hidden', !needs.length);
+        pill.classList.toggle('badge-warn', !!needs.length && !blocking);
+        pill.classList.toggle('badge-green', !needs.length);
+        pill.classList.remove('hidden');
       }
 
       info.innerHTML =
@@ -7043,8 +6993,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         log.info("ui: " + fmt % args)  # the default writes to stderr, past the log
 
     def _respond(self, status, body, ctype="text/html; charset=utf-8", extra=()):
-        # `body` is text for every JSON and message answer, and bytes for the
-        # two that hand back a file: the site download and a preview asset.
+        # `body` is text for every JSON and message answer, and bytes for
+        # the one that hands back a file: a preview asset.
         data = body if isinstance(body, bytes) else body.encode()
         self.send_response(status)
         self.send_header("Content-Type", ctype)
@@ -7140,7 +7090,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._serve_preview(path)
 
         if path not in ("/", "/status", "/config", "/traffic", "/update",
-                        "/versions", "/download"):
+                        "/versions"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -7175,31 +7125,6 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps({"latest": _upgrade_available()}),
                                  "application/json")
-
-        if path == "/download":
-            # Content leaves the box the way it arrived: the same tar.gz the
-            # publish door takes, so what comes down can go back up. A site
-            # too large to hold in memory says so rather than half-sending.
-            if auth != "ok":
-                return self._respond(403, "Not logged in.")
-            try:
-                idx = int(parse_qs(urlsplit(self.path).query).get("site", ["0"])[0])
-            except ValueError:
-                return self._respond(400, "site must be a whole number.")
-            if not (0 <= idx < len(config.sites)):
-                return self._respond(404, "No such site.")
-            target = config.sites[idx]
-            blob = _tar_live_site(target)
-            if blob is None:
-                return self._respond(413, json.dumps(
-                    {"error": f"this site is larger than {_MAX_BUNDLE_BYTES // (1024 * 1024)} MB "
-                              "— copy it with scp instead"}), "application/json")
-            # The filename is built from the site's own name, never from
-            # anything a request supplied.
-            stem = re.sub(r"[^a-z0-9.-]", "-", (target.domain or f"site-{idx}").lower())
-            return self._respond(200, blob, "application/gzip",
-                                 [("Content-Disposition",
-                                   f'attachment; filename="{stem}.tar.gz"')])
 
         if path == "/versions":
             # One site's kept trees. Its own endpoint rather than a field on
@@ -7861,38 +7786,6 @@ def _clear_previews():
         shutil.rmtree(_preview_dir(site), ignore_errors=True)
 
 
-def _tar_live_site(site, cap=_MAX_BUNDLE_BYTES):
-    """The site's live tree as gzipped tar bytes, or None if it is too big to
-    hold in memory. Content leaves the box the same way it arrived — same
-    format, same cap — so a downloaded archive is a bundle the publish door
-    would accept back.
-
-    Paths are relative to the site root and the hidden-path rule applies on
-    the way out as it does on the way in: a dot-directory is not served, so
-    it is not handed over either."""
-    root = os.path.realpath(_resolve(site.serve_dir).rstrip(os.sep))
-    if not os.path.isdir(root):
-        return None
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for base, dirs, names in os.walk(root):
-            dirs[:] = [d for d in dirs if not d.startswith(".") or d == ".well-known"]
-            for name in sorted(names):
-                if name.startswith("."):
-                    continue
-                full = os.path.join(base, name)
-                if os.path.islink(full) or not os.path.isfile(full):
-                    continue        # only regular files, as _extract_bundle accepts
-                rel = os.path.relpath(full, root)
-                try:
-                    tf.add(full, arcname=rel, recursive=False)
-                except OSError:
-                    continue
-                if buf.tell() > cap:
-                    return None
-    return buf.getvalue()
-
-
 def _tree_size(path):
     """(files, bytes) under path. A file that vanishes mid-walk is skipped,
     not raised: this is a description, and a racing publish must not make
@@ -8087,6 +7980,41 @@ def _set_host_value(target, key, value):
                 return ("/.well-known/ is reserved — the connection test and "
                         "ACME challenges live there")
         target.health_path = value
+    elif key == "cache_policy":
+        v = value.strip().lower()
+        if v not in ("no-store", "no-cache", "max-age"):
+            return "cache_policy is no-store, no-cache, or max-age"
+        target.cache_policy = v
+    elif key == "cache_max_age":
+        # Non-negative: a negative max-age is not a shorter cache, it is a
+        # malformed Cache-Control header sent on every response.
+        if not value.isdigit():
+            return "cache_max_age is seconds — a whole number, 0 or more"
+        target.cache_max_age = int(value)
+    elif key == "tls_min_version":
+        if value not in ("1.2", "1.3"):
+            return "tls_min_version is 1.2 or 1.3"
+        target.tls_min_version = value
+    elif key == "ciphers":
+        if value:
+            # Judged by the only arbiter there is — OpenSSL itself. A string
+            # it refuses would otherwise be refused at the next server
+            # start, which fails closed: the site down over a typo saved
+            # months earlier.
+            try:
+                ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).set_ciphers(value)
+            except ssl.SSLError:
+                return ("not a cipher string OpenSSL accepts "
+                        "(or empty for the system default)")
+        target.ciphers = value
+    elif key in ("csp", "permissions_policy"):
+        # Sent verbatim as a header value on every response: a control or
+        # non-ASCII character is header injection, refused at the door.
+        # Empty disables the header.
+        if any(not (0x20 <= ord(c) <= 0x7E) for c in value):
+            return (f"{key} is a header value — printable ASCII only "
+                    "(or empty to disable the header)")
+        setattr(target, key, value)
     return ""
 
 
@@ -8181,7 +8109,9 @@ def _set_site_value(target, key, value):
 
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
-                  "cache_size_mb", "trusted_proxy", "health_path")
+                  "cache_size_mb", "cache_policy", "cache_max_age",
+                  "trusted_proxy", "health_path", "tls_min_version",
+                  "ciphers", "csp", "permissions_policy")
 _SET_SITE_KEYS = ("username", "active", "redirect")
 
 
@@ -8547,26 +8477,6 @@ def _config_move_site(args):
     print(f"  {err}" if err else "  → moved.")
 
 
-# The generic setter
-def _config_set(attr, label, cast=str, validate=None, error="invalid value", hint=None):
-    current = getattr(config, attr)
-    if hint:
-        print(f"  {hint}")
-    new_value = _input(f"  {label} [{current}]: ").strip()
-    if not new_value or new_value == str(current):
-        print("  → unchanged")
-        return
-    try:
-        value = cast(new_value)
-        if validate and not validate(value):
-            raise ValueError
-        setattr(config, attr, value)
-        config.save()
-        print("  → saved")
-    except ValueError:
-        print(f"  → {error}, unchanged")
-
-
 # cert
 def _config_cert(site):
     cert_path = _resolve(site.cert_file)
@@ -8654,110 +8564,6 @@ def _config_password(site):
     print("  → saved")
 
 
-# limits and cache
-def _config_limits():
-    # Positive, the same floor `set` holds: zero would refuse every request
-    # (or every login) on the next start, and a negative limit means nothing.
-    _config_set("rate_limit",      "rate_limit",      int, lambda v: v > 0,
-                error="must be a positive integer", hint="Requests per minute per IP")
-    _config_set("auth_rate_limit", "auth_rate_limit", int, lambda v: v > 0,
-                error="must be a positive integer", hint="Failed login attempts per minute per IP")
-
-
-def _config_cache():
-    print(f"\n  Current: {config.cache_policy}" +
-          (f" ({config.cache_max_age}s)" if config.cache_policy == "max-age" else "") + "\n")
-    print("    no-store  — never cache, always download fresh")
-    print("    no-cache  — cache but always revalidate (ETag makes this a quick check)")
-    print("    max-age   — trust cached copy for N seconds without checking\n")
-    choice = _input("  cache_policy [no-store / no-cache / max-age]: ").strip().lower()
-    if not choice:
-        print("  → unchanged")
-        return
-    if choice not in ("no-store", "no-cache", "max-age"):
-        print("  → invalid option, unchanged")
-        return
-    config.cache_policy = choice
-    if choice == "max-age":
-        age_str = _input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
-        if age_str:
-            try:
-                # Non-negative, same rule 'set' enforces: a negative max-age
-                # is not a shorter cache, it is a malformed Cache-Control
-                # header sent on every response.
-                age = int(age_str)
-                if age < 0:
-                    raise ValueError
-                config.cache_max_age = age
-            except ValueError:
-                print("  → invalid number, keeping current max-age")
-    config.save()
-    print("  → saved")
-    _config_set("cache_size_mb", "cache_size_mb", int, lambda v: v > 0,
-                "invalid number", hint="In-memory file cache limit in MB (e.g. 32 on a Raspberry Pi)")
-
-
-# proxy
-def _config_trusted_proxy():
-    current = config.trusted_proxy
-    print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
-    print("  Set to the IP of your reverse proxy to trust its X-Forwarded-For header.")
-    print("  Leave blank to ignore XFF entirely (correct when Servette faces the internet directly).\n")
-    new_value = _input("  trusted_proxy IP: ").strip()
-    if new_value == current:
-        print("  → unchanged")
-        return
-    if new_value:
-        # The same rule 'set' enforces. A typo saved here was worse than a
-        # refusal: the peer-address comparison then never matches, XFF is
-        # never trusted, and every proxied visitor shares the proxy's single
-        # rate-limit bucket — the whole site throttles as one client.
-        try:
-            ipaddress.ip_address(new_value)
-        except ValueError:
-            print("  → must be an IP address, unchanged")
-            return
-    config.trusted_proxy = new_value
-    config.save()
-    print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
-
-
-# tls
-def _config_tls():
-    print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
-    print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
-    print("    1.3 — TLS 1.3 only; drops support for older clients\n")
-    ver = _input("  tls_min_version [1.2 / 1.3]: ").strip()
-    if ver and ver not in ("1.2", "1.3"):
-        print("  → invalid, unchanged")
-    elif ver and ver != config.tls_min_version:
-        config.tls_min_version = ver
-        config.save()
-        print("  → saved (takes effect on next server start)")
-    else:
-        print("  → unchanged")
-
-    print(f"\n  Current cipher suites: {config.ciphers or '(system default)'}")
-    print("  OpenSSL cipher string, e.g.: ECDHE+AESGCM:DHE+AESGCM")
-    print("  Leave blank to use the system default (recommended unless you have specific requirements).\n")
-    ciphers = _input("  ciphers: ").strip()
-    if ciphers == config.ciphers:
-        print("  → unchanged")
-        return
-    if ciphers:
-        # Judged by the only arbiter there is — OpenSSL itself. A string it
-        # refuses would otherwise be refused at the next server start, which
-        # fails closed: the site down over a typo saved months earlier.
-        try:
-            ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).set_ciphers(ciphers)
-        except ssl.SSLError:
-            print("  → not a cipher string OpenSSL accepts, unchanged")
-            return
-    config.ciphers = ciphers
-    config.save()
-    print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
-
-
 # The site-index argument
 def _config_site_arg(args):
     """Resolve dir/cert/username/password/publish's optional site-index
@@ -8806,8 +8612,6 @@ def cmd_config():
             _config_remove_site(args)
         elif cmd == "move-site":
             _config_move_site(args)
-        elif cmd == "port":
-            _config_set("port", "port", int, lambda v: 1 <= v <= 65535, "invalid port number")
         elif cmd == "cert":
             site = _config_site_arg(args)
             if site is not None:
@@ -8820,24 +8624,13 @@ def cmd_config():
             site = _config_site_arg(args)
             if site is not None:
                 _config_password(site)
-        elif cmd == "email":
-            # The same judgment the `set` door runs, so the prompt cannot
-            # save what set would refuse.
-            _config_set("email", "email", str,
-                        lambda v: not _email_problem(v),
-                        "an email is name@host — one @, no spaces")
-        elif cmd == "limits":
-            _config_limits()
-        elif cmd == "cache":
-            _config_cache()
-        elif cmd in ("proxy", "trusted_proxy"):
-            _config_trusted_proxy()
-        elif cmd == "tls":
-            _config_tls()
-        elif cmd == "csp":
-            _config_set("csp", "csp", hint="  Block what static sites never need; allow what they might. Leave blank to disable.")
-        elif cmd in ("perms", "permissions_policy"):
-            _config_set("permissions_policy", "permissions_policy", hint="  Deny hardware APIs static sites never need. Leave blank to disable.")
+        elif cmd in _SET_HOST_KEYS:
+            # Every scalar knob has exactly one terminal door: `set`. The
+            # prompt layer that wrapped it re-implemented the same
+            # validations in a guided voice for an audience that has moved
+            # to the admin page; the reader who remains knows key=value.
+            print(f"  Scalars are set non-interactively: set {cmd}=<value>")
+            print("  (from the main shell — 'back' first)")
         elif cmd in ("back", "done", "exit", "quit"):
             break
         elif cmd in ("help", "?"):

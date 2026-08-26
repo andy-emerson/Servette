@@ -6,6 +6,36 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A balancer gets one fitting: an opt-in health path, from the terminal only
+
+**Ruled (Human):** the two audiences split the answer. For the operator the
+admin page serves, the passive ruling below stands whole — nothing in the
+GUI acknowledges load balancers at all. For the sys admin in the terminal,
+Servette carries the one fitting a balancer genuinely needs and the
+existing ones could not provide: `health_path`, a host setting that is
+empty and off by default, naming a path that answers an unauthenticated
+`204` to any Host — before site selection, and before the rate limiter,
+which must not starve a probe into a false dead. No body, no file I/O, and
+no per-probe log line: an endpoint exempt from rate limiting that logged
+each hit would be an unmetered disk-filler, and a balancer's heartbeat is
+not traffic. Set with `set health_path=/healthz`, shown in the config
+display, absent from the admin page by design. The door refuses a path
+that is not site-absolute printable ASCII, and refuses `/.well-known/`
+outright — a health path there could shadow the connection test and the
+ACME challenges for every visitor.
+**Why (user pov):** someone who knows what a load balancer is has already
+proven terminal comfort; everyone else never meets the concept. **(dev
+pov):** the probe was the one wall the passive fittings could not
+configure around — the closed-system 404 makes a healthy backend look
+dead to a balancer that cannot send a Host header.
+**Supersedes** the no-dedicated-health-endpoint clause of
+[balancer compatibility is passive](#balancer-compatibility-is-passive-active-accommodations-are-out-of-scope);
+its other refusals — plain-HTTP backend mode, PROXY protocol,
+multi-backend ACME — stand, now on this ruling's authority, with that
+entry's reopen trigger. Closes
+[#126](https://github.com/andy-emerson/Servette/issues/126).
+*(2026-08-26)*
+
 ## No wrong answer is saved: a field states its criteria and refuses the rest
 
 **Ruled (Human, principle):** Servette never saves an entry that would break
@@ -769,6 +799,10 @@ multi-backend ACME — capability-shaped complexity, and multi-backend
 scale-out sits outside "one site you own" by the scope principles besides.
 **Reopen:** a real operator running Servette behind a balancer hits a wall
 the fittings cannot configure around. *(#108, 2026-08-22)*
+**Narrowed** (2026-08-26): the health-endpoint refusal is superseded by
+[the opt-in health path](#a-balancer-gets-one-fitting-an-opt-in-health-path-from-the-terminal-only),
+ruled by the Human in closing #126; the remaining refusals stand on that
+ruling's authority.
 
 ## One admin page with tabs is the browser surface
 

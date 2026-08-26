@@ -6,6 +6,46 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The page offers no download; the terminal already knows how
+
+**Ruled (Human):** the Download button, its `/download` route, and the
+tar writer behind them are removed whole. Copying the live tree off the
+box is what `scp`, `rsync`, and `tar` already do; the audience that
+would want it is the audience that already knows them; and the parity
+audit found no ruling behind the feature — it entered through the UI
+and was never vetted, which is the class of growth the audit exists to
+catch. What stays: the kept-versions list and Restore, which act on the
+server's own ring rather than copying files off the box.
+**Rejected:** keeping it as a harmless convenience (an unruled
+capability is not harmless — it is undocumented scope, a route to
+maintain, and a 500 MB in-memory tar on a Raspberry Pi); pairing it
+with a terminal twin (pairing is for features Servette owns, and
+copying files off a box is not one). *(2026-08-26)*
+
+## Every scalar knob has one terminal door: set
+
+**Ruled (Human):** the config sub-shell keeps only the flows that
+genuinely need a guided prompt — the site list, certificate issuance,
+the login pair (the password stays off argv by the standing ruling),
+and `show`. Every scalar setting is written through `set key=value` and
+nowhere else in the terminal: `cache_policy`, `cache_max_age`,
+`tls_min_version`, `ciphers`, `csp`, and `permissions_policy` join the
+`set` vocabulary behind the shared validator, and the prompt layer that
+re-asked what `set` validates — `port`, `email`, `limits`, `cache`,
+`proxy`, `tls`, `csp`, `perms`, and the generic setter under them — is
+deleted.
+**Why (user pov):** the audience that needed a guided voice for a rate
+limit has the admin page now; the terminal's remaining reader knows
+`key=value`. **(dev pov):** one door per setting is one validator per
+setting — the prompts had already drifted from `set` twice (negative
+limits accepted, ciphers saved unjudged) because two doors is two
+places to forget. The migration also brought two refusals the prompts
+never had, under the no-wrong-answers principle: ciphers judged by
+OpenSSL at the door, and the two header values refusing control
+characters, which is header injection.
+**Rejected:** keeping the prompts as a parallel guided path — the drift
+is the evidence against it. *(2026-08-26)*
+
 ## A balancer gets one fitting: an opt-in health path, from the terminal only
 
 **Ruled (Human):** the two audiences split the answer. For the operator the
@@ -180,56 +220,41 @@ layout rather than a line of command output. *(2026-08-24)*
   its own subject.
 - **One mark per item, on the row that carries its fix.** Certificate on
   the certificate row. Login on the access row. A missing folder on the
-  **Published** row, because publishing is what puts it back — it used to
-  sit in the facts block, nowhere near anything that would fix it.
+  **Published** row, because publishing is what puts it back.
 - **Nothing else.** No third register: no red paragraph restating what a
   row already says. Where a form cannot be saved, **Save is dim** and the
   row says what is missing — a refusal to print is the third register by
-  another name.
+  another name. Refusals and explanatory text sit under the control they
+  belong to: the login refusal under Save, the DNS note under the
+  certificate button it explains.
 
+**The head pill is the Status line for a folded card, mirroring it both
+ways** (amended 2026-08-26, from the Human's own walk through every
+state): shown only while the body is hidden, carrying the count when
+anything needs attention and the green `✓ healthy` when nothing does —
+so the count never vanishes because a card is closed, an empty head
+never has to mean two things, and the pill never doubles the line
+inside an open card. **Rejected** (in the amendment): per-fault wording
+on the pill — the pill mirrors the line, and the line does not name its
+members.
 **An unfinished edit is one of these items.** Flipping to private without
 a login is counted and marked, so the card cannot say "healthy" beside a
-form it is refusing. It was doing exactly that, which is the
-inconsistency that made this ruling necessary.
+form it is refusing.
 **Severity by consequence, not by kind:** a stored username with no
 password locks every visitor out — red. The same login half-typed has
-changed nothing yet — amber. The row's words say which is missing ("a
-username is needed" / "a password is needed"), not both at once.
-**Verified across every state, in a browser**, because getting it right
-for the certificate and wrong for the others is what happened three
-times: nothing wrong, certificate, folder, login, and all three at once.
-*(2026-08-24)*
-
-**Ruled (Human):** two things, and only two.
-
-1. **The Status line** — the count, naming what it counts, and the only
-   place on the card that says the site is *well*. No other row can say
-   that: they report their own subject, and a card with nothing wrong
-   would otherwise say nothing at all.
-2. **One mark per problem, on the row that carries its fix** — the
-   certificate row for a certificate, the access row for a login. An
-   indicator anywhere else is an indicator you have to go and find the fix
-   for.
-
-**The head pill is not a third thing.** It is the Status line for a folded
-card: shown only while the body is hidden, so the count never vanishes
-because a card is closed, and never doubles the line inside it.
-**Refusals move to the control that refused**, for the same reason — the
-login refusal belongs under Save, not at the foot of the card below Test
-connection. So does explanatory text: the DNS note sat below the access
-block explaining a certificate button three controls above it, and now
-sits under that button.
+changed nothing yet — amber. The row's words say which is missing, not
+both at once.
 **The Agent got this backwards once**, removing the count and keeping the
 pill — optimising away the one indicator that carried information for the
 two that repeated it. Recorded because the reasoning that produced it
 ("say it once, on the row that fixes it") was right and still led
 somewhere wrong: the count is not a repetition of the rows, it is the
 summary and the all-clear.
-**Worth knowing about the count's set:** with the page as the only
-surface, little but the certificate raises it today. A missing serve
-folder can; a half-built pull channel can, but that is terminal-only; and
-the half-authenticated state the access row reports is one the page's own
-guard prevents reaching. *(2026-08-24)*
+**Verified across every state, in a browser** — nothing wrong,
+certificate, folder, login, and all three at once — because getting it
+right for one fault and wrong for the others is what happened three
+times. *(2026-08-24; this heading had accumulated two same-day ruling
+bodies — collapsed to one, and the pill amended, 2026-08-26)*
 
 ## The connection test does not report the version
 

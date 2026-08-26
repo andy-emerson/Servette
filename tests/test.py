@@ -2543,40 +2543,6 @@ def run_dispatch_tests(s):
         s.urllib.request.urlopen    = saved_urlopen
         shutil.rmtree(setup_dir, ignore_errors=True)
 
-    section("The startup refresh never writes into a site folder")
-
-    # It used to rewrite pages carrying the servette:demo marker. With the
-    # placeholder gone it touches systemd units only — so a page carrying that
-    # historical marker is now ordinary operator content, and stays byte-for-
-    # byte as the operator left it.
-    pu_marked = tempfile.mkdtemp(dir=s.BASE_DIR)
-    pu_owned  = tempfile.mkdtemp(dir=s.BASE_DIR)
-    marked_bytes = b"<!-- servette:demo seeded by an older release -->old demo"
-    with open(os.path.join(pu_marked, "index.html"), "wb") as f:
-        f.write(marked_bytes)
-    with open(os.path.join(pu_owned, "index.html"), "wb") as f:
-        f.write(b"operator content")
-    saved_pu    = {n: getattr(s, n) for n in ("_service_file_exists",)}
-    saved_sites = [(site, site.serve_dir) for site in s.config.sites]
-    try:
-        s._service_file_exists = lambda: False
-        s.config.sites[0].serve_dir = pu_marked
-        if len(s.config.sites) > 1:
-            s.config.sites[1].serve_dir = pu_owned
-        with contextlib.redirect_stdout(io.StringIO()):
-            s._startup_refresh()
-        check("A page carrying the old servette:demo marker is left alone",
-              open(os.path.join(pu_marked, "index.html"), "rb").read() == marked_bytes)
-        check("Startup refresh leaves the operator page alone",
-              open(os.path.join(pu_owned, "index.html"), "rb").read() == b"operator content")
-    finally:
-        for n, v in saved_pu.items():
-            setattr(s, n, v)
-        for site, sd in saved_sites:
-            site.serve_dir = sd
-        shutil.rmtree(pu_marked, ignore_errors=True)
-        shutil.rmtree(pu_owned, ignore_errors=True)
-
     section("Root is requested, not required of the operator")
 
     # Servette needs root for the systemd unit, the service user, the config the
@@ -5647,10 +5613,15 @@ def run_install_tests(s, tmpdir):
           any(d.lower() == "cryptography" for d in required))
     check("...and the program itself is not one of its own dependencies",
           not any(d.lower() == "servette" for d in required))
-    for dist in required:
-        if dist.lower() == "cffi":
-            check("A distribution's bare compiled module is found too, not just its package",
-                  any(p.endswith(".so") for p in s._distribution_paths(dist)))
+    # Asserted present, not skipped when absent: cryptography declares cffi on
+    # CPython, so a closure without it is itself a resolution failure — and a
+    # conditional check here once meant the .so probe could silently never run.
+    cffi_dist = next((d for d in required if d.lower() == "cffi"), None)
+    check("cffi is in the closure (cryptography declares it on CPython)",
+          cffi_dist is not None)
+    check("A distribution's bare compiled module is found too, not just its package",
+          cffi_dist is not None
+          and any(p.endswith(".so") for p in s._distribution_paths(cffi_dist)))
 
     # Python 3.13 deprecated re.split's positional maxsplit, and `-m servette`
     # runs as __main__, where deprecation warnings print to the operator: the

@@ -66,12 +66,12 @@ The common ways to serve a folder sit at two extremes: the general-purpose serve
 |---|:--:|:--:|:--:|:--:|:--:|
 | Serves a folder in a single command | ✓ | ✗ | ✗ | ✓ | ✓ |
 | No config language to learn | ✓ | ✗ | ✗ | ✓ | ✓ |
-| Trusted HTTPS with auto-renew | ✓ | ✓ | ✓ | ✗ | ✗ |
+| Trusted HTTPS with auto-renew | ✓ | Configurable | Configurable | ✗ | ✗ |
 | Security headers and rate limiting | Automatic | Configurable | Configurable | ✗ | ✗ |
 | Survives a reboot as a service | ✓ | ✓ | ✓ | ✗ | Configurable |
-| Readable source | ~6,800 lines of literate Markdown| large C binary | large C binary | Rust crate | Rust crate |
+| Readable source | ~6,800 lines | large C binary | large C binary | Rust crate | Rust crate |
 
-Both extremes are right for their jobs: nanoservers while you build and test, nginx and Apache for large complex server-side applications. Servette is for the gap between: production security with nanoserver simplicity, from a single module you can read.
+Both extremes are right for their jobs: nanoservers are appropriate for building and testing, while production servers such as nginx and Apache are appropriate for more complex deployments, including large server-side applications. Servette is for the gap between: production security with nanoserver simplicity, from a single module you can read.
 
 ## Operating it
 

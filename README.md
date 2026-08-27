@@ -9,6 +9,7 @@
 ### The Simple, Secure, Static-Site Server
 
 [![Tests](https://github.com/andy-emerson/servette/actions/workflows/test.yml/badge.svg)](https://github.com/andy-emerson/servette/actions/workflows/test.yml)
+[![CodeQL](https://img.shields.io/badge/CodeQL-enabled-2f81f7?logo=github&logoColor=white)](https://github.com/andy-emerson/servette/security/code-scanning)
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 
 ---

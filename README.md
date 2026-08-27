@@ -14,16 +14,18 @@
 
 ---
 
-Servette is a production nanoserver. The `http.server` module in Python's standard library is the canonical nanoserver: it serves a folder in one command and, by its own documentation, is not built for production. Servette builds on that same `http.server` and adds everything the public internet demands: a trusted certificate that renews itself, HTTP redirected up to HTTPS, security headers on every response, rate limiting, password protection (optional), and a hardened service that survives reboots. No configuration language to learn, one dependency the install brings with it. Install the package, run `servette`, follow the wizard, done:
+The `http.server` module in Python's standard library is the canonical nanoserver: it serves a folder in one command and, by its own documentation, is not built for production. Servette builds on that same `http.server` and adds everything the public internet demands: a trusted certificate that renews itself, HTTP redirected up to HTTPS, security headers on every response, rate limiting, password protection (optional), and a hardened service that survives reboots. No configuration language to learn, one dependency the install brings with it. Install the package, run `servette`
 
 ```
 pipx install servette
-servette          # then, at the prompt: setup
+servette
 ```
 
-You need a Linux machine you can SSH into (Ubuntu 22.04+, Debian 12+, or Raspberry Pi OS; Python 3.11+), ports 80 and 443 reachable from the internet, and a domain pointed at it for a trusted certificate — skip the domain to serve your LAN over a self-signed one. (macOS runs in session mode: serving, certificates, and the shell, without the boot-persistent service.) You never prefix `sudo`: Servette asks for your password when it reaches the work that needs root. Setup ends with a certificate, an optional password, and a service that keeps running after you close the terminal, restarts on reboot, and renews its certificate on its own.
+then, at the prompt type `setup`, and you are done.
 
-Then put your site on it from your own computer: run `servette admin` over SSH and open the printed link — the admin page is served over your own SSH tunnel and exists nowhere on the public internet, with a one-time passcode per run as the login. Drop your site's folder on its card and press Publish. The content is staged, checked, and swapped in atomically; the tree it replaced is kept, and `restore-site` rolls back to it.
+You need Pyhon 3.11+, a Linux machine you can SSH into (macOS runs in session mode), ports 80 and 443 reachable from the internet, and a domain pointed at it for a trusted certificate — skip the domain to serve your LAN over a self-signed one. You never prefix `sudo`: Servette asks for your password when it reaches the work that needs root. Setup ends with a certificate, an optional password, and a service that keeps running after you close the terminal, restarts on reboot, and renews its certificate on its own.
+
+Then put your site on it from your own computer: run `servette admin` over SSH and open the printed link. The admin page is served over your own SSH tunnel and exists nowhere on the public internet, with a one-time passcode per run as the login. Drop your site's folder on its card and press Publish. The content is staged, checked, and swapped in atomically; the tree it replaced is kept, and `restore-site` rolls back to it.
 
 ## What Servette provides
 
@@ -44,17 +46,17 @@ Then put your site on it from your own computer: run `servette admin` over SSH a
 | Redirects | Point an old path at a new one, per site, from either surface — permanently, or temporarily while the old path stays the real address. Stored as a setting, not as a file in your site |
 | A connection test built in | Every site serves a live check page at `/.well-known/servette-check`: the encryption, the security headers, and whether your site root is published at all, reported from a real browser's vantage. The default 404 page links it — and your own `404.html` can take the error page over without ever losing the check |
 
-**Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette), and that is by design, not a limitation to work around; [Scope & non-goals](https://github.com/andy-emerson/Servette/blob/main/DESIGN.md#scope--non-goals) says what is out and why.
+**Will it serve your site?** Servette serves static files as they are. It returns `405` to `POST` requests (it has nowhere to put submitted data) and it does not rewrite deep links for single-page-app routers (React Router, Vue Router, and the like). If your site needs either, you are looking for a different project (a general-purpose server, not Servette). That is by design, not a limitation to work around. 
 
 ## Who is Servette for?
 
-**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~6,800 lines of Python, no hidden machinery), sized and structured so that one person can fully understand all of it — a weekend's honest work, not an afternoon's skim, and not a career.
+**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~6,800 lines of Python, no hidden machinery), sized and structured so that one person can fully understand all of it. Reading the entire source, which was written to be read, is a weekend's honest work.
 
-**People with a real site that needs a real server.** Development servers are perfect while you build, but they are not meant to face the internet. Servette is built to stay up: a trusted certificate that renews itself, and a hardened service that survives reboots.
+**People with a site to share that needs a simple secure server.** Development servers are perfect while you build, but they are not meant to face the internet. Servette is built to stay up: a trusted certificate that renews itself, and a hardened service that survives reboots.
 
-**People who want to own what they serve.** Managed platforms host it for you, on their infrastructure and their terms. Servette runs on your own server, with your own certificate, behind a password if you want one.
+**People who want to own what they serve.** Managed platforms host it for you, on their infrastructure and their terms. Servette runs on your own server, with your own certificate and authentication, without giving up the intuitive GUI.
 
-**Raspberry Pi users.** Servette was designed with the Pi in mind. If you can SSH in and install a Python package, you can have a real HTTPS site live in under ten minutes.
+**Raspberry Pi users.** Servette was designed with constrained hardware in mind. If you can SSH in and install a Python package, you can have a real HTTPS site live in under ten minutes.
 
 ## How it compares
 
@@ -89,9 +91,9 @@ Re-run `servette` any time for the interactive shell — or run any command as `
 | `restore-site [n]` | Roll back a site's content to a kept version |
 | `help` · `quit` | Command list · exit |
 
-**Update your site** with `admin` — pick the folder in the browser, publish, done — or from the terminal: copy the folder to the server and run `publish 0 <folder>`. Never edit the served folder in place: publishing is what keeps the version history that makes `restore-site` possible.
+**Update your site** with `admin`: pick the folder in the browser, publish, done. Or, from the terminal: copy the folder to the server and run `publish 0 <folder>`, done.
 
-**Update Servette** with `pipx upgrade servette`; the next `servette` notices the service unit is stale and refreshes it when it has the permission — otherwise it says so, and `enable` refreshes the service onto the new version.
+**Update Servette** with `pipx upgrade servette`; the next `servette` notices the service unit is stale and refreshes it when it has the permission (otherwise, it says so, and `enable` refreshes the service onto the new version).
 
 **Roll back Servette** by installing the version you want (`pipx install --force servette==x.y.z`). Your `servette.toml` is never touched by an update.
 
@@ -102,5 +104,5 @@ Re-run `servette` any time for the interactive shell — or run any command as `
 - **[servette.org](https://servette.org)** — the project site, with a browsable view of the sources.
 - **[Source on GitHub](https://github.com/andy-emerson/Servette)** — the code, the tests, and the issue tracker.
 - **[DESIGN](https://github.com/andy-emerson/Servette/blob/main/DESIGN.md)** — why Servette is built this way, and what is deliberately out of scope.
-- **[Security policy](https://github.com/andy-emerson/Servette/blob/main/SECURITY.md)** — how to report a vulnerability, privately.
+- **[Security policy](https://github.com/andy-emerson/Servette/blob/main/SECURITY.md)** — how to report a vulnerability.
 - MIT licensed.

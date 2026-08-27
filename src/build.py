@@ -220,7 +220,8 @@ def embedded_page_lines(src_dir):
 # itself, which is what the drift was: a number asserted long after it stopped
 # being true.
 _README_CLAIMS = [
-    ("comparison table", r"\| Readable source \| ~([\d,]+) lines \|"),
+    # The comparison table stopped stating a line count (its cell says
+    # "literate Markdown"), so only the who-is-it-for prose still claims one.
     ("who-is-it-for prose", r"one readable module \(~([\d,]+) lines of Python"),
 ]
 

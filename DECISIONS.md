@@ -6,6 +6,37 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A paused site is invisible to TLS too; reactivation re-earns the certificate
+
+**Ruled (Human):** `_build_site_ssl_contexts` skips inactive sites — no
+context is built, so a paused site's unloadable certificate cannot refuse
+the whole start, and no SNI entry is claimed, so the paused hostname is
+answered by the closed-system default like any unrecognized name.
+Deactivation now means one thing in every subsystem: routing, the
+catch-all election, and TLS. The certificate becomes load-bearing again
+at exactly one door — flipping `active` to yes runs the same
+`_build_ssl_context` load the server performs, and refuses with the
+sentence naming the fix (`run 'config cert' first`) when it fails,
+because a saved flip over an unloadable pair is a config the next
+restart refuses, which no door may save. The check lives in the shared
+validator, so `set`, the page, and the prompt judge alike. Extends
+[Remove deletes the server's copies; deactivate is the
+pause](#remove-deletes-the-servers-copies-deactivate-is-the-pause) from
+routing to TLS.
+**Accepted cost:** a visitor to a paused-but-healthy site's hostname
+meets the fallback certificate (a browser warning) instead of the site's
+own certificate over a 404. Judged correct by the closed system's own
+rule: presenting a valid certificate for a paused name confirms the box
+hosts it — the exact information the closed system withholds from
+unrecognized names, and a paused name is deliberately unrecognized.
+**Rejected:** loading every configured site's certificate and failing
+the start on any of them (deactivate was then no quarantine — a paused
+site's rotted cert file took every site down at the next restart);
+loading a paused site's certificate where possible and reporting where
+not (keeps the paused name's clean certificate at the price of TLS
+remaining the one subsystem a paused site still participates in).
+*(2026-08-27)*
+
 ## The startup refresh repairs what it can reach, and never prompts
 
 **Ruled (Human):** `_startup_refresh` rewrites stale units automatically when

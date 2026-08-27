@@ -1476,10 +1476,24 @@ def _set_site_value(target, key, value):
         target.redirects_temp = temp_table
     elif key == "active":
         # The pause between serving and deleting: a deactivated site keeps
-        # its config and files but is invisible to request routing.
+        # its config and files but is invisible to routing and TLS alike.
         v = value.strip().lower()
         if v not in ("yes", "no"):
             return "active must be yes or no"
+        if v == "yes" and not target.active:
+            # Reactivation makes the certificate load-bearing again: startup
+            # skips a paused site's cert but fails closed on an active one,
+            # so saving this flip over an unloadable pair would save an
+            # answer the next restart refuses. Judged with the same load the
+            # server itself performs, here — the one write path — so `set`,
+            # the page, and the prompt refuse with the same sentence.
+            try:
+                _build_ssl_context(_resolve(target.cert_file),
+                                   _resolve(target.key_file))
+            except Exception:
+                return (f"the certificate does not load "
+                        f"({target.cert_file or 'none configured'}) — "
+                        "run 'config cert' first")
         target.active = (v == "yes")
     return ""
 
@@ -1530,6 +1544,13 @@ def _apply_settings(site, pairs):
     # redirect that is really there.
     scratch_site.redirects      = dict(site.redirects)
     scratch_site.redirects_temp = dict(site.redirects_temp)
+    # The active flip judges against the site's real state: reactivation
+    # loads the certificate it would make load-bearing, so the scratch
+    # carries the cert paths and the current value — a blank scratch would
+    # run the check against no certificate at all, or skip it.
+    scratch_site.active    = site.active
+    scratch_site.cert_file = site.cert_file
+    scratch_site.key_file  = site.key_file
     for key, value in pairs:
         if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
             return f"unknown setting: {key}"

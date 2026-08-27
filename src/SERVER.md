@@ -265,7 +265,7 @@ class Site:
                                  "user:password at the first one)")
         self.domain         = domain
         # Deactivated sites keep their config and files but are invisible to
-        # request routing — the pause between serving and deleting.
+        # routing and TLS alike — the pause between serving and deleting.
         self.active         = active
         self.serve_dir      = data.get("serve_dir",      "site")
         self.cert_file      = data.get("cert_file",      "cert.pem")
@@ -1493,9 +1493,10 @@ def _select_site(host):
     Host reaches a self-signed/LAN site with no domain configured). No
     domainless site and no domain match: None, the closed-system miss."""
     host = (host or "").split(":")[0].strip().lower()
-    # A deactivated site is invisible to routing everywhere below: its Host
-    # gets the closed-system miss (over a still-valid certificate), which is
-    # what "kept but not served" means on the wire.
+    # A deactivated site is invisible to routing everywhere below, as it is
+    # to TLS (_build_site_ssl_contexts skips it): its Host gets the
+    # closed-system answer at both layers, which is what "kept but not
+    # served" means on the wire.
     for site in config.sites:
         if site.active and site.domain and site.domain.lower() == host:
             return site
@@ -1614,7 +1615,7 @@ The SNI table: one context per site, the www names answered with their bare doma
 ```python
 # The SNI table
 def _build_site_ssl_contexts():
-    """Build one SSLContext per configured site, plus the default/base context the
+    """Build one SSLContext per active site, plus the default/base context the
     listening socket is constructed with and that's presented whenever SNI doesn't
     match any site (absent, unrecognized, or direct-IP access) — the closed
     system. A domainless site's own context serves as that default when one
@@ -1624,6 +1625,14 @@ def _build_site_ssl_contexts():
     domain_ctx  = {}
     default_ctx = None
     for site in config.sites:
+        if not site.active:
+            # Deactivated means invisible to every subsystem — routing,
+            # the catch-all election, and TLS alike: no context is built,
+            # so a paused site's unreadable certificate cannot refuse the
+            # whole start, and no SNI entry is claimed, so its hostname is
+            # answered by the closed-system default like any unrecognized
+            # name. Reactivation re-loads the certificate at that door.
+            continue
         ctx = _build_ssl_context(_resolve(site.cert_file), _resolve(site.key_file))
         if site.domain:
             d = site.domain.lower()
@@ -1636,10 +1645,9 @@ def _build_site_ssl_contexts():
             # configured as www.<domain> keeps its own context regardless of
             # which order the two sites appear in.
             domain_ctx.setdefault(f"www.{d}", ctx)
-        elif site.active and default_ctx is None:
-            # First ACTIVE domainless site, matching _select_site's catch-all
-            # election — a deactivated site must not present the certificate
-            # for content another site is serving.
+        elif default_ctx is None:
+            # First domainless site — inactive ones never reach here —
+            # matching _select_site's catch-all election exactly.
             default_ctx = ctx
 
     if default_ctx is None:

@@ -327,7 +327,7 @@ class Site:
                                  "user:password at the first one)")
         self.domain         = domain
         # Deactivated sites keep their config and files but are invisible to
-        # request routing — the pause between serving and deleting.
+        # routing and TLS alike — the pause between serving and deleting.
         self.active         = active
         self.serve_dir      = data.get("serve_dir",      "site")
         self.cert_file      = data.get("cert_file",      "cert.pem")
@@ -2234,9 +2234,10 @@ def _select_site(host):
     Host reaches a self-signed/LAN site with no domain configured). No
     domainless site and no domain match: None, the closed-system miss."""
     host = (host or "").split(":")[0].strip().lower()
-    # A deactivated site is invisible to routing everywhere below: its Host
-    # gets the closed-system miss (over a still-valid certificate), which is
-    # what "kept but not served" means on the wire.
+    # A deactivated site is invisible to routing everywhere below, as it is
+    # to TLS (_build_site_ssl_contexts skips it): its Host gets the
+    # closed-system answer at both layers, which is what "kept but not
+    # served" means on the wire.
     for site in config.sites:
         if site.active and site.domain and site.domain.lower() == host:
             return site
@@ -2335,7 +2336,7 @@ def _ensure_default_cert():
 
 # The SNI table
 def _build_site_ssl_contexts():
-    """Build one SSLContext per configured site, plus the default/base context the
+    """Build one SSLContext per active site, plus the default/base context the
     listening socket is constructed with and that's presented whenever SNI doesn't
     match any site (absent, unrecognized, or direct-IP access) — the closed
     system. A domainless site's own context serves as that default when one
@@ -2345,6 +2346,14 @@ def _build_site_ssl_contexts():
     domain_ctx  = {}
     default_ctx = None
     for site in config.sites:
+        if not site.active:
+            # Deactivated means invisible to every subsystem — routing,
+            # the catch-all election, and TLS alike: no context is built,
+            # so a paused site's unreadable certificate cannot refuse the
+            # whole start, and no SNI entry is claimed, so its hostname is
+            # answered by the closed-system default like any unrecognized
+            # name. Reactivation re-loads the certificate at that door.
+            continue
         ctx = _build_ssl_context(_resolve(site.cert_file), _resolve(site.key_file))
         if site.domain:
             d = site.domain.lower()
@@ -2357,10 +2366,9 @@ def _build_site_ssl_contexts():
             # configured as www.<domain> keeps its own context regardless of
             # which order the two sites appear in.
             domain_ctx.setdefault(f"www.{d}", ctx)
-        elif site.active and default_ctx is None:
-            # First ACTIVE domainless site, matching _select_site's catch-all
-            # election — a deactivated site must not present the certificate
-            # for content another site is serving.
+        elif default_ctx is None:
+            # First domainless site — inactive ones never reach here —
+            # matching _select_site's catch-all election exactly.
             default_ctx = ctx
 
     if default_ctx is None:
@@ -8315,10 +8323,24 @@ def _set_site_value(target, key, value):
         target.redirects_temp = temp_table
     elif key == "active":
         # The pause between serving and deleting: a deactivated site keeps
-        # its config and files but is invisible to request routing.
+        # its config and files but is invisible to routing and TLS alike.
         v = value.strip().lower()
         if v not in ("yes", "no"):
             return "active must be yes or no"
+        if v == "yes" and not target.active:
+            # Reactivation makes the certificate load-bearing again: startup
+            # skips a paused site's cert but fails closed on an active one,
+            # so saving this flip over an unloadable pair would save an
+            # answer the next restart refuses. Judged with the same load the
+            # server itself performs, here — the one write path — so `set`,
+            # the page, and the prompt refuse with the same sentence.
+            try:
+                _build_ssl_context(_resolve(target.cert_file),
+                                   _resolve(target.key_file))
+            except Exception:
+                return (f"the certificate does not load "
+                        f"({target.cert_file or 'none configured'}) — "
+                        "run 'config cert' first")
         target.active = (v == "yes")
     return ""
 
@@ -8359,6 +8381,13 @@ def _apply_settings(site, pairs):
     # redirect that is really there.
     scratch_site.redirects      = dict(site.redirects)
     scratch_site.redirects_temp = dict(site.redirects_temp)
+    # The active flip judges against the site's real state: reactivation
+    # loads the certificate it would make load-bearing, so the scratch
+    # carries the cert paths and the current value — a blank scratch would
+    # run the check against no certificate at all, or skip it.
+    scratch_site.active    = site.active
+    scratch_site.cert_file = site.cert_file
+    scratch_site.key_file  = site.key_file
     for key, value in pairs:
         if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
             return f"unknown setting: {key}"

@@ -689,6 +689,28 @@ serve_dir = "b"
         sni_cb(fake_none, None, default_ctx2)
         check("Absent SNI leaves the default context",
               fake_none.context is default_ctx2)
+
+        # A deactivated site is invisible to TLS as it is to routing: no
+        # context is built for it — so a paused site's unreadable cert
+        # cannot refuse the whole start — and its hostname claims no SNI
+        # entry, falling to the closed-system default like any unrecognized
+        # name.
+        site_b2.active    = False
+        site_b2.cert_file = os.path.join(tls_dir, "deleted-since.pem")
+        site_b2.key_file  = os.path.join(tls_dir, "deleted-since.key")
+        try:
+            default_ctx3 = s._build_site_ssl_contexts()
+            built = True
+        except Exception:
+            built = False
+        check("A paused site's unloadable certificate does not refuse the build",
+              built)
+        if built:
+            fake_paused = _FakeSSLSocket(default_ctx3)
+            default_ctx3.sni_callback(fake_paused, "b.example.com", default_ctx3)
+            check("A paused site's hostname falls to the closed-system default",
+                  fake_paused.context is default_ctx3)
+        site_b2.active = True
     finally:
         s.config.sites = saved_sites2
         shutil.rmtree(tls_dir, ignore_errors=True)
@@ -2315,6 +2337,30 @@ def run_dispatch_tests(s):
         check("set active=no/yes is the deactivation switch",
               deactivated and s.config.sites[0].active is True)
 
+        # Reactivation makes the certificate load-bearing again (ruled):
+        # startup skips a paused site's cert but fails closed on an active
+        # one, so the door refuses to save the flip over a pair that does
+        # not load. The scratch pass carries the site's real cert paths and
+        # active state, so the whole call is refused before any pair applies.
+        saved_cert_pair = (s.config.sites[0].cert_file, s.config.sites[0].key_file)
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["active=no"])
+        s.config.sites[0].cert_file = "/nonexistent/rotted.pem"
+        s.config.sites[0].key_file  = "/nonexistent/rotted.key"
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["active=yes", "username=never-applied"])
+        check("Reactivating over an unloadable certificate is refused, naming the fix",
+              "does not load" in buf.getvalue()
+              and "config cert" in buf.getvalue()
+              and s.config.sites[0].active is False)
+        check("...and the refusal applies nothing from the call",
+              s.config.sites[0].username != "never-applied")
+        (s.config.sites[0].cert_file, s.config.sites[0].key_file) = saved_cert_pair
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["active=yes"])
+        check("With the certificate back, reactivation succeeds",
+              s.config.sites[0].active is True)
+
         saved_auth = (s.config.sites[0].username, s.config.sites[0].password_hash,
                       s.config.sites[0].password_salt)
         s.config.sites[0].username = "probe"
@@ -3593,13 +3639,13 @@ def run_dispatch_tests(s):
     # applied to it on the way through.
     check("...and the redirect filters the echoed query to printable ASCII",
           "0x20 <= ord(c) <= 0x7E" in _core_src2)
-    # The TLS default context election matches routing's catch-all rule:
-    # the first ACTIVE domainless site (deleting `site.active` from this
-    # condition is the cert/content mismatch _domain_in_use exists to
-    # prevent).
-    check("The default TLS context is elected by the routing rule",
-          "elif site.active and default_ctx is None"
-          in inspect.getsource(s._build_site_ssl_contexts))
+    # TLS matches routing's rule wholesale: inactive sites are skipped
+    # before any context is built (deleting that filter re-creates both the
+    # cert/content mismatch _domain_in_use exists to prevent and the paused
+    # site whose rotted cert refuses the whole start).
+    _tls_src = inspect.getsource(s._build_site_ssl_contexts)
+    check("The TLS builder skips inactive sites before loading anything",
+          "if not site.active:" in _tls_src and "continue" in _tls_src)
     check("cache_policy is a choice, stated and refused outside it",
           "no-store" in s._set_host_value(_sc, "cache_policy", "weird")
           and s._set_host_value(_sc, "cache_policy", "max-age") == ""

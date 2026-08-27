@@ -149,7 +149,7 @@ Re-run `servette` any time for the interactive shell — or run any command belo
 
 **Update your site** with `admin` — pick the folder in the browser, publish, done — or from the terminal: copy the folder to the server and run `publish 0 ~/sites/blog`. A tidy convention (a convention only — Servette attaches no meaning to the path): keep site folders under `~/sites/`, one complete site per folder, and publish when the copy has finished — `publish` reads the folder as it stands, so a half-copied tree publishes half a site. Either way the content swaps in atomically, and the tree it replaced is kept: `restore-site` rolls back to it.
 
-**Update Servette** with `pipx upgrade servette`; the next `servette` notices the service unit is stale and says so — run `enable` to refresh the service onto the new version.
+**Update Servette** with `pipx upgrade servette`; the next `servette` notices the service unit is stale and refreshes it when it has the permission — otherwise it says so, and `enable` refreshes the service onto the new version.
 
 **Roll back Servette** by installing the version you want (`pipx install --force servette==x.y.z`). Your `servette.toml` is never touched by an update.
 

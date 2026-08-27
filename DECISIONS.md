@@ -6,6 +6,57 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## The startup refresh repairs what it can reach, and never prompts
+
+**Ruled (Human):** `_startup_refresh` rewrites stale units automatically when
+the environment matches and the shell can write them, and reloads the service;
+an unprivileged shell reports the staleness with the "run 'enable'" hint; a
+drifted environment — different data directory or interpreter, or a unit that
+predates the data directory — is reported and never silently adopted. Nothing
+in the refresh ever asks for a password: self-elevation stays out of the
+launch path, which is the property the superseded ruling protected.
+**Supersedes:** [A stale unit is noticed and told, not auto-refreshed
+(#99)](#a-stale-unit-is-noticed-and-told-not-auto-refreshed-99). What changed
+the balance is the failure that ruling's own reopen clause named: a pip
+upgrade changes no unit directive, so a host that upgrades and skips `enable`
+runs old code indefinitely — the version stamp exists to catch exactly that,
+and catching it only to print a line a root shell could have fixed is the
+guard doing half its job.
+**Cost accepted:** two behaviors to test — root repairs, unprivileged
+reports — which is the very cost #99 rejected this option over; the suite
+carries both paths.
+**Rejected:** pure notice-and-tell (regresses the upgrade pair wherever the
+shell could simply have fixed it); the refresh elevating itself (the
+unprompted password #99 refused, still refused). *(2026-08-27)*
+
+## Excess logins wait; the scrypt gate never sheds
+
+**Ruled (Human):** a login arriving past `_SCRYPT_MAX_CONCURRENT` blocks on
+the semaphore until a slot frees, rather than being answered 503. Draining
+~40 hashes/s against at most `MAX_CONNECTIONS` waiters bounds the worst wait
+at ~3 s: an attack degrades login to slow, never to unavailable, and auth
+gains no new response path.
+**Rejected:** shedding with 503 — an attacker holding the semaphore full
+would then deny every legitimate login deterministically, turning a memory
+bound into an availability lever.
+**Reopen if:** `MAX_CONNECTIONS` or the scrypt parameters push that
+worst-case wait past ~10 s — the arithmetic is the assumption. *(2026-08-27,
+recording the design [`DESIGN.md`](DESIGN.md#server) has carried since the
+semaphore landed)*
+
+## The connection cap counts sockets, not forwarded headers
+
+**Ruled (Human):** the per-IP connection cap keys on the accepted socket's
+own address, enforced at accept time before any bytes are read, and is
+disabled when `trusted_proxy` is set — every connection then carries the
+proxy's address, and connection policing in that topology belongs to the
+proxy.
+**Rejected:** keying the cap on `X-Forwarded-For` — it would put
+attacker-influenced parsing inside a security control, and it misses
+slowloris entirely, since the connections the cap must stop never send
+headers at all. *(2026-08-27, recording the design
+[`DESIGN.md`](DESIGN.md#server) has carried since the cap landed)*
+
 ## Valid or refused; viable or reported — the load-door principle
 
 **Ruled (Human, principle):** a config value is judged twice, and the two
@@ -1177,6 +1228,10 @@ plaintext token, an API key, a private key — at which point the operator's
 convenience no longer outweighs keeping it to one user. *(2026-08-18)*
 
 ## A stale unit is noticed and told, not auto-refreshed (#99)
+
+*Superseded by [The startup refresh repairs what it can reach, and never
+prompts](#the-startup-refresh-repairs-what-it-can-reach-and-never-prompts);
+the never-prompt property survives there.*
 
 **Ruled (Human):** after an upgrade, the unprivileged shell notices the stale
 systemd unit at launch and says so; `enable` — which elevates itself — is the

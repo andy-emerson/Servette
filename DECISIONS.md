@@ -6,6 +6,34 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## Browser caching derives from access, overridable per site
+
+**Ruled (Human):** the browser-cache enum is gone. A public site's
+visitors keep copies re-checked on every use (`no-cache`: a publish is
+visible on the next request, unchanged files answer 304); a private
+site's visitors keep no copies at all (`no-store`: content behind a
+password leaves nothing in a disk cache on machines the operator does
+not control — the posture its credentials already get, per the
+config-ownership ruling). One per-site field overrides the derivation:
+`cache = "auto" | "yes" | "no"`, default `auto` — for the private media
+site that wants cheap repeat visits, and the public app that handles
+secrets client-side. `cache_policy` and `cache_max_age` are retired;
+old configs' keys are ignored on load and dropped at the next save.
+**Why:** secure by default demands the operator who never learns the
+setting exists still gets `no-store` behind their password; and the
+no-wrong-answer principle removes the question rather than renaming its
+options — the enum was one number line (no-cache ≈ max-age=0) plus a
+privacy property mislabeled as a duration.
+**Rejected:** `max-age` in any form — the operator with traffic worth
+tuning cache lifetimes has outgrown Servette by its own scope table,
+and a lifetime is the one value that silently breaks the instant-updates
+promise; a host-level toggle (the two examples above are per-site
+facts); friendlier labels on the old enum (naming a question better is
+not removing it).
+**Reopen if:** a public site demonstrably needs fewer requests than
+revalidation allows — `max-age` returns as one per-site number, its
+zero meaning what `auto` means today. *(2026-08-27)*
+
 ## A paused site is invisible to TLS too; reactivation re-earns the certificate
 
 **Ruled (Human):** `_build_site_ssl_contexts` skips inactive sites — no
@@ -655,6 +683,12 @@ permanent/temporary column — is replaced by the Human's per-rule ruling
 *(2026-08-24)*
 
 ## A preview is content over the tunnel, not a deployment
+
+*Amended 2026-08-27 (Human): the draft opens full size in its own tab
+through a `rel="noopener"` link — the 420px sandboxed frame was not an
+honest representation. The isolation moved from opaque-origin to
+noopener plus passcode-gated endpoints; the token-in-the-path and
+same-pipeline clauses stand.*
 
 **Ruled (Human):** Preview stages the chosen folder where only the admin
 page can see it and shows it in a frame — did the CSS land, is the image

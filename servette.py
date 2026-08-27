@@ -4640,7 +4640,7 @@ _COMMANDS = [
     ("log [n]",          "show the last n log entries"),
     ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
-    ("publish [n] <folder>", "publish a folder on this box as a site's content"),
+    ("publish <folder>", "publish a folder on this box as a site's content (site index first on a multi-site box)"),
     ("restore-site [n]", "roll back a site's content to a kept version"),
     ("help",             "show this message"),
     ("quit",             "exit"),
@@ -5094,15 +5094,20 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
     .cfg-field .cfg-hint { grid-column: 2; }
     /* The two families inside the Settings card — what defends the server,
-       and what tunes it — named so neither wears the other's label. */
+       and what tunes it. Accent-coloured and ruled off above, so a section
+       header cannot be mistaken for the field labels it governs, which
+       share its size and case. */
     .cfg-group {
-      margin: 1.1rem 0 0.45rem;
-      font-size: 0.72rem;
+      margin: 1.35rem 0 0.5rem;
+      padding-top: 0.9rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.78rem;
+      font-weight: 600;
       letter-spacing: 0.09em;
       text-transform: uppercase;
-      color: var(--muted);
+      color: var(--green);
     }
-    .cfg-group:first-child { margin-top: 0.2rem; }
+    .cfg-group:first-child { margin-top: 0.2rem; padding-top: 0; border-top: none; }
     .cfg-hint {
       font-size: 0.68rem;
       color: var(--muted);
@@ -5270,18 +5275,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     /* The panel hangs below the head, so the card must not clip it. */
     .site-card { overflow: visible; }
 
-    /* The staged draft, in a frame that cannot reach back. The sandbox
-       attribute deliberately withholds allow-same-origin: the draft runs on
-       an opaque origin, so a script in someone's own content cannot read
-       this page or call its endpoints. */
-    .preview-frame {
-      width: 100%;
-      height: 420px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: #fff;
-      margin-top: 0.5rem;
-    }
+    /* The staged draft opens in its own tab — full size, the honest
+       representation a 420px frame was not. The link carries rel=noopener,
+       so the draft's tab holds no handle back to this page or the passcode
+       in its address; the admin endpoints themselves all demand the
+       passcode the draft never learns. */
+    .preview-open { display: inline-block; margin-top: 0.6rem; }
 
     /* ── Charts: inline SVG, no library — the page loads no third-party
        code. The y-axis is part of the chart: a line without a scale is a
@@ -5996,12 +5995,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
            `publish, not the live site">Preview</button>` +
          `</div>` +
          `<div class="preview hidden">` +
-           `<p class="hint">This is the folder you chose, served over the ` +
-           `tunnel and not published. Links inside it work; the site's real ` +
-           `domain, certificate, and headers are not part of what you are ` +
-           `seeing.</p>` +
-           `<iframe class="preview-frame" sandbox="allow-scripts allow-forms" ` +
-           `title="Preview of the chosen folder"></iframe>` +
+           `<p class="hint">Staged: the folder you chose, served over the ` +
+           `tunnel and not published — it opens full size in its own tab. ` +
+           `Links inside it work; the site's real domain, certificate, and ` +
+           `headers are not part of what you are seeing.</p>` +
+           `<a class="action preview-open" target="_blank" rel="noopener" ` +
+           `href="#">Open the preview ↗</a>` +
          `</div>` +
          `<div class="done hidden">` +
            `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
@@ -6376,7 +6375,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         // it asks for. And it is the PREVIEW token, never the run's
         // passcode — a draft can read its own address, and must not learn
         // the credential that publishes.
-        q('.preview-frame').src = '/preview/' + encodeURIComponent(data.token) +
+        q('.preview-open').href = '/preview/' + encodeURIComponent(data.token) +
           '/' + encodeURIComponent(siteIndex()) + '/';
         q('.preview').classList.remove('hidden');
         mark('badge-green', '✓ staged');
@@ -7933,7 +7932,8 @@ def cmd_publish(args):
     """Publish a folder on this box as a site's content — the terminal half
     of the pair whose browser half is the page's Publish button."""
     if not args:
-        print("  Usage: publish [n] <folder>")
+        print("  Usage: publish <folder>")
+        print("  (On a multi-site box, the site index comes first: publish 1 <folder>)")
         return
     if len(args) >= 2:
         site, folder = _config_site_arg([args[0]]), args[1]

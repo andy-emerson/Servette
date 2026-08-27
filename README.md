@@ -89,7 +89,7 @@ Re-run `servette` any time for the interactive shell — or run any command as `
 | `sites [--json]` | List configured sites |
 | `set [n] k=v ...` | Change settings non-interactively (`servette set 0 active=no`) |
 | `admin` | Open the browser admin page (publish, settings) over your SSH tunnel |
-| `publish [n] <folder>` | Publish a folder on the server as a site's content |
+| `publish <folder>` | Publish a folder on the server as a site's content — site index first on a multi-site box |
 | `restore-site [n]` | Roll back a site's content to a kept version |
 | `help` · `quit` | Command list · exit |
 

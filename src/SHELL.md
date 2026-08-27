@@ -68,7 +68,7 @@ _COMMANDS = [
     ("log [n]",          "show the last n log entries"),
     ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
-    ("publish [n] <folder>", "publish a folder on this box as a site's content"),
+    ("publish <folder>", "publish a folder on this box as a site's content (site index first on a multi-site box)"),
     ("restore-site [n]", "roll back a site's content to a kept version"),
     ("help",             "show this message"),
     ("quit",             "exit"),
@@ -1070,7 +1070,8 @@ def cmd_publish(args):
     """Publish a folder on this box as a site's content — the terminal half
     of the pair whose browser half is the page's Publish button."""
     if not args:
-        print("  Usage: publish [n] <folder>")
+        print("  Usage: publish <folder>")
+        print("  (On a multi-site box, the site index comes first: publish 1 <folder>)")
         return
     if len(args) >= 2:
         site, folder = _config_site_arg([args[0]]), args[1]

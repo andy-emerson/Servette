@@ -1267,16 +1267,17 @@ def run_dispatch_tests(s):
     # Redirects are a setting, so the page edits them through the settings
     # write both surfaces share — not through a door of their own.
     # Preview and download on the page. The frame withholds
-    # allow-same-origin deliberately: a draft runs on an opaque origin and
-    # cannot read the page that staged it.
-    # Read the attribute itself, not the page text: prose about the sandbox
-    # is not the sandbox, and an assertion that cannot tell them apart would
-    # pass on a comment while the frame ran wide open.
-    sandboxes = re.findall(r'sandbox="([^"]*)"', s._UI_ADMIN_PAGE)
-    check("...offers a preview in a frame that cannot reach back",
-          sandboxes == ["allow-scripts allow-forms"]
+    # The preview opens in its own tab (ruled: full size, not a 420px
+    # frame). rel=noopener is the isolation now — the draft's tab must hold
+    # no handle back to the page whose address carries the passcode. Read
+    # the attribute itself, not the page text: prose about noopener is not
+    # noopener, and an assertion that cannot tell them apart would pass on
+    # a comment while the link ran wide open.
+    check("...offers a preview in a tab that cannot reach back",
+          re.search(r'class="action preview-open"[^>]*rel="noopener"',
+                    s._UI_ADMIN_PAGE) is not None
           and "api('/preview'" in s._UI_ADMIN_PAGE)
-    check("...whose frame URL carries the preview token, never the passcode",
+    check("...whose link carries the preview token, never the passcode",
           "'/preview/' + encodeURIComponent(data.token)" in s._UI_ADMIN_PAGE)
     # Download is removed by ruling: a sys admin already knows how to copy
     # a folder off their own box, and the terminal's own tools do it better.
@@ -7232,7 +7233,6 @@ def run_browser_tests(s, tmpdir):
             page.wait_for_timeout(600)
             page.locator("button.prev").first.click()
             page.wait_for_timeout(2000)
-            frame = page.frame_locator(".preview-frame")
             # Two lines, and the row still centres its label and buttons
             # against the pair: one line ran into the buttons and wrapped
             # mid-date.
@@ -7249,13 +7249,28 @@ def run_browser_tests(s, tmpdir):
                     return b.top >= a.bottom - 1 &&
                            Math.abs((btn.top + btn.bottom) / 2 - mid) < 6;
                   }"""))
-            check("...a preview renders the chosen draft",
-                  frame.locator("#d").inner_text() == "DRAFT")
-            check("...with its relative stylesheet resolving inside the frame",
-                  frame.locator("#d").evaluate(
+            # The staged draft opens in its own tab (ruled: a 420px frame
+            # was not an honest representation). The link's address carries
+            # the preview token in the path and never the run's passcode,
+            # and noopener leaves the draft's tab no handle back to the
+            # page that staged it.
+            open_link = page.locator("a.preview-open").first
+            href = open_link.get_attribute("href") or ""
+            check("...a staged preview offers its own tab, passcode-free",
+                  href.startswith("/preview/") and code not in href
+                  and (open_link.get_attribute("rel") or "") == "noopener")
+            with page.context.expect_page() as popped:
+                open_link.click()
+            draft_tab = popped.value
+            draft_tab.wait_for_load_state()
+            check("...the preview tab renders the chosen draft",
+                  draft_tab.locator("#d").inner_text() == "DRAFT")
+            check("...with its relative stylesheet resolving",
+                  draft_tab.locator("#d").evaluate(
                       "e => getComputedStyle(e).color") == "rgb(1, 2, 3)")
-            check("...and the frame's URL carrying no admin passcode",
-                  code not in (page.locator(".preview-frame").get_attribute("src") or ""))
+            check("...and the tab holds no handle back to the admin page",
+                  draft_tab.evaluate("() => window.opener === null"))
+            draft_tab.close()
 
             # A redirect, added and removed through the page's own form.
             page.locator("button.redir-add").first.click()
@@ -7295,6 +7310,21 @@ def run_browser_tests(s, tmpdir):
                   page.locator("#cfg-email").input_value() == "half-typed@exam"
                   and page.evaluate(
                       "() => document.activeElement.id === 'cfg-email'"))
+
+            # The group headers are marked apart from the field labels they
+            # govern (ruled): accent-coloured, and every group past the
+            # first ruled off above — a header dressed exactly like its
+            # members is not a header.
+            check("...the settings groups read apart from their fields",
+                  page.evaluate("""() => {
+                    const gs = document.querySelectorAll('#cfg-host-fields .cfg-group');
+                    const label = document.querySelector('#cfg-host-fields .cfg-field label');
+                    if (gs.length < 2 || !label) return false;
+                    const g0 = getComputedStyle(gs[0]);
+                    const g1 = getComputedStyle(gs[1]);
+                    return g0.color !== getComputedStyle(label).color &&
+                           parseFloat(g1.borderTopWidth) > 0;
+                  }"""))
 
             # The browser-cache pair on the Performance group: a select
             # for the policy (what cannot be typed cannot need refusing),

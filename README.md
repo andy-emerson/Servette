@@ -60,18 +60,18 @@ Then put your site on it from your own computer: run `servette admin` over SSH a
 
 ## How it compares
 
-The common ways to serve a folder sit at two extremes: the general-purpose servers can be made this secure, but are not simple; the nanoservers are this simple, but not secure.
+The common ways to serve a folder sit at two extremes: the general-purpose servers can be made secure, but are not simple; nanoservers are simple, but not secure.
 
-| | Servette | nginx | Apache | `python -m http.server` | `npx serve` |
+| | Servette | nginx | Apache | miniserve | Static Web Server |
 |---|:--:|:--:|:--:|:--:|:--:|
-| Serves a folder in one command | ✓ | ✗ | ✗ | ✓ | ✓ |
+| Serves a folder in a single command | ✓ | ✗ | ✗ | ✓ | ✓ |
 | No config language to learn | ✓ | ✗ | ✗ | ✓ | ✓ |
-| Trusted HTTPS that renews itself | ✓ | + certbot | + certbot | ✗ | ✗ |
-| Security headers and rate limiting by default | ✓ | you configure them | you configure them | ✗ | ✗ |
-| Survives a reboot as a hardened service | ✓ | ✓ | ✓ | ✗ | ✗ |
-| Readable source | ~6,800 lines | vast (C) | vast (C) | small (stdlib) | a node_modules tree |
+| Trusted HTTPS with auto-renew | ✓ | ✓ | ✓ | ✗ | ✗ |
+| Security headers and rate limiting | Automatic | Configurable | Configurable | ✗ | ✗ |
+| Survives a reboot as a service | ✓ | ✓ | ✓ | ✗ | Configurable |
+| Readable source | ~6,800 lines of literate Markdown| large C binary | large C binary | Rust crate | Rust crate |
 
-Both extremes are right for their jobs — nginx and Apache at scales and shapes Servette does not chase, the nanoservers while you build. Servette is for the gap between: production security with nanoserver simplicity, from a single module you can read. (Peer columns as checked 2026-08; only Servette's own figures are gated by CI.)
+Both extremes are right for their jobs: nanoservers while you build and test, nginx and Apache for large complex server-side applications. Servette is for the gap between: production security with nanoserver simplicity, from a single module you can read.
 
 ## Operating it
 

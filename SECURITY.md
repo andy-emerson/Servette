@@ -17,8 +17,8 @@ security fixes; stay current with `pipx upgrade servette`.
 ## Scope
 
 Servette implements its own auth, TLS configuration, rate limiting, path
-resolution, certificate lifecycle, and publish-bundle extraction from a
-small trusted base. Reports against any of those are in scope, for example:
+resolution, certificate lifecycle, and publish-bundle extraction. Reports
+against any of those are in scope, for example:
 
 - Path traversal or any way to read files outside the served directory.
 - Authentication or rate-limiting bypass.

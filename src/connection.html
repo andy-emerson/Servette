@@ -324,9 +324,8 @@
   const seen = (v) => v || '(absent)';
 
   // Each row is a finding in the reader's language, with the evidence that
-  // earned it underneath. The requests are the same ones as ever; what
-  // changed is that the report leads with what they mean, and several
-  // probes that answer one question now share one row.
+  // earned it underneath; several probes that answer one question share
+  // one row.
   const checks = [
     { name: 'Encrypted', run: async () => {
         const r = await fetch(here, { cache: 'no-store' });

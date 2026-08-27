@@ -242,11 +242,9 @@ def _watch_server(poll=2, grace=5):
     Under --serve nothing ever restarts the server in-process — a certificate
     reload deliberately stops it and lets systemd relaunch — so every dead
     thread this sees ends in an exit, and the grace only sets how long the
-    site stays down before the restart begins. It was 30 seconds, justified
-    by an in-process reload window that cannot occur in this mode: every
-    certificate rotation cost ~35 seconds of downtime where stop, exit, and
-    RestartSec add up to well under ten. The small grace that remains
-    absorbs stop_server's own teardown ordering, nothing more."""
+    site stays down before the restart begins — every second of it is
+    downtime a certificate rotation pays. Keep it small: it exists to
+    absorb stop_server's own teardown ordering, nothing more."""
     deadline = None
     while True:
         t = _https_thread
@@ -967,9 +965,9 @@ def _servette_gid():
 
 def _serve_dir_readable(path):
     """Whether the service could plausibly read this serve_dir: world r+x, or
-    group r+x where the group actually is servette. The old check demanded
-    world bits and told the operator to add them with a+rX — advice that undid
-    the deliberate group-only grant _operator_chown_plan had just applied."""
+    group r+x where the group actually is servette. Group access MUST count:
+    demanding world bits would tell the operator to undo the deliberate
+    group-only grant _operator_chown_plan applies."""
     st = os.stat(path)
     if st.st_mode & 0o005 == 0o005:
         return True
@@ -986,38 +984,28 @@ def _chown_config(path):
     """Give the config to the service user, readable by the operator: owner
     servette, group the operator's own, mode 0640.
 
-    servette.toml is the operator's file about the operator's box, and the
-    read-only commands (status, sites, log) read it to report a URL and a
-    certificate expiry. Owning it 0600 to the service user made those commands
-    elevate on every configured host — a password to look at your own server —
-    and left config.unreadable permanently true, so the fail-closed reload
-    guard fired during correct operation. A guard that trips in normal use is
-    one people learn to ignore.
+    Why a group at all: the read-only commands (status, sites, log) report
+    the operator's own box, and a 0600-to-servette file makes them elevate
+    for every read — a password to look at your own server — while keeping
+    the fail-closed unreadable guard permanently tripped. The widening is
+    exactly one user. World bits stay off: the file carries a password HASH
+    and salt, material for an offline attack.
 
-    The group is the operator's, so the widening is from one system user to
-    exactly one more: them. World bits stay off, as they do for site content —
-    the file carries a password HASH and salt, which is material for an offline
-    attack and never something to hand to every local account.
+    Failure degrades toward the service, never away from it. The chown can
+    fail (a SUDO_USER deleted since the sudo, an NSS outage), and the file
+    save()'s os.replace leaves behind is root:root — unreadable by the
+    service, which kills the reload and the next restart. So a failed
+    operator chown falls back to servette:servette: the operator loses the
+    no-password read until the next enable; the service, whose reload and
+    restart depend on reading the file, loses nothing. The chmod runs
+    unconditionally, and everything here is best-effort — save() runs at
+    import, and a raise would crash unprivileged runs over a write they
+    were never going to make.
 
-    Failure must degrade toward the service, not away from it. The chown can
-    fail — a SUDO_USER deleted since the sudo, an NSS outage naming a group
-    that doesn't resolve — and the file it would leave behind is whatever
-    save()'s os.replace installed: root:root, which the service cannot read,
-    which kills the per-request reload and makes the next restart refuse to
-    serve. So a failed operator chown falls back to servette:servette — the
-    operator loses their no-password read until the next enable, the service
-    loses nothing, and the site stays up. The chmod runs unconditionally
-    (0640 under servette:servette grants read to a user that already had it).
-
-    The service user is a legitimate caller — a deferred config migration on
-    a host where it can write — but not one that can grant the operator
-    anything: a non-root owner may only chgrp to groups it belongs to, and
-    servette belongs only to servette. Its saves therefore leave
-    servette:servette 0640, and the operator's group read returns with the
-    next root-elevated save or enable, both of which run this function as
-    root. save() runs at import on every configured host — check=True
-    anywhere here would be the crash _chown_servette already learned to
-    avoid."""
+    The service user is a legitimate caller (a deferred config migration)
+    but cannot chgrp to a group it doesn't belong to, so its saves leave
+    servette:servette 0640 until the next root-elevated save or enable
+    restores the operator's group read."""
     if not (_servette_user_exists() and os.path.exists(path)):
         return
     if os.geteuid() != 0 and os.geteuid() != _servette_uid():
@@ -1216,7 +1204,7 @@ def _netwatch_units():
     NetworkManager on Raspberry Pi OS, dhcpcd on older Pi OS) exactly one acts;
     the whole check is a no-op while the route is healthy.
 
-    One minute rather than the original five because the check costs nothing
+    One minute, because the check costs nothing
     to run often: despite appearances, `ip route get` sends no packets — it
     asks the local routing table which route it WOULD use — so the interval
     buys only recovery time, and the route drill measured the cost of five
@@ -1348,9 +1336,8 @@ def _cache_headroom_mb(cache_mb, running=None):
     keeps the two callers ordered. The offer (service down, ceiling charged)
     can only ever be larger than the later status check (service up, ceiling
     in the signal), so a host that accepts the offer is never afterwards told
-    to resize. The old formula had this backwards: the cache entered the
-    measurement between setup and status, so the check drifted upward past
-    the size the operator had just chosen, and nagged forever.
+    to resize — the ordering IS the property; charge the ceiling on both
+    sides and the check drifts past whatever size the operator just chose.
 
     `running` lets a caller hand in a fact it already holds — _status_data
     asks systemd once and threads the answer through everything the
@@ -1495,7 +1482,6 @@ def _ensure_swap():
     rec_mb    = rec // (1024 * 1024) if rec else None
     ours      = os.path.exists(_SWAP_PATH)
     ours_mb, foreign_mb = _swap_sizes()
-    active_mb = ours_mb or 0            # OUR file's active size, not the host total
     offer     = _swap_offer(rec_mb, ours, ours_mb, foreign_mb)
     if offer is None:
         return
@@ -1512,9 +1498,15 @@ def _ensure_swap():
     mb = rec_mb
     if resp:
         try:
-            mb = max(64, int(resp))
+            mb = int(resp)
         except ValueError:
             print("  Not a number — skipping swap setup.")
+            return
+        # The page's own bounds, refused with the same sentence — not
+        # silently rounded up, which answered "10" with a 64 MB file the
+        # operator never asked for.
+        if not (64 <= mb <= 65536):
+            print("  Swap size must be 64-65536 MB — skipping swap setup.")
             return
     err = _apply_swapfile(mb)
     if err:
@@ -2168,6 +2160,17 @@ def cmd_enable():
             print("  Servette enabled as a system service.")
             print("  It will start automatically on boot and survive SSH disconnects.")
             print("  A watchdog timer recovers a dropped default route.")
+        # The unit just written grants writes under BASE_DIR only, so a
+        # hand-edited serve_dir outside it will serve fine and refuse every
+        # publish under the service — a trap that never shows in a manual
+        # run. Said here, at the moment the sandbox comes into being; the
+        # health row carries it from now on (#123, ruled: reported, never
+        # refused).
+        for outside_site in config.sites:
+            if not _is_within_base_dir(_resolve(outside_site.serve_dir)):
+                print(f"  Note: {outside_site.domain or outside_site.serve_dir} "
+                      f"serves from outside {BASE_DIR} — the sandboxed "
+                      "service cannot publish there.")
         log.info("Enabled as systemd service")
 
         _ensure_swap()

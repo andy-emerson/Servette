@@ -15,7 +15,8 @@ and essential security headers. Run it:
 Architecture:
     Server              — config, rate limiting, file cache, the request handler, and the HTTP servers
     System              — server lifecycle, certificate management, and service management
-    Shell               — the interactive terminal interface
+    Shell               — the operator's side: the loopback admin page, content
+                          publishing, the settings doors, and the terminal shell
 """
 
 __version__ = "0.26.234"
@@ -165,15 +166,18 @@ def _redirect_next(dst):
     return _canonical_source(dst.partition("?")[0])
 
 
-def _clean_redirects(raw):
-    """The site's redirect table, validated once at load so serving one is a
-    dict lookup and nothing else.
+def _clean_redirects(raw, strict=False):
+    """The site's redirect table, validated once so serving one is a dict
+    lookup and nothing else.
 
     A source is a site-absolute path; a target is another site-absolute path
-    or an absolute http(s) URL. Anything else is dropped with a log line
-    rather than raised: one bad entry in a hand-edited table must not take a
-    whole site down, and a redirect that quietly did something other than
-    what it said would be worse than one that does nothing.
+    or an absolute http(s) URL. What happens to anything else depends on the
+    door. As the write doors' filter (strict=False), a bad entry is dropped
+    with a log line and the caller turns an empty result into its own
+    refusal sentence. At the load door (strict=True), a bad entry refuses
+    the whole file (the load-door principle — see _ConfigInvalid): a rule
+    silently dropped is a path the operator wrote a redirect for answering
+    404, discovered by visitors far from the edit.
 
     Two of the checks are load-bearing rather than tidy. A target is
     narrowed to path-or-http(s) because a redirect is an open door by
@@ -185,26 +189,34 @@ def _clean_redirects(raw):
     serve time — silently sending the visitor somewhere the operator did
     not write. An operator who wants a non-ASCII destination percent-encodes
     the path (or punycodes the host) themselves, which is ASCII and exact."""
+    def refuse(sentence):
+        # True = drop this entry; a strict caller never gets that far.
+        if strict:
+            raise _ConfigInvalid(f"servette.toml: redirects — {sentence}")
+        log.warning("redirect %s", sentence)
+        return True
+
     out = {}
     if not isinstance(raw, dict):
-        log.warning("redirects is not a table — ignoring it")
+        refuse("is not a table of \"/path\" = \"/target\" pairs")
         return out
     if len(raw) > _MAX_REDIRECTS:
-        log.warning("more than %d redirects — only the first %d are loaded",
-                    _MAX_REDIRECTS, _MAX_REDIRECTS)
+        # Sentence stays mode-neutral: strict raises before anything loads,
+        # non-strict truncates below — naming either behavior here would
+        # tell one of the two doors the opposite of what it did.
+        refuse(f"table holds more than {_MAX_REDIRECTS} rules")
     for key, target in list(raw.items())[:_MAX_REDIRECTS]:
         src, dst = str(key).strip(), str(target).strip()
         if any(not (0x20 <= ord(c) <= 0x7E) for c in src + dst):
-            log.warning("redirect with a control or non-ASCII character in it — ignored")
+            refuse(f"{src[:80]!r} carries a control or non-ASCII character")
             continue
         if not src.startswith("/") or len(src) > _MAX_REDIRECT_CHARS:
-            log.warning("redirect source %r is not a site path — ignored", src[:80])
+            refuse(f"source {src[:80]!r} is not a site path")
             continue
         if len(dst) > _MAX_REDIRECT_CHARS or not (
                 dst.startswith("/") or dst.startswith("http://")
                 or dst.startswith("https://")):
-            log.warning("redirect target %r is not a path or http(s) URL — ignored",
-                        dst[:80])
+            refuse(f"target {dst[:80]!r} is not a path or http(s) URL")
             continue
         # One rule covers /old and /old/ and every percent-spelling of the
         # same path, on both sides of the lookup: the key is the canonical
@@ -212,11 +224,18 @@ def _clean_redirects(raw):
         # /my%20page, and /caf%C3%A9 is how an ASCII-only table spells a
         # non-ASCII source.
         norm = _canonical_source(src)
+        if len(norm) > _MAX_REDIRECT_CHARS:
+            # The canonical spelling percent-expands, so a raw source under
+            # the cap can canonicalize past it — judged here so canonical
+            # output is a fixed point of this validator, not refused later
+            # with a sentence about something else.
+            refuse(f"source {src[:80]!r} exceeds {_MAX_REDIRECT_CHARS} "
+                   "characters in its canonical spelling")
+            continue
         if norm in out:
-            log.warning("redirect %s is written twice (two spellings of one "
-                        "path) — the last one wins", norm)
+            refuse(f"{norm} is written twice (two spellings of one path)")
         if norm == _redirect_next(dst):
-            log.warning("redirect %s points at itself — ignored", norm)
+            refuse(f"{norm} points at itself")
             continue
         out[norm] = dst
     # A rule pointing at itself is refused above; a ring of rules
@@ -235,28 +254,35 @@ def _clean_redirects(raw):
         if cur is not None and cur in seen:
             doomed.add(src)
     for src in doomed:
-        log.warning("redirect %s is part of, or leads into, a ring of "
-                    "redirects — ignored", src)
+        refuse(f"{src} is part of, or leads into, a ring of redirects")
         del out[src]
     return out
 
 
 def _redirect_toml(site):
-    """The site's redirect table as TOML, or nothing at all when it is empty.
+    """The site's redirect tables as TOML, or nothing at all when both are
+    empty.
 
     Written LAST inside each [[site]] block, because a TOML sub-table
     swallows every key that follows it: a scalar written after
     [site.redirects] would be read back as part of the table, not as a
     field of the site."""
-    if not site.redirects:
-        return ""
     def q(value):
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    lines = "\n".join(f"{q(src)} = {q(dst)}"
-                      for src, dst in sorted(site.redirects.items()))
-    return ("\n# A path on this site = where a visitor asking for it is sent.\n"
-            "# Answered with a 301, before any file is looked for.\n"
-            "[site.redirects]\n" + lines + "\n")
+    def block(header, comment, table):
+        if not table:
+            return ""
+        lines = "\n".join(f"{q(src)} = {q(dst)}"
+                          for src, dst in sorted(table.items()))
+        return "\n" + comment + f"[{header}]\n" + lines + "\n"
+    return (block("site.redirects",
+                  "# A path on this site = where a visitor asking for it is sent.\n"
+                  "# Answered with a permanent 301, before any file is looked for.\n",
+                  site.redirects)
+            + block("site.redirects_temporary",
+                    "# The same pairs, answered with a temporary 302: the old path\n"
+                    "# stays the site's real address, nothing memorizes the new one.\n",
+                    site.redirects_temp))
 
 
 class Site:
@@ -269,30 +295,75 @@ class Site:
 
     def __init__(self, data=None):
         data = data or {}
-        self.domain         = data.get("domain",         "")
+        # Site fields are judged here, at the load door (the load-door
+        # principle — see _ConfigInvalid). Every Site is built before
+        # Config._load mutates anything of its own, so a raise here
+        # refuses the file whole.
+        for field in ("domain", "serve_dir", "cert_file", "key_file",
+                      "username", "password_hash", "password_salt"):
+            if field in data and (not isinstance(data[field], str) or any(
+                    ord(c) < 0x20 or ord(c) == 0x7F for c in data[field])):
+                # Control characters included NUL, which TOML permits in a
+                # string but the filesystem calls downstream refuse with a
+                # bare ValueError — outside the _ConfigInvalid family the
+                # reload's last-good handling keys on.
+                raise _ConfigInvalid(f"servette.toml: {field} must be text "
+                                     "without control characters")
+        domain = data.get("domain", "")
+        if domain:
+            problem = _domain_problem(domain)
+            if problem:
+                raise _ConfigInvalid(f"servette.toml: domain — {problem}")
+        active = data.get("active", True)
+        if not isinstance(active, bool):
+            raise _ConfigInvalid("servette.toml: active must be true or false")
+        username = data.get("username", "")
+        if ":" in username:
+            # The same sentence the write doors refuse with: sign-in joins
+            # user:password and splits at the first colon, so this username
+            # could never match and locks every visitor out.
+            raise _ConfigInvalid("servette.toml: username — a username "
+                                 "cannot contain a colon (sign-in splits "
+                                 "user:password at the first one)")
+        self.domain         = domain
         # Deactivated sites keep their config and files but are invisible to
-        # request routing — the pause between serving and deleting.
-        self.active         = bool(data.get("active",    True))
+        # routing and TLS alike — the pause between serving and deleting.
+        self.active         = active
         self.serve_dir      = data.get("serve_dir",      "site")
         self.cert_file      = data.get("cert_file",      "cert.pem")
         self.key_file       = data.get("key_file",       "key.pem")
-        self.username       = data.get("username",       "")
+        self.username       = username
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
-        # Old path -> new path, validated once here so the request path is a
-        # dict lookup and nothing more. A file in the site folder would be
-        # content, and content is read at request time — which is the whole
-        # reason this is a setting.
-        self.redirects      = _clean_redirects(data.get("redirects", {}))
+        # Two tables, one per answer: redirects → 301, redirects_temporary
+        # → 302 (the ruled per-rule choice, default permanent). Validated
+        # strictly and together — criteria in _clean_redirects, principle
+        # in _ConfigInvalid: a bad rule, a source written twice or in both
+        # tables, or a ring hopping between them refuses the file.
+        perm = _clean_redirects(data.get("redirects", {}), strict=True)
+        temp = _clean_redirects(data.get("redirects_temporary", {}),
+                                strict=True)
+        both = set(perm) & set(temp)
+        if both:
+            raise _ConfigInvalid(f"servette.toml: redirects — "
+                                 f"{sorted(both)[0]} is in both tables; a "
+                                 "rule is permanent or temporary, not both")
+        combined = _clean_redirects({**perm, **temp}, strict=True)
+        self.redirects      = {k: v for k, v in combined.items()
+                               if k not in temp}
+        self.redirects_temp = {k: v for k, v in combined.items() if k in temp}
         self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
 # The invalid-config signal
 class _ConfigInvalid(Exception):
-    """servette.toml cannot be safely applied — unparseable TOML, or a
-    serve_dir that would publish Servette's own secrets. At startup this is
-    fatal (fail closed); on the per-request reload the previous configuration
-    stays in force — see reload_if_changed."""
+    """servette.toml cannot be safely applied: unparseable TOML, any value
+    the write doors would refuse (the load-door principle — valid or
+    refused, judged by the same shared validators `set` and the page run),
+    or a serve_dir that would publish Servette's own secrets. At startup
+    this is fatal (fail closed), with the message naming the field; on the
+    per-request reload the previous configuration stays in force — see
+    reload_if_changed."""
 
 
 class _ConfigUnreadable(_ConfigInvalid):
@@ -366,6 +437,13 @@ class Config:
                 unreadable = True
 
         site_tables = data.get("site", [])
+        # Typed before iterated: `site = 1` is valid TOML, and building Sites
+        # from a non-table would raise a bare TypeError — escaping the
+        # _ConfigInvalid family that reload_if_changed's last-good handling
+        # and startup's fix-or-delete sentence both key on.
+        if not isinstance(site_tables, list) or not all(
+                isinstance(t, dict) for t in site_tables):
+            raise _ConfigInvalid("servette.toml: site must be [[site]] tables")
         migrating   = existed and not site_tables and not unreadable
         if site_tables:
             sites = [Site(t) for t in site_tables]
@@ -412,20 +490,32 @@ class Config:
                 raise _ConfigInvalid(
                     f"serve_dir {site.serve_dir!r} holds Servette's own config or TLS keys — "
                     "serving it would publish them")
-        self.sites = sites
+        # Host scalars: defaults first, then every key the file carries runs
+        # through the same shared validator the write doors use — one
+        # criteria set per key, whichever door the value came through (the
+        # load-door principle — see _ConfigInvalid). Validated on a scratch
+        # object BEFORE any attribute of self changes, for the reload-path
+        # reason at the top of _load.
+        class _ScratchHost:
+            pass
+        scratch = _ScratchHost()
+        scratch.port, scratch.rate_limit, scratch.auth_rate_limit = 443, 120, 6
+        scratch.cache_policy, scratch.cache_max_age = "no-cache", 3600
+        scratch.cache_size_mb = 128
+        scratch.email = scratch.trusted_proxy = scratch.health_path = ""
+        scratch.tls_min_version, scratch.ciphers = "1.2", ""
+        scratch.csp                = "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'"
+        scratch.permissions_policy = "camera=(), microphone=(), usb=(), midi=(), serial=()"
+        for key in _SET_HOST_KEYS:
+            if key in data:
+                err = _set_host_value(scratch, key, str(data[key]))
+                if err:
+                    raise _ConfigInvalid(f"servette.toml: {key} — {err}")
 
-        self.port            = data.get("port",            443)
-        self.rate_limit      = data.get("rate_limit",      120)
-        self.auth_rate_limit = data.get("auth_rate_limit", 6)
-        self.cache_policy       = data.get("cache_policy",       "no-cache")
-        self.cache_max_age      = data.get("cache_max_age",      3600)
-        self.cache_size_mb      = data.get("cache_size_mb",      128)
-        self.email              = data.get("email",              "")
-        self.trusted_proxy      = data.get("trusted_proxy",      "")
-        self.tls_min_version    = data.get("tls_min_version",    "1.2")
-        self.ciphers            = data.get("ciphers",            "")
-        self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
-        self.permissions_policy = data.get("permissions_policy", "camera=(), microphone=(), usb=(), midi=(), serial=()")
+        # Nothing below raises: adopt the validated whole.
+        self.sites = sites
+        for key in _SET_HOST_KEYS:
+            setattr(self, key, getattr(scratch, key))
 
         self.unreadable = unreadable
         if read_mtime is not None:
@@ -483,12 +573,15 @@ class Config:
             if mtime != self._warned_mtime:
                 self._warned_mtime = mtime
                 log.warning("Config NOT reloaded (%s) — retrying on the next request", e)
-        except _ConfigInvalid as e:
+        except Exception as e:
             # A bad edit, by contrast, stays bad until someone edits again.
             # Keep serving on the last good configuration: this runs on
             # request threads, where an escape would kill the request
             # mid-flight and a process exit would take the whole server down
-            # over a typo. Stamp the mtime so the bad file isn't re-parsed —
+            # over a typo. Broad deliberately — the doors raise
+            # _ConfigInvalid for everything they judge, but a hand-edit that
+            # finds a way past them must degrade to last-good too, never to
+            # an outage. Stamp the mtime so the bad file isn't re-parsed —
             # and the warning isn't repeated — on every request until the
             # file changes again.
             self._mtime = mtime
@@ -532,7 +625,7 @@ password_salt = {s(site.password_salt)}
 #
 # Host-level settings below apply to every site on this box. Each [[site]]
 # block below is one hosted domain — its own folder, certificate, auth, and
-# publish channel.
+# redirects.
 
 port = {self.port}
 
@@ -549,6 +642,10 @@ cache_size_mb = {self.cache_size_mb}
 # Let's Encrypt registration email and optional reverse proxy IP
 email = {s(self.email)}
 trusted_proxy = {s(self.trusted_proxy)}
+
+# Optional load-balancer health check: a path answering 204 to anyone,
+# exempt from rate limiting. Empty = off (the default).
+health_path = {s(self.health_path)}
 
 # TLS settings
 tls_min_version = {s(self.tls_min_version)}
@@ -761,6 +858,9 @@ def _get_cached_file(path):
     with _file_cache_lock:
         entry = _file_cache.get(path)
         if entry and entry["stamp"] == stamp:
+            # A hit refreshes recency, or the "LRU" is really FIFO and a
+            # hot index.html is evicted as readily as a file served once.
+            _file_cache.move_to_end(path)
             return entry["raw"], entry["compressed"], entry["etag"]
 
     # Two threads can race here: both miss the cache check and both read the file. The fix is
@@ -1638,9 +1738,8 @@ _CONNECTION_PAGE = """<!DOCTYPE html>
   const seen = (v) => v || '(absent)';
 
   // Each row is a finding in the reader's language, with the evidence that
-  // earned it underneath. The requests are the same ones as ever; what
-  // changed is that the report leads with what they mean, and several
-  // probes that answer one question now share one row.
+  // earned it underneath; several probes that answer one question share
+  // one row.
   const checks = [
     { name: 'Encrypted', run: async () => {
         const r = await fetch(here, { cache: 'no-store' });
@@ -1812,7 +1911,11 @@ def _handle_request(method, url_path, headers, raw_ip):
         # Rightmost XFF value is what the single trusted proxy appended.
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
-        if xff and ip == config.trusted_proxy:
+        # Both sides normalized: the socket address collapses mapped
+        # ::ffff:a.b.c.d spellings, so the configured value must too, or a
+        # proxy declared in the mapped form never matches and every visitor
+        # silently shares its one rate-limit bucket.
+        if xff and ip == _normalize_ip(config.trusted_proxy):
             # Adopted only if it IS an address: a passthrough proxy that
             # forwards a client-written XFF verbatim would otherwise hand
             # arbitrary bytes a rate-limit bucket of their own (the bucket
@@ -1846,6 +1949,18 @@ def _handle_request(method, url_path, headers, raw_ip):
         return status, _security_headers(site) + hdrs, (b"" if method == "HEAD" else body)
 
     config.reload_if_changed()
+
+    # The balancer's health check, where one is configured — off by default,
+    # so the closed system stays closed. Answered before site selection and
+    # the rate limiter: a probe asks "is this backend process up", which no
+    # Host match should gate and no limiter should starve into a false dead.
+    # 204, no body, no file I/O — and deliberately no per-probe log line: an
+    # endpoint exempt from rate limiting that logged each hit would hand
+    # anyone who finds it an unmetered disk-filler, and a balancer's own
+    # heartbeat is not traffic (DECISIONS.md, "a balancer gets one fitting").
+    if (config.health_path and method in ("GET", "HEAD")
+            and url_path.partition("?")[0] == config.health_path):
+        return resp(204, [(b"content-length", b"0")])
 
     # Site selection — uniform regardless of site count (see _select_site).
     # Selected BEFORE the rate limiter, deliberately: selection is a cheap
@@ -1923,8 +2038,8 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
 
-    # Version discovery: what this box is running — the embedded error page
-    # reads this to show the served version. Deliberately
+    # Version discovery: what this box is running, for remote tooling that
+    # holds the site's password — no shipped page consumes it. Deliberately
     # reports only what THIS box knows; "latest available" is the package
     # index's business, not Servette's. Host-level (one process, one version).
     #
@@ -1968,19 +2083,32 @@ def _handle_request(method, url_path, headers, raw_ip):
     # (DECISIONS.md, "Redirects are a setting, not a file in the site").
     # Query strings ride along: a redirect names a path, and dropping the
     # query would silently break every campaign link pointed at the old one.
-    if site.redirects:
+    if site.redirects or site.redirects_temp:
         bare, sep, query = url_path.partition("?")
-        # Match the canonical spelling the table's keys are stored in: a
+        # Match the canonical spelling the tables' keys are stored in: a
         # source like '/my page' arrives as '/my%20page', and a rule on
         # '/old' must also catch an encoded '/%6fld' that resolves to the
         # same file — otherwise the redirect silently fails to fire, or is
         # skipped by anyone who percent-encodes a letter of the path.
-        target = site.redirects.get(_canonical_source(bare))
+        key = _canonical_source(bare)
+        # 301 for the permanent table, 302 for the temporary one: permanent
+        # carries the old path's standing to the new address, temporary
+        # keeps the old path the real one. Both no-cache, so a corrected
+        # rule reaches a browser that already saw the wrong answer.
+        target, status = site.redirects.get(key), 301
+        if target is None:
+            target, status = site.redirects_temp.get(key), 302
         if target:
             if sep and "?" not in target:
-                target += sep + query
-            log.info("301 %s to %s", log_path, ip)
-            return resp(301, [
+                # The stored target is door-validated printable ASCII; the
+                # client's query is not, and it lands in a header. Whitespace
+                # can't reach here (http.server 400s a split request line),
+                # but other control bytes can — filtered to the same
+                # printable range every header value in the program holds.
+                target += sep + "".join(c for c in query
+                                        if 0x20 <= ord(c) <= 0x7E)
+            log.info("%d %s to %s", status, log_path, ip)
+            return resp(status, [
                 (b"location",       target.encode("ascii", "ignore")),
                 (b"content-length", b"0"),
                 (b"cache-control",  b"no-cache"),
@@ -2000,19 +2128,13 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
-        # Every server needs an error page, and a bare "Not found." spends a
-        # whole response telling the reader only that they were wrong. This one
-        # leads with the path, says the server is up and answered, and links
-        # the connection test on its reserved path above — the split that
-        # keeps this a real 404 while the diagnosis survives an operator's
-        # own 404.html, which wins this role by simply existing.
-        #
-        # It also covers a site's own root while nothing is published there: no
-        # index.html means the root is itself a miss, so the domain reports on
-        # itself instead of answering with ten bytes of text.
-        #
-        # The response keeps the caching contract (ETag, Cache-Control, 304),
-        # with any positive lifetime downgraded below.
+        # The miss body is the embedded diagnostic page (its own rationale
+        # lives in src/404.html's header) unless the operator's 404.html
+        # exists, which wins this role by simply existing. Covers a site's
+        # own root while nothing is published there — no index.html means
+        # the root is itself a miss. The response keeps the caching
+        # contract (ETag, Cache-Control, 304), with any positive lifetime
+        # downgraded below.
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
         if not os.path.isfile(custom_404):
@@ -2112,9 +2234,10 @@ def _select_site(host):
     Host reaches a self-signed/LAN site with no domain configured). No
     domainless site and no domain match: None, the closed-system miss."""
     host = (host or "").split(":")[0].strip().lower()
-    # A deactivated site is invisible to routing everywhere below: its Host
-    # gets the closed-system miss (over a still-valid certificate), which is
-    # what "kept but not served" means on the wire.
+    # A deactivated site is invisible to routing everywhere below, as it is
+    # to TLS (_build_site_ssl_contexts skips it): its Host gets the
+    # closed-system answer at both layers, which is what "kept but not
+    # served" means on the wire.
     for site in config.sites:
         if site.active and site.domain and site.domain.lower() == host:
             return site
@@ -2165,12 +2288,31 @@ def _domain_problem(domain):
     return ""
 
 
+def _email_problem(email):
+    """Why this string cannot be the ACME contact address, as one sentence —
+    empty when it can be. Empty itself is allowed: the account registers
+    with no contact and simply gets no expiry mail. Syntax only, the same
+    local judgment the domain gets: the authority is the real arbiter, and
+    this refuses only what could never be a mailbox — which otherwise
+    surfaces as an issuance failure months from the typo that caused it."""
+    if not email:
+        return ""
+    local, at, host = email.rpartition("@")
+    if not at or not local or "@" in local or " " in email or not email.isascii():
+        return "an email is name@host — one @, no spaces (or empty to clear)"
+    problem = _domain_problem(host)
+    return f"after the @, {problem}" if problem else ""
+
+
 # One certificate's context
 def _build_ssl_context(cert_path, key_path):
     """TLS context for one certificate — minimum version enforced, optional cipher
     override, ALPN pinned to HTTP/1.1. Raises if the cert or key is unreadable, so
     startup can fail closed rather than serve nothing."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # .get, belt-and-braces: every door validates tls_min_version to
+    # {1.2, 1.3}, so the default fires only on a code bug — which then
+    # fails SAFE at 1.2 rather than crashing the serve path.
     ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
     if config.ciphers:
         ctx.set_ciphers(config.ciphers)
@@ -2194,7 +2336,7 @@ def _ensure_default_cert():
 
 # The SNI table
 def _build_site_ssl_contexts():
-    """Build one SSLContext per configured site, plus the default/base context the
+    """Build one SSLContext per active site, plus the default/base context the
     listening socket is constructed with and that's presented whenever SNI doesn't
     match any site (absent, unrecognized, or direct-IP access) — the closed
     system. A domainless site's own context serves as that default when one
@@ -2204,6 +2346,14 @@ def _build_site_ssl_contexts():
     domain_ctx  = {}
     default_ctx = None
     for site in config.sites:
+        if not site.active:
+            # Deactivated means invisible to every subsystem — routing,
+            # the catch-all election, and TLS alike: no context is built,
+            # so a paused site's unreadable certificate cannot refuse the
+            # whole start, and no SNI entry is claimed, so its hostname is
+            # answered by the closed-system default like any unrecognized
+            # name. Reactivation re-loads the certificate at that door.
+            continue
         ctx = _build_ssl_context(_resolve(site.cert_file), _resolve(site.key_file))
         if site.domain:
             d = site.domain.lower()
@@ -2217,7 +2367,9 @@ def _build_site_ssl_contexts():
             # which order the two sites appear in.
             domain_ctx.setdefault(f"www.{d}", ctx)
         elif default_ctx is None:
-            default_ctx = ctx  # first domainless site is the catch-all/default
+            # First domainless site — inactive ones never reach here —
+            # matching _select_site's catch-all election exactly.
+            default_ctx = ctx
 
     if default_ctx is None:
         cert_path, key_path = _ensure_default_cert()
@@ -2639,11 +2791,9 @@ def _watch_server(poll=2, grace=5):
     Under --serve nothing ever restarts the server in-process — a certificate
     reload deliberately stops it and lets systemd relaunch — so every dead
     thread this sees ends in an exit, and the grace only sets how long the
-    site stays down before the restart begins. It was 30 seconds, justified
-    by an in-process reload window that cannot occur in this mode: every
-    certificate rotation cost ~35 seconds of downtime where stop, exit, and
-    RestartSec add up to well under ten. The small grace that remains
-    absorbs stop_server's own teardown ordering, nothing more."""
+    site stays down before the restart begins — every second of it is
+    downtime a certificate rotation pays. Keep it small: it exists to
+    absorb stop_server's own teardown ordering, nothing more."""
     deadline = None
     while True:
         t = _https_thread
@@ -3289,9 +3439,9 @@ def _servette_gid():
 
 def _serve_dir_readable(path):
     """Whether the service could plausibly read this serve_dir: world r+x, or
-    group r+x where the group actually is servette. The old check demanded
-    world bits and told the operator to add them with a+rX — advice that undid
-    the deliberate group-only grant _operator_chown_plan had just applied."""
+    group r+x where the group actually is servette. Group access MUST count:
+    demanding world bits would tell the operator to undo the deliberate
+    group-only grant _operator_chown_plan applies."""
     st = os.stat(path)
     if st.st_mode & 0o005 == 0o005:
         return True
@@ -3303,38 +3453,28 @@ def _chown_config(path):
     """Give the config to the service user, readable by the operator: owner
     servette, group the operator's own, mode 0640.
 
-    servette.toml is the operator's file about the operator's box, and the
-    read-only commands (status, sites, log) read it to report a URL and a
-    certificate expiry. Owning it 0600 to the service user made those commands
-    elevate on every configured host — a password to look at your own server —
-    and left config.unreadable permanently true, so the fail-closed reload
-    guard fired during correct operation. A guard that trips in normal use is
-    one people learn to ignore.
+    Why a group at all: the read-only commands (status, sites, log) report
+    the operator's own box, and a 0600-to-servette file makes them elevate
+    for every read — a password to look at your own server — while keeping
+    the fail-closed unreadable guard permanently tripped. The widening is
+    exactly one user. World bits stay off: the file carries a password HASH
+    and salt, material for an offline attack.
 
-    The group is the operator's, so the widening is from one system user to
-    exactly one more: them. World bits stay off, as they do for site content —
-    the file carries a password HASH and salt, which is material for an offline
-    attack and never something to hand to every local account.
+    Failure degrades toward the service, never away from it. The chown can
+    fail (a SUDO_USER deleted since the sudo, an NSS outage), and the file
+    save()'s os.replace leaves behind is root:root — unreadable by the
+    service, which kills the reload and the next restart. So a failed
+    operator chown falls back to servette:servette: the operator loses the
+    no-password read until the next enable; the service, whose reload and
+    restart depend on reading the file, loses nothing. The chmod runs
+    unconditionally, and everything here is best-effort — save() runs at
+    import, and a raise would crash unprivileged runs over a write they
+    were never going to make.
 
-    Failure must degrade toward the service, not away from it. The chown can
-    fail — a SUDO_USER deleted since the sudo, an NSS outage naming a group
-    that doesn't resolve — and the file it would leave behind is whatever
-    save()'s os.replace installed: root:root, which the service cannot read,
-    which kills the per-request reload and makes the next restart refuse to
-    serve. So a failed operator chown falls back to servette:servette — the
-    operator loses their no-password read until the next enable, the service
-    loses nothing, and the site stays up. The chmod runs unconditionally
-    (0640 under servette:servette grants read to a user that already had it).
-
-    The service user is a legitimate caller — a deferred config migration on
-    a host where it can write — but not one that can grant the operator
-    anything: a non-root owner may only chgrp to groups it belongs to, and
-    servette belongs only to servette. Its saves therefore leave
-    servette:servette 0640, and the operator's group read returns with the
-    next root-elevated save or enable, both of which run this function as
-    root. save() runs at import on every configured host — check=True
-    anywhere here would be the crash _chown_servette already learned to
-    avoid."""
+    The service user is a legitimate caller (a deferred config migration)
+    but cannot chgrp to a group it doesn't belong to, so its saves leave
+    servette:servette 0640 until the next root-elevated save or enable
+    restores the operator's group read."""
     if not (_servette_user_exists() and os.path.exists(path)):
         return
     if os.geteuid() != 0 and os.geteuid() != _servette_uid():
@@ -3518,7 +3658,7 @@ def _netwatch_units():
     NetworkManager on Raspberry Pi OS, dhcpcd on older Pi OS) exactly one acts;
     the whole check is a no-op while the route is healthy.
 
-    One minute rather than the original five because the check costs nothing
+    One minute, because the check costs nothing
     to run often: despite appearances, `ip route get` sends no packets — it
     asks the local routing table which route it WOULD use — so the interval
     buys only recovery time, and the route drill measured the cost of five
@@ -3620,9 +3760,8 @@ def _cache_headroom_mb(cache_mb, running=None):
     keeps the two callers ordered. The offer (service down, ceiling charged)
     can only ever be larger than the later status check (service up, ceiling
     in the signal), so a host that accepts the offer is never afterwards told
-    to resize. The old formula had this backwards: the cache entered the
-    measurement between setup and status, so the check drifted upward past
-    the size the operator had just chosen, and nagged forever.
+    to resize — the ordering IS the property; charge the ceiling on both
+    sides and the check drifts past whatever size the operator just chose.
 
     `running` lets a caller hand in a fact it already holds — _status_data
     asks systemd once and threads the answer through everything the
@@ -3752,7 +3891,6 @@ def _ensure_swap():
     rec_mb    = rec // (1024 * 1024) if rec else None
     ours      = os.path.exists(_SWAP_PATH)
     ours_mb, foreign_mb = _swap_sizes()
-    active_mb = ours_mb or 0            # OUR file's active size, not the host total
     offer     = _swap_offer(rec_mb, ours, ours_mb, foreign_mb)
     if offer is None:
         return
@@ -3769,9 +3907,15 @@ def _ensure_swap():
     mb = rec_mb
     if resp:
         try:
-            mb = max(64, int(resp))
+            mb = int(resp)
         except ValueError:
             print("  Not a number — skipping swap setup.")
+            return
+        # The page's own bounds, refused with the same sentence — not
+        # silently rounded up, which answered "10" with a 64 MB file the
+        # operator never asked for.
+        if not (64 <= mb <= 65536):
+            print("  Swap size must be 64-65536 MB — skipping swap setup.")
             return
     err = _apply_swapfile(mb)
     if err:
@@ -4385,6 +4529,17 @@ def cmd_enable():
             print("  Servette enabled as a system service.")
             print("  It will start automatically on boot and survive SSH disconnects.")
             print("  A watchdog timer recovers a dropped default route.")
+        # The unit just written grants writes under BASE_DIR only, so a
+        # hand-edited serve_dir outside it will serve fine and refuse every
+        # publish under the service — a trap that never shows in a manual
+        # run. Said here, at the moment the sandbox comes into being; the
+        # health row carries it from now on (#123, ruled: reported, never
+        # refused).
+        for outside_site in config.sites:
+            if not _is_within_base_dir(_resolve(outside_site.serve_dir)):
+                print(f"  Note: {outside_site.domain or outside_site.serve_dir} "
+                      f"serves from outside {BASE_DIR} — the sandboxed "
+                      "service cannot publish there.")
         log.info("Enabled as systemd service")
 
         _ensure_swap()
@@ -4485,6 +4640,7 @@ _COMMANDS = [
     ("log [n]",          "show the last n log entries"),
     ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
+    ("publish [n] <folder>", "publish a folder on this box as a site's content"),
     ("restore-site [n]", "roll back a site's content to a kept version"),
     ("help",             "show this message"),
     ("quit",             "exit"),
@@ -4497,21 +4653,16 @@ _CONFIG_COMMANDS = [
     ("add-site",        "add a new site (domain and password)"),
     ("remove-site <n>", "remove a site"),
     ("move-site <n> <to>", "reorder sites (the first domainless one answers unmatched Hosts)"),
-    ("port",            "HTTPS port"),
     ("cert [n]",        "SSL certificate and key"),
-    ("email",           "email address"),
     ("username [n]",    "login username"),
     ("password [n]",    "login password"),
-    ("limits",          "rate limits"),
-    ("cache",           "browser cache policy"),
-    ("proxy",           "trusted proxy IP for X-Forwarded-For"),
-    ("tls",             "minimum TLS version and cipher suites"),
-    ("csp",             "Content-Security-Policy header"),
-    ("perms",           "Permissions-Policy header"),
     ("show",            "show current settings"),
     ("back",            "return to main shell"),
 ]
-CONFIG_HELP = _section_text("Commands") + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
+CONFIG_HELP = (_section_text("Commands")
+               + "".join(f"  {c:<{_PAD}} — {d}\n" for c, d in _CONFIG_COMMANDS)
+               + "  Every scalar setting is one door: set [n] key=value, from "
+                 "the main shell.\n")
 
 
 # Safe input
@@ -4529,1195 +4680,6 @@ def _input(prompt, default=""):
 def _prompt(question):
     return _input(f"  {question} [y/n]: ").strip().lower() == "y"
 
-
-# The settings display
-def _config_show():
-    def val(v):
-        return v if v else "(not set)"
-
-    cache_display = config.cache_policy
-    if config.cache_policy == "max-age":
-        cache_display += f" ({config.cache_max_age}s)"
-
-    host_rows = [
-        ("HTTPS port",         config.port),
-        ("Email",              val(config.email)),
-        ("Rate limit",         f"{config.rate_limit} req/min"),
-        ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
-        ("Cache policy",       cache_display),
-        ("Cache size",         f"{config.cache_size_mb} MB"),
-        ("Trusted proxy",      val(config.trusted_proxy)),
-        ("TLS min version",    config.tls_min_version),
-        ("Cipher suites",      config.ciphers or "(system default)"),
-        ("CSP",                config.csp or "(disabled)"),
-        ("Permissions-Policy", config.permissions_policy or "(disabled)"),
-    ]
-
-    _section("Current Settings")
-    for label, value in host_rows:
-        print(f"  {label:<{_PAD}} {value}")
-
-    for i, site in enumerate(config.sites):
-        print(f"\n  Site {i}: {site.domain or '(self-signed)'}")
-        site_rows = [
-            ("Directory",   val(site.serve_dir)),
-            ("Certificate", val(site.cert_file)),
-            ("Key",         val(site.key_file)),
-            ("Username",    val(site.username)),
-            ("Password",    "(set)" if site.password_hash else "(not set)"),
-        ]
-        for label, value in site_rows:
-            print(f"    {label:<{_PAD - 2}} {value}")
-    print()
-
-
-def _config_sites():
-    _section("Sites")
-    for i, site in enumerate(config.sites):
-        auth = "private" if site.username else "public"
-        state = "" if site.active else ", DEACTIVATED (set active=yes to serve)"
-        print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}{state}")
-    print()
-    print("  Edit one with e.g. 'cert 1', 'username 1' (index defaults to 0).")
-    print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
-
-
-# serve_dir containment
-def _is_within_base_dir(path):
-    """True if path (already resolved) is BASE_DIR itself or somewhere under
-    it. serve_dir must satisfy this: the publish pipeline's atomic swap
-    renames within the same filesystem, and the systemd unit's
-    ReadWritePaths only grants write access under BASE_DIR — a serve_dir
-    outside it breaks the swap silently under the sandboxed service even
-    though a manual, unsandboxed run would never show the problem.
-
-    Defers to _within so containment is decided in exactly one place: two
-    implementations of the same security predicate can drift apart, and only
-    one of them would be the one anybody reads."""
-    return _within(os.path.realpath(BASE_DIR), os.path.realpath(path))
-
-
-def _serve_dir_exposes_secrets(path):
-    """True when serving `path` would hand out Servette's own secrets. serve_dir
-    is already required to sit inside BASE_DIR (see _is_within_base_dir); the
-    danger left is a folder that also holds the config (password hashes), the
-    ACME account key, or the TLS private keys under certs/. BASE_DIR itself holds
-    all three; the certs tree is the keys. Either would be served as plain file
-    reads, so both are refused as a serve_dir."""
-    real  = os.path.realpath(path)
-    base  = os.path.realpath(BASE_DIR)
-    certs = os.path.join(base, "certs")
-    return real == base or real == certs or real.startswith(certs + os.sep)
-
-
-# add-site
-def _invent_site_dir():
-    """Create and own an empty folder for a new site. Servette names it: the
-    folder is where publishes land, not a question an operator answers
-    ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-has-left-the-vocabulary)).
-    Both doors — the page's add-card and the terminal's add-site — come
-    here, so neither can invent a folder the other would not."""
-    name = f"site-{os.urandom(3).hex()}"
-    os.makedirs(_resolve(name), exist_ok=True)
-    _chown_operator(_resolve(name))
-    return name
-
-
-def _append_site(serve_dir):
-    """Append a new site serving `serve_dir` (a path the caller has already
-    validated or created) and give it its own certificate identity. The one
-    site-creation core, shared by the terminal's add-site prompts and the
-    page's add-card. Returns the new site's index.
-
-    The self-signed pair is suffixed with randomness, not the site's list
-    position: a position-based name (cert-{idx}.pem) collides with a
-    surviving site's own files after a remove/add sequence shifts indices,
-    silently overwriting that site's live certificate. It is generated
-    unconditionally, before any domain enters the picture: if ACME issuance
-    later fails, cert_file/key_file must still point at real files on disk —
-    start_server()'s pre-flight existence check refuses to start the WHOLE
-    server, for every site, if any site's cert_file is missing."""
-    site = Site({"serve_dir": serve_dir})
-    config.sites.append(site)
-    suffix = os.urandom(4).hex()
-    site.cert_file = f"cert-{suffix}.pem"
-    site.key_file  = f"key-{suffix}.pem"
-    _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
-    _chown_servette(_resolve(site.cert_file))
-    _chown_servette(_resolve(site.key_file))
-    config.save()
-    return len(config.sites) - 1
-
-
-def _config_add_site():
-    """Add a site — the same two questions cmd_setup asks for the very first
-    one, domain and password. The folder is not among them: Servette names
-    and creates it, the same way the page's add-card does."""
-    print("\n  Adding a new site.\n")
-    # Nothing is written into it and nothing is offered: a site with no
-    # index.html answers its own domain with the embedded error page, which
-    # says the server is up and that nothing is published yet. Setup still
-    # never leaves a site with nothing to serve (#37) — it just no longer
-    # needs to put a file in a folder to keep that promise.
-    folder = _invent_site_dir()
-    print(f"  Content will land in {_resolve(folder)} — Servette's to manage.")
-    print("  Until you publish, the site answers with Servette's error page.")
-
-    # The self-signed pair keeps a second site from colliding with the
-    # first's cert.pem/key.pem — overwritten if a domain is obtained below,
-    # which uses the domain-scoped certs/<domain>/ path instead.
-    print("  Generating self-signed certificate...")
-    idx  = _append_site(folder)
-    site = config.sites[idx]
-    print(f"  → site {idx} added.\n")
-
-    domain = _input("  Domain name (leave blank for self-signed): ").strip()
-    if domain and _domain_in_use(domain):
-        print(f"  → {domain} is already used by another site on this box — using a self-signed certificate instead.")
-        domain = ""
-
-    reloaded = False
-    if domain:
-        placeholder = (_resolve(site.cert_file), _resolve(site.key_file))
-        _obtain_trusted_cert(domain, site)  # reloads the server itself on success
-        # site.domain is only assigned inside _obtain_trusted_cert on the
-        # success path, so this distinguishes a real reload from a failed
-        # ACME attempt that left the self-signed fallback (already generated
-        # above) as the site's live cert.
-        if site.domain == domain:
-            reloaded = True
-            # The placeholder pair was insurance against ACME failing; issuance
-            # succeeded and repointed the site at certs/<domain>/, so nothing
-            # references these any more. Compared against the site's current
-            # paths rather than deleted blind — if issuance somehow left the
-            # site pointing at them, they are live files, not litter.
-            for stale in placeholder:
-                if stale not in (_resolve(site.cert_file), _resolve(site.key_file)):
-                    try:
-                        os.remove(stale)
-                    except OSError:
-                        pass
-        else:
-            print("  → keeping the self-signed certificate for now. Browsers will show a security warning until you retry the domain.\n")
-    else:
-        print("  Note: browsers will show a security warning until you add a domain.\n")
-
-    print("  Password protection (optional). Leave username blank to disable.")
-    _config_username(site)
-    if site.username:
-        _config_password(site)
-
-    print(f"\n  Site {idx} added. Run 'publish {idx}' to set up its publish channel.")
-    if not reloaded and (_server_running() or _service_is_active()):
-        _reload_server()
-
-
-# remove-site
-def _remove_site(idx):
-    """Drop site `idx` and delete its server copies — the live tree, every
-    kept version in its ring, a staged preview, and the shapes that predate
-    the ring. The operator's originals live in their own local storage;
-    everything here is a derived copy, which is what makes deletion the
-    honest meaning of 'remove' (deactivation is the keep-everything
-    alternative). The site's certificate files are kept, and a folder another
-    site still points at is left alone. Returns an error sentence, empty on
-    success. Shared by the terminal's remove-site and the page's cards."""
-    if not (0 <= idx < len(config.sites)):
-        return f"no site {idx}"
-    if len(config.sites) == 1:
-        return "can't remove the only site — a box needs at least one"
-    victim = config.sites[idx]
-    # rstrip, exactly as every derived-tree helper does: a hand-edited
-    # trailing slash in serve_dir would otherwise aim the .bak/.new/base
-    # deletions at names that do not exist and leave the trees behind.
-    base   = _resolve(victim.serve_dir).rstrip(os.sep)
-    del config.sites[idx]
-    config.save()
-    shared = any(os.path.realpath(_resolve(s.serve_dir)) == os.path.realpath(base)
-                 for s in config.sites)
-    if not shared and _is_within_base_dir(base):
-        # Every derived tree, named by the same functions that create them
-        # rather than by a prefix sweep over the directory: a sweep is
-        # shorter and would also delete a neighbouring site whose folder
-        # name happens to start with this one's. _version_dirs is the ring
-        # (a filter, not a prefix match), _content_slots and .bak are the
-        # pre-ring shapes a legacy site may still hold, .new is an
-        # abandoned staging tree, and _preview_dir is an unpublished draft.
-        doomed = [p for p, _stamp in _version_dirs(victim.serve_dir)]
-        doomed += list(_content_slots(victim.serve_dir))
-        doomed += [base + ".bak", base + ".new", _preview_dir(victim), base]
-        for path in doomed:
-            try:
-                if os.path.islink(path):
-                    os.unlink(path)
-                elif os.path.isdir(path):
-                    shutil.rmtree(path, ignore_errors=True)
-            except OSError:
-                pass  # a copy that resists deletion must not block the removal
-    if _server_running() or _service_is_active():
-        _reload_server()
-    return ""
-
-
-def _config_remove_site(args):
-    if not args:
-        print("  Usage: remove-site <site index>")
-        return
-    try:
-        idx = int(args[0])
-    except ValueError:
-        print("  Usage: remove-site <site index>")
-        return
-    if not (0 <= idx < len(config.sites)):
-        print(f"  No site {idx} — run 'sites' to list them.")
-        return
-    if len(config.sites) == 1:
-        print("  Can't remove the only site — a box needs at least one.")
-        return
-
-    site  = config.sites[idx]
-    label = site.domain or site.serve_dir
-    if not _prompt(f"Remove site {idx} ({label})? Its server copies are deleted — "
-                   f"originals in your local storage are untouched "
-                   f"('set {idx} active=no' deactivates without deleting)."):
-        print("  Cancelled.")
-        return
-
-    err = _remove_site(idx)
-    print(f"  {err}" if err else f"  → site {idx} removed.")
-
-
-# move-site
-def _move_site(frm, to):
-    """Reorder: lift site `frm` out and reinsert it at position `to`.
-    Returns an error sentence, empty on success. Shared by the terminal's
-    move-site and the page's card drag."""
-    n = len(config.sites)
-    if not (0 <= frm < n and 0 <= to < n):
-        return f"site indexes must be 0-{n - 1}"
-    if frm != to:
-        config.sites.insert(to, config.sites.pop(frm))
-        config.save()
-        if _server_running() or _service_is_active():
-            _reload_server()
-    return ""
-
-
-def _config_move_site(args):
-    if len(args) != 2 or not all(a.isdigit() for a in args):
-        print("  Usage: move-site <from> <to>")
-        return
-    err = _move_site(int(args[0]), int(args[1]))
-    print(f"  {err}" if err else "  → moved.")
-
-
-# The generic setter
-def _config_set(attr, label, cast=str, validate=None, error="invalid value", hint=None):
-    current = getattr(config, attr)
-    if hint:
-        print(f"  {hint}")
-    new_value = _input(f"  {label} [{current}]: ").strip()
-    if not new_value or new_value == str(current):
-        print("  → unchanged")
-        return
-    try:
-        value = cast(new_value)
-        if validate and not validate(value):
-            raise ValueError
-        setattr(config, attr, value)
-        config.save()
-        print("  → saved")
-    except ValueError:
-        print(f"  → {error}, unchanged")
-
-
-# cert
-def _config_cert(site):
-    cert_path = _resolve(site.cert_file)
-    if os.path.exists(cert_path):
-        days = _cert_days_remaining(cert_path)
-        if days is not None and days <= 0:
-            print("  Current certificate has expired.")
-        elif days is not None:
-            print(f"  Current certificate expires in {days} days.")
-        else:
-            print(f"  Current: {site.cert_file}")
-    print()
-
-    domain = _input("  Domain name (leave blank for self-signed): ").strip()
-
-    if domain and _domain_in_use(domain, excluding=site):
-        print(f"  → {domain} is already used by another site on this box, unchanged")
-        return
-
-    if domain:
-        _obtain_trusted_cert(domain, site)
-    else:
-        cert_path = _resolve(site.cert_file or "cert.pem")
-        key_path  = _resolve(site.key_file or "key.pem")
-        print("  Generating self-signed certificate...")
-        _generate_self_signed_cert(cert_path, key_path)
-        _chown_servette(cert_path)
-        _chown_servette(key_path)
-        site.cert_file = site.cert_file or "cert.pem"
-        site.key_file  = site.key_file or "key.pem"
-        site.domain    = ""
-        config.save()
-        print("  → self-signed certificate generated.")
-        print("  Note: your browser will show a security warning until you add a domain.\n")
-        if _server_running() or _service_is_active():
-            _reload_server()
-
-
-# username and password
-def _config_username(site):
-    current   = site.username
-    new_value = _input(f"  username [{current}]: ").strip()
-    if new_value == current:
-        print("  → unchanged")
-        return
-    # Through the shared validator, so the prompt refuses exactly what
-    # `set` and the page refuse — clearing included: an emptied username
-    # takes the stored password with it there, on every surface.
-    err = _set_site_value(site, "username", new_value)
-    if err:
-        print(f"  → {err}")
-        return
-    config.save()
-    print("  → auth disabled, password cleared" if new_value == ""
-          else "  → saved")
-
-
-def _config_password(site):
-    if not site.username:
-        print("  Set a username first.")
-        return
-    try:
-        pwd = getpass.getpass("  password: ")
-        if not pwd:
-            print("  → unchanged")
-            return
-        confirm = getpass.getpass("  confirm: ")
-    except (EOFError, KeyboardInterrupt):
-        print("\n  → unchanged")
-        return
-    if pwd != confirm:
-        print("  → passwords do not match, unchanged")
-        return
-    site.password_hash, site.password_salt = _hash_password(pwd)
-    config.save()
-    print("  → saved")
-
-
-# limits and cache
-def _config_limits():
-    _config_set("rate_limit",      "rate_limit",      int, error="invalid number", hint="Requests per minute per IP")
-    _config_set("auth_rate_limit", "auth_rate_limit", int, error="invalid number", hint="Failed login attempts per minute per IP")
-
-
-def _config_cache():
-    print(f"\n  Current: {config.cache_policy}" +
-          (f" ({config.cache_max_age}s)" if config.cache_policy == "max-age" else "") + "\n")
-    print("    no-store  — never cache, always download fresh")
-    print("    no-cache  — cache but always revalidate (ETag makes this a quick check)")
-    print("    max-age   — trust cached copy for N seconds without checking\n")
-    choice = _input("  cache_policy [no-store / no-cache / max-age]: ").strip().lower()
-    if not choice:
-        print("  → unchanged")
-        return
-    if choice not in ("no-store", "no-cache", "max-age"):
-        print("  → invalid option, unchanged")
-        return
-    config.cache_policy = choice
-    if choice == "max-age":
-        age_str = _input(f"  cache_max_age seconds [{config.cache_max_age}]: ").strip()
-        if age_str:
-            try:
-                # Non-negative, same rule 'set' enforces: a negative max-age
-                # is not a shorter cache, it is a malformed Cache-Control
-                # header sent on every response.
-                age = int(age_str)
-                if age < 0:
-                    raise ValueError
-                config.cache_max_age = age
-            except ValueError:
-                print("  → invalid number, keeping current max-age")
-    config.save()
-    print("  → saved")
-    _config_set("cache_size_mb", "cache_size_mb", int, lambda v: v > 0,
-                "invalid number", hint="In-memory file cache limit in MB (e.g. 32 on a Raspberry Pi)")
-
-
-# proxy
-def _config_trusted_proxy():
-    current = config.trusted_proxy
-    print(f"\n  Current: {current or '(not set — X-Forwarded-For ignored)'}")
-    print("  Set to the IP of your reverse proxy to trust its X-Forwarded-For header.")
-    print("  Leave blank to ignore XFF entirely (correct when Servette faces the internet directly).\n")
-    new_value = _input("  trusted_proxy IP: ").strip()
-    if new_value == current:
-        print("  → unchanged")
-        return
-    if new_value:
-        # The same rule 'set' enforces. A typo saved here was worse than a
-        # refusal: the peer-address comparison then never matches, XFF is
-        # never trusted, and every proxied visitor shares the proxy's single
-        # rate-limit bucket — the whole site throttles as one client.
-        try:
-            ipaddress.ip_address(new_value)
-        except ValueError:
-            print("  → must be an IP address, unchanged")
-            return
-    config.trusted_proxy = new_value
-    config.save()
-    print("  → saved" if new_value else "  → cleared, X-Forwarded-For will be ignored")
-
-
-# tls
-def _config_tls():
-    print(f"\n  Current: TLS {config.tls_min_version}, ciphers: {config.ciphers or '(system default)'}\n")
-    print("    1.2 — TLS 1.2 minimum, TLS 1.3 also accepted (default)")
-    print("    1.3 — TLS 1.3 only; drops support for older clients\n")
-    ver = _input("  tls_min_version [1.2 / 1.3]: ").strip()
-    if ver and ver not in ("1.2", "1.3"):
-        print("  → invalid, unchanged")
-    elif ver and ver != config.tls_min_version:
-        config.tls_min_version = ver
-        config.save()
-        print("  → saved (takes effect on next server start)")
-    else:
-        print("  → unchanged")
-
-    print(f"\n  Current cipher suites: {config.ciphers or '(system default)'}")
-    print("  OpenSSL cipher string, e.g.: ECDHE+AESGCM:DHE+AESGCM")
-    print("  Leave blank to use the system default (recommended unless you have specific requirements).\n")
-    ciphers = _input("  ciphers: ").strip()
-    if ciphers == config.ciphers:
-        print("  → unchanged")
-        return
-    config.ciphers = ciphers
-    config.save()
-    print("  → saved (takes effect on next server start)" if ciphers else "  → cleared, system default will be used")
-
-
-# The site-index argument
-def _config_site_arg(args):
-    """Resolve dir/cert/username/password/publish's optional site-index
-    argument to a Site, defaulting to site 0 — same [n] convention as the
-    top-level 'log [n]'. Prints its own error and returns None if given but
-    invalid, so callers can just no-op on None."""
-    if not args:
-        return config.sites[0]
-    try:
-        idx = int(args[0])
-    except ValueError:
-        print(f"  Not a site index: {args[0]!r}")
-        return None
-    if not (0 <= idx < len(config.sites)):
-        print(f"  No site {idx} — run 'sites' to list them.")
-        return None
-    return config.sites[idx]
-
-
-# config
-def cmd_config():
-    _config_show()
-    print(CONFIG_HELP)
-
-    while True:
-        try:
-            raw = input("  config> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-
-        if not raw:
-            continue
-
-        parts = raw.split()
-        cmd   = parts[0].lower()
-        args  = parts[1:]
-
-        if cmd == "show":
-            _config_show()
-        elif cmd == "sites":
-            _config_sites()
-        elif cmd == "add-site":
-            _config_add_site()
-        elif cmd == "remove-site":
-            _config_remove_site(args)
-        elif cmd == "move-site":
-            _config_move_site(args)
-        elif cmd == "port":
-            _config_set("port", "port", int, lambda v: 1 <= v <= 65535, "invalid port number")
-        elif cmd == "cert":
-            site = _config_site_arg(args)
-            if site is not None:
-                _config_cert(site)
-        elif cmd == "username":
-            site = _config_site_arg(args)
-            if site is not None:
-                _config_username(site)
-        elif cmd == "password":
-            site = _config_site_arg(args)
-            if site is not None:
-                _config_password(site)
-        elif cmd == "email":
-            _config_set("email", "email")
-        elif cmd == "limits":
-            _config_limits()
-        elif cmd == "cache":
-            _config_cache()
-        elif cmd in ("proxy", "trusted_proxy"):
-            _config_trusted_proxy()
-        elif cmd == "tls":
-            _config_tls()
-        elif cmd == "csp":
-            _config_set("csp", "csp", hint="  Block what static sites never need; allow what they might. Leave blank to disable.")
-        elif cmd in ("perms", "permissions_policy"):
-            _config_set("permissions_policy", "permissions_policy", hint="  Deny hardware APIs static sites never need. Leave blank to disable.")
-        elif cmd in ("back", "done", "exit", "quit"):
-            break
-        elif cmd in ("help", "?"):
-            print(CONFIG_HELP)
-        else:
-            print(f"  Unknown setting: {cmd}")
-            print(CONFIG_HELP)
-
-
-# start
-def cmd_start():
-    if _service_file_exists():
-        if _service_is_active():
-            cmd_status()
-        else:
-            try:
-                subprocess.run(["systemctl", "start", "servette"], check=True, capture_output=True)
-                log.info("Service started")
-                cmd_status()
-            except PermissionError:
-                print("  Error: start needs root, and sudo is unavailable — re-run as root.")
-            except FileNotFoundError:
-                print("  Error: start requires a Linux server with systemd.")
-            except subprocess.CalledProcessError as e:
-                print(f"  Error starting service: {e}")
-    else:
-        start_server()
-        if _server_running():
-            # The macOS line carries only what the line above does not: there
-            # is no service to install here, and tmux is the substitute. It
-            # does not restate that quitting stops the server.
-            print("  Running in session only — server will stop when you quit.")
-            if _IS_MACOS:
-                print("  A permanent service needs Linux; here, run it under tmux or screen.")
-            elif _prompt("Install as a permanent service?"):
-                cmd_enable()
-
-
-# stop
-def cmd_stop():
-    stopped = False
-
-    if _service_is_active():
-        try:
-            subprocess.run(["systemctl", "stop", "servette"], check=True, capture_output=True)
-            print("  Service stopped.")
-            log.info("Service stopped")
-            stopped = True
-        except PermissionError:
-            print("  Error: stop needs root, and sudo is unavailable — re-run as root.")
-        except FileNotFoundError:
-            print("  Error: stop requires a Linux server with systemd.")
-        except subprocess.CalledProcessError as e:
-            print(f"  Error stopping service: {e}")
-
-    if _server_running():
-        stop_server()
-        stopped = True
-
-    if not stopped:
-        cmd_status()
-
-
-# log
-def cmd_log(n=20):
-    try:
-        result = subprocess.run(
-            ["journalctl", "-u", "servette", "-o", "cat", "-n", str(n), "--no-pager"],
-            capture_output=True, text=True
-        )
-        output = result.stdout or result.stderr
-        print(output, end="")
-    except FileNotFoundError:
-        if _IS_MACOS:
-            print("  No journal on macOS — in session mode the log is this terminal's own output.")
-        else:
-            print("  journalctl not found. Is this a systemd system?")
-
-
-# Traffic
-def _traffic_lines(days=7):
-    """The journal's lines for the window, timestamped (short-iso), oldest
-    first; [] where no journal answers (macOS session mode, or a journal
-    that needs privileges this shell doesn't hold)."""
-    try:
-        result = subprocess.run(
-            ["journalctl", "-u", "servette", "-o", "short-iso",
-             "--since", f"-{days}d", "--no-pager"],
-            capture_output=True, text=True)
-        return result.stdout.splitlines()
-    except FileNotFoundError:
-        return []
-
-
-_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
-
-
-def _parse_traffic(lines, days=7, now=None):
-    """Tally journal lines into the traffic summary: requests per day,
-    status counts, top paths. Pure, so the suite can feed it real log
-    lines (`now` pins the window's end for it; None means now). Every
-    bucket in the window is present, zeroes included — the chart's x-axis
-    is time, and a quiet day left out made two busy endpoints read as a
-    steady week. Each line carries two prefixes — the journal's own
-    ('<iso> <host> servette[pid]:') and then setup_logging's format
-    ('<date> <time>  LEVEL  <message>') — so the level name is the anchor
-    the message begins after. Anchoring on the unit token instead was the
-    bug that made this count nothing at all: the Python timestamp sat
-    where the status was expected. Only response lines count — every
-    served response logs as '<status> <path> … to <ip>' (or 'from' on
-    refusals) — and systemd's own lines, carrying no level, are skipped.
-    Paths are tallied from content responses (200/206/304). IPs are never
-    carried into the result."""
-    per_day, statuses, paths = {}, {}, {}
-    stamp = (lambda p: p[:13].replace("T", " ")) if days <= 2 else (lambda p: p[:10])
-    for line in lines:
-        parts = line.split()
-        if len(parts) < 4 or len(parts[0]) < 10 or parts[0][4:5] != "-":
-            continue
-        day = stamp(parts[0])
-        lvl = next((i for i, p in enumerate(parts) if p in _LOG_LEVELS), None)
-        if lvl is None:
-            continue
-        msg = parts[lvl + 1:]
-        if not msg or len(msg[0]) != 3 or not msg[0].isdigit():
-            continue
-        statuses[msg[0]] = statuses.get(msg[0], 0) + 1
-        per_day[day] = per_day.get(day, 0) + 1
-        if msg[0] in ("200", "206", "304"):
-            path = next((p for p in msg[1:] if p.startswith("/")), None)
-            if path:
-                paths[path] = paths.get(path, 0) + 1
-    # The zero-fill: journalctl's -Nd window is N*24 hours ending now, so
-    # it can touch N+1 calendar days — every bucket it covers gets a row.
-    # Line-made buckets just outside the fill (clock skew, a test's fixed
-    # dates) are kept: counted traffic is never dropped over its stamp.
-    end  = now or datetime.datetime.now()
-    step = datetime.timedelta(hours=1) if days <= 2 else datetime.timedelta(days=1)
-    fmt  = "%Y-%m-%d %H" if days <= 2 else "%Y-%m-%d"
-    for i in range((days * 24 if days <= 2 else days) + 1):
-        per_day.setdefault((end - i * step).strftime(fmt), 0)
-    top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
-    return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
-            "top_paths": top, "window_days": days,
-            "bucket": "hour" if days <= 2 else "day",
-            "total": sum(statuses.values())}
-
-
-def _traffic_summary(days=7):
-    return _parse_traffic(_traffic_lines(days), days)
-
-
-def cmd_traffic():
-    """`traffic` — requests, statuses, and top paths from the last 7 days,
-    read from the journal. The page's Traffic tab renders this same
-    summary; the raw log (IPs included) stays with `log`."""
-    t = _traffic_summary()
-    if not t["total"]:
-        print("  No traffic in the window — or no readable journal on this host.")
-        return
-    _section("Traffic — last 7 days")
-    print(f"  Requests: {sum(n for _, n in t['days'])}")
-    for day, n in t["days"]:
-        print(f"    {day}  {n}")
-    print("  Statuses: " + ", ".join(f"{s} x{n}" for s, n in t["statuses"].items()))
-    print("  Top paths:")
-    for path, n in t["top_paths"]:
-        print(f"    {n:>6}  {path}")
-    print()
-
-
-# The update channel for a site's *content*: a tar.gz bundle the operator
-# uploads over their own SSH tunnel, extracted into a staging tree and made
-# live with one atomic link flip, the tree it replaces kept in the ring for
-# 'restore-site' to flip back to. Nothing arrives from the network unasked —
-# the door is the loopback page, reachable only through the operator's
-# tunnel. (Servette's own code updates travel through the package manager,
-# not through Servette.)
-# The bundle ceiling
-_MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
-# A companion ceiling on entry COUNT: the byte cap counts payload, so a
-# bundle of millions of zero-size members (512 header bytes each,
-# ~1000:1 gzip) slips under it while still exhausting CPU and memory. A
-# static site of a million files is already absurd.
-_MAX_BUNDLE_MEMBERS = 1_000_000
-
-
-# Extracting a bundle
-def _extract_bundle(data, dest_dir):
-    """Extract a tar.gz byte string into dest_dir (must not yet exist).
-
-    Every entry's resolved path is checked against dest_dir, every entry must
-    be a plain file or directory (no symlinks/devices), and the total
-    uncompressed size is capped — all validated before anything is written,
-    so a bad bundle leaves no partial extraction behind. Where the interpreter
-    has it (3.11.4+), filter='data' is passed to extractall() too: defense in
-    depth, not the only guard — it independently enforces the same containment
-    and rejects the same entry types at the library level."""
-    os.makedirs(dest_dir)
-    dest_real = os.path.realpath(dest_dir)
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-        # Members are walked with next() rather than getmembers(): walking a
-        # gzip stream decompresses it, so getmembers() paid the FULL
-        # decompression cost before the size cap ever ran — the cap bounded
-        # what was written, not the CPU a bomb burns. next() lets the walk
-        # abort at the ceiling. (Only a bundle the operator uploaded over
-        # their own tunnel gets here at all, so this bounds a buggy build of
-        # their own site, not the anonymous internet.)
-        members = []
-        total   = 0
-        while (m := tf.next()) is not None:
-            if not (m.isfile() or m.isdir()):
-                raise ValueError(f"unsupported entry type in bundle: {m.name}")
-            target = os.path.realpath(os.path.join(dest_dir, m.name))
-            if not (target == dest_real or target.startswith(dest_real + os.sep)):
-                raise ValueError(f"entry escapes the target directory: {m.name}")
-            total += m.size
-            if total > _MAX_BUNDLE_BYTES:
-                raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
-            # The byte cap counts payload only, so zero-size members never
-            # trip it; this bounds their number, and with it the CPU the
-            # walk burns and the members list it grows.
-            if len(members) >= _MAX_BUNDLE_MEMBERS:
-                raise ValueError(f"bundle has more than {_MAX_BUNDLE_MEMBERS} entries")
-            members.append(m)
-        # The PEP 706 feature probe: data_filter exists exactly when
-        # extractall() accepts filter=. Debian 12's 3.11.2 predates the
-        # backport — there the checks above are the (sufficient) guard.
-        if hasattr(tarfile, "data_filter"):
-            tf.extractall(dest_dir, members=members, filter="data")
-        else:
-            tf.extractall(dest_dir, members=members)
-
-
-# The kept versions
-_KEEP_VERSIONS = 5   # trees kept per site, the live one included
-
-
-def _content_slots(serve_dir):
-    """The two sibling trees the pre-ring design flipped between. Kept only
-    so a site published under it can be adopted into the ring."""
-    base = _resolve(serve_dir).rstrip(os.sep)
-    return base + ".a", base + ".b"
-
-
-def _drop_backup(bak):
-    """Remove the single-shot backup marker the pre-ring design left: a
-    symlink from the flip era (the tree it names is adopted separately), or
-    a real directory from before that."""
-    if os.path.islink(bak):
-        os.remove(bak)
-    elif os.path.isdir(bak):
-        shutil.rmtree(bak, ignore_errors=True)
-
-
-def _version_dirs(serve_dir):
-    """Every kept tree for this site, newest first, as (path, epoch).
-
-    A name that does not parse is not a version and is left alone — the
-    scan is a filter over siblings, never a prefix match that could sweep
-    up a directory Servette did not create."""
-    base = _resolve(serve_dir).rstrip(os.sep)
-    head, tail = os.path.split(base)
-    try:
-        names = os.listdir(head or ".")
-    except OSError:
-        return []
-    out = []
-    for name in names:
-        if not name.startswith(tail + ".v"):
-            continue
-        stamp, _dot, extra = name[len(tail) + 2:].partition(".")
-        path = os.path.join(head, name)
-        if not (stamp.isdigit() and os.path.isdir(path) and not os.path.islink(path)):
-            continue
-        # Two publishes inside one second share an epoch and are told apart
-        # by the sequence suffix — which must sort with the clock, not
-        # against it, or the newer of the two would read as the older.
-        out.append((path, int(stamp), int(extra) if extra.isdigit() else 1))
-    out.sort(key=lambda r: (-r[1], -r[2]))
-    return [(path, stamp) for path, stamp, _seq in out]
-
-
-def _new_version_dir(serve_dir, when=None):
-    """An unused version-directory path for a tree published at `when`
-    (default now). Two publishes inside one second take '.2', '.3': the
-    name must be unique, or the second would land on top of the first."""
-    base  = _resolve(serve_dir).rstrip(os.sep)
-    stamp = int(when if when is not None else time.time())
-    path  = f"{base}.v{stamp}"
-    n = 2
-    while os.path.lexists(path):
-        path = f"{base}.v{stamp}.{n}"
-        n += 1
-    return path
-
-
-def _adopt_legacy_slots(serve_dir):
-    """Bring a two-slot site's trees into the ring, after the flip that made
-    them idle. Renaming a tree the live symlink points at would break the
-    link, so the live one is skipped — it is adopted on the publish after
-    this one, when it is no longer live. The `.bak` symlink goes: the ring
-    is the history now."""
-    base = _resolve(serve_dir).rstrip(os.sep)
-    _drop_backup(base + ".bak")
-    live = os.path.realpath(base)
-    for slot in _content_slots(serve_dir):
-        if not os.path.isdir(slot) or os.path.islink(slot):
-            continue
-        if os.path.realpath(slot) == live:
-            continue
-        try:
-            os.rename(slot, _new_version_dir(serve_dir, os.path.getmtime(slot)))
-        except OSError:
-            pass          # a slot that will not move is left, never deleted
-
-
-def _prune_versions(serve_dir, keep=None):
-    """Drop the oldest trees past the ring's depth. The live tree is never a
-    candidate however old it is: an operator who restored a year-old version
-    is serving it, and content being served is not garbage."""
-    keep = _KEEP_VERSIONS if keep is None else keep
-    live = os.path.realpath(_resolve(serve_dir).rstrip(os.sep))
-    for path, _stamp in _version_dirs(serve_dir)[keep:]:
-        if os.path.realpath(path) != live:
-            shutil.rmtree(path, ignore_errors=True)
-
-
-# The content swap
-def _swap_site_content(new_dir, serve_dir):
-    """Make new_dir the live content behind serve_dir, keeping the trees
-    behind it as the ring `restore-site` chooses from.
-
-    new_dir's tree is renamed to a fresh `<link>.v<epoch>` sibling and one
-    atomic os.replace flips the link — no window, crash-safe. Pruning runs
-    after the flip, so a publish that fills the disk fails in staging with
-    every kept version still there.
-
-    A legacy real directory at serve_dir is converted on its first swap: the
-    old content becomes a version and the link lands — the one swap that
-    still carries the old rename gap, once per site ever, with the same
-    rollback the old design had (a failed conversion must never leave NO
-    live directory — every request a 404 — while the caller reports merely
-    'rejected')."""
-    if not os.path.isdir(new_dir):
-        # A dangling symlink would "succeed" — the old rename raised here,
-        # and the flip must fail just as loudly rather than serve nothing.
-        raise FileNotFoundError(f"new content tree missing: {new_dir}")
-    live = _resolve(serve_dir).rstrip(os.sep)
-    now  = int(time.time())
-    dest = _new_version_dir(serve_dir, now)
-
-    if os.path.islink(live):
-        os.rename(new_dir, dest)
-        try:
-            flip = live + ".flip"
-            if os.path.lexists(flip):
-                os.remove(flip)                  # a crash's leftover, harmless
-            os.symlink(dest, flip)
-            os.replace(flip, live)               # the swap: one atomic syscall
-        except OSError:
-            # The tree was already renamed into the ring; a failed flip
-            # hands it back to staging, so a publish the caller reports
-            # 'rejected' leaves no never-published "version" behind for
-            # restore-site to offer.
-            os.rename(dest, new_dir)
-            raise
-        _adopt_legacy_slots(serve_dir)
-        _prune_versions(serve_dir)
-        return
-
-    # Legacy: a real directory (or nothing yet) at serve_dir — convert.
-    had_live = os.path.isdir(live)
-    os.rename(new_dir, dest)
-    kept = None
-    if had_live:
-        # Dated by its own mtime, not by now — it is the older content, and
-        # the ring sorts on the name — but clamped strictly below dest's
-        # stamp: an mtime in dest's own second would collide into a higher
-        # sequence suffix, and the ring would read the OLD tree as newer.
-        kept = _new_version_dir(serve_dir,
-                                min(int(os.path.getmtime(live)), now - 1))
-        os.rename(live, kept)
-    try:
-        os.symlink(dest, live)
-    except OSError:
-        if had_live:
-            os.rename(kept, live)
-        os.rename(dest, new_dir)   # same hand-back as the flip above
-        raise
-    _adopt_legacy_slots(serve_dir)
-    _prune_versions(serve_dir)
-
-
-_publish_lock = threading.Lock()  # serializes site-content mutation across every
-                                   # site: a page publish and 'restore-site' can
-                                   # run from two sessions at once, and the swap
-                                   # is several unguarded filesystem ops, not one.
-
-
-# Landing a bundle
-def _land_bundle(site, bundle, source):
-    """Extract `bundle` into staging and swap it live for `site`, keeping the
-    previous trees in the ring, with ownership repair — the shared tail of
-    every content channel. `source` is only for the log line. Returns
-    "rejected" or "published"."""
-    with _publish_lock:
-        staging = _resolve(site.serve_dir).rstrip(os.sep) + ".new"
-        shutil.rmtree(staging, ignore_errors=True)
-        try:
-            _extract_bundle(bundle, staging)
-            # Extracted by this process — root, since every content channel
-            # elevates — so re-establish what enable establishes BEFORE the
-            # tree goes live: the operator owns their content, the service
-            # reads through its group. strip_world because the extraction's
-            # own 644/755 modes are Servette's writing, not the operator's,
-            # and must honour the never-world-bits promise. Kept versions
-            # need nothing: each was the live tree once and keeps the
-            # ownership it already has. A failed extraction dies here, in
-            # staging, with the live content and the ring untouched.
-            _chown_operator(staging, strip_world=True)
-            _swap_site_content(staging, site.serve_dir)
-        except Exception as e:
-            log.error("Publish bundle rejected: %s", e)
-            shutil.rmtree(staging, ignore_errors=True)
-            return "rejected"
-
-    log.info("Published new content for %s from %s", site.domain or site.serve_dir, source)
-    return "published"
-
-
-# preview
-def _preview_dir(site):
-    """Where a staged preview lives: a sibling of the site's tree, never
-    inside it. Inside, the public server would serve the unpublished draft
-    to the internet."""
-    return _resolve(site.serve_dir).rstrip(os.sep) + ".preview"
-
-
-def _stage_preview(site, bundle):
-    """Extract `bundle` where the loopback server can serve it, without
-    going near the live tree. Returns "staged" or "rejected".
-
-    The same _extract_bundle every content channel runs, so a bundle the
-    publish door would refuse the preview refuses identically — a preview
-    that accepted more than a publish would be a preview of something that
-    can never ship."""
-    dest = _preview_dir(site)
-    shutil.rmtree(dest, ignore_errors=True)
-    try:
-        _extract_bundle(bundle, dest)
-    except Exception as e:
-        log.error("Preview bundle rejected: %s", e)
-        shutil.rmtree(dest, ignore_errors=True)
-        return "rejected"
-    log.info("Staged a preview for %s", site.domain or site.serve_dir)
-    return "staged"
-
-
-def _clear_previews():
-    """Drop every staged preview. A preview belongs to one `admin` run: it is
-    a draft nobody published, and leaving it on disk would keep an
-    unpublished tree beside a live site indefinitely."""
-    for site in config.sites:
-        shutil.rmtree(_preview_dir(site), ignore_errors=True)
-
-
-def _tar_live_site(site, cap=_MAX_BUNDLE_BYTES):
-    """The site's live tree as gzipped tar bytes, or None if it is too big to
-    hold in memory. Content leaves the box the same way it arrived — same
-    format, same cap — so a downloaded archive is a bundle the publish door
-    would accept back.
-
-    Paths are relative to the site root and the hidden-path rule applies on
-    the way out as it does on the way in: a dot-directory is not served, so
-    it is not handed over either."""
-    root = os.path.realpath(_resolve(site.serve_dir).rstrip(os.sep))
-    if not os.path.isdir(root):
-        return None
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for base, dirs, names in os.walk(root):
-            dirs[:] = [d for d in dirs if not d.startswith(".") or d == ".well-known"]
-            for name in sorted(names):
-                if name.startswith("."):
-                    continue
-                full = os.path.join(base, name)
-                if os.path.islink(full) or not os.path.isfile(full):
-                    continue        # only regular files, as _extract_bundle accepts
-                rel = os.path.relpath(full, root)
-                try:
-                    tf.add(full, arcname=rel, recursive=False)
-                except OSError:
-                    continue
-                if buf.tell() > cap:
-                    return None
-    return buf.getvalue()
-
-
-def _tree_size(path):
-    """(files, bytes) under path. A file that vanishes mid-walk is skipped,
-    not raised: this is a description, and a racing publish must not make
-    describing the site an error."""
-    files = total = 0
-    for root, _dirs, names in os.walk(path):
-        for name in names:
-            try:
-                total += os.path.getsize(os.path.join(root, name))
-                files += 1
-            except OSError:
-                pass
-    return files, total
-
-
-def _site_versions(site):
-    """The kept trees of one site as rows both surfaces render: the name to
-    restore by, when it was published, how many files and bytes it holds, and
-    which one is live.
-
-    The live tree is ALWAYS reported, ring member or not. A site published
-    before the ring existed serves a tree the ring does not hold — it joins
-    on its next publish — and reporting an empty list would tell an operator
-    with a live, working site that nothing is published, which is both false
-    and alarming. That tree carries its own mtime as its date and is never
-    offered for restore, because it is already live.
-
-    Walking every tree is why this is its own call rather than part of the
-    status snapshot — it runs when an operator asks to see the history, not
-    on every poll of a page that refreshes itself."""
-    live_link = _resolve(site.serve_dir).rstrip(os.sep)
-    live      = os.path.realpath(live_link)
-    rows, in_ring = [], False
-    for path, stamp in _version_dirs(site.serve_dir):
-        files, total = _tree_size(path)
-        is_live = os.path.realpath(path) == live
-        in_ring = in_ring or is_live
-        rows.append({"name": os.path.basename(path), "published": stamp,
-                     "files": files, "bytes": total, "live": is_live})
-    if not in_ring and os.path.isdir(live):
-        files, total = _tree_size(live)
-        try:
-            stamp = int(os.path.getmtime(live))
-        except OSError:
-            stamp = 0
-        rows.insert(0, {"name": os.path.basename(live), "published": stamp,
-                        "files": files, "bytes": total, "live": True})
-    return rows
-
-
-def _restore_site(site, version=None):
-    """Serve a kept version again. `version` is a name as _site_versions
-    reports it; None means the newest tree that is not already live — plain
-    'undo the last publish'. Returns "" on success, or a sentence saying why
-    not.
-
-    The flip is the publish's flip, so a restore has no window either. The
-    tree is NOT consumed: it stays in the ring, so restoring the wrong one
-    is itself undoable. That is the whole difference from the single-shot
-    backup this replaced."""
-    live_path = _resolve(site.serve_dir).rstrip(os.sep)
-    versions  = _version_dirs(site.serve_dir)
-    if not versions:
-        return ("Nothing to restore — a kept version appears the first time "
-                "new content replaces old.")
-    if not os.path.islink(live_path):
-        return ("This site's folder is not yet behind the version link — "
-                "publish once, and the content it replaces joins the ring.")
-
-    live = os.path.realpath(live_path)
-    if version is None:
-        target = next((p for p, _ in versions if os.path.realpath(p) != live), None)
-        if target is None:
-            return "Nothing to restore — the only kept version is the live one."
-    else:
-        # Matched by base name against the ring, never taken as a path: the
-        # page's version name arrives over the wire, and a caller must not be
-        # able to name a directory the ring does not hold.
-        target = next((p for p, _ in versions
-                       if os.path.basename(p) == version), None)
-        if target is None:
-            return f"No kept version named {version}."
-        if os.path.realpath(target) == live:
-            return "That version is already the live one."
-
-    with _publish_lock:
-        if not os.path.isdir(target):
-            return "That version was removed while you were deciding."
-        flip = live_path + ".flip"
-        if os.path.lexists(flip):
-            os.remove(flip)
-        os.symlink(target, flip)
-        os.replace(flip, live_path)              # the restore: one atomic flip
-        # The tree may date from a publish that extracted as root — the same
-        # ownership repair as a publish, for the same reason.
-        _chown_operator(os.path.realpath(live_path), strip_world=True)
-    log.info("Restored content for %s to %s",
-             site.domain or site.serve_dir, os.path.basename(target))
-    return ""
-
-
-def _version_line(row):
-    """One kept version as a line for the terminal: when, how big, and
-    whether it is the one being served."""
-    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["published"]))
-    size = (f"{row['bytes'] / (1024 * 1024):.1f} MB" if row["bytes"] >= 1024 * 1024
-            else f"{row['bytes'] / 1024:.0f} KB")
-    files = f"{row['files']} file" + ("" if row["files"] == 1 else "s")
-    return f"{when} — {files}, {size}" + ("  (live)" if row["live"] else "")
-
-
-def cmd_restore_site(site):
-    """Roll back to a kept version. One choice is a yes/no; several are a
-    numbered list, newest first. Nothing is consumed — the version being
-    rolled away stays in the ring, so this is undoable in its own terms."""
-    rows = _site_versions(site)
-    kept = [r for r in rows if not r["live"]]
-    if not kept:
-        # One line, and it says when that changes rather than explaining the
-        # ring: "no kept versions yet" alone leaves a reader wondering what
-        # would make one.
-        print("  Nothing to restore — a kept version appears the first time")
-        print("  new content replaces old.")
-        return
-
-    if len(kept) == 1:
-        print(f"\n  Kept: {_version_line(kept[0])}")
-        if not _prompt("Restore this content?"):
-            print("  Restore cancelled.")
-            return
-        choice = kept[0]
-    else:
-        print()
-        for n, row in enumerate(kept, 1):
-            print(f"  {n}. {_version_line(row)}")
-        raw = _input("\n  Restore which? [number, Enter = cancel]: ").strip()
-        if not raw.isdigit() or not (1 <= int(raw) <= len(kept)):
-            print("  Restore cancelled.")
-            return
-        choice = kept[int(raw) - 1]
-
-    err = _restore_site(site, choice["name"])
-    print(f"  {err}" if err else "  Site content restored.")
 
 # The loopback server's shape
 _UI_HOST          = "127.0.0.1"
@@ -6063,9 +5025,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
     .rows b { color: var(--text); font-weight: 500; }
     .rows .ok { color: var(--brand); }
-    /* Not scoped to .rows: the running dot moved onto the status switch-row
-       when the service controls joined it, and a `.rows .dot` rule stopped
-       matching — the dot was still in the markup and simply invisible. */
+    /* Not scoped to .rows: the running dot sits on the status switch-row,
+       outside any .rows block — a scoped rule silently never matches. */
     .dot {
       display: inline-block;
       width: 7px;
@@ -6086,9 +5047,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .hint b { color: var(--text); font-weight: 500; }
     .warn  { color: var(--amber); }
     .fault { color: var(--red); }
-    /* Not a fault at all — a change typed and not yet saved. It used to
-       borrow .warn, which made an unsaved intention look like something
-       broken. */
+    /* Not a fault at all — a change typed and not yet saved. It must not
+       borrow .warn: an unsaved intention is not something broken. */
     .pending { color: var(--muted); font-style: italic; }
     .error { font-size: 0.72rem; color: var(--red); line-height: 1.6; margin-top: 0.75rem; }
 
@@ -6133,6 +5093,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       color: var(--muted);
     }
     .cfg-field .cfg-hint { grid-column: 2; }
+    /* The two families inside the Settings card — what defends the server,
+       and what tunes it — named so neither wears the other's label. */
+    .cfg-group {
+      margin: 1.1rem 0 0.45rem;
+      font-size: 0.72rem;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .cfg-group:first-child { margin-top: 0.2rem; }
     .cfg-hint {
       font-size: 0.68rem;
       color: var(--muted);
@@ -6573,10 +5543,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // <b>), never server text; the value is escaped because it is.
   const field = (key, label, value, opts) => {
     const o = opts || {};
+    // A field with stated choices renders as a select: what cannot be
+    // typed cannot need refusing.
+    const control = o.choices
+      ? `<select id="cfg-${key}">` +
+        o.choices.map((c) =>
+          `<option value="${c}"${String(value) === c ? ' selected' : ''}>` +
+          `${c}</option>`).join('') +
+        `</select>`
+      : `<input id="cfg-${key}" type="${o.type || 'text'}"` +
+        ` value="${escapeHtml(value)}">`;
     return `<div class="cfg-field">` +
-      `<label for="cfg-${key}">${label}</label>` +
-      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
-      ` value="${escapeHtml(value)}">` +
+      `<label for="cfg-${key}">${label}</label>` + control +
       (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
       `</div>`;
   };
@@ -6710,14 +5688,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
      One card per site, carrying everything about it. The cards ARE the
      site list: their order is config — the first domainless site answers
      unmatched Hosts — so reordering them is a config write. ══ */
-
-  // What a site's unhealthy row is called on its card — the fault named,
-  // rather than an exclamation mark standing in for the name.
-  const NEEDS_WORD = {
-    cert:     'Needs certificate',
-    password: 'Needs password',
-    dir:      'Folder missing',
-  };
 
   // A card's index is its position in the DOM, read at the moment it is
   // needed: adding, removing, or dragging a card renumbers its neighbours,
@@ -6959,7 +5929,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const confirmHtml =
       `<div class="confirm hidden">` +
       `<p class="hint"><b>Delete</b> removes this server's copies — the ` +
-      `published files and their backup. Your originals in local storage ` +
+      `published files and every kept version. Your originals in local storage ` +
       `are untouched; publishing again rebuilds the site.</p>` +
       (inactive ? '' :
         `<p class="hint"><b>Deactivate</b> keeps everything on the server ` +
@@ -6979,7 +5949,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
       // ── What this site IS, at the top: its state, the address it
       // answers at, and the three things that decide both. What you DO to
-      // it — publish, preview, download, redirect — follows underneath.
+      // it — publish, preview, restore, redirect — follows underneath.
       : (`<div class="rows info"></div>` +
 
          `<div class="switch-row"><span class="k">Domain</span>` +
@@ -7015,8 +5985,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<p class="hint summary">The folder to drop is the one holding the ` +
          `site's <b>index.html</b>.</p>` +
          // Both of these act on the folder you chose, so both are dim until
-         // you have chosen one. Download is not here: it acts on what is
-         // live, and sits on the line that reports it.
+         // you have chosen one.
          `<div class="btn-row" style="margin-top:0.75rem">` +
            `<button class="action pub" type="button" disabled ` +
            `title="Choose a folder first">Publish</button>` +
@@ -7045,13 +6014,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<div class="switch-row"><span class="k">Published</span>` +
          `<span class="switch-value"><span class="ver-state">reading…</span>` +
          `<span class="switch-act">` +
-         // The reverse of Publish, on the line that says what is live: the
-         // live tree as the same tar.gz the publish door accepts, so what
-         // comes down can go back up.
-         // Born disabled: the size guard below needs the /versions answer,
-         // and a click before (or without) it must not navigate blind.
-         `<button class="action tiny dl" type="button" disabled ` +
-         `title="Download the live content as a tar.gz">Download</button>` +
          `<button class="action tiny ver-refresh" type="button" ` +
          `title="Re-read this list. The page updates it after a publish or ` +
          `restore of its own — this is for one done in the terminal.">` +
@@ -7073,11 +6035,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
            `<input class="redir-from" type="text" placeholder="/talk"></div>` +
            `<div class="cfg-field"><label>Sends visitors to</label>` +
            `<input class="redir-to" type="text" placeholder="/2026/keynote"></div>` +
+           `<div class="cfg-field"><label>Answered as</label>` +
+           `<select class="redir-kind"><option value="">Permanent</option>` +
+           `<option value="temporary">Temporary</option></select></div>` +
            `<p class="cfg-hint">Any path on this site: one that moved, a short ` +
            `link worth remembering, a name you want to keep working. It can ` +
-           `point at another path here or at a full https:// address. Visitors ` +
-           `are sent on with a <b>permanent</b> redirect, which browsers ` +
-           `remember — so a wrong one outlives fixing it here.</p>` +
+           `point at another path here or at a full https:// address. ` +
+           `<b>Permanent</b> tells browsers and search engines the new address ` +
+           `is the real one now; <b>temporary</b> sends visitors on while the ` +
+           `old path stays the real address.</p>` +
            `<div class="btn-row" style="margin-top:0.75rem">` +
            `<button class="action redir-save" type="button">Add redirect</button>` +
            `<button class="action redir-cancel" type="button">Cancel</button>` +
@@ -7101,18 +6067,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // beside it is the one publishing writes into, which is why they
           // are separate elements: overwriting the first would erase a
           // standing fault the moment a folder was read.
-          // Emitted even on a healthy card (hidden): a fault that arrives
-          // client-side — an unfinished login on a card built healthy —
-          // has no rebuild to emit a pill for it, and renderAttention can
-          // only fill a pill that exists.
-          `<span class="badge ${siteNeeds.some((c) => c.blocking)
-             ? 'badge-red' : 'badge-warn'} needs${
-             siteNeeds.length ? '' : ' hidden'}" title="${escapeHtml(
+          // Emitted on every card (the mirror rule itself lives in
+          // renderAttention): a fault that arrives client-side — an
+          // unfinished login on a card built healthy — has no rebuild to
+          // emit a pill for it, and renderAttention can only fill a pill
+          // that exists.
+          `<span class="badge ${!siteNeeds.length ? 'badge-green'
+             : siteNeeds.some((c) => c.blocking) ? 'badge-red'
+             : 'badge-warn'} needs" title="${escapeHtml(
              siteNeeds.map((c) => c.detail).join(' · '))}">${
-             !siteNeeds.length ? ''
-               : siteNeeds.length === 1
-                 ? escapeHtml(NEEDS_WORD[siteNeeds[0].key] || 'Needs attention')
-                 : siteNeeds.length + ' to review'}</span>` +
+             siteNeeds.length ? siteNeeds.length + ' to review'
+               : '✓ healthy'}</span>` +
           `<span class="badge state badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
           // Collapse, for a box serving more sites than fit on a screen.
@@ -7331,8 +6296,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         if (resp.ok && result === 'published') {
           const note = `<b>${escapeHtml(folderName)}/</b> is live — ` +
             `${entries.length} file${entries.length === 1 ? '' : 's'}, ` +
-            `${fmtSize(gz.length)} sent, swapped in atomically with the previous ` +
-            `content kept as the one-step backup.`;
+            `${fmtSize(gz.length)} sent, swapped in atomically — the previous ` +
+            `content stays in the kept versions below, one click to restore.`;
           q('.note-done').innerHTML = note;
           done.classList.remove('hidden');
           mark('badge-green', '✓ published');
@@ -7436,14 +6401,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       return i < 0 ? idx : i;
     };
 
-    let liveBytes = null;   // the live tree's size, for the download guard
     async function loadVersions() {
         const state = q('.ver-state'), list = q('.versions');
         try {
           const v = await getJSON('/versions', { site: siteIndex() });
           const rows = v.versions || [];
           const live = rows.find((r) => r.live);
-          liveBytes = live ? live.bytes : null;
           // The live version's own size is the answer to "did the right
           // folder land" — a file count off by an order of magnitude is
           // the wrong folder, however right the site looks.
@@ -7462,15 +6425,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             : `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
               `${fmtSize(live.bytes)}</span>` +
               `<span>${escapeHtml(when(live.published))}</span>`;
-          // Nothing published is nothing to download, and offering it
-          // anyway made the card contradict itself in two adjacent words.
-          const dl = q('.dl');
-          dl.disabled = !live || !live.files;
-          dl.title = !live
-            ? 'The folder is missing — publish to recreate it'
-            : dl.disabled
-              ? 'Nothing published yet — there is nothing to download'
-              : 'Download the live content as a tar.gz';
           list.innerHTML = rows.length < 2 ? '' :
             rows.map((r) => row(escapeHtml(when(r.published)),
               `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
@@ -7500,39 +6454,23 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     q('.ver-refresh').addEventListener('click', loadVersions);
     loadVersions();
 
-    // The response carries Content-Disposition, so the browser saves it
-    // rather than navigating: the operator stays on the page they were
-    // working in. That holds only for the 200 — the too-large refusal is
-    // JSON with no disposition, which location.assign would NAVIGATE to,
-    // replacing the page with a bare error blob. Judged here first, from
-    // the size the version row already fetched.
-    q('.dl').addEventListener('click', () => {
-      clearError(errEl);
-      // Raw bytes are the only number the page holds; the server judges
-      // the gzipped tar, so a compressible over-500 MB site is refused
-      // here that the server might have managed. Accepted: scp still
-      // works either way, and navigating the page into a JSON refusal
-      // blob is worse. The button is born disabled, so liveBytes is set
-      // by the /versions fetch before any click can land.
-      if (liveBytes != null && liveBytes > MAX_BUNDLE_BYTES)
-        return showError(errEl,
-          `This site is larger than ${fmtSize(MAX_BUNDLE_BYTES)} — ` +
-          'copy it with scp instead.');
-      location.assign(api('/download', { site: siteIndex() }));
-    });
-
     /* ── Redirects. Both halves of the pair reach _set_site_value through
        the same settings write, so a rule the terminal refuses the page
        refuses with the same sentence. ── */
 
     const renderRedirects = () => {
+      // Two tables, one list: permanent rules answer 301, temporary ones
+      // 302, and a row says which only when it is the odd one out.
       const table = siteData.redirects || {};
-      const keys = Object.keys(table).sort();
+      const temp  = siteData.redirects_temporary || {};
+      const keys = Object.keys(table).concat(Object.keys(temp)).sort();
       q('.redir-state').textContent = keys.length
         ? keys.length + (keys.length === 1 ? ' rule' : ' rules') : 'none';
       q('.redirects').innerHTML = keys.map((k) =>
         row(escapeHtml(k),
-            `→ ${escapeHtml(table[k])} <button class="action tiny redir-del" ` +
+            `→ ${escapeHtml(k in table ? table[k] : temp[k])}` +
+            `${k in temp ? ' (temporary)' : ''}` +
+            ` <button class="action tiny redir-del" ` +
             `type="button" data-k="${escapeHtml(k)}">Remove</button>`)).join('');
       for (const b of q('.redirects').querySelectorAll('.redir-del'))
         b.addEventListener('click', () => {
@@ -7551,6 +6489,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     q('.redir-save').addEventListener('click', () => {
       const from = q('.redir-from').value.trim();
       const to   = q('.redir-to').value.trim();
+      const kind = q('.redir-kind').value;
       clearError(errEl);
       if (!from || !to)
         return errAt(q('.redir-form'),
@@ -7561,7 +6500,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       if (from.includes(','))
         return errAt(q('.redir-form'), 'A path containing a comma has to be set by ' +
                      'editing servette.toml — the comma separates the pair here.');
-      saveSettings({ redirect: from + ',' + to }, siteIndex(), badge, errEl);
+      // The terminal's own third token: nothing for the permanent default,
+      // ',temporary' for a 302.
+      saveSettings({ redirect: from + ',' + to + (kind ? ',' + kind : '') },
+                   siteIndex(), badge, errEl);
     });
 
     /* ── The site's facts and the controls that change them. ── */
@@ -7632,15 +6574,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       const blocking = needs.some((c) => c.blocking);
 
       // The head pill is the Status line for a folded card, so it reads the
-      // same list rather than a snapshot taken when the card was built.
+      // same list rather than a snapshot taken when the card was built —
+      // and mirrors that line both ways: the count, or the green all-clear.
       const pill = q('.badge.needs');
       if (pill) {
-        pill.textContent = needs.length === 1
-          ? (NEEDS_WORD[needs[0].key] || 'Needs attention')
-          : needs.length + ' to review';
+        pill.textContent = needs.length
+          ? needs.length + ' to review' : '✓ healthy';
+        pill.title = needs.map((c) => c.detail).join(' · ');
         pill.classList.toggle('badge-red', blocking);
-        pill.classList.toggle('badge-warn', !blocking);
-        pill.classList.toggle('hidden', !needs.length);
+        pill.classList.toggle('badge-warn', !!needs.length && !blocking);
+        pill.classList.toggle('badge-green', !needs.length);
+        pill.classList.remove('hidden');
       }
 
       info.innerHTML =
@@ -7733,9 +6677,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
     q('.auth-switch').addEventListener('change', (e) => {
       // A refusal describes the form as it stood when Save was pressed.
-      // Move the switch and it is about a form that no longer exists, so it
-      // goes with the state that produced it — it used to sit there in red
-      // through every subsequent flip.
+      // Move the switch and it is about a form that no longer exists, so
+      // it goes with the state that produced it.
       clearError(errEl);
       authDesired = e.target.checked;
       renderInfo();
@@ -7807,21 +6750,39 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
      What the box is doing, and how it is set. The settings forms run over
      the same validators the `set` command runs, so a value the terminal
      refuses the page refuses with the same sentence. Deliberately absent
-     (the terminal keeps them): port and trusted proxy (behind-a-balancer
-     deployments) and every lifecycle verb. The domain is not a form either
-     — naming a site belongs on that site's card. ══ */
+     from this form (the terminal keeps them): port, trusted proxy, and the
+     health path (behind-a-balancer deployments), the TLS knobs and the two
+     header strings — and installation (enable/disable). The lifecycle
+     verbs live on the Status card above, not in this form; the domain is
+     not a form either — naming a site belongs on that site's card. ══ */
 
-  const HOST_FIELDS = [
+  // Two families in one card, each under its own label: what defends the
+  // server, and what tunes it. Cache size is a performance knob and must
+  // not wear a security heading — the two-bucket principle applied to the
+  // card's own layout.
+  const SECURITY_FIELDS = [
     ['email', 'Email',
-     'Registers this server with the certificate authority — one account for ' +
-     'every site here, not one per domain. Where renewal and expiry notices go.'],
+     'This server registers a single account with the certificate ' +
+     'authority; certificates for every site are issued through it. ' +
+     'Renewal and expiry notices all come to this address.'],
     ['rate_limit', 'Rate limit',
      'Requests one visitor may make per minute. Over it, they are refused until their last minute falls back under the limit.'],
     ['auth_rate_limit', 'Auth rate limit',
      'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
+  ];
+  const PERFORMANCE_FIELDS = [
     ['cache_size_mb', 'File cache size (MB)',
      'Memory set aside to serve frequently requested files without re-reading the disk.'],
+    ['cache_policy', 'Browser cache',
+     'What a visitor keeps: no-store always downloads fresh, no-cache ' +
+     'keeps a copy but re-checks it every time (a quick ETag check), ' +
+     'max-age trusts the copy for the seconds below.',
+     { choices: ['no-store', 'no-cache', 'max-age'] }],
+    ['cache_max_age', 'Cache seconds',
+     'How long a browser trusts its copy without checking back. Applies ' +
+     'to max-age only, which is why this field appears with it.'],
   ];
+  const HOST_FIELDS = SECURITY_FIELDS.concat(PERFORMANCE_FIELDS);
 
   function renderServer() {
     const d = statusData || {};
@@ -7890,9 +6851,26 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // anywhere inside it.
     const focused = document.activeElement;
     if (focused && focused.closest && focused.closest('#cfg-host-fields')) return;
+    const one = ([k, l, h, x]) =>
+      field(k, l, ((cfgData || {}).host || {})[k],
+            Object.assign({ hint: h }, x || {}));
     $('cfg-host-fields').innerHTML =
-      HOST_FIELDS.map(([k, l, h]) => field(k, l, ((cfgData || {}).host || {})[k], { hint: h }))
-        .join('') + swapField;
+      '<div class="cfg-group">Security</div>' +
+      SECURITY_FIELDS.map(one).join('') +
+      '<div class="cfg-group">Performance</div>' +
+      PERFORMANCE_FIELDS.map(one).join('') + swapField;
+    // The seconds only mean anything under max-age, so the field exists
+    // only while the select says so — the same only-while-relevant rule
+    // the login fields follow.
+    const pol = $('cfg-cache_policy');
+    const ageEl = $('cfg-cache_max_age');
+    if (pol && ageEl) {
+      const ageRow = ageEl.closest('.cfg-field');
+      const showAge = () =>
+        ageRow.classList.toggle('hidden', pol.value !== 'max-age');
+      pol.addEventListener('change', showAge);
+      showAge();
+    }
   }
 
   /* ── The service's lifecycle: start, restart, stop. The page runs the
@@ -8141,17 +7119,20 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
 # The loopback handler
 class _UIHandler(http.server.BaseHTTPRequestHandler):
-    """The loopback server's one handler. GET / is the page (login page
-    until the code is presented); POST /upload lands a content bundle. After
-    _UI_MAX_BAD_CODES wrong guesses the run stops authenticating anyone,
-    including the right code — re-run the command for a fresh one."""
+    """The loopback server's one handler. GET is the page and its read half
+    (/status /config /traffic /update /versions, and /preview on its own
+    per-staging token); POST is the write half (/upload /preview /config
+    /sites /service /swap). Everything but the login page and /preview
+    requires this run's passcode; after _UI_MAX_BAD_CODES wrong guesses
+    the run stops authenticating anyone, including the right code —
+    re-run the command for a fresh one."""
 
     def log_message(self, fmt, *args):
         log.info("ui: " + fmt % args)  # the default writes to stderr, past the log
 
     def _respond(self, status, body, ctype="text/html; charset=utf-8", extra=()):
-        # `body` is text for every JSON and message answer, and bytes for the
-        # two that hand back a file: the site download and a preview asset.
+        # `body` is text for every JSON and message answer, and bytes for
+        # the one that hands back a file: a preview asset.
         data = body if isinstance(body, bytes) else body.encode()
         self.send_response(status)
         self.send_header("Content-Type", ctype)
@@ -8225,7 +7206,10 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         counted; a missing one is not. Compared as bytes so any input gets
         the constant-time path rather than a TypeError."""
         qs   = parse_qs(urlsplit(self.path).query)
-        code = (qs.get("t") or [""])[0] or self.headers.get("X-Servette-Code", "")
+        # The passcode travels one way: the ?t= query every api() call
+        # carries. A second door for the run credential is a second thing
+        # to audit, so there is none.
+        code = (qs.get("t") or [""])[0]
         if self.server.bad_codes >= _UI_MAX_BAD_CODES:
             return "locked"
         if not code:
@@ -8238,28 +7222,26 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
 
-        # Preview content, on its own token. NOT the run's passcode: a
-        # previewed page can read its own URL, and a draft with a script in
-        # it must not be able to lift the credential that publishes. The
-        # preview token buys exactly one thing — reading the staged tree —
-        # and it is minted fresh by each staging.
+        # Preview content, on its own per-staging token — why it is not the
+        # run's passcode, and why it rides the path: see _serve_preview.
         if path == "/preview" or path.startswith("/preview/"):
             return self._serve_preview(path)
 
         if path not in ("/", "/status", "/config", "/traffic", "/update",
-                        "/versions", "/download"):
+                        "/versions"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
             return self._respond(403, "Too many wrong passcodes. Close this page and re-run the command.")
         if path == "/status":
-            # The inside view, for the page's Status tab: exactly what
+            # The inside view, for the Server tab's Status card: exactly what
             # `status --json` prints, because it is the same function.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps(_status_data()), "application/json")
         if path == "/config":
-            # The Config tab's read half: exactly the vocabulary `set`
+            # The settings read half, for the Server tab and the site cards:
+            # exactly the vocabulary `set`
             # accepts, plus current values to fill the forms — and
             # has_password, a boolean only, so the page can show whether
             # protection is on without the hash ever crossing the wire.
@@ -8271,6 +7253,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                            "active": s.active,
                            "username": s.username,
                            "redirects": s.redirects,
+                           "redirects_temporary": s.redirects_temp,
                            "has_password": bool(s.password_hash)}
                           for i, s in enumerate(config.sites)],
             }), "application/json")
@@ -8282,35 +7265,9 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._respond(200, json.dumps({"latest": _upgrade_available()}),
                                  "application/json")
 
-        if path == "/download":
-            # Content leaves the box the way it arrived: the same tar.gz the
-            # publish door takes, so what comes down can go back up. A site
-            # too large to hold in memory says so rather than half-sending.
-            if auth != "ok":
-                return self._respond(403, "Not logged in.")
-            try:
-                idx = int(parse_qs(urlsplit(self.path).query).get("site", ["0"])[0])
-            except ValueError:
-                return self._respond(400, "site must be a whole number.")
-            if not (0 <= idx < len(config.sites)):
-                return self._respond(404, "No such site.")
-            target = config.sites[idx]
-            blob = _tar_live_site(target)
-            if blob is None:
-                return self._respond(413, json.dumps(
-                    {"error": f"this site is larger than {_MAX_BUNDLE_BYTES // (1024 * 1024)} MB "
-                              "— copy it with scp instead"}), "application/json")
-            # The filename is built from the site's own name, never from
-            # anything a request supplied.
-            stem = re.sub(r"[^a-z0-9.-]", "-", (target.domain or f"site-{idx}").lower())
-            return self._respond(200, blob, "application/gzip",
-                                 [("Content-Disposition",
-                                   f'attachment; filename="{stem}.tar.gz"')])
-
         if path == "/versions":
-            # One site's kept trees. Its own endpoint rather than a field on
-            # /status because answering it walks every tree on disk, and
-            # /status is polled every few seconds while the page is open.
+            # One site's kept trees — its own endpoint for the cost reason
+            # in _site_versions.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
             try:
@@ -8324,7 +7281,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                  "keep": _KEEP_VERSIONS}), "application/json")
 
         if path == "/traffic":
-            # The Analytics tab's feed: the journal re-read as counts, and
+            # The Statistics tab's feed: the journal re-read as counts, and
             # never carrying a visitor's IP. The window is the reader's
             # choice, bounded — a request for a year would read a year of
             # journal to draw a chart nobody asked for.
@@ -8509,7 +7466,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                  "application/json")
 
         if path == "/config":
-            # The Config tab's write half: the same validate-then-apply path
+            # The settings write half: the same validate-then-apply path
             # `set` runs, so a value the terminal refuses the page refuses
             # with the same sentence. The password travels only here — never
             # on argv, which is why `set` excludes it — and mirrors the
@@ -8671,6 +7628,1434 @@ def cmd_admin():
         print("  will collect 'channel N: open failed' notices from it.")
 
 
+# The update channel for a site's *content*: a tar.gz bundle the operator
+# uploads over their own SSH tunnel, extracted into a staging tree and made
+# live with one atomic link flip, the tree it replaces kept in the ring for
+# 'restore-site' to flip back to. Nothing arrives from the network unasked —
+# the doors are the loopback page, reachable only through the operator's
+# tunnel, and the terminal's `publish`, taring a folder already on this
+# box. (Servette's own code updates travel through the package manager,
+# not through Servette.)
+# The bundle ceiling
+_MAX_BUNDLE_BYTES = 500 * 1024 * 1024  # generous for a static site; bounds a decompression-bomb bundle
+# A companion ceiling on entry COUNT: the byte cap counts payload, so a
+# bundle of millions of zero-size members (512 header bytes each,
+# ~1000:1 gzip) slips under it while still exhausting CPU and memory. A
+# static site of a million files is already absurd.
+_MAX_BUNDLE_MEMBERS = 1_000_000
+
+
+# Extracting a bundle
+def _extract_bundle(data, dest_dir):
+    """Extract a tar.gz byte string into dest_dir (must not yet exist).
+
+    Every entry's resolved path is checked against dest_dir, every entry must
+    be a plain file or directory (no symlinks/devices), and the total
+    uncompressed size is capped — all validated before anything is written,
+    so a bad bundle leaves no partial extraction behind. Where the interpreter
+    has it (3.11.4+), filter='data' is passed to extractall() too: defense in
+    depth, not the only guard — it independently enforces the same containment
+    and rejects the same entry types at the library level."""
+    os.makedirs(dest_dir)
+    dest_real = os.path.realpath(dest_dir)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        # Members are walked with next() rather than getmembers(): walking a
+        # gzip stream decompresses it, so getmembers() paid the FULL
+        # decompression cost before the size cap ever ran — the cap bounded
+        # what was written, not the CPU a bomb burns. next() lets the walk
+        # abort at the ceiling. (Only a bundle the operator uploaded over
+        # their own tunnel gets here at all, so this bounds a buggy build of
+        # their own site, not the anonymous internet.)
+        members = []
+        total   = 0
+        while (m := tf.next()) is not None:
+            if not (m.isfile() or m.isdir()):
+                raise ValueError(f"unsupported entry type in bundle: {m.name}")
+            target = os.path.realpath(os.path.join(dest_dir, m.name))
+            if not (target == dest_real or target.startswith(dest_real + os.sep)):
+                raise ValueError(f"entry escapes the target directory: {m.name}")
+            total += m.size
+            if total > _MAX_BUNDLE_BYTES:
+                raise ValueError(f"bundle exceeds {_MAX_BUNDLE_BYTES} bytes uncompressed")
+            # The byte cap counts payload only, so zero-size members never
+            # trip it; this bounds their number, and with it the CPU the
+            # walk burns and the members list it grows.
+            if len(members) >= _MAX_BUNDLE_MEMBERS:
+                raise ValueError(f"bundle has more than {_MAX_BUNDLE_MEMBERS} entries")
+            members.append(m)
+        # The PEP 706 feature probe: data_filter exists exactly when
+        # extractall() accepts filter=. Debian 12's 3.11.2 predates the
+        # backport — there the checks above are the (sufficient) guard.
+        if hasattr(tarfile, "data_filter"):
+            tf.extractall(dest_dir, members=members, filter="data")
+        else:
+            tf.extractall(dest_dir, members=members)
+
+
+# The kept versions
+_KEEP_VERSIONS = 5   # trees kept per site, the live one included
+
+
+def _content_slots(serve_dir):
+    """The two sibling trees the pre-ring design flipped between. Kept only
+    so a site published under it can be adopted into the ring."""
+    base = _resolve(serve_dir).rstrip(os.sep)
+    return base + ".a", base + ".b"
+
+
+def _drop_backup(bak):
+    """Remove the single-shot backup marker the pre-ring design left: a
+    symlink from the flip era (the tree it names is adopted separately), or
+    a real directory from before that."""
+    if os.path.islink(bak):
+        os.remove(bak)
+    elif os.path.isdir(bak):
+        shutil.rmtree(bak, ignore_errors=True)
+
+
+def _version_dirs(serve_dir):
+    """Every kept tree for this site, newest first, as (path, epoch).
+
+    A name that does not parse is not a version and is left alone — the
+    scan is a filter over siblings, never a prefix match that could sweep
+    up a directory Servette did not create."""
+    base = _resolve(serve_dir).rstrip(os.sep)
+    head, tail = os.path.split(base)
+    try:
+        names = os.listdir(head or ".")
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if not name.startswith(tail + ".v"):
+            continue
+        stamp, _dot, extra = name[len(tail) + 2:].partition(".")
+        path = os.path.join(head, name)
+        if not (stamp.isdigit() and os.path.isdir(path) and not os.path.islink(path)):
+            continue
+        # Two publishes inside one second share an epoch and are told apart
+        # by the sequence suffix — which must sort with the clock, not
+        # against it, or the newer of the two would read as the older.
+        out.append((path, int(stamp), int(extra) if extra.isdigit() else 1))
+    out.sort(key=lambda r: (-r[1], -r[2]))
+    return [(path, stamp) for path, stamp, _seq in out]
+
+
+def _new_version_dir(serve_dir, when=None):
+    """An unused version-directory path for a tree published at `when`
+    (default now). Two publishes inside one second take '.2', '.3': the
+    name must be unique, or the second would land on top of the first."""
+    base  = _resolve(serve_dir).rstrip(os.sep)
+    stamp = int(when if when is not None else time.time())
+    path  = f"{base}.v{stamp}"
+    n = 2
+    while os.path.lexists(path):
+        path = f"{base}.v{stamp}.{n}"
+        n += 1
+    return path
+
+
+def _adopt_legacy_slots(serve_dir):
+    """Bring a two-slot site's trees into the ring, after the flip that made
+    them idle. Renaming a tree the live symlink points at would break the
+    link, so the live one is skipped — it is adopted on the publish after
+    this one, when it is no longer live. The `.bak` symlink goes: the ring
+    is the history now."""
+    base = _resolve(serve_dir).rstrip(os.sep)
+    _drop_backup(base + ".bak")
+    live = os.path.realpath(base)
+    for slot in _content_slots(serve_dir):
+        if not os.path.isdir(slot) or os.path.islink(slot):
+            continue
+        if os.path.realpath(slot) == live:
+            continue
+        try:
+            os.rename(slot, _new_version_dir(serve_dir, os.path.getmtime(slot)))
+        except OSError:
+            pass          # a slot that will not move is left, never deleted
+
+
+def _prune_versions(serve_dir, keep=None):
+    """Drop the oldest trees past the ring's depth. The live tree is never a
+    candidate however old it is: an operator who restored a year-old version
+    is serving it, and content being served is not garbage."""
+    keep = _KEEP_VERSIONS if keep is None else keep
+    live = os.path.realpath(_resolve(serve_dir).rstrip(os.sep))
+    for path, _stamp in _version_dirs(serve_dir)[keep:]:
+        if os.path.realpath(path) != live:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+# The content swap
+def _swap_site_content(new_dir, serve_dir):
+    """Make new_dir the live content behind serve_dir, keeping the trees
+    behind it as the ring `restore-site` chooses from.
+
+    new_dir's tree is renamed to a fresh `<link>.v<epoch>` sibling and one
+    atomic os.replace flips the link — no window, crash-safe. Pruning runs
+    after the flip, so a publish that fills the disk fails in staging with
+    every kept version still there.
+
+    A legacy real directory at serve_dir is converted on its first swap: the
+    old content becomes a version and the link lands — the one swap that
+    still carries the old rename gap, once per site ever, with the same
+    rollback the old design had (a failed conversion must never leave NO
+    live directory — every request a 404 — while the caller reports merely
+    'rejected')."""
+    if not os.path.isdir(new_dir):
+        # A dangling symlink would "succeed" — the old rename raised here,
+        # and the flip must fail just as loudly rather than serve nothing.
+        raise FileNotFoundError(f"new content tree missing: {new_dir}")
+    live = _resolve(serve_dir).rstrip(os.sep)
+    now  = int(time.time())
+    dest = _new_version_dir(serve_dir, now)
+
+    if os.path.islink(live):
+        os.rename(new_dir, dest)
+        try:
+            flip = live + ".flip"
+            if os.path.lexists(flip):
+                os.remove(flip)                  # a crash's leftover, harmless
+            os.symlink(dest, flip)
+            os.replace(flip, live)               # the swap: one atomic syscall
+        except OSError:
+            # The tree was already renamed into the ring; a failed flip
+            # hands it back to staging, so a publish the caller reports
+            # 'rejected' leaves no never-published "version" behind for
+            # restore-site to offer.
+            os.rename(dest, new_dir)
+            raise
+        _adopt_legacy_slots(serve_dir)
+        _prune_versions(serve_dir)
+        return
+
+    # Legacy: a real directory (or nothing yet) at serve_dir — convert.
+    had_live = os.path.isdir(live)
+    os.rename(new_dir, dest)
+    kept = None
+    if had_live:
+        # Dated by its own mtime, not by now — it is the older content, and
+        # the ring sorts on the name — but clamped strictly below dest's
+        # stamp: an mtime in dest's own second would collide into a higher
+        # sequence suffix, and the ring would read the OLD tree as newer.
+        kept = _new_version_dir(serve_dir,
+                                min(int(os.path.getmtime(live)), now - 1))
+        os.rename(live, kept)
+    try:
+        os.symlink(dest, live)
+    except OSError:
+        if had_live:
+            os.rename(kept, live)
+        os.rename(dest, new_dir)   # same hand-back as the flip above
+        raise
+    _adopt_legacy_slots(serve_dir)
+    _prune_versions(serve_dir)
+
+
+_publish_lock = threading.Lock()  # serializes site-content mutation across every
+                                   # site: a page publish and 'restore-site' can
+                                   # run from two sessions at once, and the swap
+                                   # is several unguarded filesystem ops, not one.
+
+
+# Landing a bundle
+def _land_bundle(site, bundle, source):
+    """Extract `bundle` into staging and swap it live for `site`, keeping the
+    previous trees in the ring, with ownership repair — the shared tail of
+    every content channel. `source` is only for the log line. Returns
+    "rejected" or "published"."""
+    with _publish_lock:
+        staging = _resolve(site.serve_dir).rstrip(os.sep) + ".new"
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            _extract_bundle(bundle, staging)
+            # Extracted by this process — root, since every content channel
+            # elevates — so re-establish what enable establishes BEFORE the
+            # tree goes live: the operator owns their content, the service
+            # reads through its group. strip_world because the extraction's
+            # own 644/755 modes are Servette's writing, not the operator's,
+            # and must honour the never-world-bits promise. Kept versions
+            # need nothing: each was the live tree once and keeps the
+            # ownership it already has. A failed extraction dies here, in
+            # staging, with the live content and the ring untouched.
+            _chown_operator(staging, strip_world=True)
+            _swap_site_content(staging, site.serve_dir)
+        except Exception as e:
+            log.error("Publish bundle rejected: %s", e)
+            shutil.rmtree(staging, ignore_errors=True)
+            return "rejected"
+
+    log.info("Published new content for %s from %s", site.domain or site.serve_dir, source)
+    return "published"
+
+
+# publish
+def _tar_folder(root, cap=_MAX_BUNDLE_BYTES):
+    """A folder as the gzipped tar bundle the publish door takes —
+    (bytes, "") — or (None, sentence) where it cannot be one. Hidden paths
+    are excluded on the way in by the rule the server serves by: a
+    dot-path is never served, so it is never published."""
+    buf, files, total = io.BytesIO(), 0, 0
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for base, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs
+                       if not d.startswith(".") or d == ".well-known"]
+            for name in sorted(names):
+                if name.startswith("."):
+                    continue
+                full = os.path.join(base, name)
+                if os.path.islink(full) or not os.path.isfile(full):
+                    continue    # regular files only, as the extractor accepts
+                try:
+                    size = os.path.getsize(full)
+                    tf.add(full, arcname=os.path.relpath(full, root),
+                           recursive=False)
+                except OSError:
+                    continue
+                files += 1
+                # The cap counts UNCOMPRESSED bytes — the same quantity
+                # _extract_bundle enforces and the page's builder sums. A
+                # compressed count would wave a well-compressing 8 GB folder
+                # through this door only for the core to refuse it with a
+                # log line instead of this sentence.
+                total += size
+                if total > cap:
+                    return None, (f"more than {cap // (1024 * 1024)} MB of "
+                                  "content — too large to publish as one "
+                                  "bundle")
+    if not files:
+        return None, ("no publishable files (hidden paths are not served, "
+                      "so they are not published)")
+    return buf.getvalue(), ""
+
+
+def cmd_publish(args):
+    """Publish a folder on this box as a site's content — the terminal half
+    of the pair whose browser half is the page's Publish button."""
+    if not args:
+        print("  Usage: publish [n] <folder>")
+        return
+    if len(args) >= 2:
+        site, folder = _config_site_arg([args[0]]), args[1]
+    else:
+        site, folder = _config_site_arg([]), args[0]
+    if site is None:
+        return
+    root = os.path.realpath(os.path.abspath(folder))
+    if not os.path.isdir(root):
+        print(f"  {folder} is not a folder on this box.")
+        if folder.isdigit():
+            # 'publish 2' alone reads as a site index missing its folder,
+            # not as a folder named 2 — say so instead of the bare miss.
+            print(f"  (A site index needs the folder too: publish {folder} <folder>)")
+        return
+    if _serve_dir_exposes_secrets(root):
+        print("  That folder holds Servette's own config or TLS keys — "
+              "publishing it would publish them.")
+        return
+    blob, problem = _tar_folder(root)
+    if problem:
+        print(f"  {folder}: {problem}")
+        return
+    result = _land_bundle(site, blob, "terminal publish")
+    if result == "published":
+        print(f"  Published to {site.domain or site.serve_dir}.")
+    else:
+        print("  Publish rejected — the log has the reason; the live "
+              "content and the kept versions are untouched.")
+
+
+# preview
+def _preview_dir(site):
+    """Where a staged preview lives: a sibling of the site's tree, never
+    inside it. Inside, the public server would serve the unpublished draft
+    to the internet."""
+    return _resolve(site.serve_dir).rstrip(os.sep) + ".preview"
+
+
+def _stage_preview(site, bundle):
+    """Extract `bundle` where the loopback server can serve it, without
+    going near the live tree. Returns "staged" or "rejected".
+
+    The same _extract_bundle every content channel runs, so a bundle the
+    publish door would refuse the preview refuses identically — a preview
+    that accepted more than a publish would be a preview of something that
+    can never ship."""
+    dest = _preview_dir(site)
+    shutil.rmtree(dest, ignore_errors=True)
+    try:
+        _extract_bundle(bundle, dest)
+    except Exception as e:
+        log.error("Preview bundle rejected: %s", e)
+        shutil.rmtree(dest, ignore_errors=True)
+        return "rejected"
+    log.info("Staged a preview for %s", site.domain or site.serve_dir)
+    return "staged"
+
+
+def _clear_previews():
+    """Drop every staged preview. A preview belongs to one `admin` run: it is
+    a draft nobody published, and leaving it on disk would keep an
+    unpublished tree beside a live site indefinitely."""
+    for site in config.sites:
+        shutil.rmtree(_preview_dir(site), ignore_errors=True)
+
+
+def _tree_size(path):
+    """(files, bytes) under path. A file that vanishes mid-walk is skipped,
+    not raised: this is a description, and a racing publish must not make
+    describing the site an error."""
+    files = total = 0
+    for root, _dirs, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+                files += 1
+            except OSError:
+                pass
+    return files, total
+
+
+def _site_versions(site):
+    """The kept trees of one site as rows both surfaces render: the name to
+    restore by, when it was published, how many files and bytes it holds, and
+    which one is live. Answering walks every tree on disk — which is why the
+    page fetches it as its own /versions call instead of a field on the
+    /status it polls every few seconds.
+
+    The live tree is ALWAYS reported, ring member or not. A site published
+    before the ring existed serves a tree the ring does not hold — it joins
+    on its next publish — and reporting an empty list would tell an operator
+    with a live, working site that nothing is published, which is both false
+    and alarming. That tree carries its own mtime as its date and is never
+    offered for restore, because it is already live.
+
+    Walking every tree is why this is its own call rather than part of the
+    status snapshot — it runs when an operator asks to see the history, not
+    on every poll of a page that refreshes itself."""
+    live_link = _resolve(site.serve_dir).rstrip(os.sep)
+    live      = os.path.realpath(live_link)
+    rows, in_ring = [], False
+    for path, stamp in _version_dirs(site.serve_dir):
+        files, total = _tree_size(path)
+        is_live = os.path.realpath(path) == live
+        in_ring = in_ring or is_live
+        rows.append({"name": os.path.basename(path), "published": stamp,
+                     "files": files, "bytes": total, "live": is_live})
+    if not in_ring and os.path.isdir(live):
+        files, total = _tree_size(live)
+        try:
+            stamp = int(os.path.getmtime(live))
+        except OSError:
+            stamp = 0
+        rows.insert(0, {"name": os.path.basename(live), "published": stamp,
+                        "files": files, "bytes": total, "live": True})
+    return rows
+
+
+def _restore_site(site, version=None):
+    """Serve a kept version again. `version` is a name as _site_versions
+    reports it; None means the newest tree that is not already live — plain
+    'undo the last publish'. Returns "" on success, or a sentence saying why
+    not.
+
+    The flip is the publish's flip, so a restore has no window either. The
+    tree is NOT consumed: it stays in the ring, so restoring the wrong one
+    is itself undoable. That is the whole difference from the single-shot
+    backup this replaced."""
+    live_path = _resolve(site.serve_dir).rstrip(os.sep)
+    versions  = _version_dirs(site.serve_dir)
+    if not versions:
+        return ("Nothing to restore — a kept version appears the first time "
+                "new content replaces old.")
+    if not os.path.islink(live_path):
+        return ("This site's folder is not yet behind the version link — "
+                "publish once, and the content it replaces joins the ring.")
+
+    live = os.path.realpath(live_path)
+    if version is None:
+        target = next((p for p, _ in versions if os.path.realpath(p) != live), None)
+        if target is None:
+            return "Nothing to restore — the only kept version is the live one."
+    else:
+        # Matched by base name against the ring, never taken as a path: the
+        # page's version name arrives over the wire, and a caller must not be
+        # able to name a directory the ring does not hold.
+        target = next((p for p, _ in versions
+                       if os.path.basename(p) == version), None)
+        if target is None:
+            return f"No kept version named {version}."
+        if os.path.realpath(target) == live:
+            return "That version is already the live one."
+
+    with _publish_lock:
+        if not os.path.isdir(target):
+            return "That version was removed while you were deciding."
+        flip = live_path + ".flip"
+        if os.path.lexists(flip):
+            os.remove(flip)
+        os.symlink(target, flip)
+        os.replace(flip, live_path)              # the restore: one atomic flip
+        # The tree may date from a publish that extracted as root — the same
+        # ownership repair as a publish, for the same reason.
+        _chown_operator(os.path.realpath(live_path), strip_world=True)
+    log.info("Restored content for %s to %s",
+             site.domain or site.serve_dir, os.path.basename(target))
+    return ""
+
+
+def _version_line(row):
+    """One kept version as a line for the terminal: when, how big, and
+    whether it is the one being served."""
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["published"]))
+    size = (f"{row['bytes'] / (1024 * 1024):.1f} MB" if row["bytes"] >= 1024 * 1024
+            else f"{row['bytes'] / 1024:.0f} KB")
+    files = f"{row['files']} file" + ("" if row["files"] == 1 else "s")
+    return f"{when} — {files}, {size}" + ("  (live)" if row["live"] else "")
+
+
+def cmd_restore_site(site):
+    """Roll back to a kept version. One choice is a yes/no; several are a
+    numbered list, newest first. Nothing is consumed — the version being
+    rolled away stays in the ring, so this is undoable in its own terms."""
+    rows = _site_versions(site)
+    kept = [r for r in rows if not r["live"]]
+    if not kept:
+        # One line, and it says when that changes rather than explaining the
+        # ring: "no kept versions yet" alone leaves a reader wondering what
+        # would make one.
+        print("  Nothing to restore — a kept version appears the first time")
+        print("  new content replaces old.")
+        return
+
+    if len(kept) == 1:
+        print(f"\n  Kept: {_version_line(kept[0])}")
+        if not _prompt("Restore this content?"):
+            print("  Restore cancelled.")
+            return
+        choice = kept[0]
+    else:
+        print()
+        for n, row in enumerate(kept, 1):
+            print(f"  {n}. {_version_line(row)}")
+        raw = _input("\n  Restore which? [number, Enter = cancel]: ").strip()
+        if not raw.isdigit() or not (1 <= int(raw) <= len(kept)):
+            print("  Restore cancelled.")
+            return
+        choice = kept[int(raw) - 1]
+
+    err = _restore_site(site, choice["name"])
+    print(f"  {err}" if err else "  Site content restored.")
+
+# `set [n] key=value ...` is the write half of the tooling surface (`status
+# --json` and `sites --json` are the read half): external tools drive it over
+# SSH, which is the authentication — no network admin API exists, by design.
+# Host pairs
+def _set_host_value(target, key, value):
+    """Validate one host-level pair and apply it to target (config, or a
+    scratch object during the validation pass). Returns an error string,
+    empty on success."""
+    if key == "port":
+        if not (value.isdigit() and 0 < int(value) < 65536):
+            return "port must be 1-65535"
+        target.port = int(value)
+    elif key == "email":
+        # Judged at the one write door `set`, the page, and the prompt
+        # share; the alternative was the authority refusing the account at
+        # issuance time, far from the typo.
+        err = _email_problem(value)
+        if err:
+            return err
+        target.email = value
+    elif key in ("rate_limit", "auth_rate_limit"):
+        if not (value.isdigit() and int(value) > 0):
+            return f"{key} must be a positive integer"
+        setattr(target, key, int(value))
+    elif key == "cache_size_mb":
+        if not (value.isdigit() and int(value) > 0):
+            return "cache_size_mb must be a positive integer"
+        target.cache_size_mb = int(value)
+    elif key == "trusted_proxy":
+        if value:
+            try:
+                # Stored in the one canonical spelling (the redirect-source
+                # precedent): the request path compares this against a
+                # normalized socket address, and "2001:0DB8::1" typed here
+                # would never equal the lowercase form the socket yields.
+                value = str(ipaddress.ip_address(value))
+            except ValueError:
+                return "trusted_proxy must be an IP address (or empty to clear)"
+        target.trusted_proxy = value
+    elif key == "health_path":
+        # The balancer fitting, terminal-only by ruling. The criteria are
+        # the redirect source's — site-absolute, printable ASCII — plus one
+        # of its own: /.well-known/ stays out of reach, or a health path
+        # could shadow the connection test and the ACME challenges that
+        # live there, for every visitor.
+        if value:
+            if (not value.startswith("/") or len(value) > _MAX_REDIRECT_CHARS
+                    or any(not (0x20 <= ord(c) <= 0x7E) for c in value)):
+                return ("a health path is a site-absolute printable-ASCII "
+                        "path like /healthz (or empty to turn the check off)")
+            if value.startswith("/.well-known/"):
+                return ("/.well-known/ is reserved — the connection test and "
+                        "ACME challenges live there")
+        target.health_path = value
+    elif key == "cache_policy":
+        v = value.strip().lower()
+        if v not in ("no-store", "no-cache", "max-age"):
+            return "cache_policy is no-store, no-cache, or max-age"
+        target.cache_policy = v
+    elif key == "cache_max_age":
+        # Non-negative: a negative max-age is not a shorter cache, it is a
+        # malformed Cache-Control header sent on every response.
+        if not value.isdigit():
+            return "cache_max_age is seconds — a whole number, 0 or more"
+        target.cache_max_age = int(value)
+    elif key == "tls_min_version":
+        if value not in ("1.2", "1.3"):
+            return "tls_min_version is 1.2 or 1.3"
+        target.tls_min_version = value
+    elif key == "ciphers":
+        if value:
+            # Judged by the only arbiter there is — OpenSSL itself. A string
+            # it refuses would otherwise be refused at the next server
+            # start, which fails closed: the site down over a typo saved
+            # months earlier.
+            try:
+                ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).set_ciphers(value)
+            except ssl.SSLError:
+                return ("not a cipher string OpenSSL accepts "
+                        "(or empty for the system default)")
+        target.ciphers = value
+    elif key in ("csp", "permissions_policy"):
+        # Sent verbatim as a header value on every response: a control or
+        # non-ASCII character is header injection, refused at the door.
+        # Empty disables the header.
+        if any(not (0x20 <= ord(c) <= 0x7E) for c in value):
+            return (f"{key} is a header value — printable ASCII only "
+                    "(or empty to disable the header)")
+        setattr(target, key, value)
+    return ""
+
+
+# Site pairs
+def _set_site_value(target, key, value):
+    """Validate one per-site pair and apply it to target (the chosen site, or
+    a scratch Site during the validation pass). Returns an error string,
+    empty on success."""
+    if key == "username":
+        # A colon can never reach the server in a username: sign-in joins
+        # user:password into one credential and _handle_request splits it at
+        # the first colon, so a stored username containing one locks every
+        # visitor out while the health row still reads private-and-healthy.
+        # Refused here — the one write path — so `set`, the page, and the
+        # interactive prompt judge it with the same sentence.
+        if ":" in value:
+            return "a username cannot contain a colon — sign-in splits user:password at the first one"
+        # The load door refuses control characters in every text field, and
+        # a door that saved one would be saving an answer the next restart
+        # refuses — the same judgment at every door, or no principle at all.
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+            return "a username cannot contain control characters"
+        # Auth is one switch, not two half-states: a cleared username takes
+        # the stored password with it, on every surface that writes settings
+        # (`set`, the page, and the prompt alike, since all land here).
+        target.username = value
+        if not value:
+            target.password_hash = ""
+            target.password_salt = ""
+    elif key == "redirect":
+        # One rule per token: 'redirect=/path,/target' adds or replaces a
+        # permanent (301) rule, a trailing ',temporary' makes it a 302, and
+        # 'redirect=/path,' removes the rule from whichever table holds it.
+        # The tables are mappings and `set` speaks in scalars, so commas are
+        # where the two grammars meet — which prices a target literally
+        # ending in ',temporary' out of this grammar (servette.toml still
+        # spells it). Validation is _clean_redirects — the same function the
+        # config load runs, so a redirect the file would refuse the command
+        # refuses too.
+        src, comma, rest = value.partition(",")
+        if not comma:
+            return ("a redirect is a pair: redirect=/path,/where-it-goes "
+                    "(or /path, to remove; add ,temporary for a 302)")
+        head, c2, tail = rest.rpartition(",")
+        temp = False
+        if c2 and head and tail.strip().lower() in ("temporary", "permanent"):
+            temp, rest = tail.strip().lower() == "temporary", head
+        src, dst = src.strip(), rest.strip()
+        perm_table = dict(target.redirects)
+        temp_table = dict(target.redirects_temp)
+        if not dst:
+            # The canonical spelling, because that is what the tables' keys
+            # are stored in — the same rule the add path and the lookup
+            # follow, so the page can hand back a stored key verbatim.
+            norm = _canonical_source(src)
+            if not (perm_table.pop(norm, None) or temp_table.pop(norm, None)):
+                return f"no redirect from {src}"
+        else:
+            checked = _clean_redirects({src: dst})
+            if not checked:
+                return ("a redirect goes from a site path to a site path or an "
+                        "http(s) URL, and may not point at itself")
+            # Replacing a rule replaces its permanence with it: one source
+            # lives in exactly one table.
+            norm = next(iter(checked))
+            perm_table.pop(norm, None)
+            temp_table.pop(norm, None)
+            (temp_table if temp else perm_table).update(checked)
+            # Two refusals the pair only earns in company, judged here so
+            # the operator gets a sentence at the door — written into the
+            # file, either would make the strict load door refuse the whole
+            # config at the next restart. The cap first, over the two
+            # tables' sum:
+            if len(perm_table) + len(temp_table) > _MAX_REDIRECTS:
+                return (f"the redirect table is full ({_MAX_REDIRECTS} rules) "
+                        "— remove one first")
+            # And the ring, over both tables at once — a 302 hop bounces a
+            # browser exactly as a 301 does, and each pair is valid alone
+            # (/a→/b saved earlier, /b→/a now).
+            merged = {**perm_table, **temp_table}
+            if len(_clean_redirects(merged)) != len(merged):
+                return ("that redirect closes a ring — the chain of rules "
+                        "would send a visitor in a circle")
+        target.redirects      = perm_table
+        target.redirects_temp = temp_table
+    elif key == "active":
+        # The pause between serving and deleting: a deactivated site keeps
+        # its config and files but is invisible to routing and TLS alike.
+        v = value.strip().lower()
+        if v not in ("yes", "no"):
+            return "active must be yes or no"
+        if v == "yes" and not target.active:
+            # Reactivation makes the certificate load-bearing again: startup
+            # skips a paused site's cert but fails closed on an active one,
+            # so saving this flip over an unloadable pair would save an
+            # answer the next restart refuses. Judged with the same load the
+            # server itself performs, here — the one write path — so `set`,
+            # the page, and the prompt refuse with the same sentence.
+            try:
+                _build_ssl_context(_resolve(target.cert_file),
+                                   _resolve(target.key_file))
+            except Exception:
+                return (f"the certificate does not load "
+                        f"({target.cert_file or 'none configured'}) — "
+                        "run 'config cert' first")
+        target.active = (v == "yes")
+    return ""
+
+
+# The set vocabulary
+_SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
+                  "cache_size_mb", "cache_policy", "cache_max_age",
+                  "trusted_proxy", "health_path", "tls_min_version",
+                  "ciphers", "csp", "permissions_policy")
+_SET_SITE_KEYS = ("username", "active", "redirect")
+
+
+def _set_usage():
+    print("  Usage: set [n] key=value ...")
+    print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
+    print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
+    print("  A redirect is a pair: redirect=/path,/where-it-goes — and")
+    print("  redirect=/path, (nothing after the comma) removes it. A third")
+    print("  token, redirect=/path,/target,temporary, answers a temporary")
+    print("  302 instead of the permanent 301.")
+
+
+# set
+def _apply_settings(site, pairs):
+    """Validate `pairs` ([(key, value)]) against scratch objects, then apply
+    them to config/`site` and save — the one settings write path, shared by
+    `set` and the admin page's Config tab so the two surfaces cannot drift.
+    Returns an error string, empty on success; every pair is checked before
+    any is applied, so a bad pair never leaves the config half-written.
+    PermissionError from the save propagates — each caller words its own
+    hint."""
+    class _ScratchHost:
+        pass
+    scratch_host, scratch_site = _ScratchHost(), Site()
+    # The scratch site starts blank for every scalar — each is simply
+    # overwritten — but the redirect table is edited rather than replaced,
+    # so validating a removal against an empty table would refuse a
+    # redirect that is really there.
+    scratch_site.redirects      = dict(site.redirects)
+    scratch_site.redirects_temp = dict(site.redirects_temp)
+    # The active flip judges against the site's real state: reactivation
+    # loads the certificate it would make load-bearing, so the scratch
+    # carries the cert paths and the current value — a blank scratch would
+    # run the check against no certificate at all, or skip it.
+    scratch_site.active    = site.active
+    scratch_site.cert_file = site.cert_file
+    scratch_site.key_file  = site.key_file
+    for key, value in pairs:
+        if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
+            return f"unknown setting: {key}"
+        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
+               else _set_site_value(scratch_site, key, value))
+        if err:
+            return f"{key}: {err}"
+    for key, value in pairs:
+        if key in _SET_HOST_KEYS:
+            _set_host_value(config, key, value)
+        else:
+            _set_site_value(site, key, value)
+    config.save()
+    return ""
+
+
+def cmd_set(args):
+    """`set [n] key=value ...` — non-interactive configuration for tooling.
+    The optional leading index picks the site for site keys (default 0).
+    Deliberately absent: password (a secret on argv leaks into shell history
+    and the process table — set it interactively), and domain (bound up with
+    certificate issuance — run 'config cert')."""
+    site = config.sites[0]
+    if args and args[0].isdigit():
+        idx = int(args[0])
+        if idx >= len(config.sites):
+            print(f"  No site {idx} — 'sites' lists {len(config.sites)}.")
+            return
+        site, args = config.sites[idx], args[1:]
+    pairs = []
+    for token in args:
+        key, eq, value = token.partition("=")
+        key = key.strip().lower()
+        if not eq or key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
+            print(f"  Unknown or malformed: {token!r}")
+            _set_usage()
+            return
+        pairs.append((key, value))
+    if not pairs:
+        _set_usage()
+        return
+    try:
+        err = _apply_settings(site, pairs)
+    except PermissionError:
+        print("  Error: writing the config needs root, and sudo is unavailable — re-run as root.")
+        return
+    if err:
+        print(f"  {err}")
+        return
+    print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
+
+
+# The settings display
+def _config_show():
+    def val(v):
+        return v if v else "(not set)"
+
+    cache_display = config.cache_policy
+    if config.cache_policy == "max-age":
+        cache_display += f" ({config.cache_max_age}s)"
+
+    host_rows = [
+        ("HTTPS port",         config.port),
+        ("Email",              val(config.email)),
+        ("Rate limit",         f"{config.rate_limit} req/min"),
+        ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
+        ("Cache policy",       cache_display),
+        ("Cache size",         f"{config.cache_size_mb} MB"),
+        ("Trusted proxy",      val(config.trusted_proxy)),
+        ("Health check path",  config.health_path or "(off)"),
+        ("TLS min version",    config.tls_min_version),
+        ("Cipher suites",      config.ciphers or "(system default)"),
+        ("CSP",                config.csp or "(disabled)"),
+        ("Permissions-Policy", config.permissions_policy or "(disabled)"),
+    ]
+
+    _section("Current Settings")
+    for label, value in host_rows:
+        print(f"  {label:<{_PAD}} {value}")
+
+    for i, site in enumerate(config.sites):
+        print(f"\n  Site {i}: {site.domain or '(self-signed)'}")
+        site_rows = [
+            ("Directory",   val(site.serve_dir)),
+            ("Certificate", val(site.cert_file)),
+            ("Key",         val(site.key_file)),
+            ("Username",    val(site.username)),
+            ("Password",    "(set)" if site.password_hash else "(not set)"),
+        ]
+        for label, value in site_rows:
+            print(f"    {label:<{_PAD - 2}} {value}")
+    print()
+
+
+def _config_sites():
+    _section("Sites")
+    for i, site in enumerate(config.sites):
+        auth = "private" if site.username else "public"
+        state = "" if site.active else ", DEACTIVATED (set active=yes to serve)"
+        print(f"  {i}: {site.domain or '(self-signed)'} — {site.serve_dir}, {auth}{state}")
+    print()
+    print("  Edit one with e.g. 'cert 1', 'username 1' (index defaults to 0).")
+    print("  'add-site' adds one; 'remove-site <n>' removes one.\n")
+
+
+# serve_dir containment
+def _is_within_base_dir(path):
+    """True if path (already resolved) is BASE_DIR itself or somewhere under
+    it. What actually turns on this: the systemd unit's ReadWritePaths only
+    grants write access under BASE_DIR, so a serve_dir outside it SERVES
+    fine but cannot take a publish under the sandboxed service — a failure
+    a manual, unsandboxed run never shows. (The atomic swap itself is
+    indifferent to where serve_dir lives: staging and every kept version
+    are its siblings, so they share its filesystem anywhere.) Containment
+    is an implementation fact, not an enforced guarantee (#123, ruled):
+    every folder Servette assigns satisfies it by construction, and a
+    hand-edited config pointing outside is reported as a blocking health
+    row rather than refused.
+
+    Defers to _within so containment is decided in exactly one place: two
+    implementations of the same security predicate can drift apart, and only
+    one of them would be the one anybody reads."""
+    return _within(os.path.realpath(BASE_DIR), os.path.realpath(path))
+
+
+def _serve_dir_exposes_secrets(path):
+    """True when serving `path` would hand out Servette's own secrets — the
+    config (password hashes), the ACME account key, or the TLS private keys
+    under certs/. BASE_DIR itself holds all three; the certs tree is the
+    keys. Either would be served as plain file reads, so both are refused as
+    a serve_dir wherever the value came from — the load door's security
+    floor, fatal where containment is merely reported, because a config
+    that would publish the keys must not run at all. Containment inside
+    BASE_DIR is deliberately NOT assumed here: a hand-edited serve_dir may
+    point anywhere, which is why this judges the resolved path alone."""
+    real  = os.path.realpath(path)
+    base  = os.path.realpath(BASE_DIR)
+    certs = os.path.join(base, "certs")
+    return real == base or real == certs or real.startswith(certs + os.sep)
+
+
+# add-site
+def _invent_site_dir():
+    """Create and own an empty folder for a new site. Servette names it: the
+    folder is where publishes land, not a question an operator answers
+    ([the folder is not a setting](../DECISIONS.md#the-folder-is-not-a-setting-serve_dir-has-left-the-vocabulary)).
+    Both doors — the page's add-card and the terminal's add-site — come
+    here, so neither can invent a folder the other would not."""
+    name = f"site-{os.urandom(3).hex()}"
+    os.makedirs(_resolve(name), exist_ok=True)
+    _chown_operator(_resolve(name))
+    return name
+
+
+def _append_site(serve_dir):
+    """Append a new site serving `serve_dir` (a path the caller has already
+    validated or created) and give it its own certificate identity. The one
+    site-creation core, shared by the terminal's add-site prompts and the
+    page's add-card. Returns the new site's index.
+
+    The self-signed pair is suffixed with randomness, not the site's list
+    position: a position-based name (cert-{idx}.pem) collides with a
+    surviving site's own files after a remove/add sequence shifts indices,
+    silently overwriting that site's live certificate. It is generated
+    unconditionally, before any domain enters the picture: if ACME issuance
+    later fails, cert_file/key_file must still point at real files on disk —
+    start_server()'s pre-flight existence check refuses to start the WHOLE
+    server, for every site, if any site's cert_file is missing."""
+    site = Site({"serve_dir": serve_dir})
+    config.sites.append(site)
+    suffix = os.urandom(4).hex()
+    site.cert_file = f"cert-{suffix}.pem"
+    site.key_file  = f"key-{suffix}.pem"
+    _generate_self_signed_cert(_resolve(site.cert_file), _resolve(site.key_file))
+    _chown_servette(_resolve(site.cert_file))
+    _chown_servette(_resolve(site.key_file))
+    config.save()
+    return len(config.sites) - 1
+
+
+def _config_add_site():
+    """Add a site — the same two questions cmd_setup asks for the very first
+    one, domain and password. The folder is not among them: Servette names
+    and creates it, the same way the page's add-card does."""
+    print("\n  Adding a new site.\n")
+    # Nothing is written into it and nothing is offered: a site with no
+    # index.html answers its own domain with the embedded error page, which
+    # says the server is up and that nothing is published yet. Setup still
+    # never leaves a site with nothing to serve (#37) — it just no longer
+    # needs to put a file in a folder to keep that promise.
+    folder = _invent_site_dir()
+    print(f"  Content will land in {_resolve(folder)} — Servette's to manage.")
+    print("  Until you publish, the site answers with Servette's error page.")
+
+    # The self-signed pair keeps a second site from colliding with the
+    # first's cert.pem/key.pem — overwritten if a domain is obtained below,
+    # which uses the domain-scoped certs/<domain>/ path instead.
+    print("  Generating self-signed certificate...")
+    idx  = _append_site(folder)
+    site = config.sites[idx]
+    print(f"  → site {idx} added.\n")
+
+    domain = _input("  Domain name (leave blank for self-signed): ").strip()
+    if domain and _domain_in_use(domain):
+        print(f"  → {domain} is already used by another site on this box — using a self-signed certificate instead.")
+        domain = ""
+
+    reloaded = False
+    if domain:
+        placeholder = (_resolve(site.cert_file), _resolve(site.key_file))
+        _obtain_trusted_cert(domain, site)  # reloads the server itself on success
+        # site.domain is only assigned inside _obtain_trusted_cert on the
+        # success path, so this distinguishes a real reload from a failed
+        # ACME attempt that left the self-signed fallback (already generated
+        # above) as the site's live cert.
+        if site.domain == domain:
+            reloaded = True
+            # The placeholder pair was insurance against ACME failing; issuance
+            # succeeded and repointed the site at certs/<domain>/, so nothing
+            # references these any more. Compared against the site's current
+            # paths rather than deleted blind — if issuance somehow left the
+            # site pointing at them, they are live files, not litter.
+            for stale in placeholder:
+                if stale not in (_resolve(site.cert_file), _resolve(site.key_file)):
+                    try:
+                        os.remove(stale)
+                    except OSError:
+                        pass
+        else:
+            print("  → keeping the self-signed certificate for now. Browsers will show a security warning until you retry the domain.\n")
+    else:
+        print("  Note: browsers will show a security warning until you add a domain.\n")
+
+    print("  Password protection (optional). Leave username blank to disable.")
+    _config_username(site)
+    if site.username:
+        _config_password(site)
+
+    print(f"\n  Site {idx} added. Run 'publish {idx} <folder>' — or use the")
+    print("  admin page — to put content on it.")
+    if not reloaded and (_server_running() or _service_is_active()):
+        _reload_server()
+
+
+# remove-site
+def _remove_site(idx):
+    """Drop site `idx` and delete its server copies — the live tree, every
+    kept version in its ring, a staged preview, and the shapes that predate
+    the ring. The operator's originals live in their own local storage;
+    everything here is a derived copy, which is what makes deletion the
+    honest meaning of 'remove' (deactivation is the keep-everything
+    alternative). The site's certificate files are kept, and a folder another
+    site still points at is left alone. Returns an error sentence, empty on
+    success. Shared by the terminal's remove-site and the page's cards."""
+    if not (0 <= idx < len(config.sites)):
+        return f"no site {idx}"
+    if len(config.sites) == 1:
+        return "can't remove the only site — a box needs at least one"
+    victim = config.sites[idx]
+    # rstrip, exactly as every derived-tree helper does: a hand-edited
+    # trailing slash in serve_dir would otherwise aim the .bak/.new/base
+    # deletions at names that do not exist and leave the trees behind.
+    base   = _resolve(victim.serve_dir).rstrip(os.sep)
+    del config.sites[idx]
+    config.save()
+    shared = any(os.path.realpath(_resolve(s.serve_dir)) == os.path.realpath(base)
+                 for s in config.sites)
+    if not shared and _is_within_base_dir(base):
+        # Every derived tree, named by the same functions that create them
+        # rather than by a prefix sweep over the directory: a sweep is
+        # shorter and would also delete a neighbouring site whose folder
+        # name happens to start with this one's. _version_dirs is the ring
+        # (a filter, not a prefix match), _content_slots and .bak are the
+        # pre-ring shapes a legacy site may still hold, .new is an
+        # abandoned staging tree, and _preview_dir is an unpublished draft.
+        doomed = [p for p, _stamp in _version_dirs(victim.serve_dir)]
+        doomed += list(_content_slots(victim.serve_dir))
+        doomed += [base + ".bak", base + ".new", _preview_dir(victim), base]
+        for path in doomed:
+            try:
+                if os.path.islink(path):
+                    os.unlink(path)
+                elif os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                pass  # a copy that resists deletion must not block the removal
+    if _server_running() or _service_is_active():
+        _reload_server()
+    return ""
+
+
+def _config_remove_site(args):
+    if not args:
+        print("  Usage: remove-site <site index>")
+        return
+    try:
+        idx = int(args[0])
+    except ValueError:
+        print("  Usage: remove-site <site index>")
+        return
+    if not (0 <= idx < len(config.sites)):
+        print(f"  No site {idx} — run 'sites' to list them.")
+        return
+    if len(config.sites) == 1:
+        print("  Can't remove the only site — a box needs at least one.")
+        return
+
+    site  = config.sites[idx]
+    label = site.domain or site.serve_dir
+    if not _prompt(f"Remove site {idx} ({label})? Its server copies are deleted — "
+                   f"originals in your local storage are untouched "
+                   f"('set {idx} active=no' deactivates without deleting)."):
+        print("  Cancelled.")
+        return
+
+    err = _remove_site(idx)
+    print(f"  {err}" if err else f"  → site {idx} removed.")
+
+
+# move-site
+def _move_site(frm, to):
+    """Reorder: lift site `frm` out and reinsert it at position `to`.
+    Returns an error sentence, empty on success. Shared by the terminal's
+    move-site and the page's card drag."""
+    n = len(config.sites)
+    if not (0 <= frm < n and 0 <= to < n):
+        return f"site indexes must be 0-{n - 1}"
+    if frm != to:
+        config.sites.insert(to, config.sites.pop(frm))
+        config.save()
+        if _server_running() or _service_is_active():
+            _reload_server()
+    return ""
+
+
+def _config_move_site(args):
+    if len(args) != 2 or not all(a.isdigit() for a in args):
+        print("  Usage: move-site <from> <to>")
+        return
+    err = _move_site(int(args[0]), int(args[1]))
+    print(f"  {err}" if err else "  → moved.")
+
+
+# cert
+def _config_cert(site):
+    cert_path = _resolve(site.cert_file)
+    if os.path.exists(cert_path):
+        days = _cert_days_remaining(cert_path)
+        if days is not None and days <= 0:
+            print("  Current certificate has expired.")
+        elif days is not None:
+            print(f"  Current certificate expires in {days} days.")
+        else:
+            print(f"  Current: {site.cert_file}")
+    print()
+
+    domain = _input("  Domain name (leave blank for self-signed): ").strip()
+
+    if domain:
+        # The same syntax judgment the page's name door runs — refused here,
+        # instantly, rather than by the authority after a network round trip
+        # that could only ever fail.
+        problem = _domain_problem(domain)
+        if problem:
+            print(f"  → {problem}, unchanged")
+            return
+
+    if domain and _domain_in_use(domain, excluding=site):
+        print(f"  → {domain} is already used by another site on this box, unchanged")
+        return
+
+    if domain:
+        _obtain_trusted_cert(domain, site)
+    else:
+        cert_path = _resolve(site.cert_file or "cert.pem")
+        key_path  = _resolve(site.key_file or "key.pem")
+        print("  Generating self-signed certificate...")
+        _generate_self_signed_cert(cert_path, key_path)
+        _chown_servette(cert_path)
+        _chown_servette(key_path)
+        site.cert_file = site.cert_file or "cert.pem"
+        site.key_file  = site.key_file or "key.pem"
+        site.domain    = ""
+        config.save()
+        print("  → self-signed certificate generated.")
+        print("  Note: your browser will show a security warning until you add a domain.\n")
+        if _server_running() or _service_is_active():
+            _reload_server()
+
+
+# username and password
+def _config_username(site):
+    current   = site.username
+    new_value = _input(f"  username [{current}]: ").strip()
+    if new_value == current:
+        print("  → unchanged")
+        return
+    # Through the shared validator, so the prompt refuses exactly what
+    # `set` and the page refuse — clearing included: an emptied username
+    # takes the stored password with it there, on every surface.
+    err = _set_site_value(site, "username", new_value)
+    if err:
+        print(f"  → {err}")
+        return
+    config.save()
+    print("  → auth disabled, password cleared" if new_value == ""
+          else "  → saved")
+
+
+def _config_password(site):
+    if not site.username:
+        print("  Set a username first.")
+        return
+    try:
+        pwd = getpass.getpass("  password: ")
+        if not pwd:
+            print("  → unchanged")
+            return
+        confirm = getpass.getpass("  confirm: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\n  → unchanged")
+        return
+    if pwd != confirm:
+        print("  → passwords do not match, unchanged")
+        return
+    site.password_hash, site.password_salt = _hash_password(pwd)
+    config.save()
+    print("  → saved")
+
+
+# The site-index argument
+def _config_site_arg(args):
+    """Resolve cert/username/password/publish/restore-site's optional
+    site-index argument to a Site, defaulting to site 0 — same [n]
+    convention as the top-level 'log [n]'. Prints its own error and returns
+    None if given but invalid, so callers can just no-op on None."""
+    if not args:
+        return config.sites[0]
+    try:
+        idx = int(args[0])
+    except ValueError:
+        print(f"  Not a site index: {args[0]!r}")
+        return None
+    if not (0 <= idx < len(config.sites)):
+        print(f"  No site {idx} — run 'sites' to list them.")
+        return None
+    return config.sites[idx]
+
+
+# config
+def cmd_config():
+    _config_show()
+    print(CONFIG_HELP)
+
+    while True:
+        try:
+            raw = input("  config> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not raw:
+            continue
+
+        parts = raw.split()
+        cmd   = parts[0].lower()
+        args  = parts[1:]
+
+        if cmd == "show":
+            _config_show()
+        elif cmd == "sites":
+            _config_sites()
+        elif cmd == "add-site":
+            _config_add_site()
+        elif cmd == "remove-site":
+            _config_remove_site(args)
+        elif cmd == "move-site":
+            _config_move_site(args)
+        elif cmd == "cert":
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_cert(site)
+        elif cmd == "username":
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_username(site)
+        elif cmd == "password":
+            site = _config_site_arg(args)
+            if site is not None:
+                _config_password(site)
+        elif cmd in _SET_HOST_KEYS:
+            # Every scalar knob has exactly one terminal door: `set`. The
+            # prompt layer that wrapped it re-implemented the same
+            # validations in a guided voice for an audience that has moved
+            # to the admin page; the reader who remains knows key=value.
+            print(f"  Scalars are set non-interactively: set {cmd}=<value>")
+            print("  (from the main shell — 'back' first)")
+        elif cmd in ("back", "done", "exit", "quit"):
+            break
+        elif cmd in ("help", "?"):
+            print(CONFIG_HELP)
+        else:
+            print(f"  Unknown setting: {cmd}")
+            print(CONFIG_HELP)
+
+
+# start
+def cmd_start():
+    if _service_file_exists():
+        if _service_is_active():
+            cmd_status()
+        else:
+            try:
+                subprocess.run(["systemctl", "start", "servette"], check=True, capture_output=True)
+                log.info("Service started")
+                cmd_status()
+            except PermissionError:
+                print("  Error: start needs root, and sudo is unavailable — re-run as root.")
+            except FileNotFoundError:
+                print("  Error: start requires a Linux server with systemd.")
+            except subprocess.CalledProcessError as e:
+                print(f"  Error starting service: {e}")
+    else:
+        start_server()
+        if _server_running():
+            # The macOS line carries only what the line above does not: there
+            # is no service to install here, and tmux is the substitute. It
+            # does not restate that quitting stops the server.
+            print("  Running in session only — server will stop when you quit.")
+            if _IS_MACOS:
+                print("  A permanent service needs Linux; here, run it under tmux or screen.")
+            elif _prompt("Install as a permanent service?"):
+                cmd_enable()
+
+
+# stop
+def cmd_stop():
+    stopped = False
+
+    if _service_is_active():
+        try:
+            subprocess.run(["systemctl", "stop", "servette"], check=True, capture_output=True)
+            print("  Service stopped.")
+            log.info("Service stopped")
+            stopped = True
+        except PermissionError:
+            print("  Error: stop needs root, and sudo is unavailable — re-run as root.")
+        except FileNotFoundError:
+            print("  Error: stop requires a Linux server with systemd.")
+        except subprocess.CalledProcessError as e:
+            print(f"  Error stopping service: {e}")
+
+    if _server_running():
+        stop_server()
+        stopped = True
+
+    if not stopped:
+        cmd_status()
+
+
+# log
+def cmd_log(n=20):
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "servette", "-o", "cat", "-n", str(n), "--no-pager"],
+            capture_output=True, text=True
+        )
+        output = result.stdout or result.stderr
+        print(output, end="")
+    except FileNotFoundError:
+        if _IS_MACOS:
+            print("  No journal on macOS — in session mode the log is this terminal's own output.")
+        else:
+            print("  journalctl not found. Is this a systemd system?")
+
+
+# Traffic
+def _traffic_lines(days=7):
+    """The journal's lines for the window, timestamped (short-iso), oldest
+    first; [] where no journal answers (macOS session mode, or a journal
+    that needs privileges this shell doesn't hold)."""
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "servette", "-o", "short-iso",
+             "--since", f"-{days}d", "--no-pager"],
+            capture_output=True, text=True)
+        return result.stdout.splitlines()
+    except FileNotFoundError:
+        return []
+
+
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _parse_traffic(lines, days=7, now=None):
+    """Tally journal lines into the traffic summary: requests per day,
+    status counts, top paths. Pure, so the suite can feed it real log
+    lines (`now` pins the window's end for it; None means now). Every
+    bucket in the window is present, zeroes included — the chart's x-axis
+    is time, and a quiet day left out made two busy endpoints read as a
+    steady week. Each line carries two prefixes — the journal's own
+    ('<iso> <host> servette[pid]:') and then setup_logging's format
+    ('<date> <time>  LEVEL  <message>') — so the level name is the anchor
+    the message begins after. Anchoring on the unit token instead was the
+    bug that made this count nothing at all: the Python timestamp sat
+    where the status was expected. Only response lines count — every
+    served response logs as '<status> <path> … to <ip>' (or 'from' on
+    refusals) — and systemd's own lines, carrying no level, are skipped.
+    Paths are tallied from content responses (200/206/304). IPs are never
+    carried into the result."""
+    per_day, statuses, paths = {}, {}, {}
+    stamp = (lambda p: p[:13].replace("T", " ")) if days <= 2 else (lambda p: p[:10])
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 4 or len(parts[0]) < 10 or parts[0][4:5] != "-":
+            continue
+        day = stamp(parts[0])
+        lvl = next((i for i, p in enumerate(parts) if p in _LOG_LEVELS), None)
+        if lvl is None:
+            continue
+        msg = parts[lvl + 1:]
+        if not msg or len(msg[0]) != 3 or not msg[0].isdigit():
+            continue
+        statuses[msg[0]] = statuses.get(msg[0], 0) + 1
+        per_day[day] = per_day.get(day, 0) + 1
+        if msg[0] in ("200", "206", "304"):
+            path = next((p for p in msg[1:] if p.startswith("/")), None)
+            if path:
+                paths[path] = paths.get(path, 0) + 1
+    # The zero-fill: journalctl's -Nd window is N*24 hours ending now, so
+    # it can touch N+1 calendar days — every bucket it covers gets a row.
+    # Line-made buckets just outside the fill (clock skew, a test's fixed
+    # dates) are kept: counted traffic is never dropped over its stamp.
+    end  = now or datetime.datetime.now()
+    step = datetime.timedelta(hours=1) if days <= 2 else datetime.timedelta(days=1)
+    fmt  = "%Y-%m-%d %H" if days <= 2 else "%Y-%m-%d"
+    for i in range((days * 24 if days <= 2 else days) + 1):
+        per_day.setdefault((end - i * step).strftime(fmt), 0)
+    top = sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    return {"days": sorted(per_day.items()), "statuses": dict(sorted(statuses.items())),
+            "top_paths": top, "window_days": days,
+            "bucket": "hour" if days <= 2 else "day",
+            "total": sum(statuses.values())}
+
+
+def _traffic_summary(days=7):
+    return _parse_traffic(_traffic_lines(days), days)
+
+
+def cmd_traffic():
+    """`traffic` — requests, statuses, and top paths from the last 7 days,
+    read from the journal. The page's Statistics tab renders this same
+    summary; the raw log (IPs included) stays with `log`."""
+    t = _traffic_summary()
+    if not t["total"]:
+        print("  No traffic in the window — or no readable journal on this host.")
+        return
+    _section("Traffic — last 7 days")
+    print(f"  Requests: {sum(n for _, n in t['days'])}")
+    for day, n in t["days"]:
+        print(f"    {day}  {n}")
+    print("  Statuses: " + ", ".join(f"{s} x{n}" for s, n in t["statuses"].items()))
+    print("  Top paths:")
+    for path, n in t["top_paths"]:
+        print(f"    {n:>6}  {path}")
+    print()
+
+
 # Formatting uptime
 def _format_uptime(seconds):
     s = int(seconds)
@@ -8698,6 +9083,10 @@ def _production_issues(running=None):
         tag = f" ({site.domain or site.serve_dir})" if labeled else ""
         if not site.serve_dir or not os.path.exists(_resolve(site.serve_dir)):
             issues.append(f"serve directory not configured{tag} — run 'config'")
+        elif (os.path.exists(SERVICE_PATH)
+                and not _is_within_base_dir(_resolve(site.serve_dir))):
+            issues.append(f"serve directory outside {BASE_DIR}{tag} — the "
+                          "sandboxed service cannot publish there")
         if not site.cert_file or not os.path.exists(_resolve(site.cert_file)):
             issues.append(f"certificate not configured{tag} — run 'config cert'")
         elif not site.domain:
@@ -8711,11 +9100,8 @@ def _production_issues(running=None):
         # username with nothing stored to check locks every visitor out.
         if site.username and not site.password_hash:
             issues.append(f"a username with no stored password{tag} — visitors are locked out; run 'config' to set one")
-        # Every write surface refuses a colon, but a hand-edited config
-        # file loads one — and sign-in splits the credential at the first
-        # colon, so this locks every visitor out just as surely.
-        elif ":" in site.username:
-            issues.append(f"the username contains a colon{tag} — sign-in can never match it; run 'config' to change it")
+        # No colon-username line: every door refuses one, so it cannot
+        # reach a running config.
     mem_kb, avail_kb, committed_kb = _meminfo()
     rec     = _swap_recommendation(mem_kb, committed_kb,
                                    _cache_headroom_mb(config.cache_size_mb, running))
@@ -8728,6 +9114,11 @@ def _production_issues(running=None):
             # total printed a size the swapfile does not have.
             issues.append(f"swapfile {ours_mb} MB but {rec // (1024 * 1024)} MB "
                           "recommended — run 'enable' to resize")
+        elif os.path.exists(_SWAP_PATH):
+            # The file is on disk but not swapped on — "no swap" would be
+            # untrue on this host, and the fix is activation, not creation.
+            issues.append("swapfile present but inactive — run 'enable' to "
+                          "re-activate it")
         else:
             issues.append(f"no swap ({mem_kb // 1024} MB RAM) — run 'enable' to add a swapfile")
     # Both surfaces say the same thing about disk: the page reads the health
@@ -8893,12 +9284,16 @@ def _health_checks(service_active=None):
         # The recommendation is named by the field that sets it, so this row
         # states the size and speaks up only when it falls short. `offer` is
         # a (description, hint) pair for the terminal's prompt — never a
-        # number, which is what it used to be interpolated as here.
+        # number; do not interpolate it.
         if offer is None:
             detail = f"{have} MB active" if have else "not needed at this host's memory"
         elif have:
             detail = (f"{have} MB active, below the {rec_mb} MB recommendation"
                       if rec_mb else f"{have} MB active")
+        elif os.path.exists(_SWAP_PATH):
+            # On disk but not swapped on: "none" would be untrue, and the
+            # fix is activation, not creation.
+            detail = "swapfile present but inactive — 'enable' re-activates it"
         else:
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
         rows.append({"key": "swap", "site": None, "ok": offer is None,
@@ -8920,15 +9315,29 @@ def _health_checks(service_active=None):
     labeled = len(config.sites) > 1
     for i, site in enumerate(config.sites):
         tag = f"Site {i} · " if labeled else ""
-        # The folder reports only when it is missing. Where content lives is
-        # Servette's business, not the operator's (the folder-retirement
-        # ruling) — but a serve directory that has vanished is a defect the
-        # operator must hear about.
-        dir_ok = bool(site.serve_dir) and os.path.exists(_resolve(site.serve_dir))
+        # The folder reports only when something is wrong. Where content
+        # lives is Servette's business, not the operator's (the
+        # folder-retirement ruling) — but a serve directory that has
+        # vanished, or one a hand-edited config points outside the data
+        # directory, is a defect the operator must hear about. Outside is
+        # reported, not refused (#123, ruled), and only where the
+        # consequence exists: the site serves from anywhere, and only the
+        # systemd sandbox — ReadWritePaths under BASE_DIR — makes publishing
+        # fail there, working in a manual run and dying under the service.
+        # A session server (no unit) has no sandbox and no trap to name;
+        # `enable`, which writes the unit, is where that box is warned.
+        resolved_dir = _resolve(site.serve_dir)
+        dir_ok = bool(site.serve_dir) and os.path.exists(resolved_dir)
         if not dir_ok:
             rows.append({"key": "dir", "site": i, "ok": False, "blocking": True,
                          "label": tag + "Folder",
                          "detail": "missing — publish to recreate it"})
+        elif (os.path.exists(SERVICE_PATH)
+                and not _is_within_base_dir(resolved_dir)):
+            rows.append({"key": "dir", "site": i, "ok": False, "blocking": True,
+                         "label": tag + "Folder",
+                         "detail": f"outside {BASE_DIR} — the sandboxed "
+                                   "service cannot publish here"})
         # One PEM load answers both certificate facts for the row.
         cert   = _load_cert(_resolve(site.cert_file)) if site.cert_file else None
         days   = _cert_days(cert)
@@ -8952,19 +9361,13 @@ def _health_checks(service_active=None):
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored
-        # to check against — and the colon-username a hand-edited config
-        # file can load past the write surfaces' refusal: sign-in splits
-        # the credential at the first colon, so either locks every visitor
-        # out.
+        # to check against, which locks every visitor out.
         half_auth = bool(site.username) and not site.password_hash
-        bad_user  = ":" in site.username
         rows.append({"key": "password", "site": i,
-                     "ok": not (half_auth or bad_user),
-                     "blocking": half_auth or bad_user, "label": tag + "Access",
+                     "ok": not half_auth,
+                     "blocking": half_auth, "label": tag + "Access",
                      "detail": ("a username with no stored password — set one below, or make the site public"
                                 if half_auth
-                                else "the username contains a colon — sign-in can never match it; change it below"
-                                if bad_user
                                 else "private — visitors sign in" if site.username
                                 else "public — anyone can view it (the form below makes it private)")})
     return rows
@@ -9266,191 +9669,6 @@ def cmd_setup():
     print(f"      LocalForward {_UI_PORT} 127.0.0.1:{_UI_PORT}")
 
 
-# `set [n] key=value ...` is the write half of the tooling surface (`status
-# --json` and `sites --json` are the read half): external tools drive it over
-# SSH, which is the authentication — no network admin API exists, by design.
-# Host pairs
-def _set_host_value(target, key, value):
-    """Validate one host-level pair and apply it to target (config, or a
-    scratch object during the validation pass). Returns an error string,
-    empty on success."""
-    if key == "port":
-        if not (value.isdigit() and 0 < int(value) < 65536):
-            return "port must be 1-65535"
-        target.port = int(value)
-    elif key == "email":
-        target.email = value
-    elif key in ("rate_limit", "auth_rate_limit"):
-        if not (value.isdigit() and int(value) > 0):
-            return f"{key} must be a positive integer"
-        setattr(target, key, int(value))
-    elif key == "cache_size_mb":
-        if not (value.isdigit() and int(value) > 0):
-            return "cache_size_mb must be a positive integer"
-        target.cache_size_mb = int(value)
-    elif key == "trusted_proxy":
-        if value:
-            try:
-                ipaddress.ip_address(value)
-            except ValueError:
-                return "trusted_proxy must be an IP address (or empty to clear)"
-        target.trusted_proxy = value
-    return ""
-
-
-# Site pairs
-def _set_site_value(target, key, value):
-    """Validate one per-site pair and apply it to target (the chosen site, or
-    a scratch Site during the validation pass). Returns an error string,
-    empty on success."""
-    if key == "username":
-        # A colon can never reach the server in a username: sign-in joins
-        # user:password into one credential and _handle_request splits it at
-        # the first colon, so a stored username containing one locks every
-        # visitor out while the health row still reads private-and-healthy.
-        # Refused here — the one write path — so `set`, the page, and the
-        # interactive prompt judge it with the same sentence.
-        if ":" in value:
-            return "a username cannot contain a colon — sign-in splits user:password at the first one"
-        # Auth is one switch, not two half-states: a cleared username takes
-        # the stored password with it, on every surface that writes settings
-        # (`set`, the page, and the prompt alike, since all land here).
-        target.username = value
-        if not value:
-            target.password_hash = ""
-            target.password_salt = ""
-    elif key == "redirect":
-        # One pair per token: 'redirect=/path,/target' adds or replaces,
-        # 'redirect=/path,' removes. The table is a mapping and `set` speaks
-        # in scalars, so the comma is where the two grammars meet.
-        # Validation is _clean_redirects — the same function the config load
-        # runs, so a redirect the file would refuse the command refuses too.
-        src, comma, dst = value.partition(",")
-        if not comma:
-            return ("a redirect is a pair: redirect=/path,/where-it-goes "
-                    "(or /path, to remove)")
-        src, dst = src.strip(), dst.strip()
-        table = dict(target.redirects)
-        if not dst:
-            # The canonical spelling, because that is what the table's keys
-            # are stored in — the same rule the add path and the lookup
-            # follow, so the page can hand back a stored key verbatim.
-            if not table.pop(_canonical_source(src), None):
-                return f"no redirect from {src}"
-        else:
-            checked = _clean_redirects({src: dst})
-            if not checked:
-                return ("a redirect goes from a site path to a site path or an "
-                        "http(s) URL, and may not point at itself")
-            table.update(checked)
-            # Two refusals the pair only earns in company. The cap first:
-            # past it, the load-time validator would truncate — and its
-            # shrinkage must not be misread as a ring below.
-            if len(table) > _MAX_REDIRECTS:
-                return (f"the redirect table is full ({_MAX_REDIRECTS} rules) "
-                        "— remove one first")
-            # And the ring: each pair is valid alone (/a→/b saved earlier,
-            # /b→/a now), and the load-time validator would silently drop
-            # the ring on the next reload. Judged here instead, so the
-            # answer is a refusal now rather than a rule that vanishes
-            # later.
-            if len(_clean_redirects(table)) != len(table):
-                return ("that redirect closes a ring — the chain of rules "
-                        "would send a visitor in a circle")
-        target.redirects = table
-    elif key == "active":
-        # The pause between serving and deleting: a deactivated site keeps
-        # its config and files but is invisible to request routing.
-        v = value.strip().lower()
-        if v not in ("yes", "no"):
-            return "active must be yes or no"
-        target.active = (v == "yes")
-    return ""
-
-
-# The set vocabulary
-_SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
-                  "cache_size_mb", "trusted_proxy")
-_SET_SITE_KEYS = ("username", "active", "redirect")
-
-
-def _set_usage():
-    print("  Usage: set [n] key=value ...")
-    print(f"  Host keys: {', '.join(_SET_HOST_KEYS)}")
-    print(f"  Site keys: {', '.join(_SET_SITE_KEYS)} (site index first, default 0)")
-    print("  A redirect is a pair: redirect=/path,/where-it-goes — and")
-    print("  redirect=/path, (nothing after the comma) removes it.")
-
-
-# set
-def _apply_settings(site, pairs):
-    """Validate `pairs` ([(key, value)]) against scratch objects, then apply
-    them to config/`site` and save — the one settings write path, shared by
-    `set` and the admin page's Config tab so the two surfaces cannot drift.
-    Returns an error string, empty on success; every pair is checked before
-    any is applied, so a bad pair never leaves the config half-written.
-    PermissionError from the save propagates — each caller words its own
-    hint."""
-    class _ScratchHost:
-        pass
-    scratch_host, scratch_site = _ScratchHost(), Site()
-    # The scratch site starts blank for every scalar — each is simply
-    # overwritten — but the redirect table is edited rather than replaced,
-    # so validating a removal against an empty table would refuse a
-    # redirect that is really there.
-    scratch_site.redirects = dict(site.redirects)
-    for key, value in pairs:
-        if key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
-            return f"unknown setting: {key}"
-        err = (_set_host_value(scratch_host, key, value) if key in _SET_HOST_KEYS
-               else _set_site_value(scratch_site, key, value))
-        if err:
-            return f"{key}: {err}"
-    for key, value in pairs:
-        if key in _SET_HOST_KEYS:
-            _set_host_value(config, key, value)
-        else:
-            _set_site_value(site, key, value)
-    config.save()
-    return ""
-
-
-def cmd_set(args):
-    """`set [n] key=value ...` — non-interactive configuration for tooling.
-    The optional leading index picks the site for site keys (default 0).
-    Deliberately absent: password (a secret on argv leaks into shell history
-    and the process table — set it interactively), and domain (bound up with
-    certificate issuance — run 'config cert')."""
-    site = config.sites[0]
-    if args and args[0].isdigit():
-        idx = int(args[0])
-        if idx >= len(config.sites):
-            print(f"  No site {idx} — 'sites' lists {len(config.sites)}.")
-            return
-        site, args = config.sites[idx], args[1:]
-    pairs = []
-    for token in args:
-        key, eq, value = token.partition("=")
-        key = key.strip().lower()
-        if not eq or key not in _SET_HOST_KEYS + _SET_SITE_KEYS:
-            print(f"  Unknown or malformed: {token!r}")
-            _set_usage()
-            return
-        pairs.append((key, value))
-    if not pairs:
-        _set_usage()
-        return
-    try:
-        err = _apply_settings(site, pairs)
-    except PermissionError:
-        print("  Error: writing the config needs root, and sudo is unavailable — re-run as root.")
-        return
-    if err:
-        print(f"  {err}")
-        return
-    print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
-
-
 # The startup refresh
 def _startup_refresh():
     """What 'update' once did after swapping versions, done at every shell
@@ -9508,7 +9726,7 @@ def _startup_refresh():
 # owns. Read-only ones (status, sites, log) are absent deliberately — they must
 # keep working without a password prompt.
 _ROOT_COMMANDS = ("setup", "config", "enable", "disable", "set", "admin",
-                  "restore-site")
+                  "publish", "restore-site")
 
 # What sudo made of the last elevated command. The one-shot `servette <command>`
 # form exits with it, so tooling driving Servette over SSH sees a refused
@@ -9641,6 +9859,8 @@ def run_command(cmd, args):
         cmd_traffic()
     elif cmd == "admin":
         cmd_admin()
+    elif cmd == "publish":
+        cmd_publish(args)
     elif cmd == "restore-site":
         site = _config_site_arg(args)
         if site is not None:

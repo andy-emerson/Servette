@@ -6,6 +6,362 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A paused site is invisible to TLS too; reactivation re-earns the certificate
+
+**Ruled (Human):** `_build_site_ssl_contexts` skips inactive sites — no
+context is built, so a paused site's unloadable certificate cannot refuse
+the whole start, and no SNI entry is claimed, so the paused hostname is
+answered by the closed-system default like any unrecognized name.
+Deactivation now means one thing in every subsystem: routing, the
+catch-all election, and TLS. The certificate becomes load-bearing again
+at exactly one door — flipping `active` to yes runs the same
+`_build_ssl_context` load the server performs, and refuses with the
+sentence naming the fix (`run 'config cert' first`) when it fails,
+because a saved flip over an unloadable pair is a config the next
+restart refuses, which no door may save. The check lives in the shared
+validator, so `set`, the page, and the prompt judge alike. Extends
+[Remove deletes the server's copies; deactivate is the
+pause](#remove-deletes-the-servers-copies-deactivate-is-the-pause) from
+routing to TLS.
+**Accepted cost:** a visitor to a paused-but-healthy site's hostname
+meets the fallback certificate (a browser warning) instead of the site's
+own certificate over a 404. Judged correct by the closed system's own
+rule: presenting a valid certificate for a paused name confirms the box
+hosts it — the exact information the closed system withholds from
+unrecognized names, and a paused name is deliberately unrecognized.
+**Rejected:** loading every configured site's certificate and failing
+the start on any of them (deactivate was then no quarantine — a paused
+site's rotted cert file took every site down at the next restart);
+loading a paused site's certificate where possible and reporting where
+not (keeps the paused name's clean certificate at the price of TLS
+remaining the one subsystem a paused site still participates in).
+*(2026-08-27)*
+
+## The startup refresh repairs what it can reach, and never prompts
+
+**Ruled (Human):** `_startup_refresh` rewrites stale units automatically when
+the environment matches and the shell can write them, and reloads the service;
+an unprivileged shell reports the staleness with the "run 'enable'" hint; a
+drifted environment — different data directory or interpreter, or a unit that
+predates the data directory — is reported and never silently adopted. Nothing
+in the refresh ever asks for a password: self-elevation stays out of the
+launch path, which is the property the superseded ruling protected.
+**Supersedes:** [A stale unit is noticed and told, not auto-refreshed
+(#99)](#a-stale-unit-is-noticed-and-told-not-auto-refreshed-99). What changed
+the balance is the failure that ruling's own reopen clause named: a pip
+upgrade changes no unit directive, so a host that upgrades and skips `enable`
+runs old code indefinitely — the version stamp exists to catch exactly that,
+and catching it only to print a line a root shell could have fixed is the
+guard doing half its job.
+**Cost accepted:** two behaviors to test — root repairs, unprivileged
+reports — which is the very cost #99 rejected this option over; the suite
+carries both paths.
+**Rejected:** pure notice-and-tell (regresses the upgrade pair wherever the
+shell could simply have fixed it); the refresh elevating itself (the
+unprompted password #99 refused, still refused). *(2026-08-27)*
+
+## Excess logins wait; the scrypt gate never sheds
+
+**Ruled (Human):** a login arriving past `_SCRYPT_MAX_CONCURRENT` blocks on
+the semaphore until a slot frees, rather than being answered 503. Draining
+~40 hashes/s against at most `MAX_CONNECTIONS` waiters bounds the worst wait
+at ~3 s: an attack degrades login to slow, never to unavailable, and auth
+gains no new response path.
+**Rejected:** shedding with 503 — an attacker holding the semaphore full
+would then deny every legitimate login deterministically, turning a memory
+bound into an availability lever.
+**Reopen if:** `MAX_CONNECTIONS` or the scrypt parameters push that
+worst-case wait past ~10 s — the arithmetic is the assumption. *(2026-08-27,
+recording the design [`DESIGN.md`](DESIGN.md#server) has carried since the
+semaphore landed)*
+
+## The connection cap counts sockets, not forwarded headers
+
+**Ruled (Human):** the per-IP connection cap keys on the accepted socket's
+own address, enforced at accept time before any bytes are read, and is
+disabled when `trusted_proxy` is set — every connection then carries the
+proxy's address, and connection policing in that topology belongs to the
+proxy.
+**Rejected:** keying the cap on `X-Forwarded-For` — it would put
+attacker-influenced parsing inside a security control, and it misses
+slowloris entirely, since the connections the cap must stop never send
+headers at all. *(2026-08-27, recording the design
+[`DESIGN.md`](DESIGN.md#server) has carried since the cap landed)*
+
+## Valid or refused; viable or reported — the load-door principle
+
+**Ruled (Human, principle):** a config value is judged twice, and the two
+judgments get different answers.
+**Validity** — does the value parse, and is it inside its stated domain? —
+is judged the same at every door, the load door included: a value the
+write doors would refuse never takes effect. At the load door, refusal
+means the *whole file* — fatal at cold start with the sentence naming the
+key, last good config kept on the live reload. Never dropped, never
+defaulted, never repaired: a config partially obeyed is a config the
+operator can no longer reason about.
+**Viability** — is this valid value's real-world circumstance sound? — is
+never a refusal. A folder the sandbox cannot write, DNS not pointing
+here, an expired certificate: the server runs and the health surface
+reports it, severity by consequence.
+**One exception:** a valid config that would breach the security posture
+(a serve_dir over Servette's own keys) is refused like an invalid one —
+secure-by-default is a floor, not a viability question.
+**What it settled, and reversed:** hand-edited scalars stop being adopted
+unvalidated (`port = "abc"` no longer crashes at the next bind; a zero
+rate limit no longer silently refuses all traffic; a wrong TLS floor is
+no longer silently repaired to 1.2) — every one now refuses with `set`'s
+own sentence, through the same shared validators, so the load door can
+never drift from the write doors. And the redirect warn-and-drop is
+**reversed, the Human correcting the Human's own earlier call**: a rule
+silently dropped is a path the operator wrote a redirect for answering
+404, discovered by visitors far from the edit — the
+accepting-and-failing-later shape the refusal principle exists to kill.
+The availability argument that justified dropping is answered by the
+reload half: a running site never goes down over a bad edit, because
+last-good stays live; the only moment a bad line stops anything is a
+cold start, when the operator who just edited is at the keyboard and a
+sentence naming the line is worth the most. The colon-username health
+row went with it, unreachable once no door can load one.
+**Cost accepted:** a box restarted months after a bad hand-edit refuses
+to start until the line is fixed — a loud stop at the operator's moment
+over a quiet wrongness discovered later.
+**Edge deliberately untouched:** an unknown key in the file is ignored,
+as ever — its value never takes effect, and the legacy migration keys
+make a strict allowlist brittle. **Reopen:** a legitimate config shape
+the shared validators cannot express — extend the validator, never
+special-case the load door. *(2026-08-26)*
+
+## Containment is an implementation fact, observed where it breaks — not a guarantee
+
+**Ruled (Human, closing
+[#123](https://github.com/andy-emerson/Servette/issues/123)):** a
+serve_dir outside the data directory is reported, never refused. The
+invariant that every site folder sits under `BASE_DIR` holds because
+Servette assigns every folder (`_invent_site_dir`); the one way out is a
+hand-edited `servette.toml`, and that case is observed at the edge where
+its consequence lives: the site serves from anywhere — only the systemd
+sandbox, granting writes under `BASE_DIR` alone, makes publishing fail
+there, working in a manual run and dying under the service. So the site
+card carries a blocking Folder row and `status` a readiness line when the
+unit exists; a session server, with no sandbox, has no trap to name; and
+`enable` — the moment the sandbox comes into being — says the note for
+any site serving outside. Severity by consequence throughout: the config
+is *valid*, its circumstances are the problem, which is what separates
+this from the secrets guard (fatal: a config that would serve the TLS
+keys must not run at all).
+**Rejected:** refusing at load like the secrets guard (borrows fatal
+severity without its stakes — a working box would stop starting after an
+upgrade over a publishing defect); repairing on load (forbidden outright
+by the refusal principle: it would silently swap what is being served);
+supporting outside paths properly (reopens the folder ruling, and
+generating `ReadWritePaths` from config would let a hand-edit to a 0640
+file widen the systemd sandbox); leaving it unguarded (the
+environment-dependent silent failure is the #98 class this project
+exists to kill). **Reopen (option E):** if the row proves insufficient in
+practice, replace inference with evidence — a privilege-dropped write
+probe per site, the `_verify_runtime` method at the publish boundary.
+**Closed with it:** the two docstrings that claimed containment was
+required or that the atomic swap needed it — staging and every kept
+version are serve_dir's siblings, on its filesystem wherever it lives.
+*(#123, 2026-08-26)*
+
+## The staging place is a documented convention, not a mechanism
+
+**Ruled (Human):** where site folders wait to be published is a
+convention the documentation recommends — `~/sites/`, one complete site
+per folder — and nothing the code knows about. `publish` keeps taking an
+explicit path; the operator remains the completeness signal, running it
+when the copy has finished.
+**Why:** a directory whose existence *means* "publishable" hands
+Servette an assumption it cannot verify — a filesystem tree carries no
+signal that the `scp` writing into it is done, so any machinery built on
+the convention inherits the half-copied-site hazard permanently, where
+the explicit command dodges it structurally. And by [the two-bucket
+principle](#a-function-earns-its-place-by-making-the-server-work-or-by-making-it-safe)
+a conventional directory is convenience — neither bucket — so it earns
+documentation, not code.
+**Rejected:** a default search path (`publish blog` resolving against
+`~/sites/` — cheap, but the first step onto the magic-directory road);
+a watched auto-publishing directory (machinery, and it makes the
+completeness hazard structural); a root-owned drop zone like
+`/root/site/` (the operator owns their content — a root-owned staging
+directory fights the least-privilege story for no gain).
+**Reopen:** the bare-name form returns as a deliberate decision if the
+long path proves a real irritation in practice. *(2026-08-26)*
+
+## A function earns its place by making the server work, or by making it safe
+
+**Ruled (Human, principle):** every function on either surface belongs to
+one of two buckets, and a proposed feature that fits neither is out.
+**Working as a server** is the minimal bucket: serve correctly, stay up
+across reboots and spikes, carry content in (publish, swap, ring,
+restore), and prove it is doing so (status, log, traffic, the connection
+test) — with as many defaults as possible, so the process stays easy and
+fast. **Security** is everything deliberately stacked on top: TLS and its
+renewal, headers, rate limiting, auth, containment, the tunnel-only admin
+model, least privilege, and the refusal doors — not a minimal thing, but
+reading as one because the attack surface it defends is small. Simplicity
+and security are both load-bearing here: the first bucket is kept lean by
+defaults, and everything added beyond it must be defending something.
+What remains outside both buckets is presentation — folds, pills,
+ordering, color — which is the legibility of the two buckets, never a
+capability of its own.
+**First applications:** download failed the test and is removed
+([below](#the-page-offers-no-download-the-terminal-already-knows-how));
+the Server tab's Settings card groups its fields under Security and
+Performance headings rather than wearing one family's name over the
+other's knobs. **Reopen:** none foreseen — a feature that seems to demand
+a third bucket is the signal to re-argue it here first. *(2026-08-26)*
+
+## publish is the terminal half of the pair, and the cores are caller-blind
+
+**Ruled (Human):** `publish [n] <folder>` publishes a folder on the box as
+a site's content — the terminal half whose browser half is the page's
+Publish button, closing the "terminal publish-from-folder to follow" the
+folder ruling promised. The folder is tarred in memory under the same cap,
+hidden paths excluded by the rule the server serves by, and handed to the
+identical `_land_bundle`: same ceilings, same extraction guards, same
+atomic swap, same version ring. The one guard on the source is the secrets
+predicate every serve_dir runs — a sys admin may publish any folder they
+can name, except one that would publish Servette's own config or TLS keys;
+beyond that the admin is trusted on their own box. A non-folder, an empty
+folder, and a bad index are refused with their own sentences.
+**With it, two conventions the Human set:** the shared cores are
+**caller-blind** — callable from either surface without being told where
+the call came from; the audit found twelve of thirteen already are, and the
+two acknowledged exceptions stand as they are: `_land_bundle`'s `source`
+parameter, which changes no behavior and exists so the content log names
+the door (an audit trail, kept), and the loopback server's `on_publish`
+callback, the UI server's own affordance the core never sees. And the
+paired-surfaces principle is **narrowed to features both surfaces can
+serve**: preview needs a renderer, so it pairs with nothing and stays a
+page feature rather than owing a terminal twin.
+**Rejected:** a path allowlist on the source (the operator owns root
+already — a list would be theater); staging by direct copy instead of
+through the tar door (a second content path with its own guards to keep
+in step). *(2026-08-26)*
+
+## The page offers no download; the terminal already knows how
+
+**Ruled (Human):** the Download button, its `/download` route, and the
+tar writer behind them are removed whole. Copying the live tree off the
+box is what `scp`, `rsync`, and `tar` already do; the audience that
+would want it is the audience that already knows them; and the parity
+audit found no ruling behind the feature — it entered through the UI
+and was never vetted, which is the class of growth the audit exists to
+catch. What stays: the kept-versions list and Restore, which act on the
+server's own ring rather than copying files off the box.
+**Rejected:** keeping it as a harmless convenience (an unruled
+capability is not harmless — it is undocumented scope, a route to
+maintain, and a 500 MB in-memory tar on a Raspberry Pi); pairing it
+with a terminal twin (pairing is for features Servette owns, and
+copying files off a box is not one). *(2026-08-26)*
+
+## Every scalar knob has one terminal door: set
+
+**Ruled (Human):** the config sub-shell keeps only the flows that
+genuinely need a guided prompt — the site list, certificate issuance,
+the login pair (the password stays off argv by the standing ruling),
+and `show`. Every scalar setting is written through `set key=value` and
+nowhere else in the terminal: `cache_policy`, `cache_max_age`,
+`tls_min_version`, `ciphers`, `csp`, and `permissions_policy` join the
+`set` vocabulary behind the shared validator, and the prompt layer that
+re-asked what `set` validates — `port`, `email`, `limits`, `cache`,
+`proxy`, `tls`, `csp`, `perms`, and the generic setter under them — is
+deleted.
+**Why (user pov):** the audience that needed a guided voice for a rate
+limit has the admin page now; the terminal's remaining reader knows
+`key=value`. **(dev pov):** one door per setting is one validator per
+setting — the prompts had already drifted from `set` twice (negative
+limits accepted, ciphers saved unjudged) because two doors is two
+places to forget. The migration also brought two refusals the prompts
+never had, under the no-wrong-answers principle: ciphers judged by
+OpenSSL at the door, and the two header values refusing control
+characters, which is header injection.
+**Rejected:** keeping the prompts as a parallel guided path — the drift
+is the evidence against it. *(2026-08-26)*
+
+## A balancer gets one fitting: an opt-in health path, from the terminal only
+
+**Ruled (Human):** the two audiences split the answer. For the operator the
+admin page serves, the passive ruling below stands whole — nothing in the
+GUI acknowledges load balancers at all. For the sys admin in the terminal,
+Servette carries the one fitting a balancer genuinely needs and the
+existing ones could not provide: `health_path`, a host setting that is
+empty and off by default, naming a path that answers an unauthenticated
+`204` to any Host — before site selection, and before the rate limiter,
+which must not starve a probe into a false dead. No body, no file I/O, and
+no per-probe log line: an endpoint exempt from rate limiting that logged
+each hit would be an unmetered disk-filler, and a balancer's heartbeat is
+not traffic. Set with `set health_path=/healthz`, shown in the config
+display, absent from the admin page by design. The door refuses a path
+that is not site-absolute printable ASCII, and refuses `/.well-known/`
+outright — a health path there could shadow the connection test and the
+ACME challenges for every visitor.
+**Why (user pov):** someone who knows what a load balancer is has already
+proven terminal comfort; everyone else never meets the concept. **(dev
+pov):** the probe was the one wall the passive fittings could not
+configure around — the closed-system 404 makes a healthy backend look
+dead to a balancer that cannot send a Host header.
+**Supersedes** the no-dedicated-health-endpoint clause of
+[balancer compatibility is passive](#balancer-compatibility-is-passive-active-accommodations-are-out-of-scope);
+its other refusals — plain-HTTP backend mode, PROXY protocol,
+multi-backend ACME — stand, now on this ruling's authority, with that
+entry's reopen trigger. Closes
+[#126](https://github.com/andy-emerson/Servette/issues/126).
+*(2026-08-26)*
+
+## No wrong answer is saved: a field states its criteria and refuses the rest
+
+**Ruled (Human, principle):** Servette never saves an entry that would break
+the system, and never repairs one on the operator's behalf. Every field —
+page and terminal alike — states what a valid entry looks like, or what
+invalidates one, and anything outside the stated criteria is refused with
+the sentence that names the problem, at every door that writes. Refusal
+beats encoding, refusal beats rounding, and refusal beats
+accepting-and-failing-later, because the failure then lands far from the
+typo that caused it.
+**Instances of the one principle:** the redirect ASCII refusal
+[below](#a-redirect-rule-is-printable-ascii-in-one-canonical-spelling-refusal-beats-encoding);
+the username colon rule; and the five doors the audit fixed when the
+principle was applied — the ACME email judged at the door instead of by the
+authority months later, cipher strings asked of OpenSSL before saving, the
+interactive limit prompts holding `set`'s positive floor, domain syntax
+judged before any network round trip, and the swap size refused rather than
+silently rounded up to 64 MB.
+**Scope:** the doors that write. A hand-edited `servette.toml` is read, not
+saved; what its load door does with a value the write doors would refuse
+was left open here and is settled by [the load-door
+principle](#valid-or-refused-viable-or-reported--the-load-door-principle)
+above: the same judgment, through the same shared validators, refusing the
+file whole. *(2026-08-26)*
+
+## A redirect is permanent or temporary, per rule, and permanent by default
+
+**Ruled (Human):** each rule chooses its answer. Permanent — 301 — moves
+the old path's standing to the new address: browsers and search engines
+learn that the new address is the real one. Temporary — 302 — sends
+visitors on while the old path stays the site's real address, and nothing
+memorizes the new one. Permanent is the default on both surfaces; the page
+offers the choice in a select, the terminal as a third token
+(`redirect=/path,/target,temporary`), and temporary rules live in a sibling
+`[site.redirects_temporary]` table so one validator covers both — the cap
+counts the tables' sum, a ring hopping between them is still a ring, and a
+source written in both goes temporary, the softer answer to take back. Both
+statuses carry `Cache-Control: no-cache`, so a wrong rule stays fixable
+either way.
+**Supersedes** the always-301 clause of [redirects are a
+setting](#redirects-are-a-setting-not-a-file-in-the-site), which the Agent
+had recorded as "settled, not open" — a call that was not the Agent's to
+make: [#117](https://github.com/andy-emerson/Servette/issues/117)'s own
+sketch carried a per-rule permanent/temporary column, and the Human had
+deferred the decision. Re-put to the Human, the ruling is the sketch's:
+both statuses exist for a reason, and always-one means never the other.
+**Rejected:** always-301 with no-cache (the header fixes only the browser
+half of a wrong permanent answer — search engines still move the old
+path's standing, and hand it back slowly); always-302 (never carries
+standing to a path that really moved). *(2026-08-26)*
+
 ## A redirect rule is printable ASCII, in one canonical spelling; refusal beats encoding
 
 **Ruled (Human):** both sides of a redirect rule must be printable
@@ -99,56 +455,41 @@ layout rather than a line of command output. *(2026-08-24)*
   its own subject.
 - **One mark per item, on the row that carries its fix.** Certificate on
   the certificate row. Login on the access row. A missing folder on the
-  **Published** row, because publishing is what puts it back — it used to
-  sit in the facts block, nowhere near anything that would fix it.
+  **Published** row, because publishing is what puts it back.
 - **Nothing else.** No third register: no red paragraph restating what a
   row already says. Where a form cannot be saved, **Save is dim** and the
   row says what is missing — a refusal to print is the third register by
-  another name.
+  another name. Refusals and explanatory text sit under the control they
+  belong to: the login refusal under Save, the DNS note under the
+  certificate button it explains.
 
+**The head pill is the Status line for a folded card, mirroring it both
+ways** (amended 2026-08-26, from the Human's own walk through every
+state): shown only while the body is hidden, carrying the count when
+anything needs attention and the green `✓ healthy` when nothing does —
+so the count never vanishes because a card is closed, an empty head
+never has to mean two things, and the pill never doubles the line
+inside an open card. **Rejected** (in the amendment): per-fault wording
+on the pill — the pill mirrors the line, and the line does not name its
+members.
 **An unfinished edit is one of these items.** Flipping to private without
 a login is counted and marked, so the card cannot say "healthy" beside a
-form it is refusing. It was doing exactly that, which is the
-inconsistency that made this ruling necessary.
+form it is refusing.
 **Severity by consequence, not by kind:** a stored username with no
 password locks every visitor out — red. The same login half-typed has
-changed nothing yet — amber. The row's words say which is missing ("a
-username is needed" / "a password is needed"), not both at once.
-**Verified across every state, in a browser**, because getting it right
-for the certificate and wrong for the others is what happened three
-times: nothing wrong, certificate, folder, login, and all three at once.
-*(2026-08-24)*
-
-**Ruled (Human):** two things, and only two.
-
-1. **The Status line** — the count, naming what it counts, and the only
-   place on the card that says the site is *well*. No other row can say
-   that: they report their own subject, and a card with nothing wrong
-   would otherwise say nothing at all.
-2. **One mark per problem, on the row that carries its fix** — the
-   certificate row for a certificate, the access row for a login. An
-   indicator anywhere else is an indicator you have to go and find the fix
-   for.
-
-**The head pill is not a third thing.** It is the Status line for a folded
-card: shown only while the body is hidden, so the count never vanishes
-because a card is closed, and never doubles the line inside it.
-**Refusals move to the control that refused**, for the same reason — the
-login refusal belongs under Save, not at the foot of the card below Test
-connection. So does explanatory text: the DNS note sat below the access
-block explaining a certificate button three controls above it, and now
-sits under that button.
+changed nothing yet — amber. The row's words say which is missing, not
+both at once.
 **The Agent got this backwards once**, removing the count and keeping the
 pill — optimising away the one indicator that carried information for the
 two that repeated it. Recorded because the reasoning that produced it
 ("say it once, on the row that fixes it") was right and still led
 somewhere wrong: the count is not a repetition of the rows, it is the
 summary and the all-clear.
-**Worth knowing about the count's set:** with the page as the only
-surface, little but the certificate raises it today. A missing serve
-folder can; a half-built pull channel can, but that is terminal-only; and
-the half-authenticated state the access row reports is one the page's own
-guard prevents reaching. *(2026-08-24)*
+**Verified across every state, in a browser** — nothing wrong,
+certificate, folder, login, and all three at once — because getting it
+right for one fault and wrong for the others is what happened three
+times. *(2026-08-24; this heading had accumulated two same-day ruling
+bodies — collapsed to one, and the pill amended, 2026-08-26)*
 
 ## The connection test does not report the version
 
@@ -306,15 +647,11 @@ up on every migration from those platforms, so the reason is recorded
 rather than re-argued.
 **Rejected:** the `_redirects` file (above); wildcards and splats for now
 (exact paths first, which is where these systems stay simple).
-**Settled, not open — the Agent raised this as a question it should not
-have:** the status is **301**, permanent, which is what the feature is
-for and what carries a link's standing to the new path. The hazard of a
-301 is that browsers cache it hard, and a wrong one outlives fixing it —
-but the response is sent `Cache-Control: no-cache`, which overrides that
-default, so a browser re-asks and a corrected rule takes effect. 302 buys
-nothing that the header has not already bought, and costs the thing the
-feature exists for.
-**Rejected:** 302 as a safer default (it is not safer; it is weaker).
+**Superseded on the status question** (2026-08-26): an always-301 clause
+recorded here by the Agent as "settled, not open" — against the Human's
+recorded deferral in #117, whose sketch carried a per-rule
+permanent/temporary column — is replaced by the Human's per-rule ruling
+[above](#a-redirect-is-permanent-or-temporary-per-rule-and-permanent-by-default).
 *(2026-08-24)*
 
 ## A preview is content over the tunnel, not a deployment
@@ -524,6 +861,11 @@ compounding, and a re-add collision waiting to happen; a green Cancel
 
 ## The domain is granted from the Publish card
 
+*Superseded by [Naming a site and certifying it are two
+acts](#naming-a-site-and-certifying-it-are-two-acts); the Publish tab is
+now the Sites tab ([The page is three
+tabs](#the-page-is-three-tabs-a-site-is-one-card-the-server-is-its-own-page)).*
+
 **Ruled (Human):** naming a site is a Publish-card act. A domainless
 card carries a Domain field and one button that runs the same
 certificate issuance the terminal runs (`_obtain_trusted_cert`) — DNS
@@ -545,6 +887,10 @@ names other sites hold are refused.
 are born and published). *(2026-08-23)*
 
 ## The page is two tabs: Publish lands, Settings scopes
+
+*Superseded by [The page is three tabs: a site is one card, the server
+is its own
+page](#the-page-is-three-tabs-a-site-is-one-card-the-server-is-its-own-page).*
 
 **Ruled (Human):** the admin page is Publish and Settings. Publish is
 the landing tab — the site cards, the thing the operator came to do.
@@ -589,6 +935,13 @@ open question the ruling's developer-pov note anticipated. *(2026-08-22)*
 
 ## The Publish tab is the site list: cards add, move, and remove sites
 
+*Amended by [The page is three
+tabs](#the-page-is-three-tabs-a-site-is-one-card-the-server-is-its-own-page):
+the Publish tab is now the Sites tab, and the domain clause fell to
+[Naming a site and certifying it are two
+acts](#naming-a-site-and-certifying-it-are-two-acts); the
+cards-are-the-list substance stands.*
+
 **Ruled (Human):** one card per configured site — the drop strip with
 the folder picker as a link inside it, and the card's own Publish
 button — and the cards are the list itself: add, delete, and reorder in
@@ -606,6 +959,12 @@ multi-site surface (settings editable for sites the page couldn't
 publish — the asymmetry the ruling started from). *(2026-08-22)*
 
 ## The Config tab is a password switch; the advanced knobs stay in the terminal
+
+*Amended by [The page is three
+tabs](#the-page-is-three-tabs-a-site-is-one-card-the-server-is-its-own-page):
+the Config tab is gone — the access switch lives on each site's card,
+the host settings on the Server tab. The substance stands: one visible
+switch, `has_password` over the wire, the advanced knobs terminal-kept.*
 
 **Ruled (Human):** password protection is one visible switch — a toggle
 that dims the username/password fields when off, states what saving
@@ -722,6 +1081,10 @@ multi-backend ACME — capability-shaped complexity, and multi-backend
 scale-out sits outside "one site you own" by the scope principles besides.
 **Reopen:** a real operator running Servette behind a balancer hits a wall
 the fittings cannot configure around. *(#108, 2026-08-22)*
+**Narrowed** (2026-08-26): the health-endpoint refusal is superseded by
+[the opt-in health path](#a-balancer-gets-one-fitting-an-opt-in-health-path-from-the-terminal-only),
+ruled by the Human in closing #126; the remaining refusals stand on that
+ruling's authority.
 
 ## One admin page with tabs is the browser surface
 
@@ -897,6 +1260,10 @@ convenience no longer outweighs keeping it to one user. *(2026-08-18)*
 
 ## A stale unit is noticed and told, not auto-refreshed (#99)
 
+*Superseded by [The startup refresh repairs what it can reach, and never
+prompts](#the-startup-refresh-repairs-what-it-can-reach-and-never-prompts);
+the never-prompt property survives there.*
+
 **Ruled (Human):** after an upgrade, the unprivileged shell notices the stale
 systemd unit at launch and says so; `enable` — which elevates itself — is the
 documented second half of an upgrade. `pipx upgrade servette` + `enable` is the
@@ -914,6 +1281,11 @@ services long after upgrading — the failure this trades away is silent
 staleness, and evidence of it changes the balance. *(#99, 2026-08-17)*
 
 ## The cryptography floor is 48.0.1
+
+*Amended 2026-08: Ed25519 verification left with the pull channel
+([ruling](#tunnel-uploads-are-authenticated-by-ssh-the-pull-channel-is-removed)),
+so the call-graph is narrower than listed below — which only strengthens
+the floor's scoping.*
 
 **Ruled (Human):** `dependencies = ["cryptography>=48.0.1"]`, no ceiling. The
 floor tracks Servette's actual exposure, not the dependency's total advisory
@@ -1132,6 +1504,11 @@ considers untrue — in which case the conflict is recorded, not resolved by
 quietly bending one. *(2026-08-16)*
 
 ## The default error page diagnoses; the placeholder is retired
+
+*The "second role at `/selftest/`" clause is superseded by
+[The connection test is its own reserved page; the 404 is a real
+404](#the-connection-test-is-its-own-reserved-page-the-404-is-a-real-404);
+the placeholder's retirement stands.*
 
 **Ruled:** every server needs an error page, so Servette's earns the
 response it spends. Where the operator has written no `404.html`, a miss

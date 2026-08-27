@@ -402,6 +402,83 @@ serve_dir = "b"
         check("Secret-exposing serve_dir on reload keeps the previous configuration",
               [site.domain for site in c3.sites] == good_sites)
 
+        # The load-door principle: a scalar the write doors would refuse
+        # refuses the file — last good config on the live reload, and no
+        # attribute of the live config half-changes on the way to the raise.
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write('port = "abc"\nrate_limit = 200\n')
+        good_port, good_rl = c3.port, c3.rate_limit
+        c3._mtime = None
+        c3.reload_if_changed()
+        check("An invalid scalar on reload keeps the previous configuration whole",
+              [site.domain for site in c3.sites] == good_sites
+              and c3.port == good_port and c3.rate_limit == good_rl)
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write("rate_limit = 0\n")
+        c3._mtime = None
+        c3.reload_if_changed()
+        check("...a zero rate limit is refused the same way, never adopted",
+              c3.rate_limit == good_rl)
+        # And the raise carries the write door's own sentence, naming the key.
+        _load_err = ""
+        try:
+            with open(s.Config.CONFIG_FILE, "w") as f:
+                f.write('tls_min_version = "1.1"\n')
+            c3._mtime = None
+            c3._load()
+        except s._ConfigInvalid as e:
+            _load_err = str(e)
+        check("...and the refusal names the key with set's own sentence",
+              "tls_min_version" in _load_err and "1.2 or 1.3" in _load_err)
+        # Two doors a hand-edit could push a BARE TypeError/ValueError
+        # through — outside the family the last-good handling keys on. Both
+        # now refuse inside it: a scalar `site` (valid TOML), and a NUL in a
+        # path field (valid in a TOML string, refused by realpath with a
+        # bare ValueError downstream).
+        _load_err = ""
+        try:
+            with open(s.Config.CONFIG_FILE, "w") as f:
+                f.write("site = 1\n")
+            c3._mtime = None
+            c3._load()
+        except s._ConfigInvalid as e:
+            _load_err = str(e)
+        check("A scalar `site` refuses inside the family, not as a bare TypeError",
+              "site must be" in _load_err)
+        _load_err = ""
+        try:
+            with open(s.Config.CONFIG_FILE, "w") as f:
+                f.write('[[site]]\nserve_dir = "site\\u0000x"\n')
+            c3._mtime = None
+            c3._load()
+        except s._ConfigInvalid as e:
+            _load_err = str(e)
+        check("...and a NUL in a path field is named, not crashed on",
+              "control characters" in _load_err)
+        # And the reload's catch is deliberately broad: even a failure from
+        # outside the family degrades to last-good, never to request threads
+        # dying over a hand-edit.
+        saved_load_fn = s.Config._load
+        try:
+            def _boom(self, tolerate_unreadable=False):
+                raise RuntimeError("boom")
+            s.Config._load = _boom
+            c3._mtime = None
+            c3.reload_if_changed()
+            check("An off-family failure on reload keeps last-good and stamps",
+                  [site.domain for site in c3.sites] == good_sites
+                  and c3._mtime == os.path.getmtime(s.Config.CONFIG_FILE))
+        finally:
+            s.Config._load = saved_load_fn
+        with open(s.Config.CONFIG_FILE, "w") as f:
+            f.write('[[site]]\nserve_dir = "x"\n'
+                    '[site.redirects]\n"/a" = "/b"\n"/b" = "/a"\n')
+        c3._mtime = None
+        c3.reload_if_changed()
+        check("A redirect ring in a hand-edited file keeps the previous "
+              "configuration — refused whole, not loaded minus the ring",
+              [site.domain for site in c3.sites] == good_sites)
+
         # At startup the same conditions are fatal — fail closed, matching the
         # shell's edit-time refusal of these exact values.
         raised = False
@@ -459,11 +536,31 @@ serve_dir = "b"
         # A value carrying control characters must survive save→load rather than
         # corrupt the file into something tomllib refuses (which would stop
         # Servette from starting on the next run).
+        # No door produces a control-character value any more — every field
+        # refuses them at write and at load alike — so this machinery is
+        # pure defense in depth: if a future path ever plants one, save()
+        # must still write TOML the parser accepts (an unescaped control
+        # character writes a file tomllib refuses, stopping the next
+        # start), and the load door must then refuse the VALUE by policy,
+        # with its sentence — not choke on the file.
         nasty = "a\x00b\tc\x1bd\ne\rf\x7fg"
-        c.email = nasty
+        c.sites[0].username = nasty
         c.save()
-        check("A control-char value round-trips through save/load",
-              s.Config().email == nasty)
+        import tomllib as _tl
+        with open(s.Config.CONFIG_FILE, "rb") as f:
+            _parsed = _tl.load(f)
+        check("A control-char value saves as valid, faithful TOML",
+              _parsed["site"][0]["username"] == nasty)
+        _refused_policy = False
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as _rbuf:
+                s.Config()
+        except SystemExit:
+            _refused_policy = "control characters" in _rbuf.getvalue()
+        check("...which the load door then refuses by policy, named",
+              _refused_policy)
+        c.sites[0].username = ""
+        c.save()
         check("The saved file is valid TOML (reloaded without error)",
               "[[site]]" in open(s.Config.CONFIG_FILE).read())
     finally:
@@ -592,6 +689,28 @@ serve_dir = "b"
         sni_cb(fake_none, None, default_ctx2)
         check("Absent SNI leaves the default context",
               fake_none.context is default_ctx2)
+
+        # A deactivated site is invisible to TLS as it is to routing: no
+        # context is built for it — so a paused site's unreadable cert
+        # cannot refuse the whole start — and its hostname claims no SNI
+        # entry, falling to the closed-system default like any unrecognized
+        # name.
+        site_b2.active    = False
+        site_b2.cert_file = os.path.join(tls_dir, "deleted-since.pem")
+        site_b2.key_file  = os.path.join(tls_dir, "deleted-since.key")
+        try:
+            default_ctx3 = s._build_site_ssl_contexts()
+            built = True
+        except Exception:
+            built = False
+        check("A paused site's unloadable certificate does not refuse the build",
+              built)
+        if built:
+            fake_paused = _FakeSSLSocket(default_ctx3)
+            default_ctx3.sni_callback(fake_paused, "b.example.com", default_ctx3)
+            check("A paused site's hostname falls to the closed-system default",
+                  fake_paused.context is default_ctx3)
+        site_b2.active = True
     finally:
         s.config.sites = saved_sites2
         shutil.rmtree(tls_dir, ignore_errors=True)
@@ -999,24 +1118,24 @@ def run_dispatch_tests(s):
     restore_calls = [c for c in calls if isinstance(c, tuple) and c[0] == "restore-site"]
     check("'restore-site 99' (bad site index) does not call the command",
           len(restore_calls) == 1)
-    # Both are retired words now. The shell must say so rather than
-    # silently accepting a verb it dropped — 'publish' especially, since it
-    # was a real command until the sub-shell it opened was removed.
-    check("neither 'pull' nor 'publish' is a command any more",
-          not {"pull", "publish"} & {c.split()[0] for c, _ in s._COMMANDS})
-    check("...and neither is in the elevation set",
-          not any(s._needs_root(c) for c in ("pull", "publish")))
+    # 'pull' is a retired word; the shell must say so rather than silently
+    # accepting a verb it dropped. 'publish' returned as a different thing:
+    # the publish-from-folder command the tunnel channel's ruling promised,
+    # not the old sub-shell.
+    check("'pull' is not a command any more, and never elevates",
+          "pull" not in {c.split()[0] for c, _ in s._COMMANDS}
+          and not s._needs_root("pull"))
     check("'quit' stops server and exits", calls[-1] == "stop")
 
 
-    # The publish sub-shell is gone. It existed to gather the content
-    # channel's scattered verbs; the pull channel's removal left it holding
-    # one verb that was already a top-level command, so the wrapper went too.
-    # Everything it did now has exactly one home.
-    check("The publish sub-shell is gone from the program",
+    # The publish sub-shell stays gone: cmd_publish is the folder command
+    # (it takes args), and none of the sub-shell's scaffolding — the menu
+    # table, the help, the display — ever came back with it.
+    check("The publish sub-shell has not returned with the publish command",
           not any(hasattr(s, n) for n in
-                  ("cmd_publish", "_publish_show", "_PUBLISH_COMMANDS", "PUBLISH_HELP")))
-    check("...and its one verb kept its top-level home",
+                  ("_publish_show", "_PUBLISH_COMMANDS", "PUBLISH_HELP"))
+          and "folder" in (s.cmd_publish.__doc__ or ""))
+    check("...and restore-site kept its top-level home",
           "restore-site" in [c.split()[0] for c, _ in s._COMMANDS]
           and s._needs_root("restore-site"))
 
@@ -1094,8 +1213,6 @@ def run_dispatch_tests(s):
     check("...names redirected traffic and totals the unnamed remainder",
           "'Redirected'" in s._UI_ADMIN_PAGE
           and "row('Other'" in s._UI_ADMIN_PAGE)
-    check("...and refuses the oversized download in its own voice, not the browser's",
-          "copy it with scp instead." in s._UI_ADMIN_PAGE)
     # The passcode is attached in one place rather than at each call site,
     # so no request can be written that forgets it.
     check("...with every request's passcode attached by one helper",
@@ -1161,8 +1278,11 @@ def run_dispatch_tests(s):
           and "api('/preview'" in s._UI_ADMIN_PAGE)
     check("...whose frame URL carries the preview token, never the passcode",
           "'/preview/' + encodeURIComponent(data.token)" in s._UI_ADMIN_PAGE)
-    check("...and a download on the line that reports what is live",
-          "api('/download'" in s._UI_ADMIN_PAGE)
+    # Download is removed by ruling: a sys admin already knows how to copy
+    # a folder off their own box, and the terminal's own tools do it better.
+    check("...and offers no download — the terminal already knows how",
+          "/download" not in s._UI_ADMIN_PAGE
+          and "Download" not in s._UI_ADMIN_PAGE)
     # The running dot lost its styling when the status row moved onto a
     # switch-row and a `.rows .dot` rule stopped matching: still in the
     # markup, simply invisible. The rule is unscoped now.
@@ -1213,6 +1333,16 @@ def run_dispatch_tests(s):
           "redir-save" in s._UI_ADMIN_PAGE
           and "redirect: from + ',' + to" in s._UI_ADMIN_PAGE
           and "_redirects" not in s._UI_ADMIN_PAGE)
+    # The ruled per-rule choice on the page: a Permanent/Temporary select
+    # whose first (default) option is Permanent, saved as the terminal's own
+    # third token, with temporary rules saying so on their row.
+    check("...offering the per-rule permanence choice, permanent first",
+          '<option value="">Permanent</option>' in s._UI_ADMIN_PAGE
+          and '<option value="temporary">Temporary</option>'
+              in s._UI_ADMIN_PAGE
+          and "(kind ? ',' + kind : '')" in s._UI_ADMIN_PAGE
+          and "redirects_temporary" in s._UI_ADMIN_PAGE
+          and "' (temporary)'" in s._UI_ADMIN_PAGE)
     check("...and the outside check the tunnel vantage cannot compute itself",
           "outside" in s._UI_ADMIN_PAGE
           and "servette-check" in s._UI_ADMIN_PAGE)
@@ -1220,9 +1350,21 @@ def run_dispatch_tests(s):
           "panel-server" in s._UI_ADMIN_PAGE
           and "getJSON('/config')" in s._UI_ADMIN_PAGE
           and "post('/config'" in s._UI_ADMIN_PAGE)
+    # The Settings card names its two families — the two-bucket principle
+    # applied to the card's own layout, so a performance knob never wears
+    # a security heading.
+    check("...its Settings card splitting Security from Performance",
+          '<div class="cfg-group">Security</div>' in s._UI_ADMIN_PAGE
+          and '<div class="cfg-group">Performance</div>' in s._UI_ADMIN_PAGE
+          and "SECURITY_FIELDS" in s._UI_ADMIN_PAGE
+          and "PERFORMANCE_FIELDS" in s._UI_ADMIN_PAGE)
+    check("...with the browser-cache pair among the performance fields",
+          "'cache_policy'" in s._UI_ADMIN_PAGE
+          and "'cache_max_age'" in s._UI_ADMIN_PAGE
+          and "choices: ['no-store', 'no-cache', 'max-age']"
+              in s._UI_ADMIN_PAGE)
     check("...with every site's facts on its own card and the server's on the server tab",
           "auth-switch" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
-          and "attention" in s._UI_ADMIN_PAGE
           and "cfg-site-select" not in s._UI_ADMIN_PAGE)
     check("...and the server tab reading the journal summary, charted with a scale",
           "getJSON('/traffic'" in s._UI_ADMIN_PAGE
@@ -1426,11 +1568,66 @@ def run_dispatch_tests(s):
             dir_row = [r for r in s._health_checks() if r["key"] == "dir"][0]
             check("...a missing folder blocks: nothing is served at all",
                   dir_row["blocking"])
+            # #123, ruled: a hand-edited serve_dir outside the data
+            # directory is observed, not refused — and only where the
+            # consequence exists. The site serves from anywhere; it is the
+            # systemd sandbox (writes under BASE_DIR only) that makes
+            # publishing fail there, working in a manual run and dying
+            # under the service. So the row fires where the unit exists,
+            # a session server carries no trap to name, and the config
+            # loads either way: the value is valid, its circumstances are
+            # the problem.
+            outside = tempfile.mkdtemp()
+            saved_sp = s.SERVICE_PATH
+            try:
+                s.config.sites[0].serve_dir = outside
+                unit_marker = os.path.join(outside, "unit-present")
+                open(unit_marker, "w").close()
+                s.SERVICE_PATH = unit_marker
+                dir_row = [r for r in s._health_checks()
+                           if r["key"] == "dir"][0]
+                check("...a folder outside the data directory, under the "
+                      "service, blocks and says why",
+                      dir_row["blocking"]
+                      and "outside" in dir_row["detail"]
+                      and "publish" in dir_row["detail"])
+                check("...and the terminal's readiness list names it too",
+                      any("outside" in i and "publish" in i
+                          for i in s._production_issues()))
+                s.SERVICE_PATH = os.path.join(outside, "no-unit-here")
+                check("...while a session server, with no sandbox, has no "
+                      "trap to name",
+                      not [r for r in s._health_checks()
+                           if r["key"] == "dir"])
+            finally:
+                s.SERVICE_PATH = saved_sp
+                shutil.rmtree(outside, ignore_errors=True)
         finally:
             s.config.sites[0].serve_dir = saved_sd
         check("...while swap, disk, and the watchdog do not",
               not rows["swap"]["blocking"] and not rows["disk"]["blocking"]
               and (s._IS_MACOS or not rows["netwatch"]["blocking"]))
+        if not s._IS_MACOS:
+            # A swapfile on disk but not swapped on is neither "no swap"
+            # (untrue) nor healthy — both surfaces name the real state and
+            # the real fix, activation.
+            saved_sizes, saved_offer = s._swap_sizes, s._swap_offer
+            saved_swp = s._SWAP_PATH
+            _swpfd, _swppath = tempfile.mkstemp()
+            os.close(_swpfd)
+            try:
+                s._SWAP_PATH = _swppath
+                s._swap_sizes = lambda: (None, 0)
+                s._swap_offer = lambda *a: ("no swap active", "skip")
+                srow = [r for r in s._health_checks()
+                        if r["key"] == "swap"][0]
+                check("An inactive swapfile is reported as inactive, not absent",
+                      "inactive" in srow["detail"]
+                      and any("inactive" in i for i in s._production_issues()))
+            finally:
+                s._swap_sizes, s._swap_offer = saved_sizes, saved_offer
+                s._SWAP_PATH = saved_swp
+                os.unlink(_swppath)
         # The certificate is the one row with two severities: an untrusted
         # certificate is an interstitial for every visitor to a name the
         # site advertises, and simply where a nameless site starts.
@@ -1516,21 +1713,25 @@ def run_dispatch_tests(s):
         check("...and the terminal lists that same half-state as the issue",
               any("locked out" in i for i in s._production_issues())
               and not any("no password" in i for i in s._production_issues()))
-        # Every write surface refuses a colon, but a hand-edited config
-        # file loads one — and that locks every visitor out just as
-        # surely, so both readouts must name it rather than reading
-        # private-and-healthy.
-        s.config.sites[0].username = "team:alpha"
-        s.config.sites[0].password_hash = "not-empty"
-        pw = [r for r in s._health_checks()
-              if r["key"] == "password" and r["site"] == 0][0]
-        check("A colon-username loaded from a hand-edited file is flagged, not healthy",
-              not pw["ok"] and "colon" in pw["detail"])
-        check("...and the terminal lists it too",
-              any("colon" in i for i in s._production_issues()))
+        # Every door refuses a colon username now, the load door included —
+        # a hand-edited file cannot carry one into a running config, so the
+        # health surface has nothing left to flag for it.
+        _colon_raised = False
+        try:
+            s.Site({"username": "team:alpha"})
+        except s._ConfigInvalid as e:
+            _colon_raised = "colon" in str(e)
+        check("A colon-username in a hand-edited file refuses the file",
+              _colon_raised)
         (s.config.sites[0].username, s.config.sites[0].password_hash) = saved_hc
         st, _ = ui_req("GET", "/status")
         check("GET /status without the code is refused", st == 403)
+        # The run credential travels one way — the ?t= query api() sends. A
+        # header fallback was a second door nothing used; it is gone from
+        # the program, not merely unused.
+        check("The passcode has exactly one door — no header fallback",
+              "X-Servette-Code" not in io.open(os.path.abspath(s.__file__),
+                                               encoding="utf-8").read())
 
         st, body = ui_req("GET", f"/config?t={ui_code}")
         check("GET /config with the code answers the set vocabulary with values",
@@ -1568,21 +1769,11 @@ def run_dispatch_tests(s):
         check("...and is code-gated like every other route", st == 403)
         s._latest_release = saved_latest
 
-        # /download hands the live site back as the same tar.gz the publish
-        # door takes, so what comes down can go back up.
-        st, _ = ui_req("GET", "/download?site=0")
-        check("GET /download is code-gated like every other route", st == 403)
-        st, _ = ui_req("GET", f"/download?t={ui_code}&site=abc")
-        check("...refusing a site index that is not a number", st == 400)
-        st, _ = ui_req("GET", f"/download?t={ui_code}&site=99")
-        check("...and one off the end of the list", st == 404)
-        st, blob = ui_req("GET", f"/download?t={ui_code}&site=0")
-        dl_dest = os.path.join(ui_dir, "roundtrip")
-        s._extract_bundle(blob, dl_dest)
-        check("...and the downloaded bundle round-trips back through extraction",
-              st == 200
-              and os.path.isfile(os.path.join(dl_dest, "old.html"))
-              and open(os.path.join(dl_dest, "old.html")).read() == "old")
+        # Download is removed by ruling — the route must be gone, not
+        # merely unlinked from the page.
+        st, _ = ui_req("GET", f"/download?t={ui_code}&site=0")
+        check("The removed /download route answers 404 like any unknown path",
+              st == 404)
 
         # The swap size the terminal has always asked for, asked for here —
         # the same core underneath, guarded before it can reach the disk.
@@ -2146,6 +2337,30 @@ def run_dispatch_tests(s):
         check("set active=no/yes is the deactivation switch",
               deactivated and s.config.sites[0].active is True)
 
+        # Reactivation makes the certificate load-bearing again (ruled):
+        # startup skips a paused site's cert but fails closed on an active
+        # one, so the door refuses to save the flip over a pair that does
+        # not load. The scratch pass carries the site's real cert paths and
+        # active state, so the whole call is refused before any pair applies.
+        saved_cert_pair = (s.config.sites[0].cert_file, s.config.sites[0].key_file)
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["active=no"])
+        s.config.sites[0].cert_file = "/nonexistent/rotted.pem"
+        s.config.sites[0].key_file  = "/nonexistent/rotted.key"
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            s.cmd_set(["active=yes", "username=never-applied"])
+        check("Reactivating over an unloadable certificate is refused, naming the fix",
+              "does not load" in buf.getvalue()
+              and "config cert" in buf.getvalue()
+              and s.config.sites[0].active is False)
+        check("...and the refusal applies nothing from the call",
+              s.config.sites[0].username != "never-applied")
+        (s.config.sites[0].cert_file, s.config.sites[0].key_file) = saved_cert_pair
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.cmd_set(["active=yes"])
+        check("With the certificate back, reactivation succeeds",
+              s.config.sites[0].active is True)
+
         saved_auth = (s.config.sites[0].username, s.config.sites[0].password_hash,
                       s.config.sites[0].password_salt)
         s.config.sites[0].username = "probe"
@@ -2373,40 +2588,6 @@ def run_dispatch_tests(s):
         s.config.sites[0].serve_dir = saved_serve_dir
         s.urllib.request.urlopen    = saved_urlopen
         shutil.rmtree(setup_dir, ignore_errors=True)
-
-    section("The startup refresh never writes into a site folder")
-
-    # It used to rewrite pages carrying the servette:demo marker. With the
-    # placeholder gone it touches systemd units only — so a page carrying that
-    # historical marker is now ordinary operator content, and stays byte-for-
-    # byte as the operator left it.
-    pu_marked = tempfile.mkdtemp(dir=s.BASE_DIR)
-    pu_owned  = tempfile.mkdtemp(dir=s.BASE_DIR)
-    marked_bytes = b"<!-- servette:demo seeded by an older release -->old demo"
-    with open(os.path.join(pu_marked, "index.html"), "wb") as f:
-        f.write(marked_bytes)
-    with open(os.path.join(pu_owned, "index.html"), "wb") as f:
-        f.write(b"operator content")
-    saved_pu    = {n: getattr(s, n) for n in ("_service_file_exists",)}
-    saved_sites = [(site, site.serve_dir) for site in s.config.sites]
-    try:
-        s._service_file_exists = lambda: False
-        s.config.sites[0].serve_dir = pu_marked
-        if len(s.config.sites) > 1:
-            s.config.sites[1].serve_dir = pu_owned
-        with contextlib.redirect_stdout(io.StringIO()):
-            s._startup_refresh()
-        check("A page carrying the old servette:demo marker is left alone",
-              open(os.path.join(pu_marked, "index.html"), "rb").read() == marked_bytes)
-        check("Startup refresh leaves the operator page alone",
-              open(os.path.join(pu_owned, "index.html"), "rb").read() == b"operator content")
-    finally:
-        for n, v in saved_pu.items():
-            setattr(s, n, v)
-        for site, sd in saved_sites:
-            site.serve_dir = sd
-        shutil.rmtree(pu_marked, ignore_errors=True)
-        shutil.rmtree(pu_owned, ignore_errors=True)
 
     section("Root is requested, not required of the operator")
 
@@ -3190,12 +3371,17 @@ def run_dispatch_tests(s):
         s._cert_watchdog_tick()
         check("Success keeps the ordinary hourly stamp",
               abs(s._last_renewal_attempt["cool.test"] - s.time.monotonic()) < 60)
-        # And the never-attempted default is "attempt now", not "attempted at
-        # boot": monotonic is seconds since boot, and the old 0.0 default made
-        # a host up less than an hour refuse every renewal until the clock
-        # caught up — found writing this very test on a young container.
-        check("A never-attempted domain is attempted immediately (young-host bug)",
-              "cool.test" in s._last_renewal_attempt)
+        # And never-attempted means "attempt now": with no stamp for the
+        # domain, one tick must reach the obtain call itself. (The old 0.0
+        # default read as "attempted at boot" and made a young host refuse
+        # every renewal for its first hour.) Asserted on the CALL, not on
+        # the stamp the earlier checks already forced into existence.
+        _renew_calls = []
+        s._obtain_trusted_cert = lambda d, st: _renew_calls.append(d)
+        s._last_renewal_attempt.pop("cool.test", None)
+        s._cert_watchdog_tick()
+        check("A never-attempted domain is attempted on the very next tick",
+              _renew_calls == ["cool.test"])
     finally:
         s._obtain_trusted_cert = saved_obtain_w
         s._cert_days_remaining = saved_days_w
@@ -3427,45 +3613,69 @@ def run_dispatch_tests(s):
     finally:
         shutil.rmtree(extract_root, ignore_errors=True)
 
-    section("Config sub-shell validates what 'set' validates")
+    section("Every scalar knob has one terminal door: set")
 
-    # The two write surfaces must enforce the same rules. A typo'd
-    # trusted_proxy saved by the sub-shell was worse than a refusal: the peer
-    # comparison never matches, XFF is never trusted, and every proxied
-    # visitor lands in the proxy's single rate-limit bucket.
-    saved_proxy_v = s.config.trusted_proxy
-    saved_input_v = builtins.input
-    saved_save_v  = s.Config.save
-    try:
-        s.Config.save = lambda self: None
-        s.config.trusted_proxy = ""
-        builtins.input = lambda prompt="": "not-an-ip"
-        with contextlib.redirect_stdout(io.StringIO()) as vbuf:
-            s._config_trusted_proxy()
-        check("Sub-shell refuses a non-IP trusted_proxy",
-              s.config.trusted_proxy == "" and "must be an IP" in vbuf.getvalue())
-        builtins.input = lambda prompt="": "203.0.113.7"
-        with contextlib.redirect_stdout(io.StringIO()):
-            s._config_trusted_proxy()
-        check("...and accepts a real one", s.config.trusted_proxy == "203.0.113.7")
-
-        # A negative max-age is not a shorter cache, it is a malformed
-        # Cache-Control header on every response.
-        saved_age_v    = s.config.cache_max_age
-        saved_policy_v = s.config.cache_policy
-        answers = iter(["max-age", "-5"])
-        builtins.input = lambda prompt="": next(answers, "")  # "" = leave the
-        #                       trailing cache_size_mb prompt unchanged
-        with contextlib.redirect_stdout(io.StringIO()):
-            s._config_cache()
-        check("Sub-shell refuses a negative cache_max_age",
-              s.config.cache_max_age == saved_age_v)
-        s.config.cache_max_age = saved_age_v
-        s.config.cache_policy  = saved_policy_v
-    finally:
-        s.config.trusted_proxy = saved_proxy_v
-        builtins.input = saved_input_v
-        s.Config.save = saved_save_v
+    # The prompt layer that wrapped `set` is gone by ruling; the knobs it
+    # carried live in the set vocabulary now, each behind the same shared
+    # validator every surface uses.
+    import builtins
+    _sc = type("S", (), {})()
+    check("trusted_proxy refuses a non-IP at the one door",
+          "must be an IP" in s._set_host_value(_sc, "trusted_proxy", "not-an-ip")
+          and s._set_host_value(_sc, "trusted_proxy", "203.0.113.7") == ""
+          and _sc.trusted_proxy == "203.0.113.7")
+    # One canonical spelling (the redirect-source precedent): the request
+    # path compares this value against a normalized socket address, and an
+    # uppercase or zero-padded spelling stored as typed would never match —
+    # silently collapsing every proxied visitor into one rate-limit bucket.
+    check("...and stores the one canonical spelling",
+          s._set_host_value(_sc, "trusted_proxy", "2001:0DB8::1") == ""
+          and _sc.trusted_proxy == "2001:db8::1")
+    _core_src2 = inspect.getsource(s._handle_request)
+    check("...while the request path normalizes both sides of the compare",
+          "_normalize_ip(config.trusted_proxy)" in _core_src2)
+    # The client's query is echoed into the Location header; the same
+    # printable-ASCII bound every header value in the program holds is
+    # applied to it on the way through.
+    check("...and the redirect filters the echoed query to printable ASCII",
+          "0x20 <= ord(c) <= 0x7E" in _core_src2)
+    # TLS matches routing's rule wholesale: inactive sites are skipped
+    # before any context is built (deleting that filter re-creates both the
+    # cert/content mismatch _domain_in_use exists to prevent and the paused
+    # site whose rotted cert refuses the whole start).
+    _tls_src = inspect.getsource(s._build_site_ssl_contexts)
+    check("The TLS builder skips inactive sites before loading anything",
+          "if not site.active:" in _tls_src and "continue" in _tls_src)
+    check("cache_policy is a choice, stated and refused outside it",
+          "no-store" in s._set_host_value(_sc, "cache_policy", "weird")
+          and s._set_host_value(_sc, "cache_policy", "max-age") == ""
+          and _sc.cache_policy == "max-age")
+    # A negative max-age is not a shorter cache, it is a malformed
+    # Cache-Control header on every response.
+    check("cache_max_age refuses negatives and takes zero",
+          s._set_host_value(_sc, "cache_max_age", "-5") != ""
+          and s._set_host_value(_sc, "cache_max_age", "0") == ""
+          and _sc.cache_max_age == 0)
+    check("tls_min_version is 1.2 or 1.3, nothing else",
+          s._set_host_value(_sc, "tls_min_version", "1.1") != ""
+          and s._set_host_value(_sc, "tls_min_version", "1.3") == "")
+    # The cipher string's only arbiter is OpenSSL, asked at the door — the
+    # alternative was a refusal at the next server start, which fails
+    # closed: the site down over a typo saved months earlier.
+    check("ciphers are judged by OpenSSL before saving",
+          s._set_host_value(_sc, "ciphers", "GARBAGE-THAT-SELECTS-NOTHING") != ""
+          and s._set_host_value(_sc, "ciphers", "DEFAULT") == ""
+          and s._set_host_value(_sc, "ciphers", "") == "")
+    # csp and permissions_policy go out verbatim as header values; a
+    # control character there is header injection.
+    check("header-valued settings refuse control characters",
+          s._set_host_value(_sc, "csp", "default-src 'self'\r\nX-Evil: 1") != ""
+          and s._set_host_value(_sc, "csp", "default-src 'self'") == ""
+          and s._set_host_value(_sc, "permissions_policy", "camera=()") == "")
+    check("...and the sub-shell no longer carries a second door for any of them",
+          not any(hasattr(s, f) for f in
+                  ("_config_limits", "_config_cache", "_config_trusted_proxy",
+                   "_config_tls", "_config_set")))
 
     section("Ownership plans")
 
@@ -3865,6 +4075,78 @@ def run_dispatch_tests(s):
         finally:
             s._swap_site_content = saved_swap
 
+        section("publish — the terminal half of the pair")
+
+        # `publish [n] <folder>` tars a folder under the same cap, hidden
+        # paths excluded by the serving rule, and hands it to the identical
+        # _land_bundle — the core never knows which door called it.
+        pubsrc = tempfile.mkdtemp(dir=swap_root2)
+        with open(os.path.join(pubsrc, "index.html"), "w") as f:
+            f.write("from the terminal")
+        os.makedirs(os.path.join(pubsrc, ".git"), exist_ok=True)
+        with open(os.path.join(pubsrc, ".git", "secret"), "w") as f:
+            f.write("history")
+        with open(os.path.join(pubsrc, ".env"), "w") as f:
+            f.write("secret")
+        with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+            s.cmd_publish([pubsrc])
+        check("publish lands a folder as the site's live content",
+              "Published to" in pbuf.getvalue()
+              and open(os.path.join(s.config.sites[0].serve_dir,
+                                    "index.html")).read() == "from the terminal")
+        check("...hidden paths are not published, by the serving rule",
+              not os.path.exists(os.path.join(s.config.sites[0].serve_dir,
+                                              ".git"))
+              and not os.path.exists(os.path.join(s.config.sites[0].serve_dir,
+                                                  ".env")))
+        check("...and the content it replaced is in the ring",
+              any(not r["live"] for r in
+                  s._site_versions(s.config.sites[0])))
+        with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+            s.cmd_publish([os.path.join(pubsrc, "index.html")])
+        check("...a path that is not a folder is refused with a sentence",
+              "not a folder" in pbuf.getvalue())
+        empty_src = tempfile.mkdtemp(dir=swap_root2)
+        with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+            s.cmd_publish([empty_src])
+        check("...an empty folder is refused, not published as a blank site",
+              "no publishable files" in pbuf.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+            s.cmd_publish(["3", pubsrc])
+        check("...and a bad site index is the [n] convention's own refusal",
+              "No site 3" in pbuf.getvalue())
+        # The one guard on the source: Servette's own config and keys never
+        # go out through the publish door, however root the caller is.
+        saved_exposes = s._serve_dir_exposes_secrets
+        s._serve_dir_exposes_secrets = lambda path: True
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+                s.cmd_publish([pubsrc])
+        finally:
+            s._serve_dir_exposes_secrets = saved_exposes
+        check("...a folder holding Servette's secrets is refused",
+              "publishing it would publish them" in pbuf.getvalue())
+        check("...the command is offered, and it elevates like restore-site",
+              any(c.startswith("publish") for c, _ in s._COMMANDS)
+              and "publish" in s._ROOT_COMMANDS)
+        # The door's ceiling counts UNCOMPRESSED bytes — the quantity
+        # _extract_bundle enforces and the page's builder sums. A
+        # compressed count waved well-compressing folders through, only
+        # for the core to refuse them with a log line instead of the
+        # door's sentence.
+        big_src = tempfile.mkdtemp(dir=swap_root2)
+        with open(os.path.join(big_src, "a.html"), "w") as f:
+            f.write("x" * 2_000_000)
+        _blob2, _prob2 = s._tar_folder(big_src, cap=1_000_000)
+        check("publish's cap counts uncompressed bytes, like every other door",
+              _blob2 is None and "too large" in _prob2)
+        # 'publish 2' alone reads as an index missing its folder — the miss
+        # says so instead of calling 2 a folder and stopping.
+        with contextlib.redirect_stdout(io.StringIO()) as pbuf:
+            s.cmd_publish(["7"])
+        check("...and a bare digit miss explains the two-argument form",
+              "publish 7 <folder>" in pbuf.getvalue())
+
         section("The retired pull channel leaves nothing behind")
 
         # A removal is only done when the names are gone from the program, not
@@ -4071,6 +4353,30 @@ def run_server_tests(s, serve_dir):
     check("Oversized compressible file keeps its etag", bool(etag_css))
     os.remove(big_css)
 
+    section("Cache recency — LRU in fact, not only in name")
+
+    # A hit refreshes recency: without it the OrderedDict evicts by
+    # insertion age and a hot index.html dies as readily as a file served
+    # once — FIFO wearing LRU's name.
+    lruA = os.path.join(serve_dir, "lru-a.html")
+    lruB = os.path.join(serve_dir, "lru-b.html")
+    for p, body in ((lruA, "aaa"), (lruB, "bbb")):
+        with open(p, "w") as f:
+            f.write(body)
+    try:
+        s._get_cached_file(lruA)
+        s._get_cached_file(lruB)
+        s._get_cached_file(lruA)   # the hit that must refresh recency
+        with s._file_cache_lock:
+            order = [p for p in s._file_cache if p in (lruA, lruB)]
+        check("A cache hit refreshes recency, so eviction is truly LRU",
+              order == [lruB, lruA])
+    finally:
+        for p in (lruA, lruB):
+            os.unlink(p)
+            with s._file_cache_lock:
+                s._file_cache.pop(p, None)
+
     section("Cache invalidation — the publish shape")
 
     # A pull swaps in tar-extracted files whose mtimes come from the archive at
@@ -4258,6 +4564,7 @@ def run_server_tests(s, serve_dir):
             return e.code, e.headers.get("Location")
 
     saved_redirects = s.config.sites[0].redirects
+    saved_redirects_temp = s.config.sites[0].redirects_temp
     try:
         s.config.sites[0].redirects = s._clean_redirects({
             "/old": "/index.html",
@@ -4272,7 +4579,8 @@ def run_server_tests(s, serve_dir):
         # A 301 is cacheable by default and browsers hold it hard — which is
         # what makes a wrong one frightening. Explicit no-cache overrides
         # that default, so the browser re-asks and a corrected rule takes
-        # effect. This header is why 301 needs no 302 escape hatch.
+        # effect. The header is recoverability; permanence-vs-temporary is
+        # the separate, ruled per-rule choice tested below.
         try:
             _r = _nofollow.open(BASE_URL + "/old")
             _cache = _r.headers.get("Cache-Control")
@@ -4302,6 +4610,23 @@ def run_server_tests(s, serve_dir):
               hop("/index.html")[0] == 200)
         check("A missing path with no rule is still a 404",
               hop("/nope-not-here")[0] == 404)
+
+        # The ruled per-rule choice (DECISIONS.md): a rule is permanent (301,
+        # the default — the old path's standing moves to the new address) or
+        # temporary (302 — the old path stays the real one), held in a
+        # sibling table so one validator covers both.
+        s.config.sites[0].redirects_temp = s._clean_redirects(
+            {"/away": "/index.html"})
+        st, loc = hop("/away")
+        check("A temporary rule answers 302 with the new location",
+              st == 302 and loc == "/index.html")
+        try:
+            _r = _nofollow.open(BASE_URL + "/away")
+            _tcache = _r.headers.get("Cache-Control")
+        except urllib.error.HTTPError as _e:
+            _tcache = _e.headers.get("Cache-Control")
+        check("...and is sent no-cache, exactly like the permanent one",
+              _tcache == "no-cache")
 
         # The invariant this feature could have broken: a redirect is a dict
         # lookup on the loaded config, never a read of anything on disk.
@@ -4380,6 +4705,55 @@ def run_server_tests(s, serve_dir):
               == {"/a": "/b", "/b": "/c"})
         check("A non-table redirects value is ignored, not fatal",
               s._clean_redirects("nonsense") == {})
+        # Canonicalization percent-expands, so a raw source under the cap
+        # can canonicalize past it; judged on the canonical form, so the
+        # validator's output is a fixed point of the validator.
+        check("A source whose canonical spelling exceeds the cap is refused",
+              s._clean_redirects({"/" + "a " * 999: "/x"}) == {})
+
+        # The two tables load and validate together: one source lives in one
+        # table, a ring hopping between them is still a ring, and what the
+        # config writes it reads back unchanged.
+        _rt = s.Site({"redirects": {"/p": "/q"},
+                      "redirects_temporary": {"/t": "/u"}})
+        check("A site loads both redirect tables",
+              _rt.redirects == {"/p": "/q"}
+              and _rt.redirects_temp == {"/t": "/u"})
+        import tomllib as _tomllib
+        _back = s.Site(_tomllib.loads("[[site]]\n"
+                                      + s._redirect_toml(_rt))["site"][0])
+        check("...and both survive a save/load round trip",
+              _back.redirects == _rt.redirects
+              and _back.redirects_temp == _rt.redirects_temp)
+        # The load door is strict (the load-door principle): a rule the
+        # write doors would refuse does not load minus the rule — it
+        # refuses the file, with the sentence naming what is wrong.
+        def _site_refuses(data, word):
+            try:
+                s.Site(data)
+            except s._ConfigInvalid as e:
+                return word in str(e)
+            return False
+        check("A source written in both tables refuses the file",
+              _site_refuses({"redirects": {"/x": "/y"},
+                             "redirects_temporary": {"/x": "/z"}},
+                            "both tables"))
+        check("A ring that hops between the tables refuses the file",
+              _site_refuses({"redirects": {"/a": "/b"},
+                             "redirects_temporary": {"/b": "/a"}}, "ring"))
+        check("A bad rule in a hand-edited table refuses the file, not the rule",
+              _site_refuses({"redirects": {"/x": "javascript:alert(1)"}},
+                            "not a path")
+              and _site_refuses({"redirects": {"/café": "/x"}}, "non-ASCII")
+              and _site_refuses({"redirects": "nonsense"}, "not a table"))
+        check("...while the write doors' filter still drops and reports",
+              s._clean_redirects({"/x": "javascript:alert(1)"}) == {})
+        check("A hand-edited domain is judged by the same syntax door",
+              _site_refuses({"domain": "https://example.com"}, "no scheme"))
+        check("...and active must be a real TOML boolean",
+              _site_refuses({"active": "yes"}, "true or false"))
+        check("...and a non-text field is named, not crashed on",
+              _site_refuses({"serve_dir": 5}, "must be text"))
         check("The table is capped",
               len(s._clean_redirects({f"/p{n}": "/q" for n in range(400)}))
               == s._MAX_REDIRECTS)
@@ -4425,6 +4799,38 @@ def run_server_tests(s, serve_dir):
         check("...and a table at the cap refuses with the cap's own sentence",
               "full" in s._set_site_value(full_probe, "redirect", "/p-extra,/q")
               and len(full_probe.redirects) == s._MAX_REDIRECTS)
+        # The third token is the ruled per-rule choice: nothing means
+        # permanent, ',temporary' is the 302, and re-adding a source moves
+        # it between the tables rather than doubling it.
+        tprobe = s.Site()
+        check("set's third token lands a rule in the temporary table",
+              s._set_site_value(tprobe, "redirect", "/t1,/t2,temporary") == ""
+              and tprobe.redirects_temp == {"/t1": "/t2"}
+              and tprobe.redirects == {})
+        check("...an explicit ',permanent' is the default said out loud",
+              s._set_site_value(tprobe, "redirect", "/t3,/t4,permanent") == ""
+              and tprobe.redirects == {"/t3": "/t4"})
+        check("...re-adding a source moves it between the tables",
+              s._set_site_value(tprobe, "redirect", "/t1,/t2") == ""
+              and tprobe.redirects.get("/t1") == "/t2"
+              and "/t1" not in tprobe.redirects_temp)
+        check("...removal reaches whichever table holds the rule",
+              s._set_site_value(tprobe, "redirect", "/t5,/t6,temporary") == ""
+              and s._set_site_value(tprobe, "redirect", "/t5,") == ""
+              and tprobe.redirects_temp == {})
+        check("...a ring closed across the two tables is refused",
+              "closes a ring"
+              in s._set_site_value(tprobe, "redirect", "/t4,/t3,temporary"))
+        # The cap covers the tables' sum, or 200 permanent plus 200
+        # temporary would sail past what the load validator keeps.
+        check("...and the cap counts both tables together",
+              "full" in s._set_site_value(full_probe, "redirect",
+                                          "/p-extra,/q,temporary"))
+        # ',,temporary' is not a flag on an empty pair — the empty target is
+        # judged as written and refused, never misread as a removal.
+        check("...and a flag on an empty target is refused, not a removal",
+              s._set_site_value(tprobe, "redirect", "/t1,,temporary") != ""
+              and tprobe.redirects.get("/t1") == "/t2")
 
         # Removing through _apply_settings must validate against the site's
         # real table, not against a blank scratch object.
@@ -4439,7 +4845,109 @@ def run_server_tests(s, serve_dir):
             s.config.save()
     finally:
         s.config.sites[0].redirects = saved_redirects
+        s.config.sites[0].redirects_temp = saved_redirects_temp
         s.config.save()
+
+    section("Fields refuse what they cannot save")
+
+    # The ruled principle: no wrong answer is saved — every field states
+    # what a valid entry looks like (or what invalidates one) and refuses
+    # the rest, at every door, rather than repairing it quietly or letting
+    # it surface as a failure far from the typo.
+    import builtins
+    _scratch = type("S", (), {})()
+    check("The email door refuses what could never be a mailbox",
+          s._set_host_value(_scratch, "email", "not-an-email") != ""
+          and s._set_host_value(_scratch, "email", "two@ats@example.com") != ""
+          and s._set_host_value(_scratch, "email", "a b@example.com") != "")
+    check("...naming the half after the @ when that is the wrong half",
+          "after the @" in s._set_host_value(_scratch, "email", "you@-bad-.com"))
+    check("...and accepts a mailbox, or empty to clear",
+          s._set_host_value(_scratch, "email", "you@example.com") == ""
+          and _scratch.email == "you@example.com"
+          and s._set_host_value(_scratch, "email", "") == ""
+          and _scratch.email == "")
+    # The write door refuses what the load door refuses — a username with
+    # a control character saved today would brick the next restart.
+    check("A control character in a username is refused at the write door",
+          "control characters" in s._set_site_value(s.Site(), "username",
+                                                    "a\tb"))
+
+    saved_input_v = builtins.input
+
+    # The certificate prompt judges domain syntax locally — the same
+    # sentence as the page's name door — instead of handing garbage to the
+    # authority for a network round trip that could only ever fail.
+    _issuance_calls = []
+    _saved_obtain = s._obtain_trusted_cert
+    _saved_domain = s.config.sites[0].domain
+    try:
+        s._obtain_trusted_cert = lambda *a, **k: _issuance_calls.append(a)
+        builtins.input = lambda prompt="": "https://example.com"
+        with contextlib.redirect_stdout(io.StringIO()) as _certbuf:
+            s._config_cert(s.config.sites[0])
+    finally:
+        s._obtain_trusted_cert = _saved_obtain
+        builtins.input = saved_input_v
+    check("The certificate prompt judges domain syntax before any network",
+          "no scheme" in _certbuf.getvalue() and not _issuance_calls
+          and s.config.sites[0].domain == _saved_domain)
+
+    # The swap prompt refuses out-of-bounds sizes with the page's own
+    # sentence — it used to round 10 up to a 64 MB file silently, a wrong
+    # answer repaired instead of refused.
+    if not s._IS_MACOS:
+        _swap_calls = []
+        _saved_apply, _saved_offer = s._apply_swapfile, s._swap_offer
+        try:
+            s._apply_swapfile = lambda mb: _swap_calls.append(mb) or ""
+            s._swap_offer = lambda *a: ("no swap configured", "skip")
+            builtins.input = lambda prompt="": "10"
+            with contextlib.redirect_stdout(io.StringIO()) as _swapbuf:
+                s._ensure_swap()
+        finally:
+            s._apply_swapfile, s._swap_offer = _saved_apply, _saved_offer
+            builtins.input = saved_input_v
+        check("The swap prompt refuses a size below 64 MB instead of rounding it up",
+              "64-65536" in _swapbuf.getvalue() and not _swap_calls)
+
+    section("The opt-in balancer health check")
+
+    # Terminal-only by ruling: a host setting, off by default, answering an
+    # unauthenticated 204 to any Host — before the limiter, which must not
+    # starve a probe into a false dead — and absent from the admin page.
+    check("The health path door refuses what could shadow or mangle",
+          s._set_host_value(_scratch, "health_path", "healthz") != ""
+          and s._set_host_value(_scratch, "health_path", "/café") != ""
+          and "reserved" in s._set_host_value(_scratch, "health_path",
+                                              "/.well-known/x"))
+    check("...and accepts a plain path, or empty to turn the check off",
+          s._set_host_value(_scratch, "health_path", "/healthz") == ""
+          and _scratch.health_path == "/healthz"
+          and s._set_host_value(_scratch, "health_path", "") == ""
+          and _scratch.health_path == "")
+    check("With no health path configured, the path is an ordinary miss",
+          req("GET", path="/lb-health").status == 404)
+    s.config.health_path = "/lb-health"
+    try:
+        _hr = req("GET", path="/lb-health")
+        check("A configured health path answers 204 with no body",
+              _hr.status == 204 and _hr.body == b"")
+        check("...to HEAD as well, and with the query string ignored",
+              req("HEAD", path="/lb-health").status == 204
+              and req("GET", path="/lb-health?probe=1").status == 204)
+        _core_src = inspect.getsource(s._handle_request)
+        check("...answered before the limiter and before site selection",
+              _core_src.index("config.health_path")
+              < _core_src.index("_rate_limit_exceeded")
+              and _core_src.index("config.health_path")
+              < _core_src.index("_select_site("))
+        check("...and no neighbouring path borrows the answer",
+              req("GET", path="/lb-health2").status == 404)
+        check("...while the page never renders the setting",
+              "health_path" not in s._UI_ADMIN_PAGE)
+    finally:
+        s.config.health_path = ""
 
     section("404 and custom 404.html")
 
@@ -5151,10 +5659,15 @@ def run_install_tests(s, tmpdir):
           any(d.lower() == "cryptography" for d in required))
     check("...and the program itself is not one of its own dependencies",
           not any(d.lower() == "servette" for d in required))
-    for dist in required:
-        if dist.lower() == "cffi":
-            check("A distribution's bare compiled module is found too, not just its package",
-                  any(p.endswith(".so") for p in s._distribution_paths(dist)))
+    # Asserted present, not skipped when absent: cryptography declares cffi on
+    # CPython, so a closure without it is itself a resolution failure — and a
+    # conditional check here once meant the .so probe could silently never run.
+    cffi_dist = next((d for d in required if d.lower() == "cffi"), None)
+    check("cffi is in the closure (cryptography declares it on CPython)",
+          cffi_dist is not None)
+    check("A distribution's bare compiled module is found too, not just its package",
+          cffi_dist is not None
+          and any(p.endswith(".so") for p in s._distribution_paths(cffi_dist)))
 
     # Python 3.13 deprecated re.split's positional maxsplit, and `-m servette`
     # runs as __main__, where deprecation warnings print to the operator: the
@@ -5933,21 +6446,6 @@ def run_install_tests(s, tmpdir):
     finally:
         s.config.sites = saved_sites5
 
-    section("serve_dir world-readable check")
-
-    # World-readable dir: no warning expected (we capture logic by checking the stat)
-    readable_dir = os.path.join(tmpdir, "readable")
-    os.makedirs(readable_dir, exist_ok=True)
-    os.chmod(readable_dir, 0o755)
-    mode = os.stat(readable_dir).st_mode
-    check("World-readable dir passes check (mode & 0o005 == 0o005)", (mode & 0o005) == 0o005)
-
-    # Non-world-readable dir: warning expected
-    restricted_dir = os.path.join(tmpdir, "restricted")
-    os.makedirs(restricted_dir, exist_ok=True)
-    os.chmod(restricted_dir, 0o700)
-    mode2 = os.stat(restricted_dir).st_mode
-    check("Restricted dir fails check (mode & 0o005 != 0o005)", (mode2 & 0o005) != 0o005)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6168,12 +6666,12 @@ def run_invariant_tests(s, serve_dir, tmpdir):
     if missing:
         print(f"      pinned writers that no longer write: {sorted(missing)}")
 
-    # And of those, the ones that touch a site's content.
-    content_writers = {"_land_bundle", "_swap_site_content", "_restore_site",
-                       "_prune_versions", "_adopt_legacy_slots", "_drop_backup"}
-    check("Site content is written only by the publish channel",
-          content_writers <= set(writers)
-          and not (content_writers & {"cmd_setup"}))
+    # Which of those touch site CONTENT is carried by the exact-surface pin
+    # above: the expected set names each writer's claim, and a new content
+    # writer would surface there as an unclaimed surprise. (An earlier
+    # check here restated "only the publish channel writes content" with a
+    # condition that intersected two literal sets from this test — it could
+    # not fail, so it is gone.)
 
     section("Invariant: no request ever reaches a write")
 
@@ -6627,6 +7125,18 @@ def run_browser_tests(s, tmpdir):
                 page.click("#tab-sites")
                 page.wait_for_timeout(800)
 
+            # The pill mirrors the Status line both ways (the ruled shape):
+            # a healthy folded card wears the green all-clear rather than
+            # nothing, so an empty head never has to mean two things.
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
+            _pill = page.locator(".badge.needs").first
+            check("A healthy folded card wears the green all-clear pill",
+                  _pill.is_visible() and "healthy" in _pill.inner_text()
+                  and "badge-green" in (_pill.get_attribute("class") or ""))
+            page.locator("button.fold").first.click()
+            page.wait_for_timeout(300)
+
             # An unfinished login is treated as exactly what every other
             # thing to review is treated as: counted once, marked once on
             # the row that fixes it, with no third register anywhere. The
@@ -6698,7 +7208,7 @@ def run_browser_tests(s, tmpdir):
             pill_loc = page.locator(".site-card .badge.needs").first
             check("...and folding a card faulted client-side still shows the pill",
                   pill_loc.is_visible()
-                  and "Needs password" in pill_loc.inner_text())
+                  and "1 to review" in pill_loc.inner_text())
             page.locator("button.fold").first.click()
             page.wait_for_timeout(300)
             # Typing the login completes it, so the count follows.
@@ -6733,7 +7243,7 @@ def run_browser_tests(s, tmpdir):
                     if (rows.length !== 2) return false;
                     const a = rows[0].getBoundingClientRect();
                     const b = rows[1].getBoundingClientRect();
-                    const btn = document.querySelector('.switch-act button.dl')
+                    const btn = document.querySelector('.switch-act button.ver-refresh')
                                         .getBoundingClientRect();
                     const mid = (a.top + b.bottom) / 2;
                     return b.top >= a.bottom - 1 &&
@@ -6785,6 +7295,28 @@ def run_browser_tests(s, tmpdir):
                   page.locator("#cfg-email").input_value() == "half-typed@exam"
                   and page.evaluate(
                       "() => document.activeElement.id === 'cfg-email'"))
+
+            # The browser-cache pair on the Performance group: a select
+            # for the policy (what cannot be typed cannot need refusing),
+            # and the seconds field existing only while max-age makes the
+            # seconds mean anything.
+            check("...the browser-cache seconds appear only under max-age",
+                  page.evaluate("""() => {
+                    const pol = document.getElementById('cfg-cache_policy');
+                    const age = document.getElementById('cfg-cache_max_age');
+                    if (!pol || !age || pol.tagName !== 'SELECT') return false;
+                    const row = age.closest('.cfg-field');
+                    const was = pol.value;
+                    pol.value = 'no-store';
+                    pol.dispatchEvent(new Event('change'));
+                    const hiddenOff = row.classList.contains('hidden');
+                    pol.value = 'max-age';
+                    pol.dispatchEvent(new Event('change'));
+                    const shownOn = !row.classList.contains('hidden');
+                    pol.value = was;
+                    pol.dispatchEvent(new Event('change'));
+                    return hiddenOff && shownOn;
+                  }"""))
 
             browser.close()
 

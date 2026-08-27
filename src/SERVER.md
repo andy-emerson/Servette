@@ -104,15 +104,18 @@ def _redirect_next(dst):
     return _canonical_source(dst.partition("?")[0])
 
 
-def _clean_redirects(raw):
-    """The site's redirect table, validated once at load so serving one is a
-    dict lookup and nothing else.
+def _clean_redirects(raw, strict=False):
+    """The site's redirect table, validated once so serving one is a dict
+    lookup and nothing else.
 
     A source is a site-absolute path; a target is another site-absolute path
-    or an absolute http(s) URL. Anything else is dropped with a log line
-    rather than raised: one bad entry in a hand-edited table must not take a
-    whole site down, and a redirect that quietly did something other than
-    what it said would be worse than one that does nothing.
+    or an absolute http(s) URL. What happens to anything else depends on the
+    door. As the write doors' filter (strict=False), a bad entry is dropped
+    with a log line and the caller turns an empty result into its own
+    refusal sentence. At the load door (strict=True), a bad entry refuses
+    the whole file (the load-door principle — see _ConfigInvalid): a rule
+    silently dropped is a path the operator wrote a redirect for answering
+    404, discovered by visitors far from the edit.
 
     Two of the checks are load-bearing rather than tidy. A target is
     narrowed to path-or-http(s) because a redirect is an open door by
@@ -124,26 +127,34 @@ def _clean_redirects(raw):
     serve time — silently sending the visitor somewhere the operator did
     not write. An operator who wants a non-ASCII destination percent-encodes
     the path (or punycodes the host) themselves, which is ASCII and exact."""
+    def refuse(sentence):
+        # True = drop this entry; a strict caller never gets that far.
+        if strict:
+            raise _ConfigInvalid(f"servette.toml: redirects — {sentence}")
+        log.warning("redirect %s", sentence)
+        return True
+
     out = {}
     if not isinstance(raw, dict):
-        log.warning("redirects is not a table — ignoring it")
+        refuse("is not a table of \"/path\" = \"/target\" pairs")
         return out
     if len(raw) > _MAX_REDIRECTS:
-        log.warning("more than %d redirects — only the first %d are loaded",
-                    _MAX_REDIRECTS, _MAX_REDIRECTS)
+        # Sentence stays mode-neutral: strict raises before anything loads,
+        # non-strict truncates below — naming either behavior here would
+        # tell one of the two doors the opposite of what it did.
+        refuse(f"table holds more than {_MAX_REDIRECTS} rules")
     for key, target in list(raw.items())[:_MAX_REDIRECTS]:
         src, dst = str(key).strip(), str(target).strip()
         if any(not (0x20 <= ord(c) <= 0x7E) for c in src + dst):
-            log.warning("redirect with a control or non-ASCII character in it — ignored")
+            refuse(f"{src[:80]!r} carries a control or non-ASCII character")
             continue
         if not src.startswith("/") or len(src) > _MAX_REDIRECT_CHARS:
-            log.warning("redirect source %r is not a site path — ignored", src[:80])
+            refuse(f"source {src[:80]!r} is not a site path")
             continue
         if len(dst) > _MAX_REDIRECT_CHARS or not (
                 dst.startswith("/") or dst.startswith("http://")
                 or dst.startswith("https://")):
-            log.warning("redirect target %r is not a path or http(s) URL — ignored",
-                        dst[:80])
+            refuse(f"target {dst[:80]!r} is not a path or http(s) URL")
             continue
         # One rule covers /old and /old/ and every percent-spelling of the
         # same path, on both sides of the lookup: the key is the canonical
@@ -151,11 +162,18 @@ def _clean_redirects(raw):
         # /my%20page, and /caf%C3%A9 is how an ASCII-only table spells a
         # non-ASCII source.
         norm = _canonical_source(src)
+        if len(norm) > _MAX_REDIRECT_CHARS:
+            # The canonical spelling percent-expands, so a raw source under
+            # the cap can canonicalize past it — judged here so canonical
+            # output is a fixed point of this validator, not refused later
+            # with a sentence about something else.
+            refuse(f"source {src[:80]!r} exceeds {_MAX_REDIRECT_CHARS} "
+                   "characters in its canonical spelling")
+            continue
         if norm in out:
-            log.warning("redirect %s is written twice (two spellings of one "
-                        "path) — the last one wins", norm)
+            refuse(f"{norm} is written twice (two spellings of one path)")
         if norm == _redirect_next(dst):
-            log.warning("redirect %s points at itself — ignored", norm)
+            refuse(f"{norm} points at itself")
             continue
         out[norm] = dst
     # A rule pointing at itself is refused above; a ring of rules
@@ -174,28 +192,35 @@ def _clean_redirects(raw):
         if cur is not None and cur in seen:
             doomed.add(src)
     for src in doomed:
-        log.warning("redirect %s is part of, or leads into, a ring of "
-                    "redirects — ignored", src)
+        refuse(f"{src} is part of, or leads into, a ring of redirects")
         del out[src]
     return out
 
 
 def _redirect_toml(site):
-    """The site's redirect table as TOML, or nothing at all when it is empty.
+    """The site's redirect tables as TOML, or nothing at all when both are
+    empty.
 
     Written LAST inside each [[site]] block, because a TOML sub-table
     swallows every key that follows it: a scalar written after
     [site.redirects] would be read back as part of the table, not as a
     field of the site."""
-    if not site.redirects:
-        return ""
     def q(value):
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    lines = "\n".join(f"{q(src)} = {q(dst)}"
-                      for src, dst in sorted(site.redirects.items()))
-    return ("\n# A path on this site = where a visitor asking for it is sent.\n"
-            "# Answered with a 301, before any file is looked for.\n"
-            "[site.redirects]\n" + lines + "\n")
+    def block(header, comment, table):
+        if not table:
+            return ""
+        lines = "\n".join(f"{q(src)} = {q(dst)}"
+                          for src, dst in sorted(table.items()))
+        return "\n" + comment + f"[{header}]\n" + lines + "\n"
+    return (block("site.redirects",
+                  "# A path on this site = where a visitor asking for it is sent.\n"
+                  "# Answered with a permanent 301, before any file is looked for.\n",
+                  site.redirects)
+            + block("site.redirects_temporary",
+                    "# The same pairs, answered with a temporary 302: the old path\n"
+                    "# stays the site's real address, nothing memorizes the new one.\n",
+                    site.redirects_temp))
 
 
 class Site:
@@ -208,21 +233,63 @@ class Site:
 
     def __init__(self, data=None):
         data = data or {}
-        self.domain         = data.get("domain",         "")
+        # Site fields are judged here, at the load door (the load-door
+        # principle — see _ConfigInvalid). Every Site is built before
+        # Config._load mutates anything of its own, so a raise here
+        # refuses the file whole.
+        for field in ("domain", "serve_dir", "cert_file", "key_file",
+                      "username", "password_hash", "password_salt"):
+            if field in data and (not isinstance(data[field], str) or any(
+                    ord(c) < 0x20 or ord(c) == 0x7F for c in data[field])):
+                # Control characters included NUL, which TOML permits in a
+                # string but the filesystem calls downstream refuse with a
+                # bare ValueError — outside the _ConfigInvalid family the
+                # reload's last-good handling keys on.
+                raise _ConfigInvalid(f"servette.toml: {field} must be text "
+                                     "without control characters")
+        domain = data.get("domain", "")
+        if domain:
+            problem = _domain_problem(domain)
+            if problem:
+                raise _ConfigInvalid(f"servette.toml: domain — {problem}")
+        active = data.get("active", True)
+        if not isinstance(active, bool):
+            raise _ConfigInvalid("servette.toml: active must be true or false")
+        username = data.get("username", "")
+        if ":" in username:
+            # The same sentence the write doors refuse with: sign-in joins
+            # user:password and splits at the first colon, so this username
+            # could never match and locks every visitor out.
+            raise _ConfigInvalid("servette.toml: username — a username "
+                                 "cannot contain a colon (sign-in splits "
+                                 "user:password at the first one)")
+        self.domain         = domain
         # Deactivated sites keep their config and files but are invisible to
-        # request routing — the pause between serving and deleting.
-        self.active         = bool(data.get("active",    True))
+        # routing and TLS alike — the pause between serving and deleting.
+        self.active         = active
         self.serve_dir      = data.get("serve_dir",      "site")
         self.cert_file      = data.get("cert_file",      "cert.pem")
         self.key_file       = data.get("key_file",       "key.pem")
-        self.username       = data.get("username",       "")
+        self.username       = username
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
-        # Old path -> new path, validated once here so the request path is a
-        # dict lookup and nothing more. A file in the site folder would be
-        # content, and content is read at request time — which is the whole
-        # reason this is a setting.
-        self.redirects      = _clean_redirects(data.get("redirects", {}))
+        # Two tables, one per answer: redirects → 301, redirects_temporary
+        # → 302 (the ruled per-rule choice, default permanent). Validated
+        # strictly and together — criteria in _clean_redirects, principle
+        # in _ConfigInvalid: a bad rule, a source written twice or in both
+        # tables, or a ring hopping between them refuses the file.
+        perm = _clean_redirects(data.get("redirects", {}), strict=True)
+        temp = _clean_redirects(data.get("redirects_temporary", {}),
+                                strict=True)
+        both = set(perm) & set(temp)
+        if both:
+            raise _ConfigInvalid(f"servette.toml: redirects — "
+                                 f"{sorted(both)[0]} is in both tables; a "
+                                 "rule is permanent or temporary, not both")
+        combined = _clean_redirects({**perm, **temp}, strict=True)
+        self.redirects      = {k: v for k, v in combined.items()
+                               if k not in temp}
+        self.redirects_temp = {k: v for k, v in combined.items() if k in temp}
         self._cert_mtime    = None  # populated by Config._load(); externally-rotated-cert detection
 
 
@@ -233,10 +300,13 @@ The signal for a config that must not take effect. Where it is raised decides wh
 ```python
 # The invalid-config signal
 class _ConfigInvalid(Exception):
-    """servette.toml cannot be safely applied — unparseable TOML, or a
-    serve_dir that would publish Servette's own secrets. At startup this is
-    fatal (fail closed); on the per-request reload the previous configuration
-    stays in force — see reload_if_changed."""
+    """servette.toml cannot be safely applied: unparseable TOML, any value
+    the write doors would refuse (the load-door principle — valid or
+    refused, judged by the same shared validators `set` and the page run),
+    or a serve_dir that would publish Servette's own secrets. At startup
+    this is fatal (fail closed), with the message naming the field; on the
+    per-request reload the previous configuration stays in force — see
+    reload_if_changed."""
 
 
 class _ConfigUnreadable(_ConfigInvalid):
@@ -315,6 +385,13 @@ class Config:
                 unreadable = True
 
         site_tables = data.get("site", [])
+        # Typed before iterated: `site = 1` is valid TOML, and building Sites
+        # from a non-table would raise a bare TypeError — escaping the
+        # _ConfigInvalid family that reload_if_changed's last-good handling
+        # and startup's fix-or-delete sentence both key on.
+        if not isinstance(site_tables, list) or not all(
+                isinstance(t, dict) for t in site_tables):
+            raise _ConfigInvalid("servette.toml: site must be [[site]] tables")
         migrating   = existed and not site_tables and not unreadable
         if site_tables:
             sites = [Site(t) for t in site_tables]
@@ -361,20 +438,32 @@ class Config:
                 raise _ConfigInvalid(
                     f"serve_dir {site.serve_dir!r} holds Servette's own config or TLS keys — "
                     "serving it would publish them")
-        self.sites = sites
+        # Host scalars: defaults first, then every key the file carries runs
+        # through the same shared validator the write doors use — one
+        # criteria set per key, whichever door the value came through (the
+        # load-door principle — see _ConfigInvalid). Validated on a scratch
+        # object BEFORE any attribute of self changes, for the reload-path
+        # reason at the top of _load.
+        class _ScratchHost:
+            pass
+        scratch = _ScratchHost()
+        scratch.port, scratch.rate_limit, scratch.auth_rate_limit = 443, 120, 6
+        scratch.cache_policy, scratch.cache_max_age = "no-cache", 3600
+        scratch.cache_size_mb = 128
+        scratch.email = scratch.trusted_proxy = scratch.health_path = ""
+        scratch.tls_min_version, scratch.ciphers = "1.2", ""
+        scratch.csp                = "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'"
+        scratch.permissions_policy = "camera=(), microphone=(), usb=(), midi=(), serial=()"
+        for key in _SET_HOST_KEYS:
+            if key in data:
+                err = _set_host_value(scratch, key, str(data[key]))
+                if err:
+                    raise _ConfigInvalid(f"servette.toml: {key} — {err}")
 
-        self.port            = data.get("port",            443)
-        self.rate_limit      = data.get("rate_limit",      120)
-        self.auth_rate_limit = data.get("auth_rate_limit", 6)
-        self.cache_policy       = data.get("cache_policy",       "no-cache")
-        self.cache_max_age      = data.get("cache_max_age",      3600)
-        self.cache_size_mb      = data.get("cache_size_mb",      128)
-        self.email              = data.get("email",              "")
-        self.trusted_proxy      = data.get("trusted_proxy",      "")
-        self.tls_min_version    = data.get("tls_min_version",    "1.2")
-        self.ciphers            = data.get("ciphers",            "")
-        self.csp                = data.get("csp",                "default-src 'self' https: data: 'unsafe-inline'; object-src 'none'; base-uri 'self'")
-        self.permissions_policy = data.get("permissions_policy", "camera=(), microphone=(), usb=(), midi=(), serial=()")
+        # Nothing below raises: adopt the validated whole.
+        self.sites = sites
+        for key in _SET_HOST_KEYS:
+            setattr(self, key, getattr(scratch, key))
 
         self.unreadable = unreadable
         if read_mtime is not None:
@@ -432,12 +521,15 @@ class Config:
             if mtime != self._warned_mtime:
                 self._warned_mtime = mtime
                 log.warning("Config NOT reloaded (%s) — retrying on the next request", e)
-        except _ConfigInvalid as e:
+        except Exception as e:
             # A bad edit, by contrast, stays bad until someone edits again.
             # Keep serving on the last good configuration: this runs on
             # request threads, where an escape would kill the request
             # mid-flight and a process exit would take the whole server down
-            # over a typo. Stamp the mtime so the bad file isn't re-parsed —
+            # over a typo. Broad deliberately — the doors raise
+            # _ConfigInvalid for everything they judge, but a hand-edit that
+            # finds a way past them must degrade to last-good too, never to
+            # an outage. Stamp the mtime so the bad file isn't re-parsed —
             # and the warning isn't repeated — on every request until the
             # file changes again.
             self._mtime = mtime
@@ -481,7 +573,7 @@ password_salt = {s(site.password_salt)}
 #
 # Host-level settings below apply to every site on this box. Each [[site]]
 # block below is one hosted domain — its own folder, certificate, auth, and
-# publish channel.
+# redirects.
 
 port = {self.port}
 
@@ -498,6 +590,10 @@ cache_size_mb = {self.cache_size_mb}
 # Let's Encrypt registration email and optional reverse proxy IP
 email = {s(self.email)}
 trusted_proxy = {s(self.trusted_proxy)}
+
+# Optional load-balancer health check: a path answering 204 to anyone,
+# exempt from rate limiting. Empty = off (the default).
+health_path = {s(self.health_path)}
 
 # TLS settings
 tls_min_version = {s(self.tls_min_version)}
@@ -737,7 +833,7 @@ def _entry_bytes(entry):
 
 ```
 
-The read-through path: mtime-validated hits, one gzip per file change, and two protections for the bound — a file too large for the cache is served but never stored (so it can't purge everything else), and eviction is oldest-first.
+The read-through path: mtime-validated hits, one gzip per file change, and two protections for the bound — a file too large for the cache is served but never stored (so it can't purge everything else), and eviction is least-recently-served first.
 
 ```python
 # Reading through the cache
@@ -765,6 +861,9 @@ def _get_cached_file(path):
     with _file_cache_lock:
         entry = _file_cache.get(path)
         if entry and entry["stamp"] == stamp:
+            # A hit refreshes recency, or the "LRU" is really FIFO and a
+            # hot index.html is evicted as readily as a file served once.
+            _file_cache.move_to_end(path)
             return entry["raw"], entry["compressed"], entry["etag"]
 
     # Two threads can race here: both miss the cache check and both read the file. The fix is
@@ -1047,7 +1146,7 @@ def _loggable(s):
 
 ```
 
-The request core is one function, transport-agnostic and ordered deliberately: reload, site selection (bound before the limiter so a matched host's 429 carries HSTS like every other response), rate limit (still ahead of the closed-system miss, so unmatched Hosts throttle too), the undifferentiated 404 for an unmatched Host (deliberately ahead of the method check, so no 405 leaks that something is here), method check, per-site auth with the scrypt gate, the reserved paths, then file resolution and the caching/range/gzip protocol. Every inline comment below marks one of those decisions where it takes effect.
+The request core is one function, transport-agnostic and ordered deliberately: reload, the balancer health check (before everything — no Host match gates it, no limiter starves it), site selection (bound before the limiter so a matched host's 429 carries HSTS like every other response), rate limit (still ahead of the closed-system miss, so unmatched Hosts throttle too), the undifferentiated 404 for an unmatched Host (deliberately ahead of the method check, so no 405 leaks that something is here), method check, per-site auth with the scrypt gate, the reserved paths, redirects (a dict lookup before the filesystem is touched), then file resolution and the caching/range/gzip protocol. Every inline comment below marks one of those decisions where it takes effect.
 
 ```python
 # The request core
@@ -1064,7 +1163,11 @@ def _handle_request(method, url_path, headers, raw_ip):
         # Rightmost XFF value is what the single trusted proxy appended.
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
-        if xff and ip == config.trusted_proxy:
+        # Both sides normalized: the socket address collapses mapped
+        # ::ffff:a.b.c.d spellings, so the configured value must too, or a
+        # proxy declared in the mapped form never matches and every visitor
+        # silently shares its one rate-limit bucket.
+        if xff and ip == _normalize_ip(config.trusted_proxy):
             # Adopted only if it IS an address: a passthrough proxy that
             # forwards a client-written XFF verbatim would otherwise hand
             # arbitrary bytes a rate-limit bucket of their own (the bucket
@@ -1098,6 +1201,18 @@ def _handle_request(method, url_path, headers, raw_ip):
         return status, _security_headers(site) + hdrs, (b"" if method == "HEAD" else body)
 
     config.reload_if_changed()
+
+    # The balancer's health check, where one is configured — off by default,
+    # so the closed system stays closed. Answered before site selection and
+    # the rate limiter: a probe asks "is this backend process up", which no
+    # Host match should gate and no limiter should starve into a false dead.
+    # 204, no body, no file I/O — and deliberately no per-probe log line: an
+    # endpoint exempt from rate limiting that logged each hit would hand
+    # anyone who finds it an unmetered disk-filler, and a balancer's own
+    # heartbeat is not traffic (DECISIONS.md, "a balancer gets one fitting").
+    if (config.health_path and method in ("GET", "HEAD")
+            and url_path.partition("?")[0] == config.health_path):
+        return resp(204, [(b"content-length", b"0")])
 
     # Site selection — uniform regardless of site count (see _select_site).
     # Selected BEFORE the rate limiter, deliberately: selection is a cheap
@@ -1175,8 +1290,8 @@ def _handle_request(method, url_path, headers, raw_ip):
                 (b"content-length",   b"12"),
             ], b"Unauthorized")
 
-    # Version discovery: what this box is running — the embedded error page
-    # reads this to show the served version. Deliberately
+    # Version discovery: what this box is running, for remote tooling that
+    # holds the site's password — no shipped page consumes it. Deliberately
     # reports only what THIS box knows; "latest available" is the package
     # index's business, not Servette's. Host-level (one process, one version).
     #
@@ -1220,19 +1335,32 @@ def _handle_request(method, url_path, headers, raw_ip):
     # (DECISIONS.md, "Redirects are a setting, not a file in the site").
     # Query strings ride along: a redirect names a path, and dropping the
     # query would silently break every campaign link pointed at the old one.
-    if site.redirects:
+    if site.redirects or site.redirects_temp:
         bare, sep, query = url_path.partition("?")
-        # Match the canonical spelling the table's keys are stored in: a
+        # Match the canonical spelling the tables' keys are stored in: a
         # source like '/my page' arrives as '/my%20page', and a rule on
         # '/old' must also catch an encoded '/%6fld' that resolves to the
         # same file — otherwise the redirect silently fails to fire, or is
         # skipped by anyone who percent-encodes a letter of the path.
-        target = site.redirects.get(_canonical_source(bare))
+        key = _canonical_source(bare)
+        # 301 for the permanent table, 302 for the temporary one: permanent
+        # carries the old path's standing to the new address, temporary
+        # keeps the old path the real one. Both no-cache, so a corrected
+        # rule reaches a browser that already saw the wrong answer.
+        target, status = site.redirects.get(key), 301
+        if target is None:
+            target, status = site.redirects_temp.get(key), 302
         if target:
             if sep and "?" not in target:
-                target += sep + query
-            log.info("301 %s to %s", log_path, ip)
-            return resp(301, [
+                # The stored target is door-validated printable ASCII; the
+                # client's query is not, and it lands in a header. Whitespace
+                # can't reach here (http.server 400s a split request line),
+                # but other control bytes can — filtered to the same
+                # printable range every header value in the program holds.
+                target += sep + "".join(c for c in query
+                                        if 0x20 <= ord(c) <= 0x7E)
+            log.info("%d %s to %s", status, log_path, ip)
+            return resp(status, [
                 (b"location",       target.encode("ascii", "ignore")),
                 (b"content-length", b"0"),
                 (b"cache-control",  b"no-cache"),
@@ -1252,19 +1380,13 @@ def _handle_request(method, url_path, headers, raw_ip):
         return resp(403, [(b"content-type", b"text/plain"), (b"content-length", str(len(body_403)).encode())], body_403)
 
     if status == 404 or file_path is None:
-        # Every server needs an error page, and a bare "Not found." spends a
-        # whole response telling the reader only that they were wrong. This one
-        # leads with the path, says the server is up and answered, and links
-        # the connection test on its reserved path above — the split that
-        # keeps this a real 404 while the diagnosis survives an operator's
-        # own 404.html, which wins this role by simply existing.
-        #
-        # It also covers a site's own root while nothing is published there: no
-        # index.html means the root is itself a miss, so the domain reports on
-        # itself instead of answering with ten bytes of text.
-        #
-        # The response keeps the caching contract (ETag, Cache-Control, 304),
-        # with any positive lifetime downgraded below.
+        # The miss body is the embedded diagnostic page (its own rationale
+        # lives in src/404.html's header) unless the operator's 404.html
+        # exists, which wins this role by simply existing. Covers a site's
+        # own root while nothing is published there — no index.html means
+        # the root is itself a miss. The response keeps the caching
+        # contract (ETag, Cache-Control, 304), with any positive lifetime
+        # downgraded below.
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
         if not os.path.isfile(custom_404):
@@ -1371,9 +1493,10 @@ def _select_site(host):
     Host reaches a self-signed/LAN site with no domain configured). No
     domainless site and no domain match: None, the closed-system miss."""
     host = (host or "").split(":")[0].strip().lower()
-    # A deactivated site is invisible to routing everywhere below: its Host
-    # gets the closed-system miss (over a still-valid certificate), which is
-    # what "kept but not served" means on the wire.
+    # A deactivated site is invisible to routing everywhere below, as it is
+    # to TLS (_build_site_ssl_contexts skips it): its Host gets the
+    # closed-system answer at both layers, which is what "kept but not
+    # served" means on the wire.
     for site in config.sites:
         if site.active and site.domain and site.domain.lower() == host:
             return site
@@ -1429,6 +1552,22 @@ def _domain_problem(domain):
     return ""
 
 
+def _email_problem(email):
+    """Why this string cannot be the ACME contact address, as one sentence —
+    empty when it can be. Empty itself is allowed: the account registers
+    with no contact and simply gets no expiry mail. Syntax only, the same
+    local judgment the domain gets: the authority is the real arbiter, and
+    this refuses only what could never be a mailbox — which otherwise
+    surfaces as an issuance failure months from the typo that caused it."""
+    if not email:
+        return ""
+    local, at, host = email.rpartition("@")
+    if not at or not local or "@" in local or " " in email or not email.isascii():
+        return "an email is name@host — one @, no spaces (or empty to clear)"
+    problem = _domain_problem(host)
+    return f"after the @, {problem}" if problem else ""
+
+
 ```
 
 One certificate, one TLS context — minimum version enforced, ALPN pinned to HTTP/1.1, unreadable material raising so startup fails closed.
@@ -1440,6 +1579,9 @@ def _build_ssl_context(cert_path, key_path):
     override, ALPN pinned to HTTP/1.1. Raises if the cert or key is unreadable, so
     startup can fail closed rather than serve nothing."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # .get, belt-and-braces: every door validates tls_min_version to
+    # {1.2, 1.3}, so the default fires only on a code bug — which then
+    # fails SAFE at 1.2 rather than crashing the serve path.
     ctx.minimum_version = _TLS_VERSIONS.get(config.tls_min_version, ssl.TLSVersion.TLSv1_2)
     if config.ciphers:
         ctx.set_ciphers(config.ciphers)
@@ -1473,7 +1615,7 @@ The SNI table: one context per site, the www names answered with their bare doma
 ```python
 # The SNI table
 def _build_site_ssl_contexts():
-    """Build one SSLContext per configured site, plus the default/base context the
+    """Build one SSLContext per active site, plus the default/base context the
     listening socket is constructed with and that's presented whenever SNI doesn't
     match any site (absent, unrecognized, or direct-IP access) — the closed
     system. A domainless site's own context serves as that default when one
@@ -1483,6 +1625,14 @@ def _build_site_ssl_contexts():
     domain_ctx  = {}
     default_ctx = None
     for site in config.sites:
+        if not site.active:
+            # Deactivated means invisible to every subsystem — routing,
+            # the catch-all election, and TLS alike: no context is built,
+            # so a paused site's unreadable certificate cannot refuse the
+            # whole start, and no SNI entry is claimed, so its hostname is
+            # answered by the closed-system default like any unrecognized
+            # name. Reactivation re-loads the certificate at that door.
+            continue
         ctx = _build_ssl_context(_resolve(site.cert_file), _resolve(site.key_file))
         if site.domain:
             d = site.domain.lower()
@@ -1496,7 +1646,9 @@ def _build_site_ssl_contexts():
             # which order the two sites appear in.
             domain_ctx.setdefault(f"www.{d}", ctx)
         elif default_ctx is None:
-            default_ctx = ctx  # first domainless site is the catch-all/default
+            # First domainless site — inactive ones never reach here —
+            # matching _select_site's catch-all election exactly.
+            default_ctx = ctx
 
     if default_ctx is None:
         cert_path, key_path = _ensure_default_cert()

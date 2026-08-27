@@ -1,29 +1,30 @@
-
-# Local virtualenvs
-# Log files
-# Packaging build artifacts
 # Python
-# Runtime config — contains password hashes and cert paths
-# SSL certificate, key, and release signature files
-# Site folders the suite creates through the page's add-site door
-# Throwaway certs and keys named for a .test domain (RFC 2606), which a
-# probe script once left in the repository root and a blind stage committed
-# Viewer e2e harness (tests/viewer/)
-# macOS
-*.egg-info/
-*.log
-*.pem
 *.pyc
-*.sig
-*.test
-.DS_Store
-.servette-env/
-.venv/
 __pycache__/
+
+# Packaging build artifacts
+*.egg-info/
 build/
 dist/
-node_modules/
-playwright-report/
+
+# Local virtualenvs
+.venv/
+
+# Runtime config — contains password hashes and cert paths
 servette.toml
+
+# SSL certificates and keys
+*.pem
+
+# Throwaway certs and keys named for a .test domain (RFC 2606), which a
+# probe script once left in the repository root and a blind stage committed
+*.test
+
+# Site folders the suite creates through the page's add-site door
 site-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*/
-test-results/
+
+# Log files
+*.log
+
+# macOS
+.DS_Store

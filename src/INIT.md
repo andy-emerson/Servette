@@ -25,7 +25,8 @@ and essential security headers. Run it:
 Architecture:
     Server              — config, rate limiting, file cache, the request handler, and the HTTP servers
     System              — server lifecycle, certificate management, and service management
-    Shell               — the interactive terminal interface
+    Shell               — the operator's side: the loopback admin page, content
+                          publishing, the settings doors, and the terminal shell
 """
 
 __version__ = "0.26.234"

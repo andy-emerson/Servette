@@ -50,7 +50,7 @@ Then put your site on it from your own computer: run `servette admin` over SSH a
 
 ## Who is Servette for?
 
-**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~6,800 lines of Python, no hidden machinery), sized and structured so that one person can fully understand all of it. Reading the entire source, which was written to be read, is a weekend's honest work.
+**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~6,900 lines of Python, no hidden machinery), sized and structured so that one person can fully understand all of it. Reading the entire source, which was written to be read, is a weekend's honest work.
 
 **People with a site to share that needs a simple secure server.** Development servers are perfect while you build, but they are not meant to face the internet. Servette is built to stay up: a trusted certificate that renews itself, and a hardened service that survives reboots.
 

@@ -723,26 +723,44 @@ serve_dir = "b"
     check("__version__ has 3 parts",         len(s.__version__.split(".")) == 3)
     check("__version__ major is 0",          s.__version__.split(".")[0] == "0")
 
-    section("Cache-Control header — derived from access, per-site override")
+    section("Cache-Control header — a concrete per-site toggle")
 
     site0 = s.config.sites[0]
-    site0.username, site0.cache = "", "auto"
-    check("auto, public → copies re-checked",
+    site0.username, site0.cache = "", "yes"
+    check("public, yes → copies re-checked",
           s._cache_control_header(site0) == "public, no-cache")
 
-    site0.username = "alice"
-    check("auto, private → no copies at all",
+    site0.username, site0.cache = "alice", "no"
+    check("private, no → no copies at all",
           s._cache_control_header(site0) == "no-store")
 
     site0.cache = "yes"
-    check("yes overrides: the private media site keeps re-checked copies",
+    check("yes on a private site: the media site keeps re-checked copies",
           s._cache_control_header(site0) == "private, no-cache")
 
     site0.username, site0.cache = "", "no"
-    check("no overrides: the public app with secrets leaves no copies",
+    check("no on a public site: the app with secrets leaves no copies",
           s._cache_control_header(site0) == "no-store")
 
-    site0.cache = "auto"
+    # The defaults land at construction (a file without the key) and at
+    # every access flip in the shared validator — loudly at each surface.
+    check("a new public site defaults to kept copies",
+          s.Site().cache == "yes")
+    check("a private site's file without the key defaults to none",
+          s.Site({"username": "a"}).cache == "no")
+    _flip = s.Site()
+    s._set_site_value(_flip, "username", "bob")
+    check("going private resets the toggle to none",
+          _flip.cache == "no")
+    _flip.cache = "yes"                      # the operator's override...
+    s._set_site_value(_flip, "username", "carol")
+    check("...survives a username change that does not flip access",
+          _flip.cache == "yes")
+    s._set_site_value(_flip, "username", "")
+    check("going public resets the toggle to kept",
+          _flip.cache == "yes")
+
+    site0.cache = "yes"
 
     section("Rate limiter bounds memory per IP")
 
@@ -2363,18 +2381,23 @@ def run_dispatch_tests(s):
               s.config.sites[0].active is True)
 
         saved_auth = (s.config.sites[0].username, s.config.sites[0].password_hash,
-                      s.config.sites[0].password_salt)
+                      s.config.sites[0].password_salt, s.config.sites[0].cache)
         s.config.sites[0].username = "probe"
         s.config.sites[0].password_hash = "stale-hash"
         s.config.sites[0].password_salt = "stale-salt"
-        with contextlib.redirect_stdout(io.StringIO()):
+        s.config.sites[0].cache = "no"
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["username="])
         check("set username= is the one auth switch — the stored password clears with it",
               s.config.sites[0].username == ""
               and s.config.sites[0].password_hash == ""
               and s.config.sites[0].password_salt == "")
+        # The flip reset the cache toggle AND said so — loudly, by ruling.
+        check("...and the access flip resets browser copies, announced",
+              s.config.sites[0].cache == "yes"
+              and "Browser copies reset" in buf.getvalue())
         (s.config.sites[0].username, s.config.sites[0].password_hash,
-         s.config.sites[0].password_salt) = saved_auth
+         s.config.sites[0].password_salt, s.config.sites[0].cache) = saved_auth
 
         # The folder left the vocabulary by ruling: Servette assigns it, so
         # there is no key to answer wrongly. 'set dir=' is now as unknown as
@@ -3655,19 +3678,19 @@ def run_dispatch_tests(s):
           and "cache_max_age" not in s._SET_HOST_KEYS)
     _site_sc = s.Site()
     check("cache is a choice, stated and refused outside it",
-          "auto" in s._set_site_value(_site_sc, "cache", "sometimes")
+          "yes" in s._set_site_value(_site_sc, "cache", "sometimes")
           and s._set_site_value(_site_sc, "cache", "no") == ""
           and _site_sc.cache == "no")
     _bad_cache_raised = False
     try:
         s.Site({"cache": "max-age"})
     except s._ConfigInvalid as e:
-        _bad_cache_raised = "auto" in str(e)
+        _bad_cache_raised = "yes" in str(e)
     check("the load door refuses a cache value no door would save",
           _bad_cache_raised)
     check("a saved override survives the config round-trip",
           s.Site({"cache": "no"}).cache == "no"
-          and s.Site().cache == "auto")
+          and s.Site({"username": "a", "cache": "yes"}).cache == "yes")
     check("tls_min_version is 1.2 or 1.3, nothing else",
           s._set_host_value(_sc, "tls_min_version", "1.1") != ""
           and s._set_host_value(_sc, "tls_min_version", "1.3") == "")
@@ -5225,7 +5248,7 @@ def run_server_tests(s, serve_dir):
 
     section("Cache-Control on the wire — derived, and overridable")
 
-    s.config.sites[0].cache = "auto"
+    s.config.sites[0].cache = "yes"
     check("public site: no-cache in response",
           "no-cache" in req("GET").headers.get("Cache-Control", ""))
 
@@ -5233,7 +5256,7 @@ def run_server_tests(s, serve_dir):
     check("cache=no: no-store in response",
           "no-store" in req("GET").headers.get("Cache-Control", ""))
 
-    s.config.sites[0].cache = "auto"
+    s.config.sites[0].cache = "yes"
 
     section("Request rate limiting")
 
@@ -7328,22 +7351,30 @@ def run_browser_tests(s, tmpdir):
                            parseFloat(g1.borderTopWidth) > 0;
                   }"""))
 
-            # Browser caching is per-site now: a three-value select on the
-            # card (auto derives from access; the state span spells out
-            # what auto means for THIS site), and no cache field left on
-            # the Server tab.
+            # Browser caching is per-site: a two-value select on the card
+            # holding the concrete stored value, and no cache field left
+            # on the Server tab.
             page.click("#tab-sites")
             page.wait_for_timeout(300)
-            check("...browser copies is a per-site select stating what auto derives to",
+            check("...browser copies is a two-value select on the card",
                   page.evaluate("""() => {
                     const sel = document.querySelector('.cache-mode');
-                    const st  = document.querySelector('.cache-state');
-                    if (!sel || sel.tagName !== 'SELECT' || !st) return false;
+                    if (!sel || sel.tagName !== 'SELECT') return false;
                     const vals = [...sel.options].map(o => o.value).sort().join(',');
-                    return vals === 'auto,no,yes' && sel.value === 'auto' &&
-                           /re-checked|none/.test(st.textContent) &&
+                    return vals === 'no,yes' && sel.value === 'yes' &&
                            !document.getElementById('cfg-cache_policy');
                   }"""))
+
+            # The access flip's reset is said BEFORE Save (loudly, by
+            # ruling): arming the switch on a public site narrates both
+            # the sign-in and the copies reset.
+            page.locator(".auth-switch").first.check()
+            page.wait_for_timeout(200)
+            check("...arming private narrates the browser-copies reset",
+                  "copies reset to none"
+                  in (page.locator(".auth-hint").first.text_content() or ""))
+            page.locator(".auth-switch").first.uncheck()
+            page.wait_for_timeout(200)
 
             browser.close()
 

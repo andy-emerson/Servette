@@ -1231,21 +1231,20 @@
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
 
-         // ── What visitors' browsers keep. Applied on change — the three
-         // values are all safe and instantly reversible, so a Save button
+         // ── What visitors' browsers keep. Applied on change — both
+         // values are safe and instantly reversible, so a Save button
          // would be ceremony; the shared validator still judges the value.
          `<div class="switch-row"><label class="k">Browser copies</label>` +
-         `<span class="switch-value"><span class="cache-state"></span>` +
+         `<span class="switch-value">` +
          `<span class="switch-act"><select class="cache-mode">` +
-         `<option value="auto">auto</option>` +
-         `<option value="yes">kept</option>` +
+         `<option value="yes">kept, re-checked</option>` +
          `<option value="no">none</option>` +
          `</select></span></span></div>` +
-         `<p class="cfg-hint">Auto follows access: a public site's visitors ` +
-         `keep copies that are re-checked every visit (new content is ` +
-         `instant, unchanged files skip re-downloading); a private site's ` +
-         `visitors keep no copies on their machines. Kept and none force ` +
-         `either way.</p>` +
+         `<p class="cfg-hint">Kept: visitors' browsers keep copies but ` +
+         `re-check them every visit — new content is instant, unchanged ` +
+         `files skip re-downloading (the public default). None: nothing ` +
+         `lingers on visitors' machines (the private default). Switching ` +
+         `the site public or private resets this to that default.</p>` +
 
          // ── Publishing: drop a folder, look at it, ship it.
          `<div class="split"></div>` +
@@ -1923,9 +1922,17 @@
               '', { type: 'password',
                     hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
       q('.auth-save').classList.toggle('hidden', !(on || pending));
-      q('.auth-hint').textContent = on ? ''
+      // The access flip's consequences are said BEFORE Save, not
+      // discovered after (loudly, by ruling): the login change and the
+      // browser-copies reset that rides with it.
+      q('.auth-hint').textContent = on
+        ? (siteData.username ? ''
+           : 'Saving makes the site private: visitors sign in, and browser ' +
+             'copies reset to none — nothing lingers on their machines.')
         : (siteData.username
-           ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+           ? 'Saving makes the site public: the login is removed, the stored ' +
+             'password deleted, and browser copies reset to kept (re-checked ' +
+             'every visit).'
            : '');
 
       // Typing changes whether the login is complete, so the count follows
@@ -1984,14 +1991,11 @@
       if (!ok) { b.disabled = false; b.textContent = old; }
     });
 
-    // The cache select reflects the stored value and states what "auto"
-    // derives to for THIS site, so the operator reads behavior, not a word.
+    // The cache select reflects the stored value — always concrete, since
+    // access flips write the matching default onto it.
     {
-      const sel = q('.cache-mode'), state = q('.cache-state');
-      sel.value = siteData.cache || 'auto';
-      state.textContent = sel.value === 'auto'
-        ? (siteData.username ? 'private: none' : 'public: re-checked')
-        : (sel.value === 'yes' ? 're-checked each visit' : 'no copies');
+      const sel = q('.cache-mode');
+      sel.value = siteData.cache || 'yes';
       sel.addEventListener('change', () =>
         saveSettings({ cache: sel.value }, cardIndex(card), badge, errEl));
     }

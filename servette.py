@@ -317,12 +317,6 @@ class Site:
         active = data.get("active", True)
         if not isinstance(active, bool):
             raise _ConfigInvalid("servette.toml: active must be true or false")
-        cache = data.get("cache", "auto")
-        if cache not in ("auto", "yes", "no"):
-            # The same sentence the write doors refuse with (the load-door
-            # principle — see _ConfigInvalid).
-            raise _ConfigInvalid('servette.toml: cache is "auto", "yes", '
-                                 'or "no" — auto follows public/private')
         username = data.get("username", "")
         if ":" in username:
             # The same sentence the write doors refuse with: sign-in joins
@@ -331,6 +325,16 @@ class Site:
             raise _ConfigInvalid("servette.toml: username — a username "
                                  "cannot contain a colon (sign-in splits "
                                  "user:password at the first one)")
+        # A file without the key gets its access's default — public sites
+        # keep re-checked copies, private sites none. The stored value is
+        # always concrete: flipping access RESETS it to that default at
+        # the write doors, loudly, and the operator toggles it from there.
+        cache = data.get("cache", "no" if username else "yes")
+        if cache not in ("yes", "no"):
+            # The same sentence the write doors refuse with (the load-door
+            # principle — see _ConfigInvalid).
+            raise _ConfigInvalid('servette.toml: cache is "yes" (copies, '
+                                 're-checked every visit) or "no" (no copies)')
         self.domain         = domain
         # Deactivated sites keep their config and files but are invisible to
         # routing and TLS alike — the pause between serving and deleting.
@@ -341,10 +345,10 @@ class Site:
         self.username       = username
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
-        # What visitors' browsers keep: "auto" derives from access — a
-        # public site's copies are kept but re-checked every visit, a
-        # private site's are not kept at all; "yes"/"no" override either
-        # way (the private media site, the public app handling secrets).
+        # What visitors' browsers keep: "yes" = copies kept but re-checked
+        # every visit, "no" = no copies at all. Defaulted by access above,
+        # reset by access flips at the write doors, toggled freely between
+        # (the private media site, the public app handling secrets).
         self.cache          = cache
         # Two tables, one per answer: redirects → 301, redirects_temporary
         # → 302 (the ruled per-rule choice, default permanent). Validated
@@ -629,9 +633,9 @@ username = {s(site.username)}
 password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
 
-# What visitors' browsers keep: "auto" follows access (public = copies
-# kept but re-checked every visit, private = no copies), "yes" or "no"
-# forces it either way
+# What visitors' browsers keep: "yes" = copies kept but re-checked every
+# visit, "no" = no copies at all. Changing a site between public and
+# private resets this to that access's default (public yes, private no)
 cache = {s(site.cache)}
 {_redirect_toml(site)}""" for site in self.sites)
 
@@ -1017,19 +1021,17 @@ def _resolve_request_path(url_path, serve_dir):
 
 # Cache-Control
 def _cache_control_header(site):
-    """Cache-Control for the matched site, derived from its access unless
-    the site's own `cache` overrides. A public site's visitors keep copies
-    that are re-checked every visit (`no-cache` — new content is instant,
-    unchanged files answer 304). A private site's visitors keep no copies
-    at all (`no-store`): content behind a password leaves nothing in a
-    browser's disk cache on a machine the operator does not control, and
-    `private` would only have kept shared caches out. The per-site `cache`
-    field forces either behavior — the private media site that wants cheap
-    repeat visits, the public app that handles secrets client-side."""
-    mode = site.cache
-    if mode == "auto":
-        mode = "no" if site.username else "yes"
-    if mode == "no":
+    """Cache-Control for the matched site, read straight off its `cache`
+    toggle. "yes": visitors keep copies re-checked every visit (`no-cache`
+    — new content is instant, unchanged files answer 304), the public
+    default. "no": visitors keep no copies at all (`no-store` — content
+    behind a password leaves nothing in a browser's disk cache on a
+    machine the operator does not control), the private default. The
+    defaults land when access flips — the write doors reset the toggle,
+    loudly — and the operator moves it freely from there: the private
+    media site that wants cheap repeat visits, the public app that
+    handles secrets client-side."""
+    if site.cache == "no":
         return "no-store"
     return ("private" if site.username else "public") + ", no-cache"
 
@@ -5992,21 +5994,20 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
 
-         // ── What visitors' browsers keep. Applied on change — the three
-         // values are all safe and instantly reversible, so a Save button
+         // ── What visitors' browsers keep. Applied on change — both
+         // values are safe and instantly reversible, so a Save button
          // would be ceremony; the shared validator still judges the value.
          `<div class="switch-row"><label class="k">Browser copies</label>` +
-         `<span class="switch-value"><span class="cache-state"></span>` +
+         `<span class="switch-value">` +
          `<span class="switch-act"><select class="cache-mode">` +
-         `<option value="auto">auto</option>` +
-         `<option value="yes">kept</option>` +
+         `<option value="yes">kept, re-checked</option>` +
          `<option value="no">none</option>` +
          `</select></span></span></div>` +
-         `<p class="cfg-hint">Auto follows access: a public site's visitors ` +
-         `keep copies that are re-checked every visit (new content is ` +
-         `instant, unchanged files skip re-downloading); a private site's ` +
-         `visitors keep no copies on their machines. Kept and none force ` +
-         `either way.</p>` +
+         `<p class="cfg-hint">Kept: visitors' browsers keep copies but ` +
+         `re-check them every visit — new content is instant, unchanged ` +
+         `files skip re-downloading (the public default). None: nothing ` +
+         `lingers on visitors' machines (the private default). Switching ` +
+         `the site public or private resets this to that default.</p>` +
 
          // ── Publishing: drop a folder, look at it, ship it.
          `<div class="split"></div>` +
@@ -6684,9 +6685,17 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
               '', { type: 'password',
                     hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
       q('.auth-save').classList.toggle('hidden', !(on || pending));
-      q('.auth-hint').textContent = on ? ''
+      // The access flip's consequences are said BEFORE Save, not
+      // discovered after (loudly, by ruling): the login change and the
+      // browser-copies reset that rides with it.
+      q('.auth-hint').textContent = on
+        ? (siteData.username ? ''
+           : 'Saving makes the site private: visitors sign in, and browser ' +
+             'copies reset to none — nothing lingers on their machines.')
         : (siteData.username
-           ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+           ? 'Saving makes the site public: the login is removed, the stored ' +
+             'password deleted, and browser copies reset to kept (re-checked ' +
+             'every visit).'
            : '');
 
       // Typing changes whether the login is complete, so the count follows
@@ -6745,14 +6754,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       if (!ok) { b.disabled = false; b.textContent = old; }
     });
 
-    // The cache select reflects the stored value and states what "auto"
-    // derives to for THIS site, so the operator reads behavior, not a word.
+    // The cache select reflects the stored value — always concrete, since
+    // access flips write the matching default onto it.
     {
-      const sel = q('.cache-mode'), state = q('.cache-state');
-      sel.value = siteData.cache || 'auto';
-      state.textContent = sel.value === 'auto'
-        ? (siteData.username ? 'private: none' : 'public: re-checked')
-        : (sel.value === 'yes' ? 're-checked each visit' : 'no copies');
+      const sel = q('.cache-mode');
+      sel.value = siteData.cache || 'yes';
       sel.addEventListener('change', () =>
         saveSettings({ cache: sel.value }, cardIndex(card), badge, errEl));
     }
@@ -8277,10 +8283,18 @@ def _set_site_value(target, key, value):
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
         # (`set`, the page, and the prompt alike, since all land here).
+        had_login = bool(target.username)
         target.username = value
         if not value:
             target.password_hash = ""
             target.password_salt = ""
+        if bool(value) != had_login:
+            # Flipping access resets browser copies to that access's
+            # default — here, the one write path, so every door resets
+            # identically. Each surface announces the reset itself
+            # (cmd_set's line, the prompt's line, the page's hint):
+            # loudly, never as a side effect discovered later.
+            target.cache = "no" if value else "yes"
     elif key == "redirect":
         # One rule per token: 'redirect=/path,/target' adds or replaces a
         # permanent (301) rule, a trailing ',temporary' makes it a 302, and
@@ -8359,13 +8373,11 @@ def _set_site_value(target, key, value):
                         "run 'config cert' first")
         target.active = (v == "yes")
     elif key == "cache":
-        # What visitors' browsers keep. "auto" derives from access: a
-        # public site's copies are re-checked every visit, a private
-        # site's are not kept at all. "yes"/"no" force either way — the
-        # private media site, the public app handling secrets.
+        # What visitors' browsers keep — the toggle the access flip above
+        # resets. "yes": copies re-checked every visit. "no": no copies.
         v = value.strip().lower()
-        if v not in ("auto", "yes", "no"):
-            return 'cache is "auto", "yes", or "no" — auto follows public/private'
+        if v not in ("yes", "no"):
+            return 'cache is "yes" (copies, re-checked every visit) or "no" (no copies)'
         target.cache = v
     return ""
 
@@ -8454,6 +8466,7 @@ def cmd_set(args):
     if not pairs:
         _set_usage()
         return
+    pre_login, pre_cache = bool(site.username), site.cache
     try:
         err = _apply_settings(site, pairs)
     except PermissionError:
@@ -8463,6 +8476,14 @@ def cmd_set(args):
         print(f"  {err}")
         return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
+    # The access flip's reset is announced, never discovered: the operator
+    # who changed a username learns the cache toggle moved with it.
+    if bool(site.username) != pre_login and site.cache != pre_cache:
+        print("  Browser copies reset to "
+              + ("'no' — a private site leaves no copies on visitors' machines"
+                 if site.username else
+                 "'yes' — a public site's copies are re-checked every visit")
+              + " (change it with: set cache=yes|no).")
 
 
 # The settings display
@@ -8496,13 +8517,9 @@ def _config_show():
             ("Key",         val(site.key_file)),
             ("Username",    val(site.username)),
             ("Password",    "(set)" if site.password_hash else "(not set)"),
-            # "auto" spells out what it derives to, so the operator reads
-            # the behavior, not just the setting.
             ("Browser copies",
-             {"auto": ("auto (private: none)" if site.username
-                       else "auto (public: re-checked)"),
-              "yes":  "kept, re-checked each visit",
-              "no":   "none"}[site.cache]),
+             "kept, re-checked each visit" if site.cache == "yes"
+             else "none"),
         ]
         for label, value in site_rows:
             print(f"    {label:<{_PAD - 2}} {value}")
@@ -8822,6 +8839,12 @@ def _config_username(site):
     config.save()
     print("  → auth disabled, password cleared" if new_value == ""
           else "  → saved")
+    # Announce the reset the access flip carried (loudly, by ruling).
+    if bool(new_value) != bool(current):
+        print("  → browser copies reset to "
+              + ("'no' (private default: none on visitors' machines)"
+                 if new_value else
+                 "'yes' (public default: re-checked every visit)"))
 
 
 def _config_password(site):

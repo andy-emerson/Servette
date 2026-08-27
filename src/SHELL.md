@@ -342,6 +342,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
                            "active": s.active,
+                           "cache": s.cache,
                            "username": s.username,
                            "redirects": s.redirects,
                            "redirects_temporary": s.redirects_temp,
@@ -1352,17 +1353,6 @@ def _set_host_value(target, key, value):
                 return ("/.well-known/ is reserved — the connection test and "
                         "ACME challenges live there")
         target.health_path = value
-    elif key == "cache_policy":
-        v = value.strip().lower()
-        if v not in ("no-store", "no-cache", "max-age"):
-            return "cache_policy is no-store, no-cache, or max-age"
-        target.cache_policy = v
-    elif key == "cache_max_age":
-        # Non-negative: a negative max-age is not a shorter cache, it is a
-        # malformed Cache-Control header sent on every response.
-        if not value.isdigit():
-            return "cache_max_age is seconds — a whole number, 0 or more"
-        target.cache_max_age = int(value)
     elif key == "tls_min_version":
         if value not in ("1.2", "1.3"):
             return "tls_min_version is 1.2 or 1.3"
@@ -1496,6 +1486,15 @@ def _set_site_value(target, key, value):
                         f"({target.cert_file or 'none configured'}) — "
                         "run 'config cert' first")
         target.active = (v == "yes")
+    elif key == "cache":
+        # What visitors' browsers keep. "auto" derives from access: a
+        # public site's copies are re-checked every visit, a private
+        # site's are not kept at all. "yes"/"no" force either way — the
+        # private media site, the public app handling secrets.
+        v = value.strip().lower()
+        if v not in ("auto", "yes", "no"):
+            return 'cache is "auto", "yes", or "no" — auto follows public/private'
+        target.cache = v
     return ""
 
 
@@ -1506,10 +1505,10 @@ The vocabulary `set` accepts, and its usage line.
 ```python
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
-                  "cache_size_mb", "cache_policy", "cache_max_age",
+                  "cache_size_mb",
                   "trusted_proxy", "health_path", "tls_min_version",
                   "ciphers", "csp", "permissions_policy")
-_SET_SITE_KEYS = ("username", "active", "redirect")
+_SET_SITE_KEYS = ("username", "active", "cache", "redirect")
 
 
 def _set_usage():
@@ -1616,16 +1615,11 @@ def _config_show():
     def val(v):
         return v if v else "(not set)"
 
-    cache_display = config.cache_policy
-    if config.cache_policy == "max-age":
-        cache_display += f" ({config.cache_max_age}s)"
-
     host_rows = [
         ("HTTPS port",         config.port),
         ("Email",              val(config.email)),
         ("Rate limit",         f"{config.rate_limit} req/min"),
         ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
-        ("Cache policy",       cache_display),
         ("Cache size",         f"{config.cache_size_mb} MB"),
         ("Trusted proxy",      val(config.trusted_proxy)),
         ("Health check path",  config.health_path or "(off)"),
@@ -1647,6 +1641,13 @@ def _config_show():
             ("Key",         val(site.key_file)),
             ("Username",    val(site.username)),
             ("Password",    "(set)" if site.password_hash else "(not set)"),
+            # "auto" spells out what it derives to, so the operator reads
+            # the behavior, not just the setting.
+            ("Browser copies",
+             {"auto": ("auto (private: none)" if site.username
+                       else "auto (public: re-checked)"),
+              "yes":  "kept, re-checked each visit",
+              "no":   "none"}[site.cache]),
         ]
         for label, value in site_rows:
             print(f"    {label:<{_PAD - 2}} {value}")

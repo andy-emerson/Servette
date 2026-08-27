@@ -317,6 +317,12 @@ class Site:
         active = data.get("active", True)
         if not isinstance(active, bool):
             raise _ConfigInvalid("servette.toml: active must be true or false")
+        cache = data.get("cache", "auto")
+        if cache not in ("auto", "yes", "no"):
+            # The same sentence the write doors refuse with (the load-door
+            # principle — see _ConfigInvalid).
+            raise _ConfigInvalid('servette.toml: cache is "auto", "yes", '
+                                 'or "no" — auto follows public/private')
         username = data.get("username", "")
         if ":" in username:
             # The same sentence the write doors refuse with: sign-in joins
@@ -335,6 +341,11 @@ class Site:
         self.username       = username
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
+        # What visitors' browsers keep: "auto" derives from access — a
+        # public site's copies are kept but re-checked every visit, a
+        # private site's are not kept at all; "yes"/"no" override either
+        # way (the private media site, the public app handling secrets).
+        self.cache          = cache
         # Two tables, one per answer: redirects → 301, redirects_temporary
         # → 302 (the ruled per-rule choice, default permanent). Validated
         # strictly and together — criteria in _clean_redirects, principle
@@ -500,7 +511,6 @@ class Config:
             pass
         scratch = _ScratchHost()
         scratch.port, scratch.rate_limit, scratch.auth_rate_limit = 443, 120, 6
-        scratch.cache_policy, scratch.cache_max_age = "no-cache", 3600
         scratch.cache_size_mb = 128
         scratch.email = scratch.trusted_proxy = scratch.health_path = ""
         scratch.tls_min_version, scratch.ciphers = "1.2", ""
@@ -618,6 +628,11 @@ username = {s(site.username)}
 # Machine-generated — do not edit by hand
 password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
+
+# What visitors' browsers keep: "auto" follows access (public = copies
+# kept but re-checked every visit, private = no copies), "yes" or "no"
+# forces it either way
+cache = {s(site.cache)}
 {_redirect_toml(site)}""" for site in self.sites)
 
         content = f"""\
@@ -633,9 +648,6 @@ port = {self.port}
 rate_limit = {self.rate_limit}
 auth_rate_limit = {self.auth_rate_limit}
 
-# Browser cache policy: no-store, no-cache, or max-age
-cache_policy = {s(self.cache_policy)}
-cache_max_age = {self.cache_max_age}
 # In-memory file cache limit in MB — reduce on constrained hardware
 cache_size_mb = {self.cache_size_mb}
 
@@ -1004,16 +1016,22 @@ def _resolve_request_path(url_path, serve_dir):
 
 
 # Cache-Control
-def _cache_control_header(username):
-    """Cache-Control for the matched site. A site behind Basic Auth gets
-    `private`, so a shared cache never holds a response only some visitors
-    are entitled to."""
-    scope = "private" if username else "public"
-    if config.cache_policy == "no-store":
+def _cache_control_header(site):
+    """Cache-Control for the matched site, derived from its access unless
+    the site's own `cache` overrides. A public site's visitors keep copies
+    that are re-checked every visit (`no-cache` — new content is instant,
+    unchanged files answer 304). A private site's visitors keep no copies
+    at all (`no-store`): content behind a password leaves nothing in a
+    browser's disk cache on a machine the operator does not control, and
+    `private` would only have kept shared caches out. The per-site `cache`
+    field forces either behavior — the private media site that wants cheap
+    repeat visits, the public app that handles secrets client-side."""
+    mode = site.cache
+    if mode == "auto":
+        mode = "no" if site.username else "yes"
+    if mode == "no":
         return "no-store"
-    if config.cache_policy == "no-cache":
-        return f"{scope}, no-cache"
-    return f"{scope}, max-age={config.cache_max_age}"
+    return ("private" if site.username else "public") + ", no-cache"
 
 
 # Byte ranges
@@ -2062,7 +2080,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # revalidate-always caching contract as the 404 body, for the same
     # reason: the page's checks probe the URL it was served from.
     if url_path.split("?", 1)[0] == _CONNECTION_PATH:
-        cache = _cache_control_header(site.username)
+        cache = _cache_control_header(site)
         if "max-age" in cache:
             cache = ("private" if site.username else "public") + ", no-cache"
         if headers.get("If-None-Match", "") == _CONNECTION_ETAG:
@@ -2138,13 +2156,11 @@ def _handle_request(method, url_path, headers, raw_ip):
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
         if not os.path.isfile(custom_404):
-            # A positive lifetime is downgraded to revalidate-always. Under
-            # cache_policy = "max-age" an error page would otherwise sit in a
-            # shared cache for max_age seconds and keep answering 404 for a path
-            # *after* the operator publishes the very file that was missing.
-            cache = _cache_control_header(site.username)
-            if "max-age" in cache:
-                cache = ("private" if site.username else "public") + ", no-cache"
+            # Revalidate-always by construction: every mode the header can
+            # emit is no-cache or no-store, so an error page can never sit
+            # in a cache and keep answering 404 for a path *after* the
+            # operator publishes the very file that was missing.
+            cache = _cache_control_header(site)
             if headers.get("If-None-Match", "") == _NOT_FOUND_ETAG:
                 log.info("304 Not Modified %s to %s", log_path, ip)
                 return resp(304, [(b"etag", _NOT_FOUND_ETAG.encode()),
@@ -2178,7 +2194,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # 304 Not Modified
     if headers.get("If-None-Match", "") == etag:
         log.info("304 Not Modified %s to %s", log_path, ip)
-        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header(site.username).encode())])
+        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header(site).encode())])
 
     accept_encoding = headers.get("Accept-Encoding", "")
     use_gzip        = compressed is not None and "gzip" in accept_encoding
@@ -2186,7 +2202,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     common = [
         (b"content-type",  mime.encode()),
         (b"etag",          etag.encode()),
-        (b"cache-control", _cache_control_header(site.username).encode()),
+        (b"cache-control", _cache_control_header(site).encode()),
         (b"vary",          b"Accept-Encoding"),
     ]
 
@@ -5976,6 +5992,22 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
 
+         // ── What visitors' browsers keep. Applied on change — the three
+         // values are all safe and instantly reversible, so a Save button
+         // would be ceremony; the shared validator still judges the value.
+         `<div class="switch-row"><label class="k">Browser copies</label>` +
+         `<span class="switch-value"><span class="cache-state"></span>` +
+         `<span class="switch-act"><select class="cache-mode">` +
+         `<option value="auto">auto</option>` +
+         `<option value="yes">kept</option>` +
+         `<option value="no">none</option>` +
+         `</select></span></span></div>` +
+         `<p class="cfg-hint">Auto follows access: a public site's visitors ` +
+         `keep copies that are re-checked every visit (new content is ` +
+         `instant, unchanged files skip re-downloading); a private site's ` +
+         `visitors keep no copies on their machines. Kept and none force ` +
+         `either way.</p>` +
+
          // ── Publishing: drop a folder, look at it, ship it.
          `<div class="split"></div>` +
          `<div class="dropstrip"><span class="drop-lead">Drop this site's folder here</span>` +
@@ -6713,6 +6745,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       if (!ok) { b.disabled = false; b.textContent = old; }
     });
 
+    // The cache select reflects the stored value and states what "auto"
+    // derives to for THIS site, so the operator reads behavior, not a word.
+    {
+      const sel = q('.cache-mode'), state = q('.cache-state');
+      sel.value = siteData.cache || 'auto';
+      state.textContent = sel.value === 'auto'
+        ? (siteData.username ? 'private: none' : 'public: re-checked')
+        : (sel.value === 'yes' ? 're-checked each visit' : 'no copies');
+      sel.addEventListener('change', () =>
+        saveSettings({ cache: sel.value }, cardIndex(card), badge, errEl));
+    }
+
     q('.save-site').addEventListener('click', () => {
       clearError(errEl);
       if (!authOn())
@@ -6770,16 +6814,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
      'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
   ];
   const PERFORMANCE_FIELDS = [
+    // Browser caching is a per-site setting on each site's card, derived
+    // from its access unless overridden — not a host knob here.
     ['cache_size_mb', 'File cache size (MB)',
      'Memory set aside to serve frequently requested files without re-reading the disk.'],
-    ['cache_policy', 'Browser cache',
-     'What a visitor keeps: no-store always downloads fresh, no-cache ' +
-     'keeps a copy but re-checks it every time (a quick ETag check), ' +
-     'max-age trusts the copy for the seconds below.',
-     { choices: ['no-store', 'no-cache', 'max-age'] }],
-    ['cache_max_age', 'Cache seconds',
-     'How long a browser trusts its copy without checking back. Applies ' +
-     'to max-age only, which is why this field appears with it.'],
   ];
   const HOST_FIELDS = SECURITY_FIELDS.concat(PERFORMANCE_FIELDS);
 
@@ -6858,18 +6896,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       SECURITY_FIELDS.map(one).join('') +
       '<div class="cfg-group">Performance</div>' +
       PERFORMANCE_FIELDS.map(one).join('') + swapField;
-    // The seconds only mean anything under max-age, so the field exists
-    // only while the select says so — the same only-while-relevant rule
-    // the login fields follow.
-    const pol = $('cfg-cache_policy');
-    const ageEl = $('cfg-cache_max_age');
-    if (pol && ageEl) {
-      const ageRow = ageEl.closest('.cfg-field');
-      const showAge = () =>
-        ageRow.classList.toggle('hidden', pol.value !== 'max-age');
-      pol.addEventListener('change', showAge);
-      showAge();
-    }
   }
 
   /* ── The service's lifecycle: start, restart, stop. The page runs the
@@ -7250,6 +7276,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
                            "active": s.active,
+                           "cache": s.cache,
                            "username": s.username,
                            "redirects": s.redirects,
                            "redirects_temporary": s.redirects_temp,
@@ -8201,17 +8228,6 @@ def _set_host_value(target, key, value):
                 return ("/.well-known/ is reserved — the connection test and "
                         "ACME challenges live there")
         target.health_path = value
-    elif key == "cache_policy":
-        v = value.strip().lower()
-        if v not in ("no-store", "no-cache", "max-age"):
-            return "cache_policy is no-store, no-cache, or max-age"
-        target.cache_policy = v
-    elif key == "cache_max_age":
-        # Non-negative: a negative max-age is not a shorter cache, it is a
-        # malformed Cache-Control header sent on every response.
-        if not value.isdigit():
-            return "cache_max_age is seconds — a whole number, 0 or more"
-        target.cache_max_age = int(value)
     elif key == "tls_min_version":
         if value not in ("1.2", "1.3"):
             return "tls_min_version is 1.2 or 1.3"
@@ -8342,15 +8358,24 @@ def _set_site_value(target, key, value):
                         f"({target.cert_file or 'none configured'}) — "
                         "run 'config cert' first")
         target.active = (v == "yes")
+    elif key == "cache":
+        # What visitors' browsers keep. "auto" derives from access: a
+        # public site's copies are re-checked every visit, a private
+        # site's are not kept at all. "yes"/"no" force either way — the
+        # private media site, the public app handling secrets.
+        v = value.strip().lower()
+        if v not in ("auto", "yes", "no"):
+            return 'cache is "auto", "yes", or "no" — auto follows public/private'
+        target.cache = v
     return ""
 
 
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
-                  "cache_size_mb", "cache_policy", "cache_max_age",
+                  "cache_size_mb",
                   "trusted_proxy", "health_path", "tls_min_version",
                   "ciphers", "csp", "permissions_policy")
-_SET_SITE_KEYS = ("username", "active", "redirect")
+_SET_SITE_KEYS = ("username", "active", "cache", "redirect")
 
 
 def _set_usage():
@@ -8445,16 +8470,11 @@ def _config_show():
     def val(v):
         return v if v else "(not set)"
 
-    cache_display = config.cache_policy
-    if config.cache_policy == "max-age":
-        cache_display += f" ({config.cache_max_age}s)"
-
     host_rows = [
         ("HTTPS port",         config.port),
         ("Email",              val(config.email)),
         ("Rate limit",         f"{config.rate_limit} req/min"),
         ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
-        ("Cache policy",       cache_display),
         ("Cache size",         f"{config.cache_size_mb} MB"),
         ("Trusted proxy",      val(config.trusted_proxy)),
         ("Health check path",  config.health_path or "(off)"),
@@ -8476,6 +8496,13 @@ def _config_show():
             ("Key",         val(site.key_file)),
             ("Username",    val(site.username)),
             ("Password",    "(set)" if site.password_hash else "(not set)"),
+            # "auto" spells out what it derives to, so the operator reads
+            # the behavior, not just the setting.
+            ("Browser copies",
+             {"auto": ("auto (private: none)" if site.username
+                       else "auto (public: re-checked)"),
+              "yes":  "kept, re-checked each visit",
+              "no":   "none"}[site.cache]),
         ]
         for label, value in site_rows:
             print(f"    {label:<{_PAD - 2}} {value}")

@@ -723,25 +723,26 @@ serve_dir = "b"
     check("__version__ has 3 parts",         len(s.__version__.split(".")) == 3)
     check("__version__ major is 0",          s.__version__.split(".")[0] == "0")
 
-    section("Cache-Control header")
+    section("Cache-Control header — derived from access, per-site override")
 
-    s.config.sites[0].username     = ""
-    s.config.cache_policy = "no-store"
-    check("no-store",                          s._cache_control_header(s.config.sites[0].username) == "no-store")
+    site0 = s.config.sites[0]
+    site0.username, site0.cache = "", "auto"
+    check("auto, public → copies re-checked",
+          s._cache_control_header(site0) == "public, no-cache")
 
-    s.config.cache_policy = "no-cache"
-    check("no-cache, no auth → public",        s._cache_control_header(s.config.sites[0].username) == "public, no-cache")
+    site0.username = "alice"
+    check("auto, private → no copies at all",
+          s._cache_control_header(site0) == "no-store")
 
-    s.config.sites[0].username = "alice"
-    check("no-cache, with auth → private",     s._cache_control_header(s.config.sites[0].username) == "private, no-cache")
+    site0.cache = "yes"
+    check("yes overrides: the private media site keeps re-checked copies",
+          s._cache_control_header(site0) == "private, no-cache")
 
-    s.config.cache_policy  = "max-age"
-    s.config.cache_max_age = 3600
-    check("max-age with auth → private, max-age=3600",
-          s._cache_control_header(s.config.sites[0].username) == "private, max-age=3600")
+    site0.username, site0.cache = "", "no"
+    check("no overrides: the public app with secrets leaves no copies",
+          s._cache_control_header(site0) == "no-store")
 
-    s.config.sites[0].username     = ""
-    s.config.cache_policy = "no-cache"
+    site0.cache = "auto"
 
     section("Rate limiter bounds memory per IP")
 
@@ -1359,11 +1360,10 @@ def run_dispatch_tests(s):
           and '<div class="cfg-group">Performance</div>' in s._UI_ADMIN_PAGE
           and "SECURITY_FIELDS" in s._UI_ADMIN_PAGE
           and "PERFORMANCE_FIELDS" in s._UI_ADMIN_PAGE)
-    check("...with the browser-cache pair among the performance fields",
-          "'cache_policy'" in s._UI_ADMIN_PAGE
-          and "'cache_max_age'" in s._UI_ADMIN_PAGE
-          and "choices: ['no-store', 'no-cache', 'max-age']"
-              in s._UI_ADMIN_PAGE)
+    check("...with browser caching a per-site control on the card, not a host field",
+          "cache-mode" in s._UI_ADMIN_PAGE
+          and "'cache_policy'" not in s._UI_ADMIN_PAGE
+          and "'cache_max_age'" not in s._UI_ADMIN_PAGE)
     check("...with every site's facts on its own card and the server's on the server tab",
           "auth-switch" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
           and "cfg-site-select" not in s._UI_ADMIN_PAGE)
@@ -3647,16 +3647,27 @@ def run_dispatch_tests(s):
     _tls_src = inspect.getsource(s._build_site_ssl_contexts)
     check("The TLS builder skips inactive sites before loading anything",
           "if not site.active:" in _tls_src and "continue" in _tls_src)
-    check("cache_policy is a choice, stated and refused outside it",
-          "no-store" in s._set_host_value(_sc, "cache_policy", "weird")
-          and s._set_host_value(_sc, "cache_policy", "max-age") == ""
-          and _sc.cache_policy == "max-age")
-    # A negative max-age is not a shorter cache, it is a malformed
-    # Cache-Control header on every response.
-    check("cache_max_age refuses negatives and takes zero",
-          s._set_host_value(_sc, "cache_max_age", "-5") != ""
-          and s._set_host_value(_sc, "cache_max_age", "0") == ""
-          and _sc.cache_max_age == 0)
+    # The retired pair is refused as unknown, not silently accepted; the
+    # per-site `cache` key is the surviving door, a choice stated in its
+    # refusal.
+    check("the retired cache keys have left the vocabulary",
+          "cache_policy" not in s._SET_HOST_KEYS
+          and "cache_max_age" not in s._SET_HOST_KEYS)
+    _site_sc = s.Site()
+    check("cache is a choice, stated and refused outside it",
+          "auto" in s._set_site_value(_site_sc, "cache", "sometimes")
+          and s._set_site_value(_site_sc, "cache", "no") == ""
+          and _site_sc.cache == "no")
+    _bad_cache_raised = False
+    try:
+        s.Site({"cache": "max-age"})
+    except s._ConfigInvalid as e:
+        _bad_cache_raised = "auto" in str(e)
+    check("the load door refuses a cache value no door would save",
+          _bad_cache_raised)
+    check("a saved override survives the config round-trip",
+          s.Site({"cache": "no"}).cache == "no"
+          and s.Site().cache == "auto")
     check("tls_min_version is 1.2 or 1.3, nothing else",
           s._set_host_value(_sc, "tls_min_version", "1.1") != ""
           and s._set_host_value(_sc, "tls_min_version", "1.3") == "")
@@ -4986,17 +4997,13 @@ def run_server_tests(s, serve_dir):
     check("...answered by the same page, byte for byte",
           req("GET", path="/selftest/").body == resp.body)
 
-    # An error page must never sit in a shared cache with a positive lifetime:
-    # the operator publishes the file that was missing and cached clients would
-    # keep the 404.
-    saved_policy, saved_age = s.config.cache_policy, s.config.cache_max_age
-    s.config.cache_policy, s.config.cache_max_age = "max-age", 3600
-    try:
-        cc_404 = req("GET", path="/nonexistent.html").headers.get("Cache-Control", "")
-        check("Default 404 is not cached with a positive max-age",
-              "max-age" not in cc_404 and "no-cache" in cc_404)
-    finally:
-        s.config.cache_policy, s.config.cache_max_age = saved_policy, saved_age
+    # An error page must never sit in a cache with a positive lifetime:
+    # the operator publishes the file that was missing and cached clients
+    # would keep the 404. Revalidate-always is now true by construction —
+    # this pins that no mode reintroduces a lifetime.
+    cc_404 = req("GET", path="/nonexistent.html").headers.get("Cache-Control", "")
+    check("Default 404 carries no positive lifetime",
+          "max-age" not in cc_404 and "no-cache" in cc_404)
 
     custom_404      = b"<html><body>Custom 404</body></html>"
     custom_404_path = os.path.join(serve_dir, "404.html")
@@ -5216,22 +5223,17 @@ def run_server_tests(s, serve_dir):
         s.config.sites[0].password_salt = ""
         s._auth_fail_times.clear()
 
-    section("Cache-Control policies")
+    section("Cache-Control on the wire — derived, and overridable")
 
-    s.config.cache_policy = "no-cache"
-    check("no-cache in response",
+    s.config.sites[0].cache = "auto"
+    check("public site: no-cache in response",
           "no-cache" in req("GET").headers.get("Cache-Control", ""))
 
-    s.config.cache_policy  = "max-age"
-    s.config.cache_max_age = 7200
-    check("max-age=7200 in response",
-          "max-age=7200" in req("GET").headers.get("Cache-Control", ""))
-
-    s.config.cache_policy = "no-store"
-    check("no-store in response",
+    s.config.sites[0].cache = "no"
+    check("cache=no: no-store in response",
           "no-store" in req("GET").headers.get("Cache-Control", ""))
 
-    s.config.cache_policy = "no-cache"
+    s.config.sites[0].cache = "auto"
 
     section("Request rate limiting")
 
@@ -7326,26 +7328,21 @@ def run_browser_tests(s, tmpdir):
                            parseFloat(g1.borderTopWidth) > 0;
                   }"""))
 
-            # The browser-cache pair on the Performance group: a select
-            # for the policy (what cannot be typed cannot need refusing),
-            # and the seconds field existing only while max-age makes the
-            # seconds mean anything.
-            check("...the browser-cache seconds appear only under max-age",
+            # Browser caching is per-site now: a three-value select on the
+            # card (auto derives from access; the state span spells out
+            # what auto means for THIS site), and no cache field left on
+            # the Server tab.
+            page.click("#tab-sites")
+            page.wait_for_timeout(300)
+            check("...browser copies is a per-site select stating what auto derives to",
                   page.evaluate("""() => {
-                    const pol = document.getElementById('cfg-cache_policy');
-                    const age = document.getElementById('cfg-cache_max_age');
-                    if (!pol || !age || pol.tagName !== 'SELECT') return false;
-                    const row = age.closest('.cfg-field');
-                    const was = pol.value;
-                    pol.value = 'no-store';
-                    pol.dispatchEvent(new Event('change'));
-                    const hiddenOff = row.classList.contains('hidden');
-                    pol.value = 'max-age';
-                    pol.dispatchEvent(new Event('change'));
-                    const shownOn = !row.classList.contains('hidden');
-                    pol.value = was;
-                    pol.dispatchEvent(new Event('change'));
-                    return hiddenOff && shownOn;
+                    const sel = document.querySelector('.cache-mode');
+                    const st  = document.querySelector('.cache-state');
+                    if (!sel || sel.tagName !== 'SELECT' || !st) return false;
+                    const vals = [...sel.options].map(o => o.value).sort().join(',');
+                    return vals === 'auto,no,yes' && sel.value === 'auto' &&
+                           /re-checked|none/.test(st.textContent) &&
+                           !document.getElementById('cfg-cache_policy');
                   }"""))
 
             browser.close()

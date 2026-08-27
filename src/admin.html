@@ -1231,6 +1231,22 @@
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
 
+         // ── What visitors' browsers keep. Applied on change — the three
+         // values are all safe and instantly reversible, so a Save button
+         // would be ceremony; the shared validator still judges the value.
+         `<div class="switch-row"><label class="k">Browser copies</label>` +
+         `<span class="switch-value"><span class="cache-state"></span>` +
+         `<span class="switch-act"><select class="cache-mode">` +
+         `<option value="auto">auto</option>` +
+         `<option value="yes">kept</option>` +
+         `<option value="no">none</option>` +
+         `</select></span></span></div>` +
+         `<p class="cfg-hint">Auto follows access: a public site's visitors ` +
+         `keep copies that are re-checked every visit (new content is ` +
+         `instant, unchanged files skip re-downloading); a private site's ` +
+         `visitors keep no copies on their machines. Kept and none force ` +
+         `either way.</p>` +
+
          // ── Publishing: drop a folder, look at it, ship it.
          `<div class="split"></div>` +
          `<div class="dropstrip"><span class="drop-lead">Drop this site's folder here</span>` +
@@ -1968,6 +1984,18 @@
       if (!ok) { b.disabled = false; b.textContent = old; }
     });
 
+    // The cache select reflects the stored value and states what "auto"
+    // derives to for THIS site, so the operator reads behavior, not a word.
+    {
+      const sel = q('.cache-mode'), state = q('.cache-state');
+      sel.value = siteData.cache || 'auto';
+      state.textContent = sel.value === 'auto'
+        ? (siteData.username ? 'private: none' : 'public: re-checked')
+        : (sel.value === 'yes' ? 're-checked each visit' : 'no copies');
+      sel.addEventListener('change', () =>
+        saveSettings({ cache: sel.value }, cardIndex(card), badge, errEl));
+    }
+
     q('.save-site').addEventListener('click', () => {
       clearError(errEl);
       if (!authOn())
@@ -2025,16 +2053,10 @@
      'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
   ];
   const PERFORMANCE_FIELDS = [
+    // Browser caching is a per-site setting on each site's card, derived
+    // from its access unless overridden — not a host knob here.
     ['cache_size_mb', 'File cache size (MB)',
      'Memory set aside to serve frequently requested files without re-reading the disk.'],
-    ['cache_policy', 'Browser cache',
-     'What a visitor keeps: no-store always downloads fresh, no-cache ' +
-     'keeps a copy but re-checks it every time (a quick ETag check), ' +
-     'max-age trusts the copy for the seconds below.',
-     { choices: ['no-store', 'no-cache', 'max-age'] }],
-    ['cache_max_age', 'Cache seconds',
-     'How long a browser trusts its copy without checking back. Applies ' +
-     'to max-age only, which is why this field appears with it.'],
   ];
   const HOST_FIELDS = SECURITY_FIELDS.concat(PERFORMANCE_FIELDS);
 
@@ -2113,18 +2135,6 @@
       SECURITY_FIELDS.map(one).join('') +
       '<div class="cfg-group">Performance</div>' +
       PERFORMANCE_FIELDS.map(one).join('') + swapField;
-    // The seconds only mean anything under max-age, so the field exists
-    // only while the select says so — the same only-while-relevant rule
-    // the login fields follow.
-    const pol = $('cfg-cache_policy');
-    const ageEl = $('cfg-cache_max_age');
-    if (pol && ageEl) {
-      const ageRow = ageEl.closest('.cfg-field');
-      const showAge = () =>
-        ageRow.classList.toggle('hidden', pol.value !== 'max-age');
-      pol.addEventListener('change', showAge);
-      showAge();
-    }
   }
 
   /* ── The service's lifecycle: start, restart, stop. The page runs the

@@ -23,7 +23,7 @@ servette
 
 then, at the prompt type `setup`, and you are done.
 
-You need Pyhon 3.11+, a Linux machine you can SSH into (macOS runs in session mode), ports 80 and 443 reachable from the internet, and a domain pointed at it for a trusted certificate — skip the domain to serve your LAN over a self-signed one. You never prefix `sudo`: Servette asks for your password when it reaches the work that needs root. Setup ends with a certificate, an optional password, and a service that keeps running after you close the terminal, restarts on reboot, and renews its certificate on its own.
+You need Python 3.11+, a Linux machine you can SSH into (macOS runs in session mode), ports 80 and 443 reachable from the internet, and a domain pointed at it for a trusted certificate — skip the domain to serve your LAN over a self-signed one. You never prefix `sudo`: Servette asks for your password when it reaches the work that needs root. Setup ends with a certificate, an optional password, and a service that keeps running after you close the terminal, restarts on reboot, and renews its certificate on its own.
 
 Then put your site on it from your own computer: run `servette admin` over SSH and open the printed link. The admin page is served over your own SSH tunnel and exists nowhere on the public internet, with a one-time passcode per run as the login. Drop your site's folder on its card and press Publish. The content is staged, checked, and swapped in atomically; the tree it replaced is kept, and `restore-site` rolls back to it.
 
@@ -60,16 +60,18 @@ Then put your site on it from your own computer: run `servette admin` over SSH a
 
 ## How it compares
 
-| | Servette | bottle.py | srv | Static Web Server |
-|---|:--:|:--:|:--:|:--:|
-| **Built for** | static sites | dynamic web apps | static sites | static sites |
-| Automatic trusted HTTPS | ✓ | ✗ | ✓ | ✗ |
-| Hardened for production | ✓ | ✗ | ✗ | ~ |
-| Readable source | ~6,800 lines | ~4,600 lines | binary | binary |
-| Actively maintained | ✓ | ✓ | ✗ | ✓ |
-| Runs on a Raspberry Pi out of the box | ✓ | ✓ | ✗ | ✗ |
+The common ways to serve a folder sit at two extremes: the general-purpose servers can be made this secure, but are not simple; the nanoservers are this simple, but not secure.
 
-All of these are excellent at what they are built for. None of them do what Servette does: serve a static site you own, securely, on the public internet, from a single module you can read. (Peer columns as checked 2026-08; only Servette's own figures are gated by CI.)
+| | Servette | nginx | Apache | `python -m http.server` | `npx serve` |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Serves a folder in one command | ✓ | ✗ | ✗ | ✓ | ✓ |
+| No config language to learn | ✓ | ✗ | ✗ | ✓ | ✓ |
+| Trusted HTTPS that renews itself | ✓ | + certbot | + certbot | ✗ | ✗ |
+| Security headers and rate limiting by default | ✓ | you configure them | you configure them | ✗ | ✗ |
+| Survives a reboot as a hardened service | ✓ | ✓ | ✓ | ✗ | ✗ |
+| Readable source | ~6,800 lines | vast (C) | vast (C) | small (stdlib) | a node_modules tree |
+
+Both extremes are right for their jobs — nginx and Apache at scales and shapes Servette does not chase, the nanoservers while you build. Servette is for the gap between: production security with nanoserver simplicity, from a single module you can read. (Peer columns as checked 2026-08; only Servette's own figures are gated by CI.)
 
 ## Operating it
 

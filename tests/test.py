@@ -1380,6 +1380,7 @@ def run_dispatch_tests(s):
           and "PERFORMANCE_FIELDS" in s._UI_ADMIN_PAGE)
     check("...with browser caching a per-site control on the card, not a host field",
           "cache-mode" in s._UI_ADMIN_PAGE
+          and '<option value="yes">enabled</option>' in s._UI_ADMIN_PAGE
           and "'cache_policy'" not in s._UI_ADMIN_PAGE
           and "'cache_max_age'" not in s._UI_ADMIN_PAGE)
     check("...with every site's facts on its own card and the server's on the server tab",
@@ -7046,8 +7047,20 @@ def run_browser_tests(s, tmpdir):
             # The bug a text pin cannot see: a card asking for site -1.
             check("...the version list rendered, so its site index resolved",
                   "file" in page.locator(".ver-state").first.inner_text())
-            check("...with a Restore for the version that is not live",
-                  page.locator("button.restore").count() == 1)
+            # History is one dropdown with a single Restore that acts on
+            # the selection: dim while the live version is selected, armed
+            # the moment another one is.
+            check("...with history a dropdown whose Restore arms off the live pick",
+                  page.evaluate("""() => {
+                    const pick = document.querySelector('.ver-pick');
+                    const b = document.querySelector('.ver-restore');
+                    if (!pick || !b || pick.options.length !== 2) return false;
+                    if (!b.disabled) return false;
+                    const other = [...pick.options].find(o => !o.selected);
+                    pick.value = other.value;
+                    pick.dispatchEvent(new Event('change'));
+                    return !b.disabled;
+                  }"""))
 
             # The dot is markup either way; only CSS decides it is a dot.
             check("...and the running dot is a dot where the status row puts it",
@@ -7057,6 +7070,13 @@ def run_browser_tests(s, tmpdir):
                     const c = getComputedStyle(el.querySelector('.dot'));
                     return c.width === '7px' && c.borderRadius === '50%';
                   }"""))
+
+            # The load meter samples from login, not from first opening the
+            # Statistics tab: its rows are already rendered while Sites is
+            # still the visible panel.
+            check("...the load meter is sampling before the stats tab is opened",
+                  page.evaluate(
+                      "() => document.getElementById('load-rows').innerHTML !== ''"))
 
             for tab in ("server", "stats", "sites"):
                 page.click(f"#tab-{tab}")
@@ -7337,41 +7357,47 @@ def run_browser_tests(s, tmpdir):
                       "() => document.activeElement.id === 'cfg-email'"))
 
             # The group headers are marked apart from the field labels they
-            # govern (ruled): accent-coloured, and every group past the
-            # first ruled off above — a header dressed exactly like its
-            # members is not a header.
-            check("...the settings groups read apart from their fields",
+            # govern (ruled): apart by weight and the rule above, NOT by
+            # colour or size — green is the page's healthy colour, so a
+            # header in it read as a verdict, and a subsection must not
+            # outrank the card title.
+            check("...the settings groups read apart from their fields, not louder",
                   page.evaluate("""() => {
                     const gs = document.querySelectorAll('#cfg-host-fields .cfg-group');
                     const label = document.querySelector('#cfg-host-fields .cfg-field label');
                     if (gs.length < 2 || !label) return false;
                     const g0 = getComputedStyle(gs[0]);
                     const g1 = getComputedStyle(gs[1]);
-                    return g0.color !== getComputedStyle(label).color &&
+                    const l = getComputedStyle(label);
+                    return g0.color === l.color &&
+                           g0.fontSize === l.fontSize &&
+                           parseInt(g0.fontWeight) > parseInt(l.fontWeight) &&
                            parseFloat(g1.borderTopWidth) > 0;
                   }"""))
 
-            # Browser caching is per-site: a two-value select on the card
+            # Caching is per-site: an enabled/disabled select on the card
             # holding the concrete stored value, and no cache field left
             # on the Server tab.
             page.click("#tab-sites")
             page.wait_for_timeout(300)
-            check("...browser copies is a two-value select on the card",
+            check("...caching is an enabled/disabled select on the card",
                   page.evaluate("""() => {
                     const sel = document.querySelector('.cache-mode');
                     if (!sel || sel.tagName !== 'SELECT') return false;
                     const vals = [...sel.options].map(o => o.value).sort().join(',');
-                    return vals === 'no,yes' && sel.value === 'yes' &&
+                    const txts = [...sel.options].map(o => o.textContent).sort().join(',');
+                    return vals === 'no,yes' && txts === 'disabled,enabled' &&
+                           sel.value === 'yes' &&
                            !document.getElementById('cfg-cache_policy');
                   }"""))
 
             # The access flip's reset is said BEFORE Save (loudly, by
             # ruling): arming the switch on a public site narrates both
-            # the sign-in and the copies reset.
+            # the sign-in and the caching turn-off.
             page.locator(".auth-switch").first.check()
             page.wait_for_timeout(200)
-            check("...arming private narrates the browser-copies reset",
-                  "copies reset to none"
+            check("...arming private narrates the caching turn-off",
+                  "caching turns off"
                   in (page.locator(".auth-hint").first.text_content() or ""))
             page.locator(".auth-switch").first.uncheck()
             page.wait_for_timeout(200)

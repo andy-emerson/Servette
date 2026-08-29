@@ -349,18 +349,19 @@
     }
     .cfg-field .cfg-hint { grid-column: 2; }
     /* The two families inside the Settings card — what defends the server,
-       and what tunes it. Accent-coloured and ruled off above, so a section
-       header cannot be mistaken for the field labels it governs, which
-       share its size and case. */
+       and what tunes it. Ruled off above and set heavier than the field
+       labels, in the same muted grey and at the same size: green is this
+       page's "healthy" colour, so a section name in it read as a verdict —
+       and a subsection must not outrank the card title it sits under. */
     .cfg-group {
       margin: 1.35rem 0 0.5rem;
       padding-top: 0.9rem;
       border-top: 1px solid var(--border);
-      font-size: 0.78rem;
+      font-size: 0.7rem;
       font-weight: 600;
       letter-spacing: 0.09em;
       text-transform: uppercase;
-      color: var(--green);
+      color: var(--muted);
     }
     .cfg-group:first-child { margin-top: 0.2rem; padding-top: 0; border-top: none; }
     .cfg-hint {
@@ -414,6 +415,14 @@
     /* A value that needs two lines gets them, and the row keeps centring
        its label and buttons against the pair. */
     .ver-state span { display: block; }
+    /* The history dropdown shares its row with Restore: the select yields
+       (its option text runs long) so the button never leaves the card.
+       min-width: 0 at every level, because grid and flex both default a
+       child's minimum to its content — the chain is only as shrinkable
+       as its least shrinkable link. */
+    .versions .switch-value { min-width: 0; }
+    .versions .switch-act { flex: 1; min-width: 0; }
+    .ver-pick { flex: 1 1 auto; min-width: 0; }
     .switch-act label { color: var(--muted); cursor: pointer; }
 
     /* The public/private switch — a literal toggle: the knob's position
@@ -924,7 +933,10 @@
       $('tab-' + key).setAttribute('aria-selected', String(key === name));
     }
     refresh();  // every tab renders from the same /status + /config truth
-    if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
+    // startMeter here is only the retry after a failed sample stopped the
+    // meter — the meter itself runs from login (see startup), so the tab
+    // opens with history on the line instead of starting it.
+    if (name === 'stats') { loadTraffic(); startMeter(); }
     // The full path + search + hash, in that order: a bare '#…' relative
     // URL swallows the search into the fragment — the hash became the tab
     // name with the whole passcode query glued on, which parses back as no
@@ -1231,20 +1243,19 @@
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
 
-         // ── What visitors' browsers keep. Applied on change — both
+         // ── Whether visitors' browsers cache. Applied on change — both
          // values are safe and instantly reversible, so a Save button
          // would be ceremony; the shared validator still judges the value.
-         `<div class="switch-row"><label class="k">Browser copies</label>` +
+         `<div class="switch-row"><label class="k">Caching</label>` +
          `<span class="switch-value">` +
          `<span class="switch-act"><select class="cache-mode">` +
-         `<option value="yes">kept, re-checked</option>` +
-         `<option value="no">none</option>` +
+         `<option value="yes">enabled</option>` +
+         `<option value="no">disabled</option>` +
          `</select></span></span></div>` +
-         `<p class="cfg-hint">Kept: visitors' browsers keep copies but ` +
-         `re-check them every visit — new content is instant, unchanged ` +
-         `files skip re-downloading (the public default). None: nothing ` +
-         `lingers on visitors' machines (the private default). Switching ` +
-         `the site public or private resets this to that default.</p>` +
+         `<p class="cfg-hint">Enabled: browsers keep copies but re-check ` +
+         `every visit, so new content is instant. Disabled: nothing is ` +
+         `stored on visitors' machines. Switching public/private resets ` +
+         `this to its default (public on, private off).</p>` +
 
          // ── Publishing: drop a folder, look at it, ship it.
          `<div class="split"></div>` +
@@ -1694,26 +1705,50 @@
             : `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
               `${fmtSize(live.bytes)}</span>` +
               `<span>${escapeHtml(when(live.published))}</span>`;
+          // The kept versions are one dropdown, not a list: every other
+          // row on this card is label-left value-right, and five dated
+          // lines with floating buttons were the block that broke the
+          // grid. Each option carries date, size, and the live marker;
+          // Restore acts on the selection, dim while the live version
+          // is the one selected.
           list.innerHTML = rows.length < 2 ? '' :
-            rows.map((r) => row(escapeHtml(when(r.published)),
-              `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
-              (r.live ? ' <span class="ok">· live</span>'
-                      : ` <button class="action tiny restore" type="button" ` +
-                        `data-v="${escapeHtml(r.name)}">Restore</button>`))).join('') +
-            `<p class="hint">The ${v.keep} most recent are kept. Restoring does ` +
-            `not consume one — you can restore back.</p>`;
-          for (const b of list.querySelectorAll('.restore'))
-            b.addEventListener('click', async () => {
-              b.disabled = true;
-              b.textContent = 'restoring…';
+            `<div class="switch-row"><span class="k">History</span>` +
+            `<span class="switch-value"><span class="switch-act">` +
+            `<select class="ver-pick">` +
+            rows.map((r) =>
+              `<option value="${escapeHtml(r.name)}"${r.live ? ' selected' : ''}>` +
+              escapeHtml(`${when(r.published)} — ${r.files} file` +
+                         `${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
+                         (r.live ? ' · live' : '')) +
+              `</option>`).join('') +
+            `</select>` +
+            `<button class="action tiny ver-restore" type="button">` +
+            `Restore</button></span></span></div>` +
+            `<p class="cfg-hint">The ${v.keep} most recent are kept; ` +
+            `restoring does not consume one — you can restore back.</p>`;
+          const pick = list.querySelector('.ver-pick');
+          if (pick) {
+            const doRestore = list.querySelector('.ver-restore');
+            const liveName = live && live.name;
+            const arm = () => {
+              doRestore.disabled = pick.value === liveName;
+              doRestore.title = doRestore.disabled
+                ? 'This version is live already' : '';
+            };
+            arm();
+            pick.addEventListener('change', arm);
+            doRestore.addEventListener('click', async () => {
+              doRestore.disabled = true;
+              doRestore.textContent = 'restoring…';
               // What goes live now is not the operator's last upload; the
               // sent-note must not outlive the content it described.
               const pfr = pendingFolders.get(foldKey(siteData, idx));
               if (pfr) delete pfr.doneNote;
               const ok = await siteOp({ op: 'restore', site: siteIndex(),
-                                        version: b.dataset.v }, errEl);
-              if (!ok) { b.disabled = false; b.textContent = 'Restore'; }
+                                        version: pick.value }, errEl);
+              if (!ok) { doRestore.textContent = 'Restore'; arm(); }
             });
+          }
         } catch (e) {
           state.textContent = '';
           showError(errEl, reason(e, 'Could not read the kept versions'));
@@ -1924,14 +1959,14 @@
       q('.auth-save').classList.toggle('hidden', !(on || pending));
       // The access flip's consequences are said BEFORE Save, not
       // discovered after (loudly, by ruling): the login change and the
-      // browser-copies reset that rides with it.
+      // caching reset that rides with it.
       q('.auth-hint').textContent = on
         ? (siteData.username ? ''
-           : 'Saving makes the site private: visitors sign in, and browser ' +
-             'copies reset to none — nothing lingers on their machines.')
+           : 'Saving makes the site private: visitors sign in, and caching ' +
+             'turns off — nothing is stored on their machines.')
         : (siteData.username
            ? 'Saving makes the site public: the login is removed, the stored ' +
-             'password deleted, and browser copies reset to kept (re-checked ' +
+             'password deleted, and caching turns on (copies re-checked ' +
              'every visit).'
            : '');
 
@@ -2320,7 +2355,9 @@
 
   /* ── The live meter: successive readings of the server's own cumulative
      CPU counter, differenced here. Nothing is sampled or stored on the
-     server — the line exists only while this tab is open. ── */
+     server — the line exists only while this page is open. It samples
+     from login, not from the first opening of the Statistics tab, so the
+     tab shows history rather than a line starting under your click. ── */
 
   const METER_SECONDS = 3;
   let meterTimer = null, lastSample = null, cpuSeries = [];
@@ -2366,7 +2403,7 @@
   // a tunnel whose command has ended.
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) stopMeter();
-    else if (!$('panel-stats').classList.contains('hidden')) startMeter();
+    else startMeter();
   });
   window.addEventListener('pagehide', stopMeter);
 
@@ -2377,6 +2414,7 @@
   if (supported) {
     showTab((location.hash || '').replace('#', ''));
     checkUpgrade();
+    startMeter();  // sampling begins at login, so the load line has history
   }
 </script>
 

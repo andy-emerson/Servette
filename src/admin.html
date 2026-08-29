@@ -500,7 +500,10 @@
     /* Reordering, the notebook's grammar: grab the header, a ghost follows
        the cursor, the source dims to a dashed placeholder, and neighbours
        swap in place as the ghost crosses them. */
-    .site-card .card-head { cursor: grab; user-select: none; }
+    /* The head is the expand/collapse toggle (pointer); the drag grip
+       keeps the grab cursor as the reorder affordance. */
+    .site-card .card-head { cursor: pointer; user-select: none; }
+    .site-card .handle { cursor: grab; }
     .site-card.drag-placeholder { opacity: 0.35; border-style: dashed; }
     .card-ghost { box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
     .head-left, .head-right { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
@@ -961,14 +964,28 @@
   // A card's index is its position in the DOM, read at the moment it is
   // needed: adding, removing, or dragging a card renumbers its neighbours,
   // and a stale index would act on the wrong site.
-  // Which cards are folded shut. Kept here rather than on the card,
-  // because every op re-renders the list and a card that sprang open on
-  // each save would be worse than no fold at all. Keyed by the site's
+  // Which card is open — ONE at a time (ruled: an accordion, so a box
+  // with many sites stays one screen tall; expanding a card collapses
+  // the rest, and collapse is display-only, so a picked folder or an
+  // unsaved form is still there when its card reopens).
+  // `undefined` means the first render decides: a single-site box opens
+  // with its card open (most installs, zero clicks); a multi-site box
+  // opens all collapsed and the first click opens the one you came for.
+  let expandedKey;
+  // A drop's mouseup still fires a click on the head it started from —
+  // that click must not also toggle the card the drag just moved.
+  let dragJustEnded = false;
+  const applyAccordion = () => {
+    for (const c of document.querySelectorAll('#site-cards .site-card'))
+      c.classList.toggle('folded', c.dataset.foldKey !== expandedKey);
+  };
+  // The open card is keyed here rather than on the card, because every
+  // op re-renders the list and a card that sprang open (or shut) on each
+  // save would be worse than no accordion at all. Keyed by the site's
   // Servette-assigned folder: the one identity that survives everything —
   // a rename changes the domain, a drag or removal renumbers indexes, and
   // a positional key would hand one site's state (or its picked folder,
   // below) to a different site's card.
-  const folded = new Set();
   // The folder, not the domain and not the position: naming a site changes
   // its domain (and must not orphan a folder picked for it), and every
   // structural op renumbers positions. The one shape this key cannot tell
@@ -1014,6 +1031,9 @@
     // One site is a site; the plural is earned.
     $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
     sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx)));
+    if (expandedKey === undefined)
+      expandedKey = sites.length === 1 ? foldKey(sites[0], 0) : null;
+    applyAccordion();
   }
 
   /* ── Reordering, in the notebook's grammar: grab the header, a ghost
@@ -1057,6 +1077,10 @@
         document.removeEventListener('mousemove', move);
         document.removeEventListener('mouseup', up);
         if (!started) return;
+        // The click that follows this mouseup is the drag's, not a
+        // toggle; cleared on the next tick, after that click has fired.
+        dragJustEnded = true;
+        setTimeout(() => { dragJustEnded = false; });
         ghost.remove();
         el.classList.remove('drag-placeholder');
         document.body.style.userSelect = '';
@@ -1364,13 +1388,6 @@
                : '✓ healthy'}</span>` +
           `<span class="badge state badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
-          // Collapse, for a box serving more sites than fit on a screen.
-          // Chevrons toward each other close; away, open.
-          `<button class="action tiny fold" type="button" ` +
-            `title="Collapse this card"><svg viewBox="0 0 16 16" width="12" ` +
-            `height="12" fill="none" stroke="currentColor" stroke-width="1.6" ` +
-            `stroke-linecap="round"><path class="fold-a" d="M4 2.5l4 3.5 4-3.5"></path>` +
-            `<path class="fold-b" d="M4 13.5l4-3.5 4 3.5"></path></svg></button>` +
           // Removing a site is destructive, so it wears the destructive
           // colour all the time rather than only under the pointer — the
           // same rule the stop button follows.
@@ -1435,28 +1452,21 @@
     const react = q('.do-reactivate');
     if (react) react.addEventListener('click', () => setActive(true));
 
-    // ── Fold. The head keeps its title, its badges, and its controls, so
-    // a folded card still says which site it is and whether it needs
-    // attention — the reason to fold is length, not secrecy.
+    // ── Accordion (ruled): one card open at a time, and the header
+    // itself is the toggle — a single click, the gesture every accordion
+    // answers to; the old fold button is gone. The head keeps its title,
+    // badges, and controls, so a collapsed card still says which site it
+    // is and whether it needs attention — collapse is length management,
+    // not secrecy, and it is display-only. Controls in the head keep
+    // their own jobs; a drag's trailing click is swallowed above.
     const key = foldKey(siteData, idx);
-    const applyFold = () => {
-      const shut = folded.has(key);
-      card.classList.toggle('folded', shut);
-      q('.fold').title = shut ? 'Expand this card' : 'Collapse this card';
-      // Shallow chevrons at the edges, with a clear gap between them.
-      // Drawn tall and meeting in the middle they read as an X, which sits
-      // beside a delete button and means the wrong thing entirely.
-      // A caret needs its angle: rise about equal to half its width. The
-      // gap between the two is what stops them reading as an X, so the
-      // pair sit at the edges — apexes 4px apart in a 16px box.
-      q('.fold-a').setAttribute('d', shut ? 'M4 6l4-3.5 4 3.5' : 'M4 2.5l4 3.5 4-3.5');
-      q('.fold-b').setAttribute('d', shut ? 'M4 10l4 3.5 4-3.5' : 'M4 13.5l4-3.5 4 3.5');
-    };
-    q('.fold').addEventListener('click', () => {
-      if (folded.has(key)) folded.delete(key); else folded.add(key);
-      applyFold();
+    card.dataset.foldKey = key;
+    q('.card-head').addEventListener('click', (e) => {
+      if (e.target.closest('button') || e.target.closest('a')
+          || e.target.closest('.confirm') || dragJustEnded) return;
+      expandedKey = (expandedKey === key) ? null : key;
+      applyAccordion();
     });
-    applyFold();
 
     attachCardDrag(q('.card-head'), card);
 
@@ -2286,15 +2296,16 @@
     try {
       const t = await getJSON('/traffic', { days: $('traffic-window').value });
       const total = t.total || 0;
-      // Status codes are the server's vocabulary, not the reader's: each
-      // count is named for what actually happened.
-      const NAMED = [['Files sent', ['200', '206']],
-                     ['Already cached', ['304']],
-                     ['Redirected', ['301', '302', '308']],
-                     ['Nothing there', ['404']],
-                     ['Refused', ['403', '405']],
-                     ['Sign-in needed', ['401']],
-                     ['Rate limited', ['429']]];
+      // Each count is named for what happened, with the status code
+      // beside it (ruled): the reader who does not know the codes gets
+      // the word, and the one who does is not made to translate.
+      const NAMED = [['Sent (200/206)', ['200', '206']],
+                     ['Cached (304)', ['304']],
+                     ['Redirected (301/302/308)', ['301', '302', '308']],
+                     ['Not found (404)', ['404']],
+                     ['Refused (403/405)', ['403', '405']],
+                     ['Sign-in needed (401)', ['401']],
+                     ['Rate limited (429)', ['429']]];
       const named = NAMED
         .map(([name, codes]) => [name, codes.reduce(
           (n, c) => n + ((t.statuses || {})[c] || 0), 0)])

@@ -1281,7 +1281,8 @@ def run_dispatch_tests(s):
     check("...keys card state by the site's folder, the identity that survives",
           "siteData.dir || siteData.domain" in s._UI_ADMIN_PAGE)
     check("...names redirected traffic and totals the unnamed remainder",
-          "'Redirected'" in s._UI_ADMIN_PAGE
+          "'Redirected (301/302/308)'" in s._UI_ADMIN_PAGE
+          and "'Not found (404)'" in s._UI_ADMIN_PAGE
           and "row('Other'" in s._UI_ADMIN_PAGE)
     # The passcode is attached in one place rather than at each call site,
     # so no request can be written that forgets it.
@@ -7193,11 +7194,16 @@ def run_browser_tests(s, tmpdir):
                   and 0 < box_p["y"] - (box_b["y"] + box_b["height"]) < 60)
             page.locator(".do-cancel").first.click()
 
-            # Folding: the body goes, the head stays — so a folded card
-            # still says which site it is and whether it needs attention.
-            page.locator("button.fold").first.click()
+            # The accordion (ruled): the header is the toggle — one click
+            # collapses, one click reopens — and a single-site box loads
+            # with its card open. The body goes, the head stays, so a
+            # collapsed card still says which site it is and whether it
+            # needs attention.
+            check("...a single-site box loads with its card open",
+                  page.locator(".site-card .card-body").first.is_visible())
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
-            check("...folding hides the body and keeps the head",
+            check("...a header click hides the body and keeps the head",
                   not page.locator(".site-card .card-body").first.is_visible()
                   and page.locator(".site-card .card-title").first.is_visible())
             # It has to survive a re-render, or every save would spring it
@@ -7208,7 +7214,7 @@ def run_browser_tests(s, tmpdir):
             page.wait_for_timeout(900)
             check("...and survives the re-render that follows every op",
                   not page.locator(".site-card .card-body").first.is_visible())
-            page.locator("button.fold").first.click()
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
             check("...unfolding brings it back",
                   page.locator(".site-card .card-body").first.is_visible())
@@ -7242,11 +7248,11 @@ def run_browser_tests(s, tmpdir):
                       and not page.locator(".badge.needs").first.is_visible())
                 # Folded, the pill takes over — the count does not vanish
                 # just because the body is hidden.
-                page.locator("button.fold").first.click()
+                page.locator(".site-card .card-head").first.click()
                 page.wait_for_timeout(300)
                 check("...and folding hands that count to the pill",
                       page.locator(".badge.needs").first.is_visible())
-                page.locator("button.fold").first.click()
+                page.locator(".site-card .card-head").first.click()
                 page.wait_for_timeout(300)
             finally:
                 s.config.sites[0].cert_file = saved_cert
@@ -7256,13 +7262,13 @@ def run_browser_tests(s, tmpdir):
             # The pill mirrors the Status line both ways (the ruled shape):
             # a healthy folded card wears the green all-clear rather than
             # nothing, so an empty head never has to mean two things.
-            page.locator("button.fold").first.click()
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
             _pill = page.locator(".badge.needs").first
             check("A healthy folded card wears the green all-clear pill",
                   _pill.is_visible() and "healthy" in _pill.inner_text()
                   and "badge-green" in (_pill.get_attribute("class") or ""))
-            page.locator("button.fold").first.click()
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
 
             # An unfinished login is treated as exactly what every other
@@ -7331,13 +7337,13 @@ def run_browser_tests(s, tmpdir):
             # only because a hidden one is always emitted — a client-side
             # fault has no rebuild to emit one, and a folded card's Status
             # row is the pill or nothing.
-            page.locator("button.fold").first.click()
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
             pill_loc = page.locator(".site-card .badge.needs").first
             check("...and folding a card faulted client-side still shows the pill",
                   pill_loc.is_visible()
                   and "1 to review" in pill_loc.inner_text())
-            page.locator("button.fold").first.click()
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
             # Typing the login completes it, so the count follows.
             page.locator("#cfg-username-0").fill("someone")

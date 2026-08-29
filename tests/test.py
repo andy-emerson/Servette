@@ -1378,9 +1378,9 @@ def run_dispatch_tests(s):
           and '<div class="cfg-group">Performance</div>' in s._UI_ADMIN_PAGE
           and "SECURITY_FIELDS" in s._UI_ADMIN_PAGE
           and "PERFORMANCE_FIELDS" in s._UI_ADMIN_PAGE)
-    check("...with browser caching a per-site control on the card, not a host field",
-          "cache-mode" in s._UI_ADMIN_PAGE
-          and '<option value="yes">enabled</option>' in s._UI_ADMIN_PAGE
+    check("...with browser caching a per-site toggle on the card, not a host field",
+          "cache-switch" in s._UI_ADMIN_PAGE
+          and "cache-mode" not in s._UI_ADMIN_PAGE
           and "'cache_policy'" not in s._UI_ADMIN_PAGE
           and "'cache_max_age'" not in s._UI_ADMIN_PAGE)
     check("...with every site's facts on its own card and the server's on the server tab",
@@ -7045,8 +7045,9 @@ def run_browser_tests(s, tmpdir):
                   and page.locator("#site-cards .site-card").count() == 1)
 
             # The bug a text pin cannot see: a card asking for site -1.
-            check("...the version list rendered, so its site index resolved",
-                  "file" in page.locator(".ver-state").first.inner_text())
+            vs = page.locator(".ver-state").first.inner_text()
+            check("...the version state rendered, so its site index resolved",
+                  "·" in vs and vs.strip().endswith("B"))
             # History is one dropdown with a single Restore that acts on
             # the selection: dim while the live version is selected, armed
             # the moment another one is.
@@ -7278,21 +7279,20 @@ def run_browser_tests(s, tmpdir):
             page.wait_for_timeout(600)
             page.locator("button.prev").first.click()
             page.wait_for_timeout(2000)
-            # Two lines, and the row still centres its label and buttons
-            # against the pair: one line ran into the buttons and wrapped
-            # mid-date.
-            check("...the published line is two lines, centred against them",
+            # One line — date · size is short enough never to reach the
+            # button (ruled: no file counts) — and the row centres its
+            # label and button against it.
+            check("...the published line is one line, clear of its button",
                   page.evaluate("""() => {
                     const st = document.querySelector('.ver-state');
                     const rows = st.querySelectorAll('span');
-                    if (rows.length !== 2) return false;
+                    if (rows.length !== 1) return false;
                     const a = rows[0].getBoundingClientRect();
-                    const b = rows[1].getBoundingClientRect();
                     const btn = document.querySelector('.switch-act button.ver-refresh')
                                         .getBoundingClientRect();
-                    const mid = (a.top + b.bottom) / 2;
-                    return b.top >= a.bottom - 1 &&
-                           Math.abs((btn.top + btn.bottom) / 2 - mid) < 6;
+                    return a.right <= btn.left &&
+                           Math.abs((btn.top + btn.bottom) / 2 -
+                                    (a.top + a.bottom) / 2) < 6;
                   }"""))
             # The staged draft opens in its own tab (ruled: a 420px frame
             # was not an honest representation). The link's address carries
@@ -7375,19 +7375,17 @@ def run_browser_tests(s, tmpdir):
                            parseFloat(g1.borderTopWidth) > 0;
                   }"""))
 
-            # Caching is per-site: an enabled/disabled select on the card
-            # holding the concrete stored value, and no cache field left
-            # on the Server tab.
+            # Caching is per-site: a literal toggle on the card (ruled:
+            # two states get a switch, not a menu), on for a public site,
+            # and no cache field left on the Server tab.
             page.click("#tab-sites")
             page.wait_for_timeout(300)
-            check("...caching is an enabled/disabled select on the card",
+            check("...caching is a toggle on the card, on for a public site",
                   page.evaluate("""() => {
-                    const sel = document.querySelector('.cache-mode');
-                    if (!sel || sel.tagName !== 'SELECT') return false;
-                    const vals = [...sel.options].map(o => o.value).sort().join(',');
-                    const txts = [...sel.options].map(o => o.textContent).sort().join(',');
-                    return vals === 'no,yes' && txts === 'disabled,enabled' &&
-                           sel.value === 'yes' &&
+                    const sw = document.querySelector('.cache-switch');
+                    return !!sw && sw.type === 'checkbox' && sw.checked &&
+                           sw.classList.contains('switch') &&
+                           !document.querySelector('.cache-mode') &&
                            !document.getElementById('cfg-cache_policy');
                   }"""))
 
@@ -7396,9 +7394,13 @@ def run_browser_tests(s, tmpdir):
             # the sign-in and the caching turn-off.
             page.locator(".auth-switch").first.check()
             page.wait_for_timeout(200)
-            check("...arming private narrates the caching turn-off",
+            check("...arming private narrates the caching turn-off, loudly",
                   "caching turns off"
-                  in (page.locator(".auth-hint").first.text_content() or ""))
+                  in (page.locator(".auth-hint").first.text_content() or "")
+                  and page.evaluate("""() => {
+                    const h = document.querySelector('.auth-hint');
+                    return getComputedStyle(h).color === 'rgb(251, 191, 36)';
+                  }"""))
             page.locator(".auth-switch").first.uncheck()
             page.wait_for_timeout(200)
 

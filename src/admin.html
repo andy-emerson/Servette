@@ -300,6 +300,9 @@
     /* ── Prose: hints under a control, errors, the attention band ─────── */
     .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
     .hint b { color: var(--text); font-weight: 500; }
+    /* The access flip's narration is a consequence about to happen, not a
+       footnote: it wears the attention colour (loud, by ruling). */
+    .auth-hint.warn { color: var(--amber); }
     .warn  { color: var(--amber); }
     .fault { color: var(--red); }
     /* Not a fault at all — a change typed and not yet saved. It must not
@@ -412,9 +415,6 @@
       color: var(--text);
     }
     .switch-act { display: flex; align-items: center; gap: 0.5rem; }
-    /* A value that needs two lines gets them, and the row keeps centring
-       its label and buttons against the pair. */
-    .ver-state span { display: block; }
     /* The history dropdown shares its row with Restore: the select yields
        (its option text runs long) so the button never leaves the card.
        min-width: 0 at every level, because grid and flex both default a
@@ -713,9 +713,9 @@
       <div class="card-body">
         <div class="rows" id="load-rows"></div>
         <div id="load-chart"></div>
-        <p class="hint">Averages since the server started; the line is live
-        while this tab is open and is kept nowhere. High CPU on a static
-        server usually means a bot, not popularity.</p>
+        <p class="hint">Averages since the server started; the line samples
+        from the moment the admin page opens and is kept nowhere. High CPU
+        on a static server usually means a bot, not popularity.</p>
         <p class="error hidden" id="load-error"></p>
       </div>
     </div>
@@ -1243,19 +1243,18 @@
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
 
-         // ── Whether visitors' browsers cache. Applied on change — both
-         // values are safe and instantly reversible, so a Save button
-         // would be ceremony; the shared validator still judges the value.
+         // ── Whether visitors' browsers cache. A literal toggle, like
+         // Access (ruled: two states get a switch, not a menu). Applied
+         // on change — both states are safe and reversible, so a Save
+         // button would be ceremony; a refused write flips the knob back.
          `<div class="switch-row"><label class="k">Caching</label>` +
-         `<span class="switch-value">` +
-         `<span class="switch-act"><select class="cache-mode">` +
-         `<option value="yes">enabled</option>` +
-         `<option value="no">disabled</option>` +
-         `</select></span></span></div>` +
-         `<p class="cfg-hint">Enabled: browsers keep copies but re-check ` +
-         `every visit, so new content is instant. Disabled: nothing is ` +
-         `stored on visitors' machines. Switching public/private resets ` +
-         `this to its default (public on, private off).</p>` +
+         `<span class="switch-value"><span class="cache-state"></span>` +
+         `<span class="switch-act">` +
+         `<input class="switch cache-switch" type="checkbox"></span></span></div>` +
+         `<p class="cfg-hint">On: browsers keep copies and re-check them ` +
+         `every visit, so a visitor is never shown stale content. Off: ` +
+         `nothing is stored on visitors' machines. Switching public/private ` +
+         `resets this to its default (public on, private off).</p>` +
 
          // ── Publishing: drop a folder, look at it, ship it.
          `<div class="split"></div>` +
@@ -1687,12 +1686,10 @@
           const v = await getJSON('/versions', { site: siteIndex() });
           const rows = v.versions || [];
           const live = rows.find((r) => r.live);
-          // The live version's own size is the answer to "did the right
-          // folder land" — a file count off by an order of magnitude is
-          // the wrong folder, however right the site looks.
-          // Two lines: what is there, then when it landed. One line ran to
-          // the buttons and wrapped mid-date; the switch-row still centres
-          // the label and the buttons against the pair.
+          // The live version's size is the answer to "did the right
+          // folder land" — off by an order of magnitude is the wrong
+          // folder, however right the site looks (ruled: size carries
+          // that job alone; file counts left the row).
           // A missing folder is marked here, because publishing is what
           // fixes it — and judged from THIS fetch, not from a status
           // snapshot taken when the card was built: the terminal can
@@ -1702,30 +1699,28 @@
           // live row IS the folder missing.
           state.innerHTML = !live
             ? `<span class="warn">missing — publish to recreate it</span>`
-            : `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
-              `${fmtSize(live.bytes)}</span>` +
-              `<span>${escapeHtml(when(live.published))}</span>`;
+            : `<span>${escapeHtml(when(live.published))} · ` +
+              `${fmtSize(live.bytes)}</span>`;
           // The kept versions are one dropdown, not a list: every other
           // row on this card is label-left value-right, and five dated
           // lines with floating buttons were the block that broke the
-          // grid. Each option carries date, size, and the live marker;
-          // Restore acts on the selection, dim while the live version
-          // is the one selected.
+          // grid. Each option is date and size, nothing more — which one
+          // is live, the Published row above already says, echoed by the
+          // dropdown opening on it with Restore dim.
           list.innerHTML = rows.length < 2 ? '' :
             `<div class="switch-row"><span class="k">History</span>` +
             `<span class="switch-value"><span class="switch-act">` +
             `<select class="ver-pick">` +
             rows.map((r) =>
               `<option value="${escapeHtml(r.name)}"${r.live ? ' selected' : ''}>` +
-              escapeHtml(`${when(r.published)} — ${r.files} file` +
-                         `${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
-                         (r.live ? ' · live' : '')) +
+              escapeHtml(`${when(r.published)} · ${fmtSize(r.bytes)}`) +
               `</option>`).join('') +
             `</select>` +
             `<button class="action tiny ver-restore" type="button">` +
             `Restore</button></span></span></div>` +
-            `<p class="cfg-hint">The ${v.keep} most recent are kept; ` +
-            `restoring does not consume one — you can restore back.</p>`;
+            `<p class="cfg-hint">The live version and the ${v.keep - 1} ` +
+            `before it are kept; restoring does not use one up — you can ` +
+            `restore back.</p>`;
           const pick = list.querySelector('.ver-pick');
           if (pick) {
             const doRestore = list.querySelector('.ver-restore');
@@ -1960,7 +1955,8 @@
       // The access flip's consequences are said BEFORE Save, not
       // discovered after (loudly, by ruling): the login change and the
       // caching reset that rides with it.
-      q('.auth-hint').textContent = on
+      const ah = q('.auth-hint');
+      ah.textContent = on
         ? (siteData.username ? ''
            : 'Saving makes the site private: visitors sign in, and caching ' +
              'turns off — nothing is stored on their machines.')
@@ -1969,6 +1965,7 @@
              'password deleted, and caching turns on (copies re-checked ' +
              'every visit).'
            : '');
+      ah.classList.toggle('warn', ah.textContent !== '');
 
       // Typing changes whether the login is complete, so the count follows
       // the keystroke — but only the attention half re-renders, or the
@@ -2026,13 +2023,20 @@
       if (!ok) { b.disabled = false; b.textContent = old; }
     });
 
-    // The cache select reflects the stored value — always concrete, since
-    // access flips write the matching default onto it.
+    // The cache switch reflects the stored value — always concrete, since
+    // access flips write the matching default onto it. A write the server
+    // refuses must not leave the knob lying about what is stored.
     {
-      const sel = q('.cache-mode');
-      sel.value = siteData.cache || 'yes';
-      sel.addEventListener('change', () =>
-        saveSettings({ cache: sel.value }, cardIndex(card), badge, errEl));
+      const sw = q('.cache-switch'), state = q('.cache-state');
+      const show = () => { state.textContent = sw.checked ? 'on' : 'off'; };
+      sw.checked = (siteData.cache || 'yes') === 'yes';
+      show();
+      sw.addEventListener('change', async () => {
+        show();
+        const ok = await saveSettings({ cache: sw.checked ? 'yes' : 'no' },
+                                      cardIndex(card), badge, errEl);
+        if (!ok) { sw.checked = !sw.checked; show(); }
+      });
     }
 
     q('.save-site').addEventListener('click', () => {

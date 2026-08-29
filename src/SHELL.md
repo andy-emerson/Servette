@@ -677,13 +677,70 @@ def _stop_ui(httpd):
 
 ```python
 # admin
+def _stale_admin_pids():
+    """PIDs of OTHER 'servette admin' runs owned by this same user, read
+    from /proc. The service (no 'admin' argument) never matches, and
+    neither does the calling process. Empty on hosts without /proc
+    (macOS) — the caller then has nothing it can safely clear."""
+    pids = []
+    me, uid = os.getpid(), os.getuid()
+    for name in os.listdir("/proc") if os.path.isdir("/proc") else []:
+        if not name.isdigit() or int(name) == me:
+            continue
+        entry = os.path.join("/proc", name)
+        try:
+            if os.stat(entry).st_uid != uid:
+                continue
+            with open(os.path.join(entry, "cmdline"), "rb") as f:
+                argv = [a.decode("utf-8", "replace")
+                        for a in f.read().split(b"\0") if a]
+        except OSError:
+            continue                     # raced away, or unreadable
+        if "admin" in argv[1:] and any(
+                os.path.basename(a).startswith("servette") for a in argv):
+            pids.append(int(name))
+    return pids
+
+
+def _reclaim_admin_port(site, page):
+    """After a refused bind: end this user's stale admin runs and retry.
+    A dropped SSH session does not always end the admin command it was
+    running, and the leftover holds the port. Running 'admin' again IS
+    the statement that the old session is over (ruled: clear it, never
+    ask) — and its passcode dying with it is what this page wants anyway.
+    Returns (httpd, code), or (None, None) when the port's holder is not
+    ours to clear."""
+    stale = _stale_admin_pids()
+    for pid in stale:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass                         # already gone
+    if stale:
+        for _ in range(20):              # up to ~2 s for the socket to free
+            time.sleep(0.1)
+            try:
+                return _start_ui(site, page)
+            except OSError:
+                continue
+    return None, None
+
+
 def cmd_admin():
     site = config.sites[0]  # the fallback when an upload names no site
     try:
         httpd, code = _start_ui(site, _UI_ADMIN_PAGE)
-    except OSError as e:
-        print(f"  Could not open the page (port {_UI_PORT}: {e.strerror or e}).")
-        return
+    except OSError:
+        httpd, code = _reclaim_admin_port(site, _UI_ADMIN_PAGE)
+        if httpd is None:
+            # Not ours to kill, so the refusal names the finder and the fix.
+            print(f"  Could not open the page: port {_UI_PORT} is taken by "
+                  "another program.")
+            print(f"  Find it with 'sudo ss -ltnp | grep {_UI_PORT}', stop "
+                  "it, then run 'admin' again.")
+            return
+        print("  An earlier admin session was still running — closed it and "
+              "took its place (its passcode no longer works).")
     httpd.on_publish = lambda s: print(
         f"\n  Published from browser to {s.domain or s.serve_dir}: "
         "content swapped in — restore-site undoes it.")
@@ -2371,12 +2428,13 @@ def _production_issues(running=None):
     ours_mb, foreign_mb = _swap_sizes()
     offer   = _swap_offer(rec // (1024 * 1024) if rec else None,
                           os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
-    # An active swap is never listed, whatever its size (ruled: a working
-    # swap is not a thing to review — 'enable' still offers the resize).
-    # Only a host with no swap at all, or a swapfile lying inactive, has
-    # something to say here.
-    if offer is not None and not ours_mb and not foreign_mb:
-        if os.path.exists(_SWAP_PATH):
+    if offer is not None:
+        if ours_mb:
+            # ours_mb, not SwapTotal: with a swap partition alongside, the
+            # total printed a size the swapfile does not have.
+            issues.append(f"swapfile {ours_mb} MB but {rec // (1024 * 1024)} MB "
+                          "recommended — run 'enable' to resize")
+        elif os.path.exists(_SWAP_PATH):
             # The file is on disk but not swapped on — "no swap" would be
             # untrue on this host, and the fix is activation, not creation.
             issues.append("swapfile present but inactive — run 'enable' to "
@@ -2558,12 +2616,10 @@ def _health_checks(service_active=None):
         rec_mb = (rec // (1024 * 1024)) if rec else None
         offer  = _swap_offer(rec_mb, os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
         have   = (ours_mb or 0) + foreign_mb
-        # The recommendation is named by the field that sets it; the detail
-        # may state a shortfall, but an ACTIVE swap always reads as ok
-        # (ruled: a working swap is not a thing to review) — only absent
-        # or inactive-while-recommended is worth the attention pill.
-        # `offer` is a (description, hint) pair for the terminal's prompt —
-        # never a number; do not interpolate it.
+        # The recommendation is named by the field that sets it, so this row
+        # states the size and speaks up only when it falls short. `offer` is
+        # a (description, hint) pair for the terminal's prompt — never a
+        # number; do not interpolate it.
         if offer is None:
             detail = f"{have} MB active" if have else "not needed at this host's memory"
         elif have:
@@ -2575,8 +2631,12 @@ def _health_checks(service_active=None):
             detail = "swapfile present but inactive — 'enable' re-activates it"
         else:
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
-        rows.append({"key": "swap", "site": None,
-                     "ok": offer is None or have > 0,
+        # `quiet` (this row only): warn amber where it lives — the Server
+        # tab row and the terminal — but never as the cross-tab banner
+        # (ruled: an undersized swap is worth its row's colour, not a
+        # "This server" band over the site cards).
+        rows.append({"key": "swap", "site": None, "ok": offer is None,
+                     "quiet": True,
                      "blocking": False, "label": "Swap file", "detail": detail})
     # Disk is host-wide and platform-independent: a full disk is the outage
     # every other row assumes is not happening. A publish that cannot write

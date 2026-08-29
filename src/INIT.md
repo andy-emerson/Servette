@@ -57,6 +57,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import ssl
 import subprocess
 import sys

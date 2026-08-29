@@ -270,8 +270,11 @@
       min-width: 8rem;
       padding-right: 0.75rem;
     }
-    .rows a { color: var(--brand); text-decoration: none; }
-    .rows a:hover { text-decoration: underline; }
+    /* .serving-state too: the Serving link left .rows for its switch-row,
+       and an anchor no rule reaches falls back to the browser's default —
+       visited-purple on a green page. */
+    .rows a, .serving-state a { color: var(--brand); text-decoration: none; }
+    .rows a:hover, .serving-state a:hover { text-decoration: underline; }
     /* A ledger's total sits under a rule, at the foot of what it sums. */
     .rows .ledger {
       margin-top: 0.35rem;
@@ -2111,8 +2114,10 @@
     const hostChecks = ((d.checks) || []).filter((c) => c.site === null);
 
     // What has no card of its own says its piece here; a site's trouble is
-    // worn by that site's card on the Sites tab.
-    const needs = hostChecks.filter((c) => !c.ok);
+    // worn by that site's card on the Sites tab. A `quiet` row (the swap
+    // shortfall) warns amber on its own Server-tab row but is never worth
+    // this cross-tab band (ruled).
+    const needs = hostChecks.filter((c) => !c.ok && !c.quiet);
     $('attention').classList.toggle('hidden', !needs.length);
     $('attention').innerHTML = needs.map((c) =>
       `<b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +

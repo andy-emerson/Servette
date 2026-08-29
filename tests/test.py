@@ -1158,6 +1158,57 @@ def run_dispatch_tests(s):
           "restore-site" in [c.split()[0] for c, _ in s._COMMANDS]
           and s._needs_root("restore-site"))
 
+    # The admin door clears its own stale predecessor (ruled): a dropped
+    # SSH session leaves 'servette admin' holding the port, and no user
+    # should need pkill to get back in.
+    if not s._IS_MACOS:
+        free = _free_port()
+        decoy = subprocess.Popen(
+            [sys.executable, "-c",
+             "import socket, time; s = socket.socket(); "
+             f"s.bind(('127.0.0.1', {free})); s.listen(1); time.sleep(60)",
+             "servette", "admin"])
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    socket.create_connection(("127.0.0.1", free), 0.2).close()
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            pids = s._stale_admin_pids()
+            check("A stale admin run is found by its command line, never ourselves",
+                  decoy.pid in pids and os.getpid() not in pids)
+            saved_uiport = s._UI_PORT
+            try:
+                s._UI_PORT = free
+                httpd, code = s._reclaim_admin_port(s.config.sites[0],
+                                                    s._UI_ADMIN_PAGE)
+                check("Re-running admin ends the stale run and takes its port",
+                      httpd is not None and bool(code)
+                      and decoy.poll() is not None)
+                if httpd is not None:
+                    s._stop_ui(httpd)
+                # A port held by something that is NOT an admin run is
+                # refused, never killed.
+                blocker = socket.socket()
+                blocker.bind(("127.0.0.1", free))
+                blocker.listen(1)
+                try:
+                    httpd2, _ = s._reclaim_admin_port(s.config.sites[0],
+                                                      s._UI_ADMIN_PAGE)
+                    check("A foreign holder of the port is refused, not killed",
+                          httpd2 is None
+                          and blocker.fileno() != -1)
+                finally:
+                    blocker.close()
+            finally:
+                s._UI_PORT = saved_uiport
+        finally:
+            if decoy.poll() is None:
+                decoy.kill()
+            decoy.wait()
+
     section("Admin command")
 
     # The door to the browser half: the page server brackets exactly this
@@ -1380,6 +1431,8 @@ def run_dispatch_tests(s):
           and '<div class="cfg-group">Performance</div>' in s._UI_ADMIN_PAGE
           and "SECURITY_FIELDS" in s._UI_ADMIN_PAGE
           and "PERFORMANCE_FIELDS" in s._UI_ADMIN_PAGE)
+    check("...and the cross-tab banner skips quiet rows",
+          "!c.ok && !c.quiet" in s._UI_ADMIN_PAGE)
     check("...with browser caching a per-site toggle on the card, not a host field",
           "cache-switch" in s._UI_ADMIN_PAGE
           and "cache-mode" not in s._UI_ADMIN_PAGE
@@ -1646,16 +1699,16 @@ def run_dispatch_tests(s):
                 check("An inactive swapfile is reported as inactive, not absent",
                       "inactive" in srow["detail"]
                       and any("inactive" in i for i in s._production_issues()))
-                # Ruled: an active swap is not a review item, whatever its
-                # size — the attention pill and the production list both
-                # stay quiet while the detail still states the number.
+                # Ruled: the shortfall warns amber on its own row (and in
+                # the terminal), but never as the cross-tab banner — the
+                # row carries `quiet`, and the page's band skips quiet
+                # rows.
                 s._swap_sizes = lambda: (999, 0)
                 srow = [r for r in s._health_checks()
                         if r["key"] == "swap"][0]
-                check("An active swap below the recommendation reads as ok",
-                      srow["ok"] and "MB active" in srow["detail"]
-                      and not any("swap" in i
-                                  for i in s._production_issues()))
+                check("An active swap below the recommendation warns on its row only",
+                      not srow["ok"] and srow.get("quiet") is True
+                      and "MB active" in srow["detail"])
             finally:
                 s._swap_sizes, s._swap_offer = saved_sizes, saved_offer
                 s._SWAP_PATH = saved_swp
@@ -6219,13 +6272,13 @@ def run_install_tests(s, tmpdir):
         s._swap_sizes = lambda: (None, 1024)
         check("Host with a foreign swap partition is not flagged",
               not any("swap" in issue for issue in s._production_issues()))
-        # Ruled: an active swap is never an issue, whatever its size — a
-        # working swap is not a thing to review, and the resize offer
-        # stays in 'enable', out of the report.
+        # The nag names OUR file's size from /proc/swaps — with a partition
+        # alongside, SwapTotal printed a number the swapfile does not have.
         _pin_swapfile(True)
         s._swap_sizes = lambda: (600, 1024)
-        check("An undersized but active swapfile is not flagged",
-              not any("swap" in i for i in s._production_issues()))
+        flagged = [i for i in s._production_issues() if "swapfile" in i]
+        check("An undersized swapfile is named by its own size, not SwapTotal",
+              flagged and "swapfile 600 MB" in flagged[0])
     finally:
         s._meminfo       = saved_meminfo
         s._swap_sizes    = saved_sizes
@@ -7090,6 +7143,22 @@ def run_browser_tests(s, tmpdir):
             check("...the load meter is sampling before the stats tab is opened",
                   page.evaluate(
                       "() => document.getElementById('load-rows').innerHTML !== ''"))
+
+            # The Serving link left .rows for its own switch-row; an anchor
+            # no rule reaches falls back to the browser default — visited
+            # purple. The pin is computed colour, which a text pin cannot
+            # see.
+            check("...the serving link wears the page's colour, not the browser's",
+                  page.evaluate("""() => {
+                    const a = document.querySelector('.serving-state a');
+                    if (!a) return false;
+                    const probe = document.createElement('span');
+                    probe.style.color = 'var(--brand)';
+                    document.body.appendChild(probe);
+                    const want = getComputedStyle(probe).color;
+                    probe.remove();
+                    return getComputedStyle(a).color === want;
+                  }"""))
 
             for tab in ("server", "stats", "sites"):
                 page.click(f"#tab-{tab}")

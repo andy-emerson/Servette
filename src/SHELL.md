@@ -2371,13 +2371,12 @@ def _production_issues(running=None):
     ours_mb, foreign_mb = _swap_sizes()
     offer   = _swap_offer(rec // (1024 * 1024) if rec else None,
                           os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
-    if offer is not None:
-        if ours_mb:
-            # ours_mb, not SwapTotal: with a swap partition alongside, the
-            # total printed a size the swapfile does not have.
-            issues.append(f"swapfile {ours_mb} MB but {rec // (1024 * 1024)} MB "
-                          "recommended — run 'enable' to resize")
-        elif os.path.exists(_SWAP_PATH):
+    # An active swap is never listed, whatever its size (ruled: a working
+    # swap is not a thing to review — 'enable' still offers the resize).
+    # Only a host with no swap at all, or a swapfile lying inactive, has
+    # something to say here.
+    if offer is not None and not ours_mb and not foreign_mb:
+        if os.path.exists(_SWAP_PATH):
             # The file is on disk but not swapped on — "no swap" would be
             # untrue on this host, and the fix is activation, not creation.
             issues.append("swapfile present but inactive — run 'enable' to "
@@ -2559,10 +2558,12 @@ def _health_checks(service_active=None):
         rec_mb = (rec // (1024 * 1024)) if rec else None
         offer  = _swap_offer(rec_mb, os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
         have   = (ours_mb or 0) + foreign_mb
-        # The recommendation is named by the field that sets it, so this row
-        # states the size and speaks up only when it falls short. `offer` is
-        # a (description, hint) pair for the terminal's prompt — never a
-        # number; do not interpolate it.
+        # The recommendation is named by the field that sets it; the detail
+        # may state a shortfall, but an ACTIVE swap always reads as ok
+        # (ruled: a working swap is not a thing to review) — only absent
+        # or inactive-while-recommended is worth the attention pill.
+        # `offer` is a (description, hint) pair for the terminal's prompt —
+        # never a number; do not interpolate it.
         if offer is None:
             detail = f"{have} MB active" if have else "not needed at this host's memory"
         elif have:
@@ -2574,7 +2575,8 @@ def _health_checks(service_active=None):
             detail = "swapfile present but inactive — 'enable' re-activates it"
         else:
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
-        rows.append({"key": "swap", "site": None, "ok": offer is None,
+        rows.append({"key": "swap", "site": None,
+                     "ok": offer is None or have > 0,
                      "blocking": False, "label": "Swap file", "detail": detail})
     # Disk is host-wide and platform-independent: a full disk is the outage
     # every other row assumes is not happening. A publish that cannot write

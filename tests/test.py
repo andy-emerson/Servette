@@ -1363,9 +1363,11 @@ def run_dispatch_tests(s):
           and "(kind ? ',' + kind : '')" in s._UI_ADMIN_PAGE
           and "redirects_temporary" in s._UI_ADMIN_PAGE
           and "' (temporary)'" in s._UI_ADMIN_PAGE)
-    check("...and the outside check the tunnel vantage cannot compute itself",
+    check("...and the outside check, a Test button on the Serving row",
           "outside" in s._UI_ADMIN_PAGE
-          and "servette-check" in s._UI_ADMIN_PAGE)
+          and "servette-check" in s._UI_ADMIN_PAGE
+          and ">Test</button>" in s._UI_ADMIN_PAGE
+          and "Test connection" not in s._UI_ADMIN_PAGE)
     check("...and the Server panel wired to the set vocabulary",
           "panel-server" in s._UI_ADMIN_PAGE
           and "getJSON('/config')" in s._UI_ADMIN_PAGE
@@ -1644,6 +1646,16 @@ def run_dispatch_tests(s):
                 check("An inactive swapfile is reported as inactive, not absent",
                       "inactive" in srow["detail"]
                       and any("inactive" in i for i in s._production_issues()))
+                # Ruled: an active swap is not a review item, whatever its
+                # size — the attention pill and the production list both
+                # stay quiet while the detail still states the number.
+                s._swap_sizes = lambda: (999, 0)
+                srow = [r for r in s._health_checks()
+                        if r["key"] == "swap"][0]
+                check("An active swap below the recommendation reads as ok",
+                      srow["ok"] and "MB active" in srow["detail"]
+                      and not any("swap" in i
+                                  for i in s._production_issues()))
             finally:
                 s._swap_sizes, s._swap_offer = saved_sizes, saved_offer
                 s._SWAP_PATH = saved_swp
@@ -6207,13 +6219,13 @@ def run_install_tests(s, tmpdir):
         s._swap_sizes = lambda: (None, 1024)
         check("Host with a foreign swap partition is not flagged",
               not any("swap" in issue for issue in s._production_issues()))
-        # The nag names OUR file's size from /proc/swaps — with a partition
-        # alongside, SwapTotal printed a number the swapfile does not have.
+        # Ruled: an active swap is never an issue, whatever its size — a
+        # working swap is not a thing to review, and the resize offer
+        # stays in 'enable', out of the report.
         _pin_swapfile(True)
         s._swap_sizes = lambda: (600, 1024)
-        flagged = [i for i in s._production_issues() if "swapfile" in i]
-        check("An undersized swapfile is named by its own size, not SwapTotal",
-              flagged and "swapfile 600 MB" in flagged[0])
+        check("An undersized but active swapfile is not flagged",
+              not any("swap" in i for i in s._production_issues()))
     finally:
         s._meminfo       = saved_meminfo
         s._swap_sizes    = saved_sizes

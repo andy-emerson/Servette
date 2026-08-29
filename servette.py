@@ -5981,6 +5981,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       // it — publish, preview, restore, redirect — follows underneath.
       : (`<div class="rows info"></div>` +
 
+         // The site itself, one click away — and Test beside it: the one
+         // view a page on the tunnel cannot compute for itself, opened
+         // from the outside on the site's own check page.
+         `<div class="switch-row"><span class="k">Serving</span>` +
+         `<span class="switch-value"><span class="serving-state"></span>` +
+         `<span class="switch-act"><button class="action tiny outside" ` +
+         `type="button" disabled>Test</button></span></span></div>` +
+
          `<div class="switch-row"><span class="k">Domain</span>` +
          `<span class="switch-value"><input class="dom-input" type="text" ` +
          `placeholder="example.com" value="${escapeHtml(siteData.domain)}">` +
@@ -6090,12 +6098,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
            `<button class="action redir-save" type="button">Add redirect</button>` +
            `<button class="action redir-cancel" type="button">Cancel</button>` +
            `</div>` +
-         `</div>` +
-
-         // ── The one view a page on the tunnel cannot compute for itself.
-         `<div class="split"></div>` +
-         `<div class="btn-row">` +
-         `<button class="action outside" type="button" disabled>Test connection</button>` +
          `</div>`)
 
     const q = (sel) => card.querySelector(sel);
@@ -6657,13 +6659,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         row('Status', needs.length
           ? `<span class="${blocking ? 'fault' : 'warn'}">` +
             `${needs.length} to review</span>`
-          : '<span class="ok">✓</span> healthy') +
-        // The site itself, one click away and in its own tab: the fastest
-        // answer to "did that publish land" is looking at it.
-        row('Serving', siteData.domain
-          ? `<a href="${escapeHtml('https://' + siteData.domain)}" target="_blank" ` +
-            `rel="noopener">${escapeHtml('https://' + siteData.domain)}</a>`
-          : "this server's IP address (no domain set)");
+          : '<span class="ok">✓</span> healthy');
+      // The fastest answer to "did that publish land" is looking at the
+      // site. Its row is static markup (the Test button keeps its one
+      // listener); only this value re-renders.
+      q('.serving-state').innerHTML = siteData.domain
+        ? `<a href="${escapeHtml('https://' + siteData.domain)}" target="_blank" ` +
+          `rel="noopener">${escapeHtml('https://' + siteData.domain)}</a>`
+        : "this server's IP address (no domain set)";
 
       // One marker per row, taken from the same list the count read, so a
       // row and the count can never disagree about what is wrong.
@@ -9200,13 +9203,12 @@ def _production_issues(running=None):
     ours_mb, foreign_mb = _swap_sizes()
     offer   = _swap_offer(rec // (1024 * 1024) if rec else None,
                           os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
-    if offer is not None:
-        if ours_mb:
-            # ours_mb, not SwapTotal: with a swap partition alongside, the
-            # total printed a size the swapfile does not have.
-            issues.append(f"swapfile {ours_mb} MB but {rec // (1024 * 1024)} MB "
-                          "recommended — run 'enable' to resize")
-        elif os.path.exists(_SWAP_PATH):
+    # An active swap is never listed, whatever its size (ruled: a working
+    # swap is not a thing to review — 'enable' still offers the resize).
+    # Only a host with no swap at all, or a swapfile lying inactive, has
+    # something to say here.
+    if offer is not None and not ours_mb and not foreign_mb:
+        if os.path.exists(_SWAP_PATH):
             # The file is on disk but not swapped on — "no swap" would be
             # untrue on this host, and the fix is activation, not creation.
             issues.append("swapfile present but inactive — run 'enable' to "
@@ -9373,10 +9375,12 @@ def _health_checks(service_active=None):
         rec_mb = (rec // (1024 * 1024)) if rec else None
         offer  = _swap_offer(rec_mb, os.path.exists(_SWAP_PATH), ours_mb, foreign_mb)
         have   = (ours_mb or 0) + foreign_mb
-        # The recommendation is named by the field that sets it, so this row
-        # states the size and speaks up only when it falls short. `offer` is
-        # a (description, hint) pair for the terminal's prompt — never a
-        # number; do not interpolate it.
+        # The recommendation is named by the field that sets it; the detail
+        # may state a shortfall, but an ACTIVE swap always reads as ok
+        # (ruled: a working swap is not a thing to review) — only absent
+        # or inactive-while-recommended is worth the attention pill.
+        # `offer` is a (description, hint) pair for the terminal's prompt —
+        # never a number; do not interpolate it.
         if offer is None:
             detail = f"{have} MB active" if have else "not needed at this host's memory"
         elif have:
@@ -9388,7 +9392,8 @@ def _health_checks(service_active=None):
             detail = "swapfile present but inactive — 'enable' re-activates it"
         else:
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
-        rows.append({"key": "swap", "site": None, "ok": offer is None,
+        rows.append({"key": "swap", "site": None,
+                     "ok": offer is None or have > 0,
                      "blocking": False, "label": "Swap file", "detail": detail})
     # Disk is host-wide and platform-independent: a full disk is the outage
     # every other row assumes is not happening. A publish that cannot write

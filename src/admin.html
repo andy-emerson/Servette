@@ -1218,6 +1218,14 @@
       // it — publish, preview, restore, redirect — follows underneath.
       : (`<div class="rows info"></div>` +
 
+         // The site itself, one click away — and Test beside it: the one
+         // view a page on the tunnel cannot compute for itself, opened
+         // from the outside on the site's own check page.
+         `<div class="switch-row"><span class="k">Serving</span>` +
+         `<span class="switch-value"><span class="serving-state"></span>` +
+         `<span class="switch-act"><button class="action tiny outside" ` +
+         `type="button" disabled>Test</button></span></span></div>` +
+
          `<div class="switch-row"><span class="k">Domain</span>` +
          `<span class="switch-value"><input class="dom-input" type="text" ` +
          `placeholder="example.com" value="${escapeHtml(siteData.domain)}">` +
@@ -1327,12 +1335,6 @@
            `<button class="action redir-save" type="button">Add redirect</button>` +
            `<button class="action redir-cancel" type="button">Cancel</button>` +
            `</div>` +
-         `</div>` +
-
-         // ── The one view a page on the tunnel cannot compute for itself.
-         `<div class="split"></div>` +
-         `<div class="btn-row">` +
-         `<button class="action outside" type="button" disabled>Test connection</button>` +
          `</div>`)
 
     const q = (sel) => card.querySelector(sel);
@@ -1894,13 +1896,14 @@
         row('Status', needs.length
           ? `<span class="${blocking ? 'fault' : 'warn'}">` +
             `${needs.length} to review</span>`
-          : '<span class="ok">✓</span> healthy') +
-        // The site itself, one click away and in its own tab: the fastest
-        // answer to "did that publish land" is looking at it.
-        row('Serving', siteData.domain
-          ? `<a href="${escapeHtml('https://' + siteData.domain)}" target="_blank" ` +
-            `rel="noopener">${escapeHtml('https://' + siteData.domain)}</a>`
-          : "this server's IP address (no domain set)");
+          : '<span class="ok">✓</span> healthy');
+      // The fastest answer to "did that publish land" is looking at the
+      // site. Its row is static markup (the Test button keeps its one
+      // listener); only this value re-renders.
+      q('.serving-state').innerHTML = siteData.domain
+        ? `<a href="${escapeHtml('https://' + siteData.domain)}" target="_blank" ` +
+          `rel="noopener">${escapeHtml('https://' + siteData.domain)}</a>`
+        : "this server's IP address (no domain set)";
 
       // One marker per row, taken from the same list the count read, so a
       // row and the count can never disagree about what is wrong.

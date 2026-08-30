@@ -326,11 +326,10 @@ class Site:
             raise _ConfigInvalid("servette.toml: username — a username "
                                  "cannot contain a colon (sign-in splits "
                                  "user:password at the first one)")
-        # A file without the key gets its access's default — public sites
-        # keep re-checked copies, private sites none. The stored value is
-        # always concrete: flipping access RESETS it to that default at
-        # the write doors, loudly, and the operator toggles it from there.
-        cache = data.get("cache", "no" if username else "yes")
+        # A file without the key gets the default: enabled. Caching is its
+        # own per-site setting, independent of access (ruled) — flipping
+        # public/private never touches it.
+        cache = data.get("cache", "yes")
         if cache not in ("yes", "no"):
             # The same sentence the write doors refuse with (the load-door
             # principle — see _ConfigInvalid).
@@ -347,9 +346,10 @@ class Site:
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
         # What visitors' browsers keep: "yes" = copies kept but re-checked
-        # every visit, "no" = no copies at all. Defaulted by access above,
-        # reset by access flips at the write doors, toggled freely between
-        # (the private media site, the public app handling secrets).
+        # every visit, "no" = no copies at all. Independent of access
+        # (ruled): its own toggle, default enabled, and access flips never
+        # move it. Only the HEADER FORM follows access — a private site's
+        # copies are marked `private` so shared caches never hold them.
         self.cache          = cache
         # Two tables, one per answer: redirects → 301, redirects_temporary
         # → 302 (the ruled per-rule choice, default permanent). Validated
@@ -635,8 +635,7 @@ password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
 
 # What visitors' browsers keep: "yes" = copies kept but re-checked every
-# visit, "no" = no copies at all. Changing a site between public and
-# private resets this to that access's default (public yes, private no)
+# visit (the default), "no" = no copies at all. Independent of access.
 cache = {s(site.cache)}
 {_redirect_toml(site)}""" for site in self.sites)
 
@@ -1023,15 +1022,12 @@ def _resolve_request_path(url_path, serve_dir):
 # Cache-Control
 def _cache_control_header(site):
     """Cache-Control for the matched site, read straight off its `cache`
-    toggle. "yes": visitors keep copies re-checked every visit (`no-cache`
-    — new content is instant, unchanged files answer 304), the public
-    default. "no": visitors keep no copies at all (`no-store` — content
-    behind a password leaves nothing in a browser's disk cache on a
-    machine the operator does not control), the private default. The
-    defaults land when access flips — the write doors reset the toggle,
-    loudly — and the operator moves it freely from there: the private
-    media site that wants cheap repeat visits, the public app that
-    handles secrets client-side."""
+    toggle. "yes" (the default): visitors keep copies re-checked every
+    visit (`no-cache` — unchanged files answer 304 and stale content is
+    never shown). "no": visitors keep no copies at all (`no-store`).
+    The toggle is the operator's alone, independent of access (ruled) —
+    only the header FORM follows access: a private site's copies are
+    marked `private` so shared caches never hold them."""
     if site.cache == "no":
         return "no-store"
     return ("private" if site.username else "public") + ", no-cache"
@@ -5706,11 +5702,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       $('tab-' + key).classList.toggle('active', key === name);
       $('tab-' + key).setAttribute('aria-selected', String(key === name));
     }
-    refresh();  // every tab renders from the same /status + /config truth
-    // startMeter here is only the retry after a failed sample stopped the
-    // meter — the meter itself runs from login (see startup), so the tab
-    // opens with history on the line instead of starting it.
-    if (name === 'stats') { loadTraffic(); startMeter(); }
+    // Every panel is populated at login and re-rendered after each op
+    // (ruled): a tab click only shows what is already drawn — no refresh,
+    // no rebuild underfoot. startMeter here is only the retry after a
+    // failed sample stopped the meter; the meter itself runs from login.
+    if (name === 'stats') startMeter();
     // The full path + search + hash, in that order: a bare '#…' relative
     // URL swallows the search into the fragment — the hash became the tab
     // name with the whole passcode query glued on, which parses back as no
@@ -5767,6 +5763,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // every op re-renders the cards, and a re-render must never cost a
   // folder that took a drag to pick.
   const pendingFolders = new Map();
+
+  // An armed-but-unsaved access flip, surviving re-renders under the same
+  // keys: touching any other control saves and rebuilds the cards, and a
+  // rebuild that snapped the armed switch back to the stored state read
+  // as one setting changing another. Entries whose desire matches the
+  // stored truth are dropped at build, so a flip completed on any surface
+  // clears itself.
+  const pendingAuth = new Map();
 
   const cardIndex = (el) =>
     [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
@@ -6597,8 +6601,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const authRow = checksFor.find((c) => c.key === 'password');
 
     // What the operator has asked for but not yet saved. null means the
-    // switch is still showing what the server says.
-    let authDesired = null;
+    // switch is still showing what the server says. Restored from
+    // pendingAuth so a rebuild (any other control's save) cannot snap an
+    // armed flip back; a desire the stored truth already matches is done.
+    if (pendingAuth.get(foldKey(siteData, idx)) === !!siteData.username)
+      pendingAuth.delete(foldKey(siteData, idx));
+    let authDesired = pendingAuth.has(foldKey(siteData, idx))
+      ? pendingAuth.get(foldKey(siteData, idx)) : null;
     const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
 
     /* ── What this card wants dealt with ───────────────────────────────
@@ -6712,10 +6721,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         : 'Save the access settings for this site';
     };
 
-    // The cache switch reflects the stored value — always concrete, since
-    // access flips write the matching default onto it. A write the server
-    // refuses must not leave the knob lying about what is stored.
-    // Above renderInfo, which previews this knob during an access flip.
+    // The cache switch reflects the stored value, nothing else — access
+    // and caching are independent (ruled). A write the server refuses
+    // must not leave the knob lying about what is stored.
     const cacheSw = q('.cache-switch');
     const showCache = () => {
       q('.cache-state').textContent = cacheSw.checked ? 'enabled' : 'disabled';
@@ -6756,26 +6764,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                     hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
       q('.auth-save').classList.toggle('hidden', !(on || pending));
       // The access flip's consequences are said BEFORE Save, not
-      // discovered after (loudly, by ruling): the login change and the
-      // caching reset that rides with it.
+      // discovered after (loudly, by ruling). Access and caching are
+      // independent (ruled): the flip narrates the login change only.
       const ah = q('.auth-hint');
       ah.textContent = on
         ? (siteData.username ? ''
-           : 'Saving makes the site private: visitors sign in, and caching ' +
-             'turns off — nothing is stored on their machines.')
+           : 'Saving makes the site private: visitors sign in with this ' +
+             'username and password.')
         : (siteData.username
-           ? 'Saving makes the site public: the login is removed, the stored ' +
-             'password deleted, and caching turns on (copies re-checked ' +
-             'every visit).'
+           ? 'Saving makes the site public: the login is removed and the ' +
+             'stored password deleted.'
            : '');
       ah.classList.toggle('warn', ah.textContent !== '');
-      // The caching knob moves WITH the flip (ruled): a knob that sits
-      // frozen until Save reads as the reset not working. While the flip
-      // is pending it shows the incoming access's default; an abandoned
-      // flip puts the stored truth back; Save makes it real (the server's
-      // one settings-write path performs the reset).
-      cacheSw.checked = pending ? !on : (siteData.cache || 'yes') === 'yes';
-      showCache();
 
       // Typing changes whether the login is complete, so the count follows
       // the keystroke — but only the attention half re-renders, or the
@@ -6800,6 +6800,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       // it goes with the state that produced it.
       clearError(errEl);
       authDesired = e.target.checked;
+      pendingAuth.set(foldKey(siteData, idx), authDesired);
       renderInfo();
     });
 
@@ -7214,6 +7215,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   $(supported ? 'app' : 'unsupported').classList.remove('hidden');
   if (supported) {
     showTab((location.hash || '').replace('#', ''));
+    // Every panel fills NOW (ruled): tab clicks only reveal, so the data
+    // must not wait for the first click on its tab.
+    refresh();
+    loadTraffic();
     checkUpgrade();
     startMeter();  // sampling begins at login, so the load line has history
   }
@@ -8416,18 +8421,12 @@ def _set_site_value(target, key, value):
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
         # (`set`, the page, and the prompt alike, since all land here).
-        had_login = bool(target.username)
+        # Access and caching are independent settings (ruled): flipping
+        # public/private never touches the cache toggle.
         target.username = value
         if not value:
             target.password_hash = ""
             target.password_salt = ""
-        if bool(value) != had_login:
-            # Flipping access resets browser copies to that access's
-            # default — here, the one write path, so every door resets
-            # identically. Each surface announces the reset itself
-            # (cmd_set's line, the prompt's line, the page's hint):
-            # loudly, never as a side effect discovered later.
-            target.cache = "no" if value else "yes"
     elif key == "redirect":
         # One rule per token: 'redirect=/path,/target' adds or replaces a
         # permanent (301) rule, a trailing ',temporary' makes it a 302, and
@@ -8506,8 +8505,9 @@ def _set_site_value(target, key, value):
                         "run 'config cert' first")
         target.active = (v == "yes")
     elif key == "cache":
-        # What visitors' browsers keep — the toggle the access flip above
-        # resets. "yes": copies re-checked every visit. "no": no copies.
+        # What visitors' browsers keep — the operator's own toggle,
+        # independent of access (ruled). "yes": copies re-checked every
+        # visit. "no": no copies.
         v = value.strip().lower()
         if v not in ("yes", "no"):
             return 'cache is "yes" (copies, re-checked every visit) or "no" (no copies)'
@@ -8599,7 +8599,6 @@ def cmd_set(args):
     if not pairs:
         _set_usage()
         return
-    pre_login, pre_cache = bool(site.username), site.cache
     try:
         err = _apply_settings(site, pairs)
     except PermissionError:
@@ -8609,14 +8608,6 @@ def cmd_set(args):
         print(f"  {err}")
         return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
-    # The access flip's reset is announced, never discovered: the operator
-    # who changed a username learns the cache toggle moved with it.
-    if bool(site.username) != pre_login and site.cache != pre_cache:
-        print("  Browser copies reset to "
-              + ("'no' — a private site leaves no copies on visitors' machines"
-                 if site.username else
-                 "'yes' — a public site's copies are re-checked every visit")
-              + " (change it with: set cache=yes|no).")
 
 
 # The settings display
@@ -8650,9 +8641,9 @@ def _config_show():
             ("Key",         val(site.key_file)),
             ("Username",    val(site.username)),
             ("Password",    "(set)" if site.password_hash else "(not set)"),
-            ("Browser copies",
-             "kept, re-checked each visit" if site.cache == "yes"
-             else "none"),
+            ("Caching",
+             "enabled (copies re-checked each visit)" if site.cache == "yes"
+             else "disabled (nothing stored)"),
         ]
         for label, value in site_rows:
             print(f"    {label:<{_PAD - 2}} {value}")
@@ -8972,12 +8963,6 @@ def _config_username(site):
     config.save()
     print("  → auth disabled, password cleared" if new_value == ""
           else "  → saved")
-    # Announce the reset the access flip carried (loudly, by ruling).
-    if bool(new_value) != bool(current):
-        print("  → browser copies reset to "
-              + ("'no' (private default: none on visitors' machines)"
-                 if new_value else
-                 "'yes' (public default: re-checked every visit)"))
 
 
 def _config_password(site):

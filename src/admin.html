@@ -942,11 +942,11 @@
       $('tab-' + key).classList.toggle('active', key === name);
       $('tab-' + key).setAttribute('aria-selected', String(key === name));
     }
-    refresh();  // every tab renders from the same /status + /config truth
-    // startMeter here is only the retry after a failed sample stopped the
-    // meter — the meter itself runs from login (see startup), so the tab
-    // opens with history on the line instead of starting it.
-    if (name === 'stats') { loadTraffic(); startMeter(); }
+    // Every panel is populated at login and re-rendered after each op
+    // (ruled): a tab click only shows what is already drawn — no refresh,
+    // no rebuild underfoot. startMeter here is only the retry after a
+    // failed sample stopped the meter; the meter itself runs from login.
+    if (name === 'stats') startMeter();
     // The full path + search + hash, in that order: a bare '#…' relative
     // URL swallows the search into the fragment — the hash became the tab
     // name with the whole passcode query glued on, which parses back as no
@@ -1003,6 +1003,14 @@
   // every op re-renders the cards, and a re-render must never cost a
   // folder that took a drag to pick.
   const pendingFolders = new Map();
+
+  // An armed-but-unsaved access flip, surviving re-renders under the same
+  // keys: touching any other control saves and rebuilds the cards, and a
+  // rebuild that snapped the armed switch back to the stored state read
+  // as one setting changing another. Entries whose desire matches the
+  // stored truth are dropped at build, so a flip completed on any surface
+  // clears itself.
+  const pendingAuth = new Map();
 
   const cardIndex = (el) =>
     [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
@@ -1833,8 +1841,13 @@
     const authRow = checksFor.find((c) => c.key === 'password');
 
     // What the operator has asked for but not yet saved. null means the
-    // switch is still showing what the server says.
-    let authDesired = null;
+    // switch is still showing what the server says. Restored from
+    // pendingAuth so a rebuild (any other control's save) cannot snap an
+    // armed flip back; a desire the stored truth already matches is done.
+    if (pendingAuth.get(foldKey(siteData, idx)) === !!siteData.username)
+      pendingAuth.delete(foldKey(siteData, idx));
+    let authDesired = pendingAuth.has(foldKey(siteData, idx))
+      ? pendingAuth.get(foldKey(siteData, idx)) : null;
     const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
 
     /* ── What this card wants dealt with ───────────────────────────────
@@ -1948,10 +1961,9 @@
         : 'Save the access settings for this site';
     };
 
-    // The cache switch reflects the stored value — always concrete, since
-    // access flips write the matching default onto it. A write the server
-    // refuses must not leave the knob lying about what is stored.
-    // Above renderInfo, which previews this knob during an access flip.
+    // The cache switch reflects the stored value, nothing else — access
+    // and caching are independent (ruled). A write the server refuses
+    // must not leave the knob lying about what is stored.
     const cacheSw = q('.cache-switch');
     const showCache = () => {
       q('.cache-state').textContent = cacheSw.checked ? 'enabled' : 'disabled';
@@ -1992,26 +2004,18 @@
                     hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
       q('.auth-save').classList.toggle('hidden', !(on || pending));
       // The access flip's consequences are said BEFORE Save, not
-      // discovered after (loudly, by ruling): the login change and the
-      // caching reset that rides with it.
+      // discovered after (loudly, by ruling). Access and caching are
+      // independent (ruled): the flip narrates the login change only.
       const ah = q('.auth-hint');
       ah.textContent = on
         ? (siteData.username ? ''
-           : 'Saving makes the site private: visitors sign in, and caching ' +
-             'turns off — nothing is stored on their machines.')
+           : 'Saving makes the site private: visitors sign in with this ' +
+             'username and password.')
         : (siteData.username
-           ? 'Saving makes the site public: the login is removed, the stored ' +
-             'password deleted, and caching turns on (copies re-checked ' +
-             'every visit).'
+           ? 'Saving makes the site public: the login is removed and the ' +
+             'stored password deleted.'
            : '');
       ah.classList.toggle('warn', ah.textContent !== '');
-      // The caching knob moves WITH the flip (ruled): a knob that sits
-      // frozen until Save reads as the reset not working. While the flip
-      // is pending it shows the incoming access's default; an abandoned
-      // flip puts the stored truth back; Save makes it real (the server's
-      // one settings-write path performs the reset).
-      cacheSw.checked = pending ? !on : (siteData.cache || 'yes') === 'yes';
-      showCache();
 
       // Typing changes whether the login is complete, so the count follows
       // the keystroke — but only the attention half re-renders, or the
@@ -2036,6 +2040,7 @@
       // it goes with the state that produced it.
       clearError(errEl);
       authDesired = e.target.checked;
+      pendingAuth.set(foldKey(siteData, idx), authDesired);
       renderInfo();
     });
 
@@ -2450,6 +2455,10 @@
   $(supported ? 'app' : 'unsupported').classList.remove('hidden');
   if (supported) {
     showTab((location.hash || '').replace('#', ''));
+    // Every panel fills NOW (ruled): tab clicks only reveal, so the data
+    // must not wait for the first click on its tab.
+    refresh();
+    loadTraffic();
     checkUpgrade();
     startMeter();  // sampling begins at login, so the load line has history
   }

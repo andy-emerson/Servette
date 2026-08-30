@@ -1462,18 +1462,12 @@ def _set_site_value(target, key, value):
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
         # (`set`, the page, and the prompt alike, since all land here).
-        had_login = bool(target.username)
+        # Access and caching are independent settings (ruled): flipping
+        # public/private never touches the cache toggle.
         target.username = value
         if not value:
             target.password_hash = ""
             target.password_salt = ""
-        if bool(value) != had_login:
-            # Flipping access resets browser copies to that access's
-            # default — here, the one write path, so every door resets
-            # identically. Each surface announces the reset itself
-            # (cmd_set's line, the prompt's line, the page's hint):
-            # loudly, never as a side effect discovered later.
-            target.cache = "no" if value else "yes"
     elif key == "redirect":
         # One rule per token: 'redirect=/path,/target' adds or replaces a
         # permanent (301) rule, a trailing ',temporary' makes it a 302, and
@@ -1552,8 +1546,9 @@ def _set_site_value(target, key, value):
                         "run 'config cert' first")
         target.active = (v == "yes")
     elif key == "cache":
-        # What visitors' browsers keep — the toggle the access flip above
-        # resets. "yes": copies re-checked every visit. "no": no copies.
+        # What visitors' browsers keep — the operator's own toggle,
+        # independent of access (ruled). "yes": copies re-checked every
+        # visit. "no": no copies.
         v = value.strip().lower()
         if v not in ("yes", "no"):
             return 'cache is "yes" (copies, re-checked every visit) or "no" (no copies)'
@@ -1655,7 +1650,6 @@ def cmd_set(args):
     if not pairs:
         _set_usage()
         return
-    pre_login, pre_cache = bool(site.username), site.cache
     try:
         err = _apply_settings(site, pairs)
     except PermissionError:
@@ -1665,14 +1659,6 @@ def cmd_set(args):
         print(f"  {err}")
         return
     print(f"  Saved {len(pairs)} setting{'s' if len(pairs) != 1 else ''}.")
-    # The access flip's reset is announced, never discovered: the operator
-    # who changed a username learns the cache toggle moved with it.
-    if bool(site.username) != pre_login and site.cache != pre_cache:
-        print("  Browser copies reset to "
-              + ("'no' — a private site leaves no copies on visitors' machines"
-                 if site.username else
-                 "'yes' — a public site's copies are re-checked every visit")
-              + " (change it with: set cache=yes|no).")
 
 
 ```
@@ -1713,9 +1699,9 @@ def _config_show():
             ("Key",         val(site.key_file)),
             ("Username",    val(site.username)),
             ("Password",    "(set)" if site.password_hash else "(not set)"),
-            ("Browser copies",
-             "kept, re-checked each visit" if site.cache == "yes"
-             else "none"),
+            ("Caching",
+             "enabled (copies re-checked each visit)" if site.cache == "yes"
+             else "disabled (nothing stored)"),
         ]
         for label, value in site_rows:
             print(f"    {label:<{_PAD - 2}} {value}")
@@ -2065,12 +2051,6 @@ def _config_username(site):
     config.save()
     print("  → auth disabled, password cleared" if new_value == ""
           else "  → saved")
-    # Announce the reset the access flip carried (loudly, by ruling).
-    if bool(new_value) != bool(current):
-        print("  → browser copies reset to "
-              + ("'no' (private default: none on visitors' machines)"
-                 if new_value else
-                 "'yes' (public default: re-checked every visit)"))
 
 
 def _config_password(site):

@@ -263,11 +263,10 @@ class Site:
             raise _ConfigInvalid("servette.toml: username — a username "
                                  "cannot contain a colon (sign-in splits "
                                  "user:password at the first one)")
-        # A file without the key gets its access's default — public sites
-        # keep re-checked copies, private sites none. The stored value is
-        # always concrete: flipping access RESETS it to that default at
-        # the write doors, loudly, and the operator toggles it from there.
-        cache = data.get("cache", "no" if username else "yes")
+        # A file without the key gets the default: enabled. Caching is its
+        # own per-site setting, independent of access (ruled) — flipping
+        # public/private never touches it.
+        cache = data.get("cache", "yes")
         if cache not in ("yes", "no"):
             # The same sentence the write doors refuse with (the load-door
             # principle — see _ConfigInvalid).
@@ -284,9 +283,10 @@ class Site:
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
         # What visitors' browsers keep: "yes" = copies kept but re-checked
-        # every visit, "no" = no copies at all. Defaulted by access above,
-        # reset by access flips at the write doors, toggled freely between
-        # (the private media site, the public app handling secrets).
+        # every visit, "no" = no copies at all. Independent of access
+        # (ruled): its own toggle, default enabled, and access flips never
+        # move it. Only the HEADER FORM follows access — a private site's
+        # copies are marked `private` so shared caches never hold them.
         self.cache          = cache
         # Two tables, one per answer: redirects → 301, redirects_temporary
         # → 302 (the ruled per-rule choice, default permanent). Validated
@@ -582,8 +582,7 @@ password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
 
 # What visitors' browsers keep: "yes" = copies kept but re-checked every
-# visit, "no" = no copies at all. Changing a site between public and
-# private resets this to that access's default (public yes, private no)
+# visit (the default), "no" = no copies at all. Independent of access.
 cache = {s(site.cache)}
 {_redirect_toml(site)}""" for site in self.sites)
 
@@ -1049,15 +1048,12 @@ Cache-Control scope follows the site's auth: a password-protected site's respons
 # Cache-Control
 def _cache_control_header(site):
     """Cache-Control for the matched site, read straight off its `cache`
-    toggle. "yes": visitors keep copies re-checked every visit (`no-cache`
-    — new content is instant, unchanged files answer 304), the public
-    default. "no": visitors keep no copies at all (`no-store` — content
-    behind a password leaves nothing in a browser's disk cache on a
-    machine the operator does not control), the private default. The
-    defaults land when access flips — the write doors reset the toggle,
-    loudly — and the operator moves it freely from there: the private
-    media site that wants cheap repeat visits, the public app that
-    handles secrets client-side."""
+    toggle. "yes" (the default): visitors keep copies re-checked every
+    visit (`no-cache` — unchanged files answer 304 and stale content is
+    never shown). "no": visitors keep no copies at all (`no-store`).
+    The toggle is the operator's alone, independent of access (ruled) —
+    only the header FORM follows access: a private site's copies are
+    marked `private` so shared caches never hold them."""
     if site.cache == "no":
         return "no-store"
     return ("private" if site.username else "public") + ", no-cache"

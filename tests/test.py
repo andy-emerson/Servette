@@ -742,22 +742,20 @@ serve_dir = "b"
     check("no on a public site: the app with secrets leaves no copies",
           s._cache_control_header(site0) == "no-store")
 
-    # The defaults land at construction (a file without the key) and at
-    # every access flip in the shared validator — loudly at each surface.
-    check("a new public site defaults to kept copies",
+    # Caching is independent of access (ruled): the default is enabled
+    # for every site, and no access flip on any surface moves the toggle.
+    check("a new site defaults to caching enabled",
           s.Site().cache == "yes")
-    check("a private site's file without the key defaults to none",
-          s.Site({"username": "a"}).cache == "no")
+    check("a private site's file without the key defaults the same",
+          s.Site({"username": "a"}).cache == "yes")
     _flip = s.Site()
+    _flip.cache = "no"
     s._set_site_value(_flip, "username", "bob")
-    check("going private resets the toggle to none",
+    check("going private leaves the caching toggle alone",
           _flip.cache == "no")
-    _flip.cache = "yes"                      # the operator's override...
-    s._set_site_value(_flip, "username", "carol")
-    check("...survives a username change that does not flip access",
-          _flip.cache == "yes")
+    _flip.cache = "yes"
     s._set_site_value(_flip, "username", "")
-    check("going public resets the toggle to kept",
+    check("going public leaves it alone too",
           _flip.cache == "yes")
 
     site0.cache = "yes"
@@ -2459,10 +2457,12 @@ def run_dispatch_tests(s):
               s.config.sites[0].username == ""
               and s.config.sites[0].password_hash == ""
               and s.config.sites[0].password_salt == "")
-        # The flip reset the cache toggle AND said so — loudly, by ruling.
-        check("...and the access flip resets browser copies, announced",
-              s.config.sites[0].cache == "yes"
-              and "Browser copies reset" in buf.getvalue())
+        # Caching is independent of access (ruled): the flip leaves the
+        # toggle alone and says nothing about it.
+        check("...and the access flip leaves the caching toggle alone, silently",
+              s.config.sites[0].cache == "no"
+              and "copies" not in buf.getvalue().lower()
+              and "caching" not in buf.getvalue().lower())
         (s.config.sites[0].username, s.config.sites[0].password_hash,
          s.config.sites[0].password_salt, s.config.sites[0].cache) = saved_auth
 
@@ -7138,12 +7138,15 @@ def run_browser_tests(s, tmpdir):
                     return c.width === '7px' && c.borderRadius === '50%';
                   }"""))
 
-            # The load meter samples from login, not from first opening the
-            # Statistics tab: its rows are already rendered while Sites is
-            # still the visible panel.
+            # Every panel fills at login (ruled), not on its tab's first
+            # click: the load meter is sampling and the traffic summary is
+            # rendered while Sites is still the visible panel.
             check("...the load meter is sampling before the stats tab is opened",
                   page.evaluate(
                       "() => document.getElementById('load-rows').innerHTML !== ''"))
+            check("...and the traffic summary is rendered before its tab is opened",
+                  page.evaluate(
+                      "() => document.getElementById('traffic-rows').innerHTML !== ''"))
 
             # The Serving link left .rows for its own switch-row; an anchor
             # no rule reaches falls back to the browser default — visited
@@ -7207,10 +7210,9 @@ def run_browser_tests(s, tmpdir):
                   not page.locator(".site-card .card-body").first.is_visible()
                   and page.locator(".site-card .card-title").first.is_visible())
             # It has to survive a re-render, or every save would spring it
-            # open again.
-            page.click("#tab-server")
-            page.wait_for_timeout(600)
-            page.click("#tab-sites")
+            # open again. Driven by refresh() directly: tab clicks no
+            # longer rebuild anything (ruled — panels fill at login).
+            page.evaluate("() => refresh()")
             page.wait_for_timeout(900)
             check("...and survives the re-render that follows every op",
                   not page.locator(".site-card .card-body").first.is_visible())
@@ -7228,9 +7230,7 @@ def run_browser_tests(s, tmpdir):
             saved_cert = s.config.sites[0].cert_file
             try:
                 s.config.sites[0].cert_file = ""      # nothing trusted to present
-                page.click("#tab-server")
-                page.wait_for_timeout(400)
-                page.click("#tab-sites")
+                page.evaluate("() => refresh()")
                 page.wait_for_timeout(900)
                 info = page.locator(".info").first.inner_text()
                 # Two indicators for one fault, and exactly two: the Status
@@ -7256,8 +7256,8 @@ def run_browser_tests(s, tmpdir):
                 page.wait_for_timeout(300)
             finally:
                 s.config.sites[0].cert_file = saved_cert
-                page.click("#tab-sites")
-                page.wait_for_timeout(800)
+                page.evaluate("() => refresh()")
+                page.wait_for_timeout(900)
 
             # The pill mirrors the Status line both ways (the ruled shape):
             # a healthy folded card wears the green all-clear rather than
@@ -7496,31 +7496,34 @@ def run_browser_tests(s, tmpdir):
                     return track(a) === track(b) && knob(a) !== knob(b);
                   }"""))
 
-            # The access flip's reset is said BEFORE Save (loudly, by
-            # ruling) AND shown: the caching knob previews the incoming
-            # default the moment the switch flips, and an abandoned flip
-            # puts the stored truth back.
+            # Access and caching are independent (ruled): arming the flip
+            # narrates the login change only — caching goes unmentioned
+            # and its knob does not move.
             page.locator(".auth-switch").first.check()
             page.wait_for_timeout(200)
-            check("...arming private narrates the caching turn-off, loudly",
-                  "caching turns off"
+            check("...arming private narrates the sign-in, loudly, caching unmentioned",
+                  "visitors sign in"
                   in (page.locator(".auth-hint").first.text_content() or "")
+                  and "caching" not in
+                      (page.locator(".auth-hint").first.text_content() or "")
                   and page.evaluate("""() => {
                     const h = document.querySelector('.auth-hint');
                     return getComputedStyle(h).color === 'rgb(251, 191, 36)';
                   }"""))
-            check("...and the caching knob previews the reset at the flip",
-                  page.evaluate("""() => {
-                    const sw = document.querySelector('.cache-switch');
-                    return !sw.checked &&
-                           document.querySelector('.cache-state')
-                                   .textContent === 'disabled';
-                  }"""))
-            page.locator(".auth-switch").first.uncheck()
-            page.wait_for_timeout(200)
-            check("...an abandoned flip puts the stored caching truth back",
+            check("...and the caching knob does not move with the flip",
                   page.evaluate(
                       "() => document.querySelector('.cache-switch').checked"))
+            # An armed-but-unsaved flip survives the re-render every other
+            # control's save triggers — the snap-back to the stored state
+            # was what read as one setting changing another.
+            page.evaluate("() => refresh()")
+            page.wait_for_timeout(900)
+            check("...and an armed flip survives a re-render, still pending",
+                  page.evaluate(
+                      "() => document.querySelector('.auth-switch').checked")
+                  and page.locator(".auth-save").first.is_visible())
+            page.locator(".auth-switch").first.uncheck()
+            page.wait_for_timeout(200)
 
             browser.close()
 

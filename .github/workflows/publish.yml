@@ -35,9 +35,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The same gates main is held to, re-run against the exact tagged tree:
-      # the release is the one artifact nobody can amend afterwards, and a
-      # version can never be re-uploaded to PyPI.
+      # Two of main's gates, re-run against the exact tagged tree (the full
+      # suite and --check-counts already ran on the merge this tag points
+      # at): the release is the one artifact nobody can amend afterwards,
+      # and a version can never be re-uploaded to PyPI.
       - name: Verify the committed module matches src/
         run: python3 src/build.py --check
 

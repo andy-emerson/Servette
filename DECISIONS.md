@@ -6,43 +6,44 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
-## Browser copies are a per-site toggle; flipping access resets it, loudly
+## Caching is one independent per-site toggle, default enabled
 
 **Ruled (Human):** the browser-cache enum is gone. One per-site toggle,
-`cache = "yes" | "no"`, always holding a concrete value: `yes` —
+`cache = "yes" | "no"`, always holding a concrete value: `yes` (the
+default for every site, and what a file without the key gets) —
 visitors keep copies re-checked on every use (`no-cache`: a publish is
-visible on the next request, unchanged files answer 304), the public
-default; `no` — visitors keep no copies at all (`no-store`: content
-behind a password leaves nothing in a disk cache on machines the
-operator does not control — the posture its credentials already get,
-per the config-ownership ruling), the private default. Flipping a site
-public or private **writes the matching default onto the toggle**,
-inside the shared username validator so every door resets identically —
-and **loudly**: `set` prints the reset, the interactive prompt prints
-it, and the page says it *before* Save in the access hint, both
-directions. From there the operator moves it freely — the private media
-site that wants cheap repeat visits, the public app that handles
-secrets client-side. `cache_policy` and `cache_max_age` are retired;
-old configs' keys are ignored on load and dropped at the next save, and
-a file without `cache` gets its access's default.
-**Why:** secure by default demands the operator who never learns the
-setting exists still gets `no-store` behind their password; the
-no-wrong-answer principle removes the enum rather than renaming its
-options (it was one number line, no-cache ≈ max-age=0, plus a privacy
-property mislabeled as a duration); and a stored concrete value beats a
-derived `auto` — the operator reads what the site does, not a word that
-means different things on different cards.
+visible on the next request, unchanged files answer 304); `no` —
+visitors keep no copies at all (`no-store`). **Access and caching are
+independent** (re-ruled 2026-08-30, superseding this entry's earlier
+form): flipping a site public or private never touches the toggle, no
+surface announces a coupling that no longer exists, and the operator
+sets caching to whatever they want on any site. The one place access
+still shows in caching is the header *form*: an enabled private site's
+copies are marked `private` rather than `public`, so shared caches
+never hold them. `cache_policy` and `cache_max_age` are retired; old
+configs' keys are ignored on load and dropped at the next save.
+**Why:** two settings that move each other read as broken — the earlier
+access-flip reset, built to be "loud", was still discovered as caching
+apparently rewriting access (an armed, unsaved flip snapped back when
+another control's save re-rendered the card); one owner per setting is
+the only model the operator can predict. The no-wrong-answer principle
+removes the enum rather than renaming its options; a stored concrete
+value beats a derived `auto`.
 **Rejected:** `max-age` in any form — the operator with traffic worth
 tuning cache lifetimes has outgrown Servette by its own scope table,
 and a lifetime is the one value that silently breaks the instant-updates
-promise; a derived `auto` third value (superseded within this ruling: a
-silent derivation hides the behavior the toggle exists to state); a
-host-level toggle (both motivating examples are per-site facts); a
-silent reset on access flips (a setting changed as a side effect must
-be announced where it changes).
-**Reopen if:** a public site demonstrably needs fewer requests than
-revalidation allows — `max-age` returns as one per-site number, its
-zero meaning `yes`. *(2026-08-27)*
+promise; a derived `auto` value (a silent derivation hides the behavior
+the toggle exists to state); a host-level toggle (caching is a per-site
+fact); the access-flip reset with default `no-store` behind a password
+(superseded: predictability of independent settings outranked the
+secure-by-default derivation — an operator who wants `no` on a private
+site sets it, and the page's caching hint says what each state stores).
+**Reopen if:** a real operator leaks private content through a shared
+cache despite the `private` marking — the reset returns as an explicit
+confirmation step on the access flip, never as a silent write; or a
+public site demonstrably needs fewer requests than revalidation allows —
+`max-age` returns as one per-site number, its zero meaning `yes`.
+*(2026-08-27, re-ruled 2026-08-30)*
 
 ## A paused site is invisible to TLS too; reactivation re-earns the certificate
 

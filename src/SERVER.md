@@ -1340,9 +1340,10 @@ def _handle_request(method, url_path, headers, raw_ip):
     # revalidate-always caching contract as the 404 body, for the same
     # reason: the page's checks probe the URL it was served from.
     if url_path.split("?", 1)[0] == _CONNECTION_PATH:
+        # Revalidate-always by construction, exactly as the 404 body below:
+        # every mode _cache_control_header can emit is no-cache or no-store,
+        # so no downgrade guard is needed here either.
         cache = _cache_control_header(site)
-        if "max-age" in cache:
-            cache = ("private" if site.username else "public") + ", no-cache"
         if headers.get("If-None-Match", "") == _CONNECTION_ETAG:
             log.info("304 Not Modified %s to %s", log_path, ip)
             return resp(304, [(b"etag", _CONNECTION_ETAG.encode()),

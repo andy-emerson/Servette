@@ -2090,9 +2090,10 @@ def _handle_request(method, url_path, headers, raw_ip):
     # revalidate-always caching contract as the 404 body, for the same
     # reason: the page's checks probe the URL it was served from.
     if url_path.split("?", 1)[0] == _CONNECTION_PATH:
+        # Revalidate-always by construction, exactly as the 404 body below:
+        # every mode _cache_control_header can emit is no-cache or no-store,
+        # so no downgrade guard is needed here either.
         cache = _cache_control_header(site)
-        if "max-age" in cache:
-            cache = ("private" if site.username else "public") + ", no-cache"
         if headers.get("If-None-Match", "") == _CONNECTION_ETAG:
             log.info("304 Not Modified %s to %s", log_path, ip)
             return resp(304, [(b"etag", _CONNECTION_ETAG.encode()),
@@ -5655,19 +5656,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          : `<span class="${faultClass(c)}">${escapeHtml(c.detail)}</span>`);
 
   // One labelled input. The hint is page-authored markup (several carry
-  // <b>), never server text; the value is escaped because it is.
+  // <b>), never server text; the value is escaped because it is. (A select
+  // variant existed for fields with stated choices; the last such field
+  // left with the cache_policy knob, and dead render paths are the one
+  // place an unescaped value could hide.)
   const field = (key, label, value, opts) => {
     const o = opts || {};
-    // A field with stated choices renders as a select: what cannot be
-    // typed cannot need refusing.
-    const control = o.choices
-      ? `<select id="cfg-${key}">` +
-        o.choices.map((c) =>
-          `<option value="${c}"${String(value) === c ? ' selected' : ''}>` +
-          `${c}</option>`).join('') +
-        `</select>`
-      : `<input id="cfg-${key}" type="${o.type || 'text'}"` +
-        ` value="${escapeHtml(value)}">`;
+    const control =
+      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
+      ` value="${escapeHtml(value)}">`;
     return `<div class="cfg-field">` +
       `<label for="cfg-${key}">${label}</label>` + control +
       (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
@@ -6643,6 +6640,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             `type="button" data-k="${escapeHtml(k)}">Remove</button>`)).join('');
       for (const b of q('.redirects').querySelectorAll('.redir-del'))
         b.addEventListener('click', () => {
+          // The comma separates the pair on this wire, so a source carrying
+          // one cannot be spoken here — the add form says the same, and a
+          // first-comma split would read the removal as a mangled add.
+          if (b.dataset.k.includes(','))
+            return errAt(q('.redirects'),
+                         'A path containing a comma has to be removed by ' +
+                         'editing servette.toml — the comma separates the ' +
+                         'pair here.');
           b.disabled = true;
           // Nothing after the comma is the removal, the same spelling the
           // terminal takes.
@@ -7016,7 +7021,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // The upgrade row tells; it never installs. Upgrading is a terminal
     // act, so the row names the two commands and stops there.
     $('host-rows').innerHTML =
-      row('Version', 'v' + (d.version || '?') +
+      row('Version', 'v' + escapeHtml(d.version || '?') +
         (latestVersion
           ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
             ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
@@ -7040,7 +7045,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             { hint: 'Disk that absorbs a memory spike, so a burst past free RAM ' +
                     'cannot take the host down.' +
                     (sw.recommended_mb
-                      ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
+                      ? ' Recommended for this host: <b>' +
+                        escapeHtml(sw.recommended_mb) + ' MB</b>.'
                       : '') });
     // Re-rendering the form under a cursor would discard what is being
     // typed — and refresh() and the upgrade check (up to four seconds

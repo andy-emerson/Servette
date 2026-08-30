@@ -6585,6 +6585,51 @@ def run_install_tests(s, tmpdir):
           (ours_probe is None or isinstance(ours_probe, int))
           and isinstance(foreign_probe, int))
 
+    section("Swapfile mode at creation; the fstab line lands whole")
+
+    # The kernel fills this file with swapped memory pages — key material
+    # included — so its mode must exist AT creation (the _write_private_key
+    # pattern). chmod is disarmed here: a file that still measures 0600
+    # proves the mode came from os.open, where the old create-then-chmod
+    # measures the umask's 0644 and left a window in which another local
+    # user's open fd survived the chmod.
+    swap_tmp        = tempfile.mkdtemp()
+    saved_swap_path = s._SWAP_PATH
+    saved_fstab     = s._FSTAB_PATH
+    saved_run_swap  = s.subprocess.run
+    saved_chmod_sw  = s.os.chmod
+    saved_umask_sw  = os.umask(0o022)
+    try:
+        s._SWAP_PATH     = os.path.join(swap_tmp, "swapfile")
+        s._FSTAB_PATH    = os.path.join(swap_tmp, "fstab")
+        s.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0)
+        s.os.chmod       = lambda *a, **k: None
+        s._make_swapfile(4096)
+        check("The swapfile is 0600 with chmod disarmed (mode at creation)",
+              os.stat(s._SWAP_PATH).st_mode & 0o777 == 0o600)
+
+        # Appending straight onto a final line with no newline corrupts
+        # that mount entry — which can drop the next boot into emergency
+        # mode. The line must land whole, and land once.
+        with open(s._FSTAB_PATH, "w") as f:
+            f.write("/dev/sda1 /boot vfat defaults 0 2")   # no trailing newline
+        s._ensure_fstab_swap_line()
+        fstab_lines = open(s._FSTAB_PATH).read().splitlines()
+        check("A newline-less final fstab line keeps its entry intact",
+              fstab_lines[0] == "/dev/sda1 /boot vfat defaults 0 2"
+              and len(fstab_lines) == 2
+              and fstab_lines[1] == f"{s._SWAP_PATH} none swap sw 0 0")
+        s._ensure_fstab_swap_line()
+        check("...and the line is added once, not per call",
+              open(s._FSTAB_PATH).read().count("swap sw") == 1)
+    finally:
+        os.umask(saved_umask_sw)
+        s._SWAP_PATH     = saved_swap_path
+        s._FSTAB_PATH    = saved_fstab
+        s.subprocess.run = saved_run_swap
+        s.os.chmod       = saved_chmod_sw
+        shutil.rmtree(swap_tmp, ignore_errors=True)
+
     mem_kb, avail_kb, committed_kb = s._meminfo()
     check("_meminfo returns a consistent triple",
           (mem_kb is None and avail_kb is None and committed_kb is None)
@@ -7089,7 +7134,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         "_chown_config",
         # The host, at install time and as root.
         "_write_unit_files", "_build_runtime", "_commit_runtime", "cmd_disable",
-        "_apply_swapfile", "_make_swapfile",
+        "_apply_swapfile", "_make_swapfile", "_ensure_fstab_swap_line",
         # Staging: unpacks a verified bundle into a temporary directory.
         "_extract_bundle",
         # Removes a site's own generated certificate when the site goes.

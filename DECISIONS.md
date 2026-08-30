@@ -6,6 +6,31 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A standing certificate is not re-ordered; the terminal may overrule, the page may not
+
+**Ruled (Human):** both operator doors to issuance run `_standing_cert_days`
+before ordering: a site named for the requested domain, whose certificate on
+disk covers it with more than the watchdog's 30-day renewal line remaining,
+already has what an order would buy — and each duplicate order spends Let's
+Encrypt's five-a-week budget, the same budget renewal later draws on. The
+terminal's cert prompt confirms before ordering anyway (re-typing the domain
+is the natural re-run of setup, and an operator holding a certificate they
+distrust can still say yes); the page's certificate button no-ops with the
+days remaining and offers no override, because a button invites the double
+click and the retry, and the operator who truly wants a duplicate has the
+terminal. The watchdog is untouched: it acts only under the same 30-day
+line the guard answers by, so renewal and the guard cannot disagree.
+Self-signed pairs never read as standing coverage — they name no real
+domain.
+**Rejected:** a force path on every surface (more surface than the case
+deserves — the terminal confirm is the one escape hatch); guarding inside
+`_obtain_trusted_cert` itself (the watchdog calls it from a background
+thread that must never prompt, so the question belongs at the doors).
+**Reopen if:** issuance grows a reason to re-order early that the doors
+cannot express — a key-compromise revocation flow, or coverage changes
+(www) that leave the standing certificate covering the name but not the
+need.
+*(2026-08-30)*
 ## Caching is one independent per-site toggle, default enabled
 
 **Ruled (Human):** the browser-cache enum is gone. One per-site toggle,

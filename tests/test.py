@@ -142,6 +142,40 @@ def _free_port():
         return sock.getsockname()[1]
 
 
+def gen_named_cert(dirpath, domain, days):
+    """A self-issued certificate whose SAN names `domain`, valid for `days` —
+    what an issued Let's Encrypt pair looks like to the inspection helpers,
+    for tests that need a standing certificate without an authority."""
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key  = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)])
+    now  = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=days))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(domain)]),
+                       critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = os.path.join(dirpath, f"{domain}-{days}d-cert.pem")
+    key_path  = os.path.join(dirpath, f"{domain}-{days}d-key.pem")
+    with open(cert_path, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    with open(key_path, "wb") as f:
+        f.write(key.private_bytes(serialization.Encoding.PEM,
+                                  serialization.PrivateFormat.TraditionalOpenSSL,
+                                  serialization.NoEncryption()))
+    return cert_path, key_path
+
+
 class Response:
     def __init__(self, status, headers, body):
         self.status  = status
@@ -2146,6 +2180,28 @@ def run_dispatch_tests(s):
             check("...and refusing to ask for a certificate with no name to put on it",
                   st == 422 and b"set a domain first" in body)
             s.config.sites[n0].domain = "card.example"
+
+            # The guard on the page's certificate button: a standing
+            # certificate makes the button a no-op with a sentence, and the
+            # issuance core is never reached — a double click or a retry
+            # cannot spend a duplicate order. The terminal keeps the
+            # override; the page deliberately has none.
+            guard_dir = tempfile.mkdtemp()
+            saved_cert_file = s.config.sites[n0].cert_file
+            guard_calls = []
+            try:
+                cert_g, _ = gen_named_cert(guard_dir, "card.example", 90)
+                s.config.sites[n0].cert_file = cert_g
+                s._obtain_trusted_cert = (lambda domain, site_obj:
+                                          guard_calls.append(domain))
+                st, body = ui_req("POST", f"/sites?t={ui_code}",
+                                  body=json.dumps({"op": "certificate",
+                                                   "site": n0}).encode())
+                check("op=certificate on a standing certificate no-ops, naming the days",
+                      st == 422 and b"more days" in body and guard_calls == [])
+            finally:
+                s.config.sites[n0].cert_file = saved_cert_file
+                shutil.rmtree(guard_dir, ignore_errors=True)
             s._obtain_trusted_cert = saved_obtain
 
             saved_sites_list = s.config.sites
@@ -5513,6 +5569,69 @@ def run_cert_tests(s, tmpdir):
     test_cert = os.path.join(tmpdir, "cert.pem")
     days2     = s._cert_days_remaining(test_cert)
     check("reads test cert expiry correctly", days2 is not None and days2 > 0)
+
+    section("The issuance guard")
+
+    # _standing_cert_days answers the days a site already holds for a domain,
+    # or None where an order is warranted — the check both operator doors run
+    # so a re-run of setup or a double-clicked button cannot spend Let's
+    # Encrypt's duplicate-certificate budget on a certificate already in hand.
+    guard_dir = tempfile.mkdtemp()
+    try:
+        cert90, key90 = gen_named_cert(guard_dir, "guard.example", 90)
+        cert10, _     = gen_named_cert(guard_dir, "guard.example", 10)
+
+        site = s.Site({"domain": "guard.example", "cert_file": cert90,
+                       "key_file": key90, "serve_dir": guard_dir})
+        days = s._standing_cert_days(site, "guard.example")
+        check("A standing certificate with >30 days answers its days remaining",
+              days is not None and 85 <= days <= 90)
+        check("A domain other than the site's is an order, not a duplicate",
+              s._standing_cert_days(site, "other.example") is None)
+        site.cert_file = cert10
+        check("Inside the watchdog's 30-day renewal line the guard stands aside",
+              s._standing_cert_days(site, "guard.example") is None)
+        site.cert_file = cert_path   # the self-signed pair generated above
+        check("A self-signed certificate never reads as standing coverage",
+              s._standing_cert_days(site, "guard.example") is None)
+        site.cert_file = os.path.join(guard_dir, "missing.pem")
+        check("A missing certificate file is an order",
+              s._standing_cert_days(site, "guard.example") is None)
+
+        # The terminal door: re-typing the covered domain asks before
+        # ordering, and only a yes reaches the issuance core.
+        site.cert_file = cert90
+        calls = []
+        saved_obtain, saved_input = s._obtain_trusted_cert, s._input
+        try:
+            s._obtain_trusted_cert = lambda domain, site_obj: calls.append(domain)
+            answers = iter(["guard.example", "n"])
+            s._input = lambda *a, **k: next(answers, "")
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                s._config_cert(site)
+            check("Declining the terminal confirm places no order, unchanged",
+                  calls == [] and "unchanged" in buf.getvalue())
+            answers = iter(["guard.example", "y"])
+            s._input = lambda *a, **k: next(answers, "")
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._config_cert(site)
+            check("Confirming overrules the guard and orders",
+                  calls == ["guard.example"])
+            # No standing coverage: issuance runs with no question asked — a
+            # prompt would read the exhausted feed's "" as a decline and fail
+            # the order this check requires.
+            site.domain = ""
+            calls.clear()
+            answers = iter(["guard.example"])
+            s._input = lambda *a, **k: next(answers, "")
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._config_cert(site)
+            check("With no standing coverage issuance runs without a question",
+                  calls == ["guard.example"])
+        finally:
+            s._obtain_trusted_cert, s._input = saved_obtain, saved_input
+    finally:
+        shutil.rmtree(guard_dir, ignore_errors=True)
 
 
 def run_install_tests(s, tmpdir):

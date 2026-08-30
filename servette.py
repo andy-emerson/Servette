@@ -3413,6 +3413,25 @@ def _cert_days(cert):
     return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
 
 
+# The issuance guard
+def _standing_cert_days(site, domain):
+    """Days of coverage `site` already holds for `domain`, or None where an
+    order is warranted. Not None means the site is named `domain`, its
+    certificate on disk covers `domain`, and more than 30 days remain — the
+    watchdog's renewal line, so anything closer is due for an order anyway.
+    A self-signed pair never trips it: those certificates name no real
+    domain, so _domain_from_cert answers None for them."""
+    if not domain or site.domain != domain or not site.cert_file:
+        return None
+    cert_path = _resolve(site.cert_file)
+    if _domain_from_cert(cert_path) != domain:
+        return None
+    days = _cert_days_remaining(cert_path)
+    if days is None or days <= 30:
+        return None
+    return days
+
+
 # Service probes
 def _service_file_exists():
     return os.path.exists(SERVICE_PATH)
@@ -7544,6 +7563,13 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                         target = config.sites[idx]
                         if not target.domain:
                             err = "set a domain first — a certificate is issued for a name"
+                        elif (standing := _standing_cert_days(target, target.domain)) is not None:
+                            # The issuance guard, with no override here: a
+                            # button invites the double click and the retry,
+                            # and the operator who truly wants a duplicate
+                            # order has the terminal's confirm.
+                            err = (f"already covered — this certificate is good for "
+                                   f"{standing} more days and renews on its own")
                         else:
                             outcome = _obtain_trusted_cert(target.domain, target)
                             err = ("" if outcome is None else
@@ -8928,6 +8954,18 @@ def _config_cert(site):
         return
 
     if domain:
+        # The issuance guard, with the terminal's override: re-typing the
+        # domain here is the natural re-run of setup, not a request to spend
+        # a duplicate order — but the operator holding a certificate they
+        # have reason to distrust can still say yes.
+        days = _standing_cert_days(site, domain)
+        if days is not None:
+            print(f"  This site's certificate already covers {domain} with {days} days")
+            print("  left, and renewal is automatic. A fresh order spends Let's Encrypt's")
+            print("  duplicate-certificate budget (5 a week) without changing anything.")
+            if not _prompt("Order a new certificate anyway?"):
+                print("  → unchanged")
+                return
         _obtain_trusted_cert(domain, site)
     else:
         cert_path = _resolve(site.cert_file or "cert.pem")

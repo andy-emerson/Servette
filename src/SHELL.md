@@ -1760,11 +1760,15 @@ def _serve_dir_exposes_secrets(path):
     floor, fatal where containment is merely reported, because a config
     that would publish the keys must not run at all. Containment inside
     BASE_DIR is deliberately NOT assumed here: a hand-edited serve_dir may
-    point anywhere, which is why this judges the resolved path alone."""
+    point anywhere, which is why this judges the resolved path alone.
+    An ANCESTOR of the data directory is the same exposure one level up —
+    serving /var/lib serves everything under /var/lib/servette as plain
+    file reads — so any path the data directory sits inside is refused
+    with the data directory itself."""
     real  = os.path.realpath(path)
     base  = os.path.realpath(BASE_DIR)
     certs = os.path.join(base, "certs")
-    return real == base or real == certs or real.startswith(certs + os.sep)
+    return _within(real, base) or real == certs or real.startswith(certs + os.sep)
 
 
 ```

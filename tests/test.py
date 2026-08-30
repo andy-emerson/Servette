@@ -945,6 +945,14 @@ serve_dir = "b"
           s._serve_dir_exposes_secrets(os.path.join(_sbase, "certs", "example.com")))
     check("an ordinary child folder (site/) is fine",
           not s._serve_dir_exposes_secrets(os.path.join(_sbase, "site")))
+    # An ancestor serves the data directory as a subfolder — the same
+    # exposure one level up ('publish 0 /var/lib' would publish the config
+    # and every key). The guard once judged only BASE_DIR and certs/
+    # themselves, so a parent sailed through.
+    check("the data directory's parent is refused (serves it whole)",
+          s._serve_dir_exposes_secrets(os.path.dirname(_sbase)))
+    check("filesystem root is refused (serves everything)",
+          s._serve_dir_exposes_secrets(os.sep))
 
     section("_loggable escapes log-bound control characters")
 

@@ -8220,21 +8220,29 @@ def _tar_folder(root, cap=_MAX_BUNDLE_BYTES):
                     continue    # regular files only, as the extractor accepts
                 try:
                     size = os.path.getsize(full)
-                    tf.add(full, arcname=os.path.relpath(full, root),
-                           recursive=False)
                 except OSError:
                     continue
-                files += 1
                 # The cap counts UNCOMPRESSED bytes — the same quantity
                 # _extract_bundle enforces and the page's builder sums. A
                 # compressed count would wave a well-compressing 8 GB folder
                 # through this door only for the core to refuse it with a
-                # log line instead of this sentence.
+                # log line instead of this sentence. Checked BEFORE tf.add,
+                # which buffers the whole file into the in-memory bundle: an
+                # over-cap file must be refused, not held in RAM first — an
+                # OOM on the small hosts Servette targets, instead of the
+                # sentence.
                 total += size
                 if total > cap:
                     return None, (f"more than {cap // (1024 * 1024)} MB of "
                                   "content — too large to publish as one "
                                   "bundle")
+                try:
+                    tf.add(full, arcname=os.path.relpath(full, root),
+                           recursive=False)
+                except OSError:
+                    total -= size   # not bundled after all
+                    continue
+                files += 1
     if not files:
         return None, ("no publishable files (hidden paths are not served, "
                       "so they are not published)")

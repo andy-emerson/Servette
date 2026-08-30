@@ -4503,6 +4503,21 @@ def run_dispatch_tests(s):
         _blob2, _prob2 = s._tar_folder(big_src, cap=1_000_000)
         check("publish's cap counts uncompressed bytes, like every other door",
               _blob2 is None and "too large" in _prob2)
+        # The cap must refuse BEFORE tf.add buffers the file into the
+        # in-memory bundle: an 8 GB disk image held in RAM first is an OOM
+        # on the small hosts Servette targets, not the sentence.
+        _adds = []
+        _saved_tf_add = tarfile.TarFile.add
+        def _spy_add(self, *a, **k):
+            _adds.append(a)
+            return _saved_tf_add(self, *a, **k)
+        tarfile.TarFile.add = _spy_add
+        try:
+            _blob3, _prob3 = s._tar_folder(big_src, cap=1_000_000)
+            check("...and refuses before the over-cap file is buffered",
+                  _blob3 is None and "too large" in _prob3 and _adds == [])
+        finally:
+            tarfile.TarFile.add = _saved_tf_add
         # 'publish 2' alone reads as an index missing its folder — the miss
         # says so instead of calling 2 a folder and stopping.
         with contextlib.redirect_stdout(io.StringIO()) as pbuf:
@@ -7026,47 +7041,80 @@ def run_platform_tests(s):
 
 # The write primitives. A module base is required for the ambiguous names, so
 # text.replace() is not mistaken for os.replace(); extractall and the pathlib
-# writers are unambiguous and counted wherever they appear.
+# writers are unambiguous and counted wherever they appear. os.open counts
+# when any write flag appears in the call (a variable holding flags is out of
+# a syntax check's reach — none exists in the program); tempfile's creators
+# count wherever they appear.
 _WRITE_MODULES = {"os", "shutil", "tarfile", "path"}
 _WRITE_CALLS   = {"makedirs", "mkdir", "remove", "unlink", "rmdir", "replace",
                   "rename", "rmtree", "copytree", "copy2", "copyfile", "chmod",
                   "chown", "symlink", "truncate"}
 _WRITE_ANYWHERE = {"extractall", "write_text", "write_bytes"}
+_WRITE_OS_OPEN_FLAGS = {"O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND"}
 
 
 def _writing_functions(module_src):
     """Every function in the program that writes to the filesystem, as
-    {name: {primitives}}. Read from the syntax tree rather than by grep, so a
-    write cannot hide behind a line break or an unusual spelling."""
+    {name: {primitives}} — plus '<module>' for statements at module scope,
+    which a FunctionDef walk cannot see and the entry module carries (the
+    data directory's makedirs runs on import). Read from the syntax tree
+    rather than by grep, so a write cannot hide behind a line break or an
+    unusual spelling — or, as one did, behind os.open: the key writer's own
+    primitive went unseen until the detector learned it."""
     import ast
+
+    def call_writes(n):
+        if not isinstance(n, ast.Call):
+            return set()
+        f = n.func
+        if isinstance(f, ast.Attribute) and f.attr in _WRITE_ANYWHERE:
+            return {f.attr}
+        if (isinstance(f, ast.Attribute) and f.attr == "open"
+                and isinstance(f.value, ast.Name) and f.value.id == "os"):
+            flags = {a.attr for a in ast.walk(n) if isinstance(a, ast.Attribute)}
+            return {"os.open-for-write"} if flags & _WRITE_OS_OPEN_FLAGS else set()
+        if (isinstance(f, ast.Attribute) and f.attr in ("mkstemp", "mkdtemp")
+                and isinstance(f.value, ast.Name) and f.value.id == "tempfile"):
+            return {f.attr}
+        if isinstance(f, ast.Attribute) and f.attr in _WRITE_CALLS:
+            base = f.value
+            root = base.id if isinstance(base, ast.Name) else (
+                base.attr if isinstance(base, ast.Attribute) else None)
+            return {f.attr} if root in _WRITE_MODULES else set()
+        if isinstance(f, ast.Name) and f.id == "open":
+            mode = ""
+            if len(n.args) > 1 and isinstance(n.args[1], ast.Constant):
+                mode = n.args[1].value or ""
+            for kw in n.keywords:
+                if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                    mode = kw.value.value or ""
+            if any(c in mode for c in "wax+"):
+                return {"open-for-write"}
+        return set()
+
+    tree  = ast.parse(module_src)
     found = {}
-    for node in ast.walk(ast.parse(module_src)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
         writes = set()
         for n in ast.walk(node):
-            if not isinstance(n, ast.Call):
-                continue
-            f = n.func
-            if isinstance(f, ast.Attribute) and f.attr in _WRITE_ANYWHERE:
-                writes.add(f.attr)
-            elif isinstance(f, ast.Attribute) and f.attr in _WRITE_CALLS:
-                base = f.value
-                root = base.id if isinstance(base, ast.Name) else (
-                    base.attr if isinstance(base, ast.Attribute) else None)
-                if root in _WRITE_MODULES:
-                    writes.add(f.attr)
-            elif isinstance(f, ast.Name) and f.id == "open":
-                mode = ""
-                if len(n.args) > 1 and isinstance(n.args[1], ast.Constant):
-                    mode = n.args[1].value or ""
-                for kw in n.keywords:
-                    if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
-                        mode = kw.value.value or ""
-                if any(c in mode for c in "wax+"):
-                    writes.add("open-for-write")
+            writes |= call_writes(n)
         if writes:
             found[node.name] = writes
+
+    # Module scope: every statement outside any def, walked with function
+    # bodies skipped — their writes are already attributed above.
+    module_writes = set()
+    stack = list(ast.iter_child_nodes(tree))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        module_writes |= call_writes(node)
+        stack.extend(ast.iter_child_nodes(node))
+    if module_writes:
+        found["<module>"] = module_writes
     return found
 
 
@@ -7082,16 +7130,24 @@ def run_invariant_tests(s, serve_dir, tmpdir):
     # The detector first, on source written to trip it: a pin that cannot fail
     # pins nothing, and the ambiguous names are the risk in both directions.
     probe_src = (
+        "import os\n"
+        "os.makedirs('x')\n"
         "def writes():\n    os.replace(a, b)\n\n"
         "def also_writes():\n    open(p, 'w')\n\n"
         "def unpacks():\n    tar.extractall(d)\n\n"
+        "def creates_600():\n    os.open(p, os.O_WRONLY | os.O_CREAT, 0o600)\n\n"
+        "def temps():\n    tempfile.mkstemp(dir=d)\n\n"
+        "def reads_fd():\n    os.open(p, os.O_RDONLY)\n\n"
         "def reads_only():\n    open(p, 'rb')\n\n"
         "def just_a_string():\n    return s.replace('a', 'b')\n")
     found = _writing_functions(probe_src)
-    check("The write detector sees os.replace, a write-mode open, and extractall",
-          set(found) == {"writes", "also_writes", "unpacks"})
-    check("...and does not mistake str.replace or a read for a write",
-          "just_a_string" not in found and "reads_only" not in found)
+    check("The write detector sees os.replace, write opens (mode and flags), "
+          "extractall, mkstemp, and module-scope writes",
+          set(found) == {"writes", "also_writes", "unpacks", "creates_600",
+                         "temps", "<module>"})
+    check("...and does not mistake str.replace, a read, or a read-only "
+          "os.open for a write",
+          not {"just_a_string", "reads_only", "reads_fd"} & set(found))
 
     module_src = build.build(os.path.join(SERVETTE_DIR, "src"))
     writers = _writing_functions(module_src)
@@ -7128,6 +7184,16 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # Servette's own state: config, certificates, the ACME account.
         "save", "_generate_self_signed_cert", "_ensure_default_cert",
         "_obtain_trusted_cert", "_persist_issued_cert", "issue",
+        # 0600-at-creation writers, seen through os.open: every private key
+        # goes through _write_private_key, and the publish lock's __enter__
+        # creates its own content-free lock file (_PublishLock).
+        "_write_private_key", "__enter__",
+        # main() re-points a broken stdout at devnull on EPIPE — an os.open
+        # with a write flag, though nothing ever lands on disk.
+        "main",
+        # Import time: the data directory is created (best-effort) before
+        # the config singleton loads from it.
+        "<module>",
         # Writes no content — sets the config's mode, which is a write all the
         # same, and the one kind of write the detector should never let past
         # unclaimed on a file holding a password hash.
@@ -7181,6 +7247,19 @@ def run_invariant_tests(s, serve_dir, tmpdir):
             raise AssertionError(f"a request opened {f} for writing")
         return real_open(f, mode, *a, **k)
 
+    # os.open too — the primitive the key writer and the publish lock use.
+    # Write flags only: reads through os.open stay permitted, like reads
+    # through open.
+    real_os_open = os.open
+    _os_write_flags = (os.O_WRONLY | os.O_RDWR | os.O_CREAT
+                       | os.O_TRUNC | os.O_APPEND)
+
+    def guarded_os_open(f, flags, *a, **k):
+        if flags & _os_write_flags:
+            denied.append("os.open")
+            raise AssertionError(f"a request os.open'ed {f} for writing")
+        return real_os_open(f, flags, *a, **k)
+
     with open(os.path.join(serve_dir, "index.html"), "w") as f:
         f.write(TEST_HTML)
     s._file_cache.clear()
@@ -7192,6 +7271,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         for n, fn in saved_sh.items():
             setattr(s.shutil, n, _deny(f"shutil.{n}"))
         s.open = guarded_open
+        s.os.open = guarded_os_open
 
         battery = [
             ("GET",  "/",                     200),
@@ -7225,7 +7305,9 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # them left half-written temp files in the data directory.
         caught = 0
         for attempt in (lambda: s.os.remove(os.path.join(tmpdir, "nothing")),
-                        lambda: s.open(os.path.join(tmpdir, "nothing"), "w")):
+                        lambda: s.open(os.path.join(tmpdir, "nothing"), "w"),
+                        lambda: s.os.open(os.path.join(tmpdir, "nothing"),
+                                          os.O_WRONLY | os.O_CREAT, 0o600)):
             try:
                 attempt()
             except AssertionError:
@@ -7233,13 +7315,14 @@ def run_invariant_tests(s, serve_dir, tmpdir):
             except Exception:
                 pass
         check("The guards are real: a write outside the request path is caught",
-              caught == 2)
+              caught == 3)
         denied.clear()
     finally:
         for n, fn in saved_os.items():
             setattr(s.os, n, fn)
         for n, fn in saved_sh.items():
             setattr(s.shutil, n, fn)
+        s.os.open = real_os_open
         s.__dict__.pop("open", None)
 
     after = sorted((p, os.stat(os.path.join(dp, p)).st_mtime)

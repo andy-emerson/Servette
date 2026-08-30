@@ -40,6 +40,7 @@ Every import is Python standard library. The one third-party dependency, `crypto
 import base64
 import collections
 import datetime
+import fcntl
 import getpass
 import gzip
 import hashlib

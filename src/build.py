@@ -12,11 +12,14 @@ SYSTEM.md, SHELL.md, MAIN.md. Each interleaves three things:
     reader and produces nothing.
 
 This tool reverses that mapping, in file order, to produce the module. Every
-output line comes from a code fence, a blockquote, or the one substitution
-below: `404.html` is inlined where the sources name it, so the
-page ships inside the module instead of beside it. The blockquote/comment
-mapping is an exact inverse of the split that created these files, and the
-substitution is verbatim, so the build is deterministic.
+output line comes from a code fence, a blockquote, or the substitutions
+below: the three embedded pages (EMBEDDED_PAGES — the error page, the
+connection test, the admin page) are inlined where the sources name them, so
+each ships inside the module instead of beside it, and every page's
+@@MARK_ICON@@ marker is filled with the mark's data URI. The
+blockquote/comment mapping is an exact inverse of the split that created
+these files, and the page substitutions are verbatim past that one marker,
+so the build is deterministic.
 
 The generated module IS committed, at the repository root, to be read — and it
 is never the source of truth. The package build regenerates it from src/: pip

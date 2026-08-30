@@ -40,12 +40,13 @@ jobs:
         run: apt-get update -qq && apt-get install -y -qq python3 python3-venv
       - name: Verify the built package is in sync with src/
         run: python3 src/build.py --check
-      # The website publishes exact line counts to back "readable in an
-      # afternoon" — a headline figure, a per-section table, and three region
-      # paragraphs. They are a measurement claim, so they are only as good as
-      # their latest run, and they drifted 106 lines unnoticed once because
-      # nothing re-ran them. This is that run.
-      - name: Verify the website's line counts match src/
+      # README states a line count as the measurable half of "understood by
+      # one person". It is a measurement claim, so it is only as good as its
+      # latest run — it drifted 106 lines unnoticed once because nothing
+      # re-ran it. This is that run. (The website's per-section counts moved
+      # to their own repository and cannot be gated from here; --counts
+      # prints them for whoever edits that page.)
+      - name: Verify README's line count matches src/
         run: python3 src/build.py --check-counts
       - name: Verify the documents name only things that exist
         run: python3 src/build.py --check-docs

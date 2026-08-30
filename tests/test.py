@@ -751,6 +751,75 @@ serve_dir = "b"
         if not default_cert_existed and os.path.exists(s._DEFAULT_CERT_FILE):
             shutil.rmtree(s._DEFAULT_CERT_DIR, ignore_errors=True)
 
+    section("A paused site is exempt from the start pre-flight too")
+
+    # The context build above skips a paused site; the existence pre-flight
+    # in start_server() must apply the same exemption, or a paused site
+    # whose folder or certificate was deleted since refuses the whole start
+    # — under --serve, a systemd restart loop. The fake TLS server proves
+    # the pre-flight was passed, then stops before any socket binds.
+    class _ReachedBuild(Exception):
+        pass
+    saved_running_pf = s._server_running
+    saved_tls_pf     = s._TLSThreadingHTTPServer
+    saved_sites_pf   = s.config.sites
+    reached_pf       = []
+    try:
+        s._server_running = lambda: False
+        def _fake_tls_mark(*a, **k):
+            reached_pf.append(1)
+            raise _ReachedBuild()
+        s._TLSThreadingHTTPServer = _fake_tls_mark
+        paused_pf = s.Site({"domain": "paused.example.com",
+                            "serve_dir": "no-such-dir-anymore",
+                            "cert_file": "deleted-since.pem",
+                            "key_file":  "deleted-since.key",
+                            "active":    False})
+        s.config.sites = [s.config.sites[0], paused_pf]
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.start_server()
+        check("A paused site's missing files do not refuse the start",
+              bool(reached_pf))
+    finally:
+        s._server_running         = saved_running_pf
+        s._TLSThreadingHTTPServer = saved_tls_pf
+        s.config.sites            = saved_sites_pf
+
+    section("The cert watchdog sweeps active sites only")
+
+    # A paused site is invisible to routing and TLS; renewing its
+    # certificate would order material nothing serves — hourly ACME
+    # attempts forever on a site paused precisely because its DNS moved
+    # away. Reactivation re-earns the certificate at the door.
+    saved_days_wd   = s._cert_days_remaining
+    saved_obtain_wd = s._obtain_trusted_cert
+    saved_sites_wd  = s.config.sites
+    saved_attempts  = dict(s._last_renewal_attempt)
+    renewed_wd      = []
+    try:
+        s._last_renewal_attempt.clear()
+        s._cert_days_remaining = lambda p: 5
+        s._obtain_trusted_cert = (lambda domain, site:
+                                  renewed_wd.append(domain))
+        active_wd = s.Site({"domain": "active.example.com",
+                            "serve_dir": "x", "cert_file": "a.pem",
+                            "key_file": "a.key"})
+        paused_wd = s.Site({"domain": "paused.example.com",
+                            "serve_dir": "y", "cert_file": "b.pem",
+                            "key_file": "b.key", "active": False})
+        s.config.sites = [active_wd, paused_wd]
+        s._cert_watchdog_tick()
+        check("An active site's expiring certificate is renewed",
+              renewed_wd == ["active.example.com"])
+        check("A paused site is skipped whole (nothing ordered, no reload)",
+              "paused.example.com" not in renewed_wd)
+    finally:
+        s._cert_days_remaining  = saved_days_wd
+        s._obtain_trusted_cert  = saved_obtain_wd
+        s.config.sites          = saved_sites_wd
+        s._last_renewal_attempt.clear()
+        s._last_renewal_attempt.update(saved_attempts)
+
     section("Versioning")
 
     check("__version__ is set",              bool(s.__version__))
@@ -945,6 +1014,14 @@ serve_dir = "b"
           s._serve_dir_exposes_secrets(os.path.join(_sbase, "certs", "example.com")))
     check("an ordinary child folder (site/) is fine",
           not s._serve_dir_exposes_secrets(os.path.join(_sbase, "site")))
+    # An ancestor serves the data directory as a subfolder — the same
+    # exposure one level up ('publish 0 /var/lib' would publish the config
+    # and every key). The guard once judged only BASE_DIR and certs/
+    # themselves, so a parent sailed through.
+    check("the data directory's parent is refused (serves it whole)",
+          s._serve_dir_exposes_secrets(os.path.dirname(_sbase)))
+    check("filesystem root is refused (serves everything)",
+          s._serve_dir_exposes_secrets(os.sep))
 
     section("_loggable escapes log-bound control characters")
 
@@ -1000,6 +1077,70 @@ serve_dir = "b"
     c._kid = "https://acme.example/acct/1"
     prot2  = _json.loads(unb64(_json.loads(c._sign("https://acme.example/a", None))["protected"]))
     check("kid replaces jwk once account known", "kid" in prot2 and "jwk" not in prot2)
+
+    section("A reused-valid authorization is not re-challenged")
+    # Let's Encrypt reuses a still-valid authorization from an earlier order on
+    # the same account (the key persists in .acme-account.pem), and refuses a
+    # challenge POST on a non-pending authorization outright. issue() must
+    # prove only pending authorizations — the www fallback's bare-domain
+    # re-order is exactly this shape, and answering the reused authorization's
+    # challenge there turned the advertised fallback into a refusal.
+    class _FakeResp:
+        def __init__(self, obj=None, headers=None, text=""):
+            self._obj, self.headers, self.text = obj, headers or {}, text
+        def json(self):
+            return self._obj
+
+    chall_calls = []
+    acme_tmp    = tempfile.mkdtemp()
+    c2 = s._ACMEClient("https://acme.example/directory", akey)
+    c2._dir = {"newOrder": "https://acme.example/new-order"}
+    resources = {
+        "https://acme.example/authz/valid": {
+            "status": "valid",
+            "identifier": {"type": "dns", "value": "example.com"},
+            "challenges": [{"type": "http-01",
+                            "url": "https://acme.example/chall/valid",
+                            "token": "tok-valid"}]},
+        "https://acme.example/authz/pending": {
+            "status": "pending",
+            "identifier": {"type": "dns", "value": "www.example.com"},
+            "challenges": [{"type": "http-01",
+                            "url": "https://acme.example/chall/pending",
+                            "token": "tok-pending"}]},
+        "https://acme.example/order/1": {"status": "valid",
+                                         "certificate": "https://acme.example/cert/1"},
+        "https://acme.example/cert/1": "PEM CHAIN",
+    }
+
+    def fake_post(url, payload):
+        if url == "https://acme.example/new-order":
+            return _FakeResp({"authorizations": ["https://acme.example/authz/valid",
+                                                 "https://acme.example/authz/pending"],
+                              "finalize": "https://acme.example/finalize/1"},
+                             headers={"Location": "https://acme.example/order/1"})
+        if url.startswith("https://acme.example/chall/"):
+            chall_calls.append(url)
+            if url.endswith("/valid"):   # what the real CA answers
+                raise s._ACMEError("authorization must be pending")
+            resources["https://acme.example/authz/pending"]["status"] = "valid"
+            return _FakeResp({})
+        if url == "https://acme.example/finalize/1":
+            return _FakeResp({})
+        raise AssertionError(f"unexpected POST {url}")
+
+    c2._post        = fake_post
+    c2._post_as_get = lambda url: (_FakeResp(resources[url])
+                                   if isinstance(resources[url], dict)
+                                   else _FakeResp(text=resources[url]))
+    try:
+        pem = c2.issue(["example.com", "www.example.com"], b"csr-der", acme_tmp)
+        check("issue() succeeds past a reused-valid authorization", pem == "PEM CHAIN")
+        check("Only the pending authorization was challenged",
+              chall_calls == ["https://acme.example/chall/pending"])
+        check("No challenge file is left behind", os.listdir(acme_tmp) == [])
+    finally:
+        shutil.rmtree(acme_tmp, ignore_errors=True)
 
     section("Raising a rate limit takes effect for already-active IPs")
 
@@ -1637,6 +1778,35 @@ def run_dispatch_tests(s):
         check("GET /status with the code answers the inside view",
               st == 200 and b'"version"' in body and b'"sites"' in body
               and b'"checks"' in body)
+
+        # The freshness rule the dispatcher applies before every command: the
+        # admin process lives for the whole run, and a page answering (or
+        # saving) from its load-time snapshot would silently revert whatever
+        # the terminal or the service wrote in between.
+        saved_ui_reload = s.Config.reload_if_changed
+        ui_reloads = []
+        try:
+            s.Config.reload_if_changed = lambda self: ui_reloads.append(1)
+            ui_req("GET", f"/status?t={ui_code}")
+            check("Every page request re-reads the config first",
+                  len(ui_reloads) == 1)
+            ui_req("POST", f"/service?t={ui_code}", body=b'{"op":"nonsense"}')
+            check("...writes too", len(ui_reloads) == 2)
+        finally:
+            s.Config.reload_if_changed = saved_ui_reload
+
+        # A body that parses as JSON but is not an object ('"start"', '[1]')
+        # must be the same malformed-body refusal as unparseable bytes — not
+        # an AttributeError that drops the connection and prints a traceback.
+        st, body = ui_req("POST", f"/service?t={ui_code}", body=b'"start"')
+        check("Non-object JSON to /service is refused as malformed",
+              st == 400 and b"Malformed" in body)
+        st, body = ui_req("POST", f"/sites?t={ui_code}", body=b"[1]")
+        check("Non-object JSON to /sites is refused as malformed",
+              st == 400 and b"Malformed" in body)
+        st, body = ui_req("POST", f"/swap?t={ui_code}", body=b'"512"')
+        check("Non-object JSON to /swap is refused with the size sentence",
+              st == 422 and b"size in MB" in body)
 
         health_keys = {r["key"] for r in s._health_checks()}
         check("The health rows cover the roster, green included",
@@ -4233,6 +4403,41 @@ def run_dispatch_tests(s):
         finally:
             s._swap_site_content = saved_swap
 
+        # And across PROCESSES: a browser publish and a terminal
+        # restore-site each run in their own elevated process, where a
+        # threading.Lock excludes nothing. A child process holds the flock;
+        # this process must block on it until the child lets go.
+        lock_path = os.path.join(s.BASE_DIR, ".publish.lock")
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import fcntl, os, sys\n"
+             "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+             "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+             "print('held', flush=True)\n"
+             "sys.stdin.readline()\n",
+             lock_path],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            child.stdout.readline()          # the child really holds it
+            acquired = threading.Event()
+            def _try_lock():
+                with s._publish_lock:
+                    acquired.set()
+            waiter = threading.Thread(target=_try_lock, daemon=True)
+            waiter.start()
+            waiter.join(0.3)
+            check("A lock held by another process blocks this one",
+                  not acquired.is_set())
+            child.stdin.close()              # the child exits and releases
+            child.wait(10)
+            waiter.join(10)
+            check("...and is acquired the moment that process releases it",
+                  acquired.is_set())
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+
         section("publish — the terminal half of the pair")
 
         # `publish [n] <folder>` tars a folder under the same cap, hidden
@@ -4298,6 +4503,21 @@ def run_dispatch_tests(s):
         _blob2, _prob2 = s._tar_folder(big_src, cap=1_000_000)
         check("publish's cap counts uncompressed bytes, like every other door",
               _blob2 is None and "too large" in _prob2)
+        # The cap must refuse BEFORE tf.add buffers the file into the
+        # in-memory bundle: an 8 GB disk image held in RAM first is an OOM
+        # on the small hosts Servette targets, not the sentence.
+        _adds = []
+        _saved_tf_add = tarfile.TarFile.add
+        def _spy_add(self, *a, **k):
+            _adds.append(a)
+            return _saved_tf_add(self, *a, **k)
+        tarfile.TarFile.add = _spy_add
+        try:
+            _blob3, _prob3 = s._tar_folder(big_src, cap=1_000_000)
+            check("...and refuses before the over-cap file is buffered",
+                  _blob3 is None and "too large" in _prob3 and _adds == [])
+        finally:
+            tarfile.TarFile.add = _saved_tf_add
         # 'publish 2' alone reads as an index missing its folder — the miss
         # says so instead of calling 2 a folder and stopping.
         with contextlib.redirect_stdout(io.StringIO()) as pbuf:
@@ -5435,6 +5655,27 @@ def run_server_tests(s, serve_dir):
     check("An ip:port XFF is adopted as its address, not lumped as junk",
           req("GET", headers={"X-Forwarded-For": "[2001:db8::7]:443"}).status != 429)
 
+    # A proxy that adds the forwarded client as its OWN header line (HAProxy
+    # style) leaves a client-forged line FIRST on the wire. Reading only the
+    # first line (HTTPMessage.get) hands the forger a fresh bucket per
+    # request; the rightmost hop must be rightmost across ALL lines.
+    s._request_times.clear()
+    def _two_xff_lines(forged, appended):
+        conn = http.client.HTTPSConnection("127.0.0.1", TEST_PORT,
+                                           context=SSL_CTX, timeout=10)
+        try:
+            conn.putrequest("GET", "/")
+            conn.putheader("X-Forwarded-For", forged)
+            conn.putheader("X-Forwarded-For", appended)
+            conn.endheaders()
+            return conn.getresponse().status
+        finally:
+            conn.close()
+    _two_xff_lines("6.6.6.1", "203.0.113.7")
+    _two_xff_lines("6.6.6.2", "203.0.113.7")
+    check("A rotating forged first XFF line cannot mint fresh buckets",
+          _two_xff_lines("6.6.6.3", "203.0.113.7") == 429)
+
     s.config.rate_limit    = 200
     s.config.trusted_proxy = ""
     s._request_times.clear()
@@ -6359,6 +6600,51 @@ def run_install_tests(s, tmpdir):
           (ours_probe is None or isinstance(ours_probe, int))
           and isinstance(foreign_probe, int))
 
+    section("Swapfile mode at creation; the fstab line lands whole")
+
+    # The kernel fills this file with swapped memory pages — key material
+    # included — so its mode must exist AT creation (the _write_private_key
+    # pattern). chmod is disarmed here: a file that still measures 0600
+    # proves the mode came from os.open, where the old create-then-chmod
+    # measures the umask's 0644 and left a window in which another local
+    # user's open fd survived the chmod.
+    swap_tmp        = tempfile.mkdtemp()
+    saved_swap_path = s._SWAP_PATH
+    saved_fstab     = s._FSTAB_PATH
+    saved_run_swap  = s.subprocess.run
+    saved_chmod_sw  = s.os.chmod
+    saved_umask_sw  = os.umask(0o022)
+    try:
+        s._SWAP_PATH     = os.path.join(swap_tmp, "swapfile")
+        s._FSTAB_PATH    = os.path.join(swap_tmp, "fstab")
+        s.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0)
+        s.os.chmod       = lambda *a, **k: None
+        s._make_swapfile(4096)
+        check("The swapfile is 0600 with chmod disarmed (mode at creation)",
+              os.stat(s._SWAP_PATH).st_mode & 0o777 == 0o600)
+
+        # Appending straight onto a final line with no newline corrupts
+        # that mount entry — which can drop the next boot into emergency
+        # mode. The line must land whole, and land once.
+        with open(s._FSTAB_PATH, "w") as f:
+            f.write("/dev/sda1 /boot vfat defaults 0 2")   # no trailing newline
+        s._ensure_fstab_swap_line()
+        fstab_lines = open(s._FSTAB_PATH).read().splitlines()
+        check("A newline-less final fstab line keeps its entry intact",
+              fstab_lines[0] == "/dev/sda1 /boot vfat defaults 0 2"
+              and len(fstab_lines) == 2
+              and fstab_lines[1] == f"{s._SWAP_PATH} none swap sw 0 0")
+        s._ensure_fstab_swap_line()
+        check("...and the line is added once, not per call",
+              open(s._FSTAB_PATH).read().count("swap sw") == 1)
+    finally:
+        os.umask(saved_umask_sw)
+        s._SWAP_PATH     = saved_swap_path
+        s._FSTAB_PATH    = saved_fstab
+        s.subprocess.run = saved_run_swap
+        s.os.chmod       = saved_chmod_sw
+        shutil.rmtree(swap_tmp, ignore_errors=True)
+
     mem_kb, avail_kb, committed_kb = s._meminfo()
     check("_meminfo returns a consistent triple",
           (mem_kb is None and avail_kb is None and committed_kb is None)
@@ -6755,47 +7041,80 @@ def run_platform_tests(s):
 
 # The write primitives. A module base is required for the ambiguous names, so
 # text.replace() is not mistaken for os.replace(); extractall and the pathlib
-# writers are unambiguous and counted wherever they appear.
+# writers are unambiguous and counted wherever they appear. os.open counts
+# when any write flag appears in the call (a variable holding flags is out of
+# a syntax check's reach — none exists in the program); tempfile's creators
+# count wherever they appear.
 _WRITE_MODULES = {"os", "shutil", "tarfile", "path"}
 _WRITE_CALLS   = {"makedirs", "mkdir", "remove", "unlink", "rmdir", "replace",
                   "rename", "rmtree", "copytree", "copy2", "copyfile", "chmod",
                   "chown", "symlink", "truncate"}
 _WRITE_ANYWHERE = {"extractall", "write_text", "write_bytes"}
+_WRITE_OS_OPEN_FLAGS = {"O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND"}
 
 
 def _writing_functions(module_src):
     """Every function in the program that writes to the filesystem, as
-    {name: {primitives}}. Read from the syntax tree rather than by grep, so a
-    write cannot hide behind a line break or an unusual spelling."""
+    {name: {primitives}} — plus '<module>' for statements at module scope,
+    which a FunctionDef walk cannot see and the entry module carries (the
+    data directory's makedirs runs on import). Read from the syntax tree
+    rather than by grep, so a write cannot hide behind a line break or an
+    unusual spelling — or, as one did, behind os.open: the key writer's own
+    primitive went unseen until the detector learned it."""
     import ast
+
+    def call_writes(n):
+        if not isinstance(n, ast.Call):
+            return set()
+        f = n.func
+        if isinstance(f, ast.Attribute) and f.attr in _WRITE_ANYWHERE:
+            return {f.attr}
+        if (isinstance(f, ast.Attribute) and f.attr == "open"
+                and isinstance(f.value, ast.Name) and f.value.id == "os"):
+            flags = {a.attr for a in ast.walk(n) if isinstance(a, ast.Attribute)}
+            return {"os.open-for-write"} if flags & _WRITE_OS_OPEN_FLAGS else set()
+        if (isinstance(f, ast.Attribute) and f.attr in ("mkstemp", "mkdtemp")
+                and isinstance(f.value, ast.Name) and f.value.id == "tempfile"):
+            return {f.attr}
+        if isinstance(f, ast.Attribute) and f.attr in _WRITE_CALLS:
+            base = f.value
+            root = base.id if isinstance(base, ast.Name) else (
+                base.attr if isinstance(base, ast.Attribute) else None)
+            return {f.attr} if root in _WRITE_MODULES else set()
+        if isinstance(f, ast.Name) and f.id == "open":
+            mode = ""
+            if len(n.args) > 1 and isinstance(n.args[1], ast.Constant):
+                mode = n.args[1].value or ""
+            for kw in n.keywords:
+                if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                    mode = kw.value.value or ""
+            if any(c in mode for c in "wax+"):
+                return {"open-for-write"}
+        return set()
+
+    tree  = ast.parse(module_src)
     found = {}
-    for node in ast.walk(ast.parse(module_src)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
         writes = set()
         for n in ast.walk(node):
-            if not isinstance(n, ast.Call):
-                continue
-            f = n.func
-            if isinstance(f, ast.Attribute) and f.attr in _WRITE_ANYWHERE:
-                writes.add(f.attr)
-            elif isinstance(f, ast.Attribute) and f.attr in _WRITE_CALLS:
-                base = f.value
-                root = base.id if isinstance(base, ast.Name) else (
-                    base.attr if isinstance(base, ast.Attribute) else None)
-                if root in _WRITE_MODULES:
-                    writes.add(f.attr)
-            elif isinstance(f, ast.Name) and f.id == "open":
-                mode = ""
-                if len(n.args) > 1 and isinstance(n.args[1], ast.Constant):
-                    mode = n.args[1].value or ""
-                for kw in n.keywords:
-                    if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
-                        mode = kw.value.value or ""
-                if any(c in mode for c in "wax+"):
-                    writes.add("open-for-write")
+            writes |= call_writes(n)
         if writes:
             found[node.name] = writes
+
+    # Module scope: every statement outside any def, walked with function
+    # bodies skipped — their writes are already attributed above.
+    module_writes = set()
+    stack = list(ast.iter_child_nodes(tree))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        module_writes |= call_writes(node)
+        stack.extend(ast.iter_child_nodes(node))
+    if module_writes:
+        found["<module>"] = module_writes
     return found
 
 
@@ -6811,16 +7130,24 @@ def run_invariant_tests(s, serve_dir, tmpdir):
     # The detector first, on source written to trip it: a pin that cannot fail
     # pins nothing, and the ambiguous names are the risk in both directions.
     probe_src = (
+        "import os\n"
+        "os.makedirs('x')\n"
         "def writes():\n    os.replace(a, b)\n\n"
         "def also_writes():\n    open(p, 'w')\n\n"
         "def unpacks():\n    tar.extractall(d)\n\n"
+        "def creates_600():\n    os.open(p, os.O_WRONLY | os.O_CREAT, 0o600)\n\n"
+        "def temps():\n    tempfile.mkstemp(dir=d)\n\n"
+        "def reads_fd():\n    os.open(p, os.O_RDONLY)\n\n"
         "def reads_only():\n    open(p, 'rb')\n\n"
         "def just_a_string():\n    return s.replace('a', 'b')\n")
     found = _writing_functions(probe_src)
-    check("The write detector sees os.replace, a write-mode open, and extractall",
-          set(found) == {"writes", "also_writes", "unpacks"})
-    check("...and does not mistake str.replace or a read for a write",
-          "just_a_string" not in found and "reads_only" not in found)
+    check("The write detector sees os.replace, write opens (mode and flags), "
+          "extractall, mkstemp, and module-scope writes",
+          set(found) == {"writes", "also_writes", "unpacks", "creates_600",
+                         "temps", "<module>"})
+    check("...and does not mistake str.replace, a read, or a read-only "
+          "os.open for a write",
+          not {"just_a_string", "reads_only", "reads_fd"} & set(found))
 
     module_src = build.build(os.path.join(SERVETTE_DIR, "src"))
     writers = _writing_functions(module_src)
@@ -6857,13 +7184,23 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # Servette's own state: config, certificates, the ACME account.
         "save", "_generate_self_signed_cert", "_ensure_default_cert",
         "_obtain_trusted_cert", "_persist_issued_cert", "issue",
+        # 0600-at-creation writers, seen through os.open: every private key
+        # goes through _write_private_key, and the publish lock's __enter__
+        # creates its own content-free lock file (_PublishLock).
+        "_write_private_key", "__enter__",
+        # main() re-points a broken stdout at devnull on EPIPE — an os.open
+        # with a write flag, though nothing ever lands on disk.
+        "main",
+        # Import time: the data directory is created (best-effort) before
+        # the config singleton loads from it.
+        "<module>",
         # Writes no content — sets the config's mode, which is a write all the
         # same, and the one kind of write the detector should never let past
         # unclaimed on a file holding a password hash.
         "_chown_config",
         # The host, at install time and as root.
         "_write_unit_files", "_build_runtime", "_commit_runtime", "cmd_disable",
-        "_apply_swapfile", "_make_swapfile",
+        "_apply_swapfile", "_make_swapfile", "_ensure_fstab_swap_line",
         # Staging: unpacks a verified bundle into a temporary directory.
         "_extract_bundle",
         # Removes a site's own generated certificate when the site goes.
@@ -6910,6 +7247,19 @@ def run_invariant_tests(s, serve_dir, tmpdir):
             raise AssertionError(f"a request opened {f} for writing")
         return real_open(f, mode, *a, **k)
 
+    # os.open too — the primitive the key writer and the publish lock use.
+    # Write flags only: reads through os.open stay permitted, like reads
+    # through open.
+    real_os_open = os.open
+    _os_write_flags = (os.O_WRONLY | os.O_RDWR | os.O_CREAT
+                       | os.O_TRUNC | os.O_APPEND)
+
+    def guarded_os_open(f, flags, *a, **k):
+        if flags & _os_write_flags:
+            denied.append("os.open")
+            raise AssertionError(f"a request os.open'ed {f} for writing")
+        return real_os_open(f, flags, *a, **k)
+
     with open(os.path.join(serve_dir, "index.html"), "w") as f:
         f.write(TEST_HTML)
     s._file_cache.clear()
@@ -6921,6 +7271,7 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         for n, fn in saved_sh.items():
             setattr(s.shutil, n, _deny(f"shutil.{n}"))
         s.open = guarded_open
+        s.os.open = guarded_os_open
 
         battery = [
             ("GET",  "/",                     200),
@@ -6954,7 +7305,9 @@ def run_invariant_tests(s, serve_dir, tmpdir):
         # them left half-written temp files in the data directory.
         caught = 0
         for attempt in (lambda: s.os.remove(os.path.join(tmpdir, "nothing")),
-                        lambda: s.open(os.path.join(tmpdir, "nothing"), "w")):
+                        lambda: s.open(os.path.join(tmpdir, "nothing"), "w"),
+                        lambda: s.os.open(os.path.join(tmpdir, "nothing"),
+                                          os.O_WRONLY | os.O_CREAT, 0o600)):
             try:
                 attempt()
             except AssertionError:
@@ -6962,13 +7315,14 @@ def run_invariant_tests(s, serve_dir, tmpdir):
             except Exception:
                 pass
         check("The guards are real: a write outside the request path is caught",
-              caught == 2)
+              caught == 3)
         denied.clear()
     finally:
         for n, fn in saved_os.items():
             setattr(s.os, n, fn)
         for n, fn in saved_sh.items():
             setattr(s.shutil, n, fn)
+        s.os.open = real_os_open
         s.__dict__.pop("open", None)
 
     after = sorted((p, os.stat(os.path.join(dp, p)).st_mtime)

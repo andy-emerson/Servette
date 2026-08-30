@@ -25,6 +25,7 @@ __version__ = "0.26.239"
 import base64
 import collections
 import datetime
+import fcntl
 import getpass
 import gzip
 import hashlib
@@ -1924,7 +1925,17 @@ def _handle_request(method, url_path, headers, raw_ip):
     ip = _normalize_ip(raw_ip)
     log_path = _loggable(url_path)   # request path, escaped for the log lines below
     if config.trusted_proxy:
-        xff = headers.get("X-Forwarded-For", "")
+        # ALL X-Forwarded-For lines, joined in wire order: get() reads only
+        # the FIRST line, and a proxy that adds the client as its own header
+        # line (HAProxy-style) rather than appending to the client's would
+        # leave a client-written first line as the one read — every request
+        # minting a fresh rate-limit bucket from a forged address. Joining
+        # restores the one meaning the header has: a single comma list whose
+        # rightmost value is the trusted proxy's own contribution.
+        if hasattr(headers, "get_all"):
+            xff = ", ".join(headers.get_all("X-Forwarded-For") or [])
+        else:
+            xff = headers.get("X-Forwarded-For", "")
         # Rightmost XFF value is what the single trusted proxy appended.
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.
@@ -2079,9 +2090,10 @@ def _handle_request(method, url_path, headers, raw_ip):
     # revalidate-always caching contract as the 404 body, for the same
     # reason: the page's checks probe the URL it was served from.
     if url_path.split("?", 1)[0] == _CONNECTION_PATH:
+        # Revalidate-always by construction, exactly as the 404 body below:
+        # every mode _cache_control_header can emit is no-cache or no-store,
+        # so no downgrade guard is needed here either.
         cache = _cache_control_header(site)
-        if "max-age" in cache:
-            cache = ("private" if site.username else "public") + ", no-cache"
         if headers.get("If-None-Match", "") == _CONNECTION_ETAG:
             log.info("304 Not Modified %s to %s", log_path, ip)
             return resp(304, [(b"etag", _CONNECTION_ETAG.encode()),
@@ -2628,12 +2640,20 @@ def _server_running():
 
 # The watchdog pass
 def _cert_watchdog_tick():
-    """One renewal/reload pass over every configured site's certificate. Each
+    """One renewal/reload pass over every ACTIVE site's certificate. Each
     site's pass is wrapped in its own try/except: one site's failure can't skip
     the rest, and nothing here can kill the watchdog thread — a dead watchdog
     would silently end renewals for every site, for the life of the process;
-    the next pass simply retries."""
+    the next pass simply retries.
+
+    A paused site is skipped whole: it is invisible to routing and TLS, so
+    renewing its certificate would order (or reload the server for) material
+    nothing serves — hourly ACME attempts forever on a site paused because
+    its DNS moved away. Reactivation re-earns the certificate at the door,
+    and a renewal missed while paused is caught on the first pass after."""
     for site in config.sites:
+        if not site.active:
+            continue
         try:
             cert_path = _resolve(site.cert_file)
 
@@ -2696,6 +2716,14 @@ def start_server():
         return
 
     for site in config.sites:
+        # A paused site is not served, so nothing of it is checked here —
+        # the same exemption the TLS context build applies, and for the
+        # same reason: a deactivated site whose certificate or folder was
+        # deleted since must not refuse the whole start (under --serve,
+        # a restart loop). Its files are re-earned at the reactivation
+        # door instead.
+        if not site.active:
+            continue
         for fname in [site.serve_dir, site.cert_file, site.key_file]:
             if not fname:
                 print("  Not fully configured. Run 'config' to set up the server.")
@@ -3113,6 +3141,14 @@ class _ACMEClient:
         try:
             for authz_url in order["authorizations"]:
                 authz = self._post_as_get(authz_url).json()
+                # A still-valid authorization from an earlier order is reused
+                # by the CA (the account key persists, so the www fallback and
+                # any retry after validation meet one). Answering its challenge
+                # again is a protocol error — the CA refuses a POST to a
+                # non-pending challenge — so only pending ones are proved;
+                # the settle loop below accepts either kind.
+                if authz.get("status") != "pending":
+                    continue
                 chall = next(c for c in authz["challenges"] if c["type"] == "http-01")
                 path  = os.path.join(challenge_dir, chall["token"])
                 with open(path, "w") as f:
@@ -3317,11 +3353,22 @@ def _persist_issued_cert(domain, site, certs_dir, fullchain, key_pem, issued_nam
     cert_path = os.path.join(certs_dir, "fullchain.pem")
     key_path  = os.path.join(certs_dir, "privkey.pem")
 
-    with open(cert_path + ".tmp", "w") as f:
+    # mkstemp names, not fixed ".tmp" ones: the shell's issuance and the
+    # service's watchdog are separate processes, and inside the <30-day
+    # window — where the standing-cert guard stops refusing the operator's
+    # order — both can persist the same domain at once. Fixed temp names
+    # let their writes interleave into a cert from one issuance beside a
+    # key from the other: exactly the mismatched pair the two-rename
+    # design exists to prevent. mkstemp also arrives 0600, which the key
+    # rewrite below preserves.
+    cfd, cert_tmp = tempfile.mkstemp(dir=certs_dir, prefix="fullchain.", suffix=".tmp")
+    with os.fdopen(cfd, "w") as f:
         f.write(fullchain)
-    _write_private_key(key_path + ".tmp", key_pem)
-    os.replace(key_path + ".tmp", key_path)
-    os.replace(cert_path + ".tmp", cert_path)
+    kfd, key_tmp = tempfile.mkstemp(dir=certs_dir, prefix="privkey.", suffix=".tmp")
+    os.close(kfd)
+    _write_private_key(key_tmp, key_pem)   # the one key writer: 0600 before content
+    os.replace(key_tmp, key_path)
+    os.replace(cert_tmp, cert_path)
     _chown_servette(certs_dir)
 
     changed = (site.cert_file, site.key_file, site.domain) != (cert_path, key_path, domain)
@@ -3726,7 +3773,8 @@ WantedBy=timers.target
 
 
 # Reading /proc/meminfo
-_SWAP_PATH = "/swapfile"
+_SWAP_PATH  = "/swapfile"
+_FSTAB_PATH = "/etc/fstab"   # a name, so the fstab handling is testable against a copy
 
 
 def _meminfo():
@@ -3906,12 +3954,32 @@ def _root_on_sd_card():
 # Making the swapfile
 def _make_swapfile(size):
     """Allocate, format, and activate /swapfile at `size` bytes; raises on any
-    failure. Mode 0600 is set before content exists — never world-readable."""
-    with open(_SWAP_PATH, "wb") as f:
+    failure. Mode 0600 exists AT creation (the _write_private_key pattern —
+    the kernel will fill this file with swapped memory pages, key material
+    included): under a permissive umask, create-then-chmod left a window
+    where another local user could open the file and keep the fd past the
+    chmod. The chmod stays for a pre-existing file, which O_CREAT's mode
+    does not touch."""
+    fd = os.open(_SWAP_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
         os.chmod(_SWAP_PATH, 0o600)
         os.posix_fallocate(f.fileno(), 0, size)
     subprocess.run(["mkswap", _SWAP_PATH], check=True, capture_output=True)
     subprocess.run(["swapon", _SWAP_PATH], check=True, capture_output=True)
+
+
+def _ensure_fstab_swap_line():
+    """Add the swapfile's mount line if fstab lacks it — on a line of its
+    own even when the file's last line has no trailing newline: appending
+    straight onto that line would corrupt an existing mount entry, which
+    can drop the next boot into emergency mode."""
+    with open(_FSTAB_PATH) as f:
+        fstab = f.read()
+    if _SWAP_PATH in fstab.split():
+        return
+    with open(_FSTAB_PATH, "a") as f:
+        f.write(("" if not fstab or fstab.endswith("\n") else "\n")
+                + f"{_SWAP_PATH} none swap sw 0 0\n")
 
 
 # The swap offer
@@ -3985,11 +4053,7 @@ def _apply_swapfile(mb):
             return "Could not deactivate the current swapfile (heavily in use?) — try again later."
     try:
         _make_swapfile(size)
-        with open("/etc/fstab") as f:
-            fstab = f.read()
-        if _SWAP_PATH not in fstab.split():
-            with open("/etc/fstab", "a") as f:
-                f.write(f"{_SWAP_PATH} none swap sw 0 0" + chr(10))
+        _ensure_fstab_swap_line()
         log.info("Swapfile active: %d MB at %s", mb, _SWAP_PATH)
         return ""
     except (OSError, subprocess.CalledProcessError) as e:
@@ -4013,11 +4077,11 @@ def _apply_swapfile(mb):
         except OSError:
             pass
         try:
-            with open("/etc/fstab") as f:
+            with open(_FSTAB_PATH) as f:
                 lines = f.readlines()
             kept = [l for l in lines if _SWAP_PATH not in l.split()]
             if kept != lines:
-                with open("/etc/fstab", "w") as f:
+                with open(_FSTAB_PATH, "w") as f:
                     f.writelines(kept)
         except OSError:
             pass
@@ -5592,19 +5656,15 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          : `<span class="${faultClass(c)}">${escapeHtml(c.detail)}</span>`);
 
   // One labelled input. The hint is page-authored markup (several carry
-  // <b>), never server text; the value is escaped because it is.
+  // <b>), never server text; the value is escaped because it is. (A select
+  // variant existed for fields with stated choices; the last such field
+  // left with the cache_policy knob, and dead render paths are the one
+  // place an unescaped value could hide.)
   const field = (key, label, value, opts) => {
     const o = opts || {};
-    // A field with stated choices renders as a select: what cannot be
-    // typed cannot need refusing.
-    const control = o.choices
-      ? `<select id="cfg-${key}">` +
-        o.choices.map((c) =>
-          `<option value="${c}"${String(value) === c ? ' selected' : ''}>` +
-          `${c}</option>`).join('') +
-        `</select>`
-      : `<input id="cfg-${key}" type="${o.type || 'text'}"` +
-        ` value="${escapeHtml(value)}">`;
+    const control =
+      `<input id="cfg-${key}" type="${o.type || 'text'}"` +
+      ` value="${escapeHtml(value)}">`;
     return `<div class="cfg-field">` +
       `<label for="cfg-${key}">${label}</label>` + control +
       (o.hint ? `<div class="cfg-hint">${o.hint}</div>` : '') +
@@ -6580,6 +6640,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             `type="button" data-k="${escapeHtml(k)}">Remove</button>`)).join('');
       for (const b of q('.redirects').querySelectorAll('.redir-del'))
         b.addEventListener('click', () => {
+          // The comma separates the pair on this wire, so a source carrying
+          // one cannot be spoken here — the add form says the same, and a
+          // first-comma split would read the removal as a mangled add.
+          if (b.dataset.k.includes(','))
+            return errAt(q('.redirects'),
+                         'A path containing a comma has to be removed by ' +
+                         'editing servette.toml — the comma separates the ' +
+                         'pair here.');
           b.disabled = true;
           // Nothing after the comma is the removal, the same spelling the
           // terminal takes.
@@ -6953,7 +7021,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // The upgrade row tells; it never installs. Upgrading is a terminal
     // act, so the row names the two commands and stops there.
     $('host-rows').innerHTML =
-      row('Version', 'v' + (d.version || '?') +
+      row('Version', 'v' + escapeHtml(d.version || '?') +
         (latestVersion
           ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
             ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
@@ -6977,7 +7045,8 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
             { hint: 'Disk that absorbs a memory spike, so a burst past free RAM ' +
                     'cannot take the host down.' +
                     (sw.recommended_mb
-                      ? ' Recommended for this host: <b>' + sw.recommended_mb + ' MB</b>.'
+                      ? ' Recommended for this host: <b>' +
+                        escapeHtml(sw.recommended_mb) + ' MB</b>.'
                       : '') });
     // Re-rendering the form under a cursor would discard what is being
     // typed — and refresh() and the upgrade check (up to four seconds
@@ -7341,16 +7410,28 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         # carries. A second door for the run credential is a second thing
         # to audit, so there is none.
         code = (qs.get("t") or [""])[0]
-        if self.server.bad_codes >= _UI_MAX_BAD_CODES:
-            return "locked"
-        if not code:
-            return "none"
-        if hmac.compare_digest(code.encode(), self.server.code.encode()):
-            return "ok"
-        self.server.bad_codes += 1
-        return "bad"
+        # One lock around check-and-count: each request runs on its own
+        # thread, and an unsynchronized += raced the ceiling check —
+        # parallel wrong guesses could land past _UI_MAX_BAD_CODES. The
+        # comparison inside the lock also serializes guessing, which only
+        # helps the ceiling do its job.
+        with self.server.bad_lock:
+            if self.server.bad_codes >= _UI_MAX_BAD_CODES:
+                return "locked"
+            if not code:
+                return "none"
+            if hmac.compare_digest(code.encode(), self.server.code.encode()):
+                return "ok"
+            self.server.bad_codes += 1
+            return "bad"
 
     def do_GET(self):
+        # The freshness rule the dispatcher applies before every command,
+        # applied before every page request for the same reason: this
+        # process lives for the whole admin run, and answering (or worse,
+        # saving) from its load-time snapshot would silently revert
+        # anything the terminal or the service wrote in between.
+        config.reload_if_changed()
         path = urlsplit(self.path).path
 
         # Preview content, on its own per-staging token — why it is not the
@@ -7430,6 +7511,10 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         return self._respond(200, _UI_LOGIN_PAGE)
 
     def do_POST(self):
+        # Freshness before every write, as in do_GET — a save built on a
+        # stale snapshot is the clobber the dispatcher's re-read exists
+        # to prevent.
+        config.reload_if_changed()
         path = urlsplit(self.path).path
         if path not in ("/upload", "/preview", "/config", "/sites", "/service",
                         "/swap"):
@@ -7458,8 +7543,11 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             # garbled or unknown op is refused, never defaulted — a
             # truncated stop must not become a start.
             try:
+                # AttributeError included everywhere a body is read: '"start"'
+                # parses as JSON but is not an object, and .get on it must be
+                # the same malformed-body refusal, not a dropped connection.
                 body_op = str(json.loads(self.rfile.read(length)).get("op") or "")
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed body.")
             if body_op not in ("start", "restart", "stop"):
                 return self._respond(422, json.dumps(
@@ -7487,7 +7575,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(413, "Body too large.")
             try:
                 mb = int(json.loads(self.rfile.read(length)).get("mb"))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(422, json.dumps(
                     {"error": "a size in MB is needed"}), "application/json")
             if not (64 <= mb <= 65536):
@@ -7510,7 +7598,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             try:
                 body = json.loads(self.rfile.read(length))
                 op   = str(body.get("op") or "")
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed body.")
             try:
                 if op == "add":
@@ -7618,7 +7706,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 idx  = int(body.get("site") or 0)
                 values = {str(k).strip().lower(): str(v)
                           for k, v in dict(body.get("values") or {}).items()}
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed settings body.")
             password = values.pop("password", "")
             pairs = list(values.items())
@@ -7667,8 +7755,9 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/preview":
             # The same bundle, staged where only this page can see it. A
-            # fresh token per staging, so a preview's reach ends when the
-            # next one is staged or the command exits.
+            # fresh token per staging — a link shared under the old token
+            # stops working — and every staged tree is dropped when the
+            # command exits.
             result = _stage_preview(site, self.rfile.read(length))
             if result != "staged":
                 return self._respond(422, json.dumps({"result": result}),
@@ -7699,6 +7788,7 @@ def _start_ui(site, page, port=_UI_PORT):
     _clear_previews()
     httpd.site, httpd.page = site, page
     httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
+    httpd.bad_lock = threading.Lock()   # guards the guess ceiling across request threads
     httpd.preview_code = ""      # minted by the first staging, not before
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, httpd.code
@@ -8048,10 +8138,43 @@ def _swap_site_content(new_dir, serve_dir):
     _prune_versions(serve_dir)
 
 
-_publish_lock = threading.Lock()  # serializes site-content mutation across every
-                                   # site: a page publish and 'restore-site' can
-                                   # run from two sessions at once, and the swap
-                                   # is several unguarded filesystem ops, not one.
+# The publish lock
+class _PublishLock:
+    """Serializes site-content mutation across every site, every thread, AND
+    every process: an in-process threading.Lock (fcntl locks do not exclude
+    threads sharing the process) around an fcntl.flock on one file in the
+    data directory (threading locks do not exclude other processes — a page
+    publish and 'restore-site' can run from two sessions at once, and the
+    swap is several unguarded filesystem ops, not one). Closing the fd
+    releases the flock, including on the way out of a raise; the kernel
+    releases it if the process dies, so a killed publish cannot wedge the
+    next one."""
+    def __init__(self):
+        self._threads = threading.Lock()
+        self._fd = None
+
+    def __enter__(self):
+        self._threads.acquire()
+        try:
+            self._fd = os.open(os.path.join(BASE_DIR, ".publish.lock"),
+                               os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
+        except BaseException:
+            if self._fd is not None:
+                os.close(self._fd)
+                self._fd = None
+            self._threads.release()
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self._fd)
+        self._fd = None
+        self._threads.release()
+        return False
+
+
+_publish_lock = _PublishLock()
 
 
 # Landing a bundle
@@ -8104,21 +8227,29 @@ def _tar_folder(root, cap=_MAX_BUNDLE_BYTES):
                     continue    # regular files only, as the extractor accepts
                 try:
                     size = os.path.getsize(full)
-                    tf.add(full, arcname=os.path.relpath(full, root),
-                           recursive=False)
                 except OSError:
                     continue
-                files += 1
                 # The cap counts UNCOMPRESSED bytes — the same quantity
                 # _extract_bundle enforces and the page's builder sums. A
                 # compressed count would wave a well-compressing 8 GB folder
                 # through this door only for the core to refuse it with a
-                # log line instead of this sentence.
+                # log line instead of this sentence. Checked BEFORE tf.add,
+                # which buffers the whole file into the in-memory bundle: an
+                # over-cap file must be refused, not held in RAM first — an
+                # OOM on the small hosts Servette targets, instead of the
+                # sentence.
                 total += size
                 if total > cap:
                     return None, (f"more than {cap // (1024 * 1024)} MB of "
                                   "content — too large to publish as one "
                                   "bundle")
+                try:
+                    tf.add(full, arcname=os.path.relpath(full, root),
+                           recursive=False)
+                except OSError:
+                    total -= size   # not bundled after all
+                    continue
+                files += 1
     if not files:
         return None, ("no publishable files (hidden paths are not served, "
                       "so they are not published)")
@@ -8177,15 +8308,19 @@ def _stage_preview(site, bundle):
     The same _extract_bundle every content channel runs, so a bundle the
     publish door would refuse the preview refuses identically — a preview
     that accepted more than a publish would be a preview of something that
-    can never ship."""
+    can never ship. Under the publish lock like every other content
+    mutation: the preview tree is no publish's, but two stagings of the
+    same site's preview from two runs would interleave rmtree and
+    extraction just as two publishes would."""
     dest = _preview_dir(site)
-    shutil.rmtree(dest, ignore_errors=True)
-    try:
-        _extract_bundle(bundle, dest)
-    except Exception as e:
-        log.error("Preview bundle rejected: %s", e)
+    with _publish_lock:
         shutil.rmtree(dest, ignore_errors=True)
-        return "rejected"
+        try:
+            _extract_bundle(bundle, dest)
+        except Exception as e:
+            log.error("Preview bundle rejected: %s", e)
+            shutil.rmtree(dest, ignore_errors=True)
+            return "rejected"
     log.info("Staged a preview for %s", site.domain or site.serve_dir)
     return "staged"
 
@@ -8194,8 +8329,9 @@ def _clear_previews():
     """Drop every staged preview. A preview belongs to one `admin` run: it is
     a draft nobody published, and leaving it on disk would keep an
     unpublished tree beside a live site indefinitely."""
-    for site in config.sites:
-        shutil.rmtree(_preview_dir(site), ignore_errors=True)
+    with _publish_lock:
+        for site in config.sites:
+            shutil.rmtree(_preview_dir(site), ignore_errors=True)
 
 
 def _tree_size(path):
@@ -8716,11 +8852,15 @@ def _serve_dir_exposes_secrets(path):
     floor, fatal where containment is merely reported, because a config
     that would publish the keys must not run at all. Containment inside
     BASE_DIR is deliberately NOT assumed here: a hand-edited serve_dir may
-    point anywhere, which is why this judges the resolved path alone."""
+    point anywhere, which is why this judges the resolved path alone.
+    An ANCESTOR of the data directory is the same exposure one level up —
+    serving /var/lib serves everything under /var/lib/servette as plain
+    file reads — so any path the data directory sits inside is refused
+    with the data directory itself."""
     real  = os.path.realpath(path)
     base  = os.path.realpath(BASE_DIR)
     certs = os.path.join(base, "certs")
-    return real == base or real == certs or real.startswith(certs + os.sep)
+    return _within(real, base) or real == certs or real.startswith(certs + os.sep)
 
 
 # add-site
@@ -9392,7 +9532,7 @@ def _runtime_stats(service_active):
             return rows
         elapsed = None
         mono = props.get("ActiveEnterTimestampMonotonic", "")
-        if mono and mono != "0":
+        if mono.isdigit() and mono != "0":
             try:
                 with open("/proc/uptime") as f:
                     boot_elapsed = float(f.read().split()[0])

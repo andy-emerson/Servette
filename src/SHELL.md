@@ -301,16 +301,28 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         # carries. A second door for the run credential is a second thing
         # to audit, so there is none.
         code = (qs.get("t") or [""])[0]
-        if self.server.bad_codes >= _UI_MAX_BAD_CODES:
-            return "locked"
-        if not code:
-            return "none"
-        if hmac.compare_digest(code.encode(), self.server.code.encode()):
-            return "ok"
-        self.server.bad_codes += 1
-        return "bad"
+        # One lock around check-and-count: each request runs on its own
+        # thread, and an unsynchronized += raced the ceiling check —
+        # parallel wrong guesses could land past _UI_MAX_BAD_CODES. The
+        # comparison inside the lock also serializes guessing, which only
+        # helps the ceiling do its job.
+        with self.server.bad_lock:
+            if self.server.bad_codes >= _UI_MAX_BAD_CODES:
+                return "locked"
+            if not code:
+                return "none"
+            if hmac.compare_digest(code.encode(), self.server.code.encode()):
+                return "ok"
+            self.server.bad_codes += 1
+            return "bad"
 
     def do_GET(self):
+        # The freshness rule the dispatcher applies before every command,
+        # applied before every page request for the same reason: this
+        # process lives for the whole admin run, and answering (or worse,
+        # saving) from its load-time snapshot would silently revert
+        # anything the terminal or the service wrote in between.
+        config.reload_if_changed()
         path = urlsplit(self.path).path
 
         # Preview content, on its own per-staging token — why it is not the
@@ -390,6 +402,10 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         return self._respond(200, _UI_LOGIN_PAGE)
 
     def do_POST(self):
+        # Freshness before every write, as in do_GET — a save built on a
+        # stale snapshot is the clobber the dispatcher's re-read exists
+        # to prevent.
+        config.reload_if_changed()
         path = urlsplit(self.path).path
         if path not in ("/upload", "/preview", "/config", "/sites", "/service",
                         "/swap"):
@@ -418,8 +434,11 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             # garbled or unknown op is refused, never defaulted — a
             # truncated stop must not become a start.
             try:
+                # AttributeError included everywhere a body is read: '"start"'
+                # parses as JSON but is not an object, and .get on it must be
+                # the same malformed-body refusal, not a dropped connection.
                 body_op = str(json.loads(self.rfile.read(length)).get("op") or "")
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed body.")
             if body_op not in ("start", "restart", "stop"):
                 return self._respond(422, json.dumps(
@@ -447,7 +466,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(413, "Body too large.")
             try:
                 mb = int(json.loads(self.rfile.read(length)).get("mb"))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(422, json.dumps(
                     {"error": "a size in MB is needed"}), "application/json")
             if not (64 <= mb <= 65536):
@@ -470,7 +489,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             try:
                 body = json.loads(self.rfile.read(length))
                 op   = str(body.get("op") or "")
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed body.")
             try:
                 if op == "add":
@@ -578,7 +597,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 idx  = int(body.get("site") or 0)
                 values = {str(k).strip().lower(): str(v)
                           for k, v in dict(body.get("values") or {}).items()}
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed settings body.")
             password = values.pop("password", "")
             pairs = list(values.items())
@@ -627,8 +646,9 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/preview":
             # The same bundle, staged where only this page can see it. A
-            # fresh token per staging, so a preview's reach ends when the
-            # next one is staged or the command exits.
+            # fresh token per staging — a link shared under the old token
+            # stops working — and every staged tree is dropped when the
+            # command exits.
             result = _stage_preview(site, self.rfile.read(length))
             if result != "staged":
                 return self._respond(422, json.dumps({"result": result}),
@@ -664,6 +684,7 @@ def _start_ui(site, page, port=_UI_PORT):
     _clear_previews()
     httpd.site, httpd.page = site, page
     httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
+    httpd.bad_lock = threading.Lock()   # guards the guess ceiling across request threads
     httpd.preview_code = ""      # minted by the first staging, not before
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, httpd.code
@@ -1041,13 +1062,46 @@ def _swap_site_content(new_dir, serve_dir):
 
 ```
 
-The lock that serializes every content mutation.
+The lock that serializes every content mutation. Two layers because the contenders come in two kinds: threads of one process (the page server handles each request on its own thread) and separate processes entirely — a browser publish and a terminal `restore-site` each run in their own elevated process, and a `threading.Lock` alone let their staging trees and flips interleave. The flock rides a dedicated file because locking a tree that is itself renamed and replaced would lock a name, not the content.
 
 ```python
-_publish_lock = threading.Lock()  # serializes site-content mutation across every
-                                   # site: a page publish and 'restore-site' can
-                                   # run from two sessions at once, and the swap
-                                   # is several unguarded filesystem ops, not one.
+# The publish lock
+class _PublishLock:
+    """Serializes site-content mutation across every site, every thread, AND
+    every process: an in-process threading.Lock (fcntl locks do not exclude
+    threads sharing the process) around an fcntl.flock on one file in the
+    data directory (threading locks do not exclude other processes — a page
+    publish and 'restore-site' can run from two sessions at once, and the
+    swap is several unguarded filesystem ops, not one). Closing the fd
+    releases the flock, including on the way out of a raise; the kernel
+    releases it if the process dies, so a killed publish cannot wedge the
+    next one."""
+    def __init__(self):
+        self._threads = threading.Lock()
+        self._fd = None
+
+    def __enter__(self):
+        self._threads.acquire()
+        try:
+            self._fd = os.open(os.path.join(BASE_DIR, ".publish.lock"),
+                               os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
+        except BaseException:
+            if self._fd is not None:
+                os.close(self._fd)
+                self._fd = None
+            self._threads.release()
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self._fd)
+        self._fd = None
+        self._threads.release()
+        return False
+
+
+_publish_lock = _PublishLock()
 
 
 ```
@@ -1110,21 +1164,29 @@ def _tar_folder(root, cap=_MAX_BUNDLE_BYTES):
                     continue    # regular files only, as the extractor accepts
                 try:
                     size = os.path.getsize(full)
-                    tf.add(full, arcname=os.path.relpath(full, root),
-                           recursive=False)
                 except OSError:
                     continue
-                files += 1
                 # The cap counts UNCOMPRESSED bytes — the same quantity
                 # _extract_bundle enforces and the page's builder sums. A
                 # compressed count would wave a well-compressing 8 GB folder
                 # through this door only for the core to refuse it with a
-                # log line instead of this sentence.
+                # log line instead of this sentence. Checked BEFORE tf.add,
+                # which buffers the whole file into the in-memory bundle: an
+                # over-cap file must be refused, not held in RAM first — an
+                # OOM on the small hosts Servette targets, instead of the
+                # sentence.
                 total += size
                 if total > cap:
                     return None, (f"more than {cap // (1024 * 1024)} MB of "
                                   "content — too large to publish as one "
                                   "bundle")
+                try:
+                    tf.add(full, arcname=os.path.relpath(full, root),
+                           recursive=False)
+                except OSError:
+                    total -= size   # not bundled after all
+                    continue
+                files += 1
     if not files:
         return None, ("no publishable files (hidden paths are not served, "
                       "so they are not published)")
@@ -1188,15 +1250,19 @@ def _stage_preview(site, bundle):
     The same _extract_bundle every content channel runs, so a bundle the
     publish door would refuse the preview refuses identically — a preview
     that accepted more than a publish would be a preview of something that
-    can never ship."""
+    can never ship. Under the publish lock like every other content
+    mutation: the preview tree is no publish's, but two stagings of the
+    same site's preview from two runs would interleave rmtree and
+    extraction just as two publishes would."""
     dest = _preview_dir(site)
-    shutil.rmtree(dest, ignore_errors=True)
-    try:
-        _extract_bundle(bundle, dest)
-    except Exception as e:
-        log.error("Preview bundle rejected: %s", e)
+    with _publish_lock:
         shutil.rmtree(dest, ignore_errors=True)
-        return "rejected"
+        try:
+            _extract_bundle(bundle, dest)
+        except Exception as e:
+            log.error("Preview bundle rejected: %s", e)
+            shutil.rmtree(dest, ignore_errors=True)
+            return "rejected"
     log.info("Staged a preview for %s", site.domain or site.serve_dir)
     return "staged"
 
@@ -1205,8 +1271,9 @@ def _clear_previews():
     """Drop every staged preview. A preview belongs to one `admin` run: it is
     a draft nobody published, and leaving it on disk would keep an
     unpublished tree beside a live site indefinitely."""
-    for site in config.sites:
-        shutil.rmtree(_preview_dir(site), ignore_errors=True)
+    with _publish_lock:
+        for site in config.sites:
+            shutil.rmtree(_preview_dir(site), ignore_errors=True)
 
 
 def _tree_size(path):
@@ -1760,11 +1827,15 @@ def _serve_dir_exposes_secrets(path):
     floor, fatal where containment is merely reported, because a config
     that would publish the keys must not run at all. Containment inside
     BASE_DIR is deliberately NOT assumed here: a hand-edited serve_dir may
-    point anywhere, which is why this judges the resolved path alone."""
+    point anywhere, which is why this judges the resolved path alone.
+    An ANCESTOR of the data directory is the same exposure one level up —
+    serving /var/lib serves everything under /var/lib/servette as plain
+    file reads — so any path the data directory sits inside is refused
+    with the data directory itself."""
     real  = os.path.realpath(path)
     base  = os.path.realpath(BASE_DIR)
     certs = os.path.join(base, "certs")
-    return real == base or real == certs or real.startswith(certs + os.sep)
+    return _within(real, base) or real == certs or real.startswith(certs + os.sep)
 
 
 ```
@@ -2515,7 +2586,7 @@ def _runtime_stats(service_active):
             return rows
         elapsed = None
         mono = props.get("ActiveEnterTimestampMonotonic", "")
-        if mono and mono != "0":
+        if mono.isdigit() and mono != "0":
             try:
                 with open("/proc/uptime") as f:
                     boot_elapsed = float(f.read().split()[0])

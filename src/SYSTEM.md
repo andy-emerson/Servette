@@ -39,17 +39,25 @@ def _server_running():
 
 ```
 
-One pass of the certificate watchdog: renew expiring Let's Encrypt certificates, reload when an externally managed certificate rotates on disk.
+One pass of the certificate watchdog: renew expiring Let's Encrypt certificates, reload when an externally managed certificate rotates on disk. Active sites only — a paused site is invisible to routing and TLS, and its certificate is re-earned at the reactivation door.
 
 ```python
 # The watchdog pass
 def _cert_watchdog_tick():
-    """One renewal/reload pass over every configured site's certificate. Each
+    """One renewal/reload pass over every ACTIVE site's certificate. Each
     site's pass is wrapped in its own try/except: one site's failure can't skip
     the rest, and nothing here can kill the watchdog thread — a dead watchdog
     would silently end renewals for every site, for the life of the process;
-    the next pass simply retries."""
+    the next pass simply retries.
+
+    A paused site is skipped whole: it is invisible to routing and TLS, so
+    renewing its certificate would order (or reload the server for) material
+    nothing serves — hourly ACME attempts forever on a site paused because
+    its DNS moved away. Reactivation re-earns the certificate at the door,
+    and a renewal missed while paused is caught on the first pass after."""
     for site in config.sites:
+        if not site.active:
+            continue
         try:
             cert_path = _resolve(site.cert_file)
 
@@ -109,7 +117,7 @@ def _cert_watchdog():
 
 ```
 
-Starting validates every site's configuration first, then builds the HTTPS server **failing closed** — a socket that can't bind or a certificate that can't load must surface here, synchronously (the bind happens in the constructor, the certs in `_build_site_ssl_contexts`), rather than leave a live process serving nothing. The port-80 redirect is best-effort: it needs privilege and a free port, and the site works without it. Startup ends by printing what is being served, plus any expiry, production, or cache warnings.
+Starting validates every active site's configuration first (a paused site's files are deliberately unexamined, like its certificate in the context build below), then builds the HTTPS server **failing closed** — a socket that can't bind or a certificate that can't load must surface here, synchronously (the bind happens in the constructor, the certs in `_build_site_ssl_contexts`), rather than leave a live process serving nothing. The port-80 redirect is best-effort: it needs privilege and a free port, and the site works without it. Startup ends by printing what is being served, plus any expiry, production, or cache warnings.
 
 ```python
 # Starting
@@ -122,6 +130,14 @@ def start_server():
         return
 
     for site in config.sites:
+        # A paused site is not served, so nothing of it is checked here —
+        # the same exemption the TLS context build applies, and for the
+        # same reason: a deactivated site whose certificate or folder was
+        # deleted since must not refuse the whole start (under --serve,
+        # a restart loop). Its files are re-earned at the reactivation
+        # door instead.
+        if not site.active:
+            continue
         for fname in [site.serve_dir, site.cert_file, site.key_file]:
             if not fname:
                 print("  Not fully configured. Run 'config' to set up the server.")
@@ -593,6 +609,14 @@ class _ACMEClient:
         try:
             for authz_url in order["authorizations"]:
                 authz = self._post_as_get(authz_url).json()
+                # A still-valid authorization from an earlier order is reused
+                # by the CA (the account key persists, so the www fallback and
+                # any retry after validation meet one). Answering its challenge
+                # again is a protocol error — the CA refuses a POST to a
+                # non-pending challenge — so only pending ones are proved;
+                # the settle loop below accepts either kind.
+                if authz.get("status") != "pending":
+                    continue
                 chall = next(c for c in authz["challenges"] if c["type"] == "http-01")
                 path  = os.path.join(challenge_dir, chall["token"])
                 with open(path, "w") as f:
@@ -802,11 +826,22 @@ def _persist_issued_cert(domain, site, certs_dir, fullchain, key_pem, issued_nam
     cert_path = os.path.join(certs_dir, "fullchain.pem")
     key_path  = os.path.join(certs_dir, "privkey.pem")
 
-    with open(cert_path + ".tmp", "w") as f:
+    # mkstemp names, not fixed ".tmp" ones: the shell's issuance and the
+    # service's watchdog are separate processes, and inside the <30-day
+    # window — where the standing-cert guard stops refusing the operator's
+    # order — both can persist the same domain at once. Fixed temp names
+    # let their writes interleave into a cert from one issuance beside a
+    # key from the other: exactly the mismatched pair the two-rename
+    # design exists to prevent. mkstemp also arrives 0600, which the key
+    # rewrite below preserves.
+    cfd, cert_tmp = tempfile.mkstemp(dir=certs_dir, prefix="fullchain.", suffix=".tmp")
+    with os.fdopen(cfd, "w") as f:
         f.write(fullchain)
-    _write_private_key(key_path + ".tmp", key_pem)
-    os.replace(key_path + ".tmp", key_path)
-    os.replace(cert_path + ".tmp", cert_path)
+    kfd, key_tmp = tempfile.mkstemp(dir=certs_dir, prefix="privkey.", suffix=".tmp")
+    os.close(kfd)
+    _write_private_key(key_tmp, key_pem)   # the one key writer: 0600 before content
+    os.replace(key_tmp, key_path)
+    os.replace(cert_tmp, cert_path)
     _chown_servette(certs_dir)
 
     changed = (site.cert_file, site.key_file, site.domain) != (cert_path, key_path, domain)
@@ -1269,7 +1304,8 @@ A small host that runs out of memory drops offline; a swapfile absorbs the spike
 
 ```python
 # Reading /proc/meminfo
-_SWAP_PATH = "/swapfile"
+_SWAP_PATH  = "/swapfile"
+_FSTAB_PATH = "/etc/fstab"   # a name, so the fstab handling is testable against a copy
 
 
 def _meminfo():
@@ -1487,12 +1523,32 @@ The interactive offer itself: present the measurement, take a size or a decline,
 # Making the swapfile
 def _make_swapfile(size):
     """Allocate, format, and activate /swapfile at `size` bytes; raises on any
-    failure. Mode 0600 is set before content exists — never world-readable."""
-    with open(_SWAP_PATH, "wb") as f:
+    failure. Mode 0600 exists AT creation (the _write_private_key pattern —
+    the kernel will fill this file with swapped memory pages, key material
+    included): under a permissive umask, create-then-chmod left a window
+    where another local user could open the file and keep the fd past the
+    chmod. The chmod stays for a pre-existing file, which O_CREAT's mode
+    does not touch."""
+    fd = os.open(_SWAP_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
         os.chmod(_SWAP_PATH, 0o600)
         os.posix_fallocate(f.fileno(), 0, size)
     subprocess.run(["mkswap", _SWAP_PATH], check=True, capture_output=True)
     subprocess.run(["swapon", _SWAP_PATH], check=True, capture_output=True)
+
+
+def _ensure_fstab_swap_line():
+    """Add the swapfile's mount line if fstab lacks it — on a line of its
+    own even when the file's last line has no trailing newline: appending
+    straight onto that line would corrupt an existing mount entry, which
+    can drop the next boot into emergency mode."""
+    with open(_FSTAB_PATH) as f:
+        fstab = f.read()
+    if _SWAP_PATH in fstab.split():
+        return
+    with open(_FSTAB_PATH, "a") as f:
+        f.write(("" if not fstab or fstab.endswith("\n") else "\n")
+                + f"{_SWAP_PATH} none swap sw 0 0\n")
 
 
 # The swap offer
@@ -1566,11 +1622,7 @@ def _apply_swapfile(mb):
             return "Could not deactivate the current swapfile (heavily in use?) — try again later."
     try:
         _make_swapfile(size)
-        with open("/etc/fstab") as f:
-            fstab = f.read()
-        if _SWAP_PATH not in fstab.split():
-            with open("/etc/fstab", "a") as f:
-                f.write(f"{_SWAP_PATH} none swap sw 0 0" + chr(10))
+        _ensure_fstab_swap_line()
         log.info("Swapfile active: %d MB at %s", mb, _SWAP_PATH)
         return ""
     except (OSError, subprocess.CalledProcessError) as e:
@@ -1594,11 +1646,11 @@ def _apply_swapfile(mb):
         except OSError:
             pass
         try:
-            with open("/etc/fstab") as f:
+            with open(_FSTAB_PATH) as f:
                 lines = f.readlines()
             kept = [l for l in lines if _SWAP_PATH not in l.split()]
             if kept != lines:
-                with open("/etc/fstab", "w") as f:
+                with open(_FSTAB_PATH, "w") as f:
                     f.writelines(kept)
         except OSError:
             pass

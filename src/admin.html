@@ -428,8 +428,10 @@
     .ver-pick { flex: 1 1 auto; min-width: 0; }
     .switch-act label { color: var(--muted); cursor: pointer; }
 
-    /* The public/private switch — a literal toggle: the knob's position
-       and a green tint say private (on). */
+    /* Toggles, everywhere on the page (ruled): the track is always the
+       green tint — it names the control, not the state — and the KNOB
+       carries the state: filled when on, empty (the page's ground) when
+       off, with its position saying the same thing twice. */
     input.switch {
       appearance: none;
       -webkit-appearance: none;
@@ -439,10 +441,9 @@
       width: 38px;
       height: 20px;
       border-radius: 99px;
-      background: var(--bg);
-      border: 1px solid var(--border);
+      background: rgba(90,132,102,0.15);
+      border: 1px solid rgba(90,132,102,0.6);
       cursor: pointer;
-      transition: background 0.15s, border-color 0.15s;
     }
     input.switch::after {
       content: '';
@@ -452,15 +453,18 @@
       width: 14px;
       height: 14px;
       border-radius: 50%;
-      background: var(--muted);
+      box-sizing: border-box;
+      background: var(--bg);
+      border: 1px solid rgba(90,132,102,0.6);
       transform: translateY(-50%);
       transition: left 0.15s, right 0.15s, background 0.15s;
     }
-    input.switch:checked {
-      background: rgba(90,132,102,0.15);
-      border-color: rgba(90,132,102,0.6);
+    input.switch:checked::after {
+      left: auto;
+      right: 2px;
+      background: var(--brand);
+      border-color: var(--brand);
     }
-    input.switch:checked::after { left: auto; right: 2px; background: var(--brand); }
     input.switch:focus-visible { outline: 1px solid rgba(90,132,102,0.8); outline-offset: 1px; }
 
     /* ── Site cards ──────────────────────────────────────────────────── */
@@ -1268,6 +1272,20 @@
          `already points here — check that the domain's DNS has an A record ` +
          `to this server's IP before requesting one.</p>` +
 
+         // ── Whether visitors' browsers cache — above Access (ruled). A
+         // literal toggle like Access, with the same action label beside
+         // the knob. Applied on change — both states are safe and
+         // reversible, so a Save button would be ceremony; a refused
+         // write flips the knob back. The access-flip reset is Access's
+         // story, told there — not repeated in this hint.
+         `<div class="switch-row"><label class="k">Caching</label>` +
+         `<span class="switch-value"><span class="cache-state"></span>` +
+         `<span class="switch-act"><label class="cache-action"></label>` +
+         `<input class="switch cache-switch" type="checkbox"></span></span></div>` +
+         `<p class="cfg-hint">Enabled: browsers keep copies and re-check ` +
+         `them every visit, so a visitor is never shown stale content. ` +
+         `Disabled: nothing is stored on visitors' machines.</p>` +
+
          `<div class="switch-row">` +
          `<label class="k auth-label">Access</label>` +
          `<span class="switch-value"><span class="auth-state"></span>` +
@@ -1277,19 +1295,6 @@
          `<div class="btn-row auth-save hidden" style="margin-top:0.9rem">` +
          `<button class="action save-site" type="button">Save</button></div>` +
          `<p class="hint auth-hint"></p>` +
-
-         // ── Whether visitors' browsers cache. A literal toggle, like
-         // Access (ruled: two states get a switch, not a menu). Applied
-         // on change — both states are safe and reversible, so a Save
-         // button would be ceremony; a refused write flips the knob back.
-         `<div class="switch-row"><label class="k">Caching</label>` +
-         `<span class="switch-value"><span class="cache-state"></span>` +
-         `<span class="switch-act">` +
-         `<input class="switch cache-switch" type="checkbox"></span></span></div>` +
-         `<p class="cfg-hint">On: browsers keep copies and re-check them ` +
-         `every visit, so a visitor is never shown stale content. Off: ` +
-         `nothing is stored on visitors' machines. Switching public/private ` +
-         `resets this to its default (public on, private off).</p>` +
 
          // ── Publishing: drop a folder, look at it, ship it.
          `<div class="split"></div>` +
@@ -1943,6 +1948,24 @@
         : 'Save the access settings for this site';
     };
 
+    // The cache switch reflects the stored value — always concrete, since
+    // access flips write the matching default onto it. A write the server
+    // refuses must not leave the knob lying about what is stored.
+    // Above renderInfo, which previews this knob during an access flip.
+    const cacheSw = q('.cache-switch');
+    const showCache = () => {
+      q('.cache-state').textContent = cacheSw.checked ? 'enabled' : 'disabled';
+      q('.cache-action').textContent = cacheSw.checked ? 'Disable' : 'Enable';
+    };
+    cacheSw.checked = (siteData.cache || 'yes') === 'yes';
+    showCache();
+    cacheSw.addEventListener('change', async () => {
+      showCache();
+      const ok = await saveSettings({ cache: cacheSw.checked ? 'yes' : 'no' },
+                                    cardIndex(card), badge, errEl);
+      if (!ok) { cacheSw.checked = !cacheSw.checked; showCache(); }
+    });
+
     const renderInfo = () => {
       const on = authOn();
       const pending = authDesired !== null && authDesired !== !!siteData.username;
@@ -1982,6 +2005,13 @@
              'every visit).'
            : '');
       ah.classList.toggle('warn', ah.textContent !== '');
+      // The caching knob moves WITH the flip (ruled): a knob that sits
+      // frozen until Save reads as the reset not working. While the flip
+      // is pending it shows the incoming access's default; an abandoned
+      // flip puts the stored truth back; Save makes it real (the server's
+      // one settings-write path performs the reset).
+      cacheSw.checked = pending ? !on : (siteData.cache || 'yes') === 'yes';
+      showCache();
 
       // Typing changes whether the login is complete, so the count follows
       // the keystroke — but only the attention half re-renders, or the
@@ -2038,22 +2068,6 @@
       const ok = await siteOp({ op: 'certificate', site: cardIndex(card) }, errEl);
       if (!ok) { b.disabled = false; b.textContent = old; }
     });
-
-    // The cache switch reflects the stored value — always concrete, since
-    // access flips write the matching default onto it. A write the server
-    // refuses must not leave the knob lying about what is stored.
-    {
-      const sw = q('.cache-switch'), state = q('.cache-state');
-      const show = () => { state.textContent = sw.checked ? 'on' : 'off'; };
-      sw.checked = (siteData.cache || 'yes') === 'yes';
-      show();
-      sw.addEventListener('change', async () => {
-        show();
-        const ok = await saveSettings({ cache: sw.checked ? 'yes' : 'no' },
-                                      cardIndex(card), badge, errEl);
-        if (!ok) { sw.checked = !sw.checked; show(); }
-      });
-    }
 
     q('.save-site').addEventListener('click', () => {
       clearError(errEl);

@@ -7463,22 +7463,43 @@ def run_browser_tests(s, tmpdir):
                   }"""))
 
             # Caching is per-site: a literal toggle on the card (ruled:
-            # two states get a switch, not a menu), on for a public site,
+            # two states get a switch, not a menu), enabled for a public
+            # site, sitting ABOVE Access with the same action-label shape,
             # and no cache field left on the Server tab.
             page.click("#tab-sites")
             page.wait_for_timeout(300)
-            check("...caching is a toggle on the card, on for a public site",
+            check("...caching is a labelled toggle above Access, enabled for a public site",
                   page.evaluate("""() => {
                     const sw = document.querySelector('.cache-switch');
-                    return !!sw && sw.type === 'checkbox' && sw.checked &&
-                           sw.classList.contains('switch') &&
+                    if (!sw || sw.type !== 'checkbox' || !sw.checked ||
+                        !sw.classList.contains('switch')) return false;
+                    const row = (el) => el.closest('.switch-row')
+                                          .getBoundingClientRect().top;
+                    return document.querySelector('.cache-state').textContent === 'enabled' &&
+                           document.querySelector('.cache-action').textContent === 'Disable' &&
+                           row(sw) < row(document.querySelector('.auth-switch')) &&
                            !document.querySelector('.cache-mode') &&
                            !document.getElementById('cfg-cache_policy');
                   }"""))
 
+            # Toggle cosmetics (ruled): the track is always the green tint
+            # — the same for on and off — and the knob carries the state,
+            # filled against empty. Compared between the checked caching
+            # switch and the unchecked access switch.
+            check("...toggle tracks match on/off; the knobs differ",
+                  page.evaluate("""() => {
+                    const a = document.querySelector('.cache-switch');
+                    const b = document.querySelector('.auth-switch');
+                    if (!a.checked || b.checked) return false;
+                    const track = (el) => getComputedStyle(el).backgroundColor;
+                    const knob = (el) => getComputedStyle(el, '::after').backgroundColor;
+                    return track(a) === track(b) && knob(a) !== knob(b);
+                  }"""))
+
             # The access flip's reset is said BEFORE Save (loudly, by
-            # ruling): arming the switch on a public site narrates both
-            # the sign-in and the caching turn-off.
+            # ruling) AND shown: the caching knob previews the incoming
+            # default the moment the switch flips, and an abandoned flip
+            # puts the stored truth back.
             page.locator(".auth-switch").first.check()
             page.wait_for_timeout(200)
             check("...arming private narrates the caching turn-off, loudly",
@@ -7488,8 +7509,18 @@ def run_browser_tests(s, tmpdir):
                     const h = document.querySelector('.auth-hint');
                     return getComputedStyle(h).color === 'rgb(251, 191, 36)';
                   }"""))
+            check("...and the caching knob previews the reset at the flip",
+                  page.evaluate("""() => {
+                    const sw = document.querySelector('.cache-switch');
+                    return !sw.checked &&
+                           document.querySelector('.cache-state')
+                                   .textContent === 'disabled';
+                  }"""))
             page.locator(".auth-switch").first.uncheck()
             page.wait_for_timeout(200)
+            check("...an abandoned flip puts the stored caching truth back",
+                  page.evaluate(
+                      "() => document.querySelector('.cache-switch').checked"))
 
             browser.close()
 

@@ -1001,6 +1001,70 @@ serve_dir = "b"
     prot2  = _json.loads(unb64(_json.loads(c._sign("https://acme.example/a", None))["protected"]))
     check("kid replaces jwk once account known", "kid" in prot2 and "jwk" not in prot2)
 
+    section("A reused-valid authorization is not re-challenged")
+    # Let's Encrypt reuses a still-valid authorization from an earlier order on
+    # the same account (the key persists in .acme-account.pem), and refuses a
+    # challenge POST on a non-pending authorization outright. issue() must
+    # prove only pending authorizations — the www fallback's bare-domain
+    # re-order is exactly this shape, and answering the reused authorization's
+    # challenge there turned the advertised fallback into a refusal.
+    class _FakeResp:
+        def __init__(self, obj=None, headers=None, text=""):
+            self._obj, self.headers, self.text = obj, headers or {}, text
+        def json(self):
+            return self._obj
+
+    chall_calls = []
+    acme_tmp    = tempfile.mkdtemp()
+    c2 = s._ACMEClient("https://acme.example/directory", akey)
+    c2._dir = {"newOrder": "https://acme.example/new-order"}
+    resources = {
+        "https://acme.example/authz/valid": {
+            "status": "valid",
+            "identifier": {"type": "dns", "value": "example.com"},
+            "challenges": [{"type": "http-01",
+                            "url": "https://acme.example/chall/valid",
+                            "token": "tok-valid"}]},
+        "https://acme.example/authz/pending": {
+            "status": "pending",
+            "identifier": {"type": "dns", "value": "www.example.com"},
+            "challenges": [{"type": "http-01",
+                            "url": "https://acme.example/chall/pending",
+                            "token": "tok-pending"}]},
+        "https://acme.example/order/1": {"status": "valid",
+                                         "certificate": "https://acme.example/cert/1"},
+        "https://acme.example/cert/1": "PEM CHAIN",
+    }
+
+    def fake_post(url, payload):
+        if url == "https://acme.example/new-order":
+            return _FakeResp({"authorizations": ["https://acme.example/authz/valid",
+                                                 "https://acme.example/authz/pending"],
+                              "finalize": "https://acme.example/finalize/1"},
+                             headers={"Location": "https://acme.example/order/1"})
+        if url.startswith("https://acme.example/chall/"):
+            chall_calls.append(url)
+            if url.endswith("/valid"):   # what the real CA answers
+                raise s._ACMEError("authorization must be pending")
+            resources["https://acme.example/authz/pending"]["status"] = "valid"
+            return _FakeResp({})
+        if url == "https://acme.example/finalize/1":
+            return _FakeResp({})
+        raise AssertionError(f"unexpected POST {url}")
+
+    c2._post        = fake_post
+    c2._post_as_get = lambda url: (_FakeResp(resources[url])
+                                   if isinstance(resources[url], dict)
+                                   else _FakeResp(text=resources[url]))
+    try:
+        pem = c2.issue(["example.com", "www.example.com"], b"csr-der", acme_tmp)
+        check("issue() succeeds past a reused-valid authorization", pem == "PEM CHAIN")
+        check("Only the pending authorization was challenged",
+              chall_calls == ["https://acme.example/chall/pending"])
+        check("No challenge file is left behind", os.listdir(acme_tmp) == [])
+    finally:
+        shutil.rmtree(acme_tmp, ignore_errors=True)
+
     section("Raising a rate limit takes effect for already-active IPs")
 
     # A deque keeps the maxlen it was born with; without the rebuild, an IP

@@ -3113,6 +3113,14 @@ class _ACMEClient:
         try:
             for authz_url in order["authorizations"]:
                 authz = self._post_as_get(authz_url).json()
+                # A still-valid authorization from an earlier order is reused
+                # by the CA (the account key persists, so the www fallback and
+                # any retry after validation meet one). Answering its challenge
+                # again is a protocol error — the CA refuses a POST to a
+                # non-pending challenge — so only pending ones are proved;
+                # the settle loop below accepts either kind.
+                if authz.get("status") != "pending":
+                    continue
                 chall = next(c for c in authz["challenges"] if c["type"] == "http-01")
                 path  = os.path.join(challenge_dir, chall["token"])
                 with open(path, "w") as f:

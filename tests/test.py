@@ -5542,6 +5542,27 @@ def run_server_tests(s, serve_dir):
     check("An ip:port XFF is adopted as its address, not lumped as junk",
           req("GET", headers={"X-Forwarded-For": "[2001:db8::7]:443"}).status != 429)
 
+    # A proxy that adds the forwarded client as its OWN header line (HAProxy
+    # style) leaves a client-forged line FIRST on the wire. Reading only the
+    # first line (HTTPMessage.get) hands the forger a fresh bucket per
+    # request; the rightmost hop must be rightmost across ALL lines.
+    s._request_times.clear()
+    def _two_xff_lines(forged, appended):
+        conn = http.client.HTTPSConnection("127.0.0.1", TEST_PORT,
+                                           context=SSL_CTX, timeout=10)
+        try:
+            conn.putrequest("GET", "/")
+            conn.putheader("X-Forwarded-For", forged)
+            conn.putheader("X-Forwarded-For", appended)
+            conn.endheaders()
+            return conn.getresponse().status
+        finally:
+            conn.close()
+    _two_xff_lines("6.6.6.1", "203.0.113.7")
+    _two_xff_lines("6.6.6.2", "203.0.113.7")
+    check("A rotating forged first XFF line cannot mint fresh buckets",
+          _two_xff_lines("6.6.6.3", "203.0.113.7") == 429)
+
     s.config.rate_limit    = 200
     s.config.trusted_proxy = ""
     s._request_times.clear()

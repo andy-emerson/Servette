@@ -1175,7 +1175,17 @@ def _handle_request(method, url_path, headers, raw_ip):
     ip = _normalize_ip(raw_ip)
     log_path = _loggable(url_path)   # request path, escaped for the log lines below
     if config.trusted_proxy:
-        xff = headers.get("X-Forwarded-For", "")
+        # ALL X-Forwarded-For lines, joined in wire order: get() reads only
+        # the FIRST line, and a proxy that adds the client as its own header
+        # line (HAProxy-style) rather than appending to the client's would
+        # leave a client-written first line as the one read — every request
+        # minting a fresh rate-limit bucket from a forged address. Joining
+        # restores the one meaning the header has: a single comma list whose
+        # rightmost value is the trusted proxy's own contribution.
+        if hasattr(headers, "get_all"):
+            xff = ", ".join(headers.get_all("X-Forwarded-For") or [])
+        else:
+            xff = headers.get("X-Forwarded-For", "")
         # Rightmost XFF value is what the single trusted proxy appended.
         # Correct for one-hop topologies (overwrite-style or append-style).
         # Multi-hop chains are not supported — rightmost would be an intermediate proxy.

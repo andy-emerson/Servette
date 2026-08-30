@@ -50,7 +50,7 @@ Then put your site on it from your own computer: run `servette admin` over SSH a
 
 ## Who is Servette for?
 
-**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~6,800 lines of Python, no hidden machinery), sized and structured so that one person can fully understand all of it. Reading the entire source, which was written to be read, is a weekend's honest work.
+**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~6,900 lines of Python, no hidden machinery), sized and structured so that one person can fully understand all of it. Reading the entire source, which was written to be read, is a weekend's honest work.
 
 **People with a site to share that needs a simple secure server.** Development servers are perfect while you build, but they are not meant to face the internet. Servette is built to stay up: a trusted certificate that renews itself, and a hardened service that survives reboots.
 
@@ -89,7 +89,7 @@ Re-run `servette` any time for the interactive shell — or run any command as `
 | `sites [--json]` | List configured sites |
 | `set [n] k=v ...` | Change settings non-interactively (`servette set 0 active=no`) |
 | `admin` | Open the browser admin page (publish, settings) over your SSH tunnel |
-| `publish [n] <folder>` | Publish a folder on the server as a site's content |
+| `publish <folder>` | Publish a folder on the server as a site's content — site index first on a multi-site box |
 | `restore-site [n]` | Roll back a site's content to a kept version |
 | `help` · `quit` | Command list · exit |
 

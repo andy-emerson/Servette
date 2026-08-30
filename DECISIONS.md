@@ -6,6 +6,70 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## A standing certificate is not re-ordered; the terminal may overrule, the page may not
+
+**Ruled (Human):** both operator doors to issuance run `_standing_cert_days`
+before ordering: a site named for the requested domain, whose certificate on
+disk covers it with more than the watchdog's 30-day renewal line remaining,
+already has what an order would buy — and each duplicate order spends Let's
+Encrypt's five-a-week budget, the same budget renewal later draws on. The
+terminal's cert prompt confirms before ordering anyway (re-typing the domain
+is the natural re-run of setup, and an operator holding a certificate they
+distrust can still say yes); the page's certificate button no-ops with the
+days remaining and offers no override, because a button invites the double
+click and the retry, and the operator who truly wants a duplicate has the
+terminal. The watchdog is untouched: it acts only under the same 30-day
+line the guard answers by, so renewal and the guard cannot disagree.
+Self-signed pairs never read as standing coverage — they name no real
+domain.
+**Rejected:** a force path on every surface (more surface than the case
+deserves — the terminal confirm is the one escape hatch); guarding inside
+`_obtain_trusted_cert` itself (the watchdog calls it from a background
+thread that must never prompt, so the question belongs at the doors).
+**Reopen if:** issuance grows a reason to re-order early that the doors
+cannot express — a key-compromise revocation flow, or coverage changes
+(www) that leave the standing certificate covering the name but not the
+need.
+*(2026-08-30)*
+## Caching is one independent per-site toggle, default enabled
+
+**Ruled (Human):** the browser-cache enum is gone. One per-site toggle,
+`cache = "yes" | "no"`, always holding a concrete value: `yes` (the
+default for every site, and what a file without the key gets) —
+visitors keep copies re-checked on every use (`no-cache`: a publish is
+visible on the next request, unchanged files answer 304); `no` —
+visitors keep no copies at all (`no-store`). **Access and caching are
+independent** (re-ruled 2026-08-30, superseding this entry's earlier
+form): flipping a site public or private never touches the toggle, no
+surface announces a coupling that no longer exists, and the operator
+sets caching to whatever they want on any site. The one place access
+still shows in caching is the header *form*: an enabled private site's
+copies are marked `private` rather than `public`, so shared caches
+never hold them. `cache_policy` and `cache_max_age` are retired; old
+configs' keys are ignored on load and dropped at the next save.
+**Why:** two settings that move each other read as broken — the earlier
+access-flip reset, built to be "loud", was still discovered as caching
+apparently rewriting access (an armed, unsaved flip snapped back when
+another control's save re-rendered the card); one owner per setting is
+the only model the operator can predict. The no-wrong-answer principle
+removes the enum rather than renaming its options; a stored concrete
+value beats a derived `auto`.
+**Rejected:** `max-age` in any form — the operator with traffic worth
+tuning cache lifetimes has outgrown Servette by its own scope table,
+and a lifetime is the one value that silently breaks the instant-updates
+promise; a derived `auto` value (a silent derivation hides the behavior
+the toggle exists to state); a host-level toggle (caching is a per-site
+fact); the access-flip reset with default `no-store` behind a password
+(superseded: predictability of independent settings outranked the
+secure-by-default derivation — an operator who wants `no` on a private
+site sets it, and the page's caching hint says what each state stores).
+**Reopen if:** a real operator leaks private content through a shared
+cache despite the `private` marking — the reset returns as an explicit
+confirmation step on the access flip, never as a silent write; or a
+public site demonstrably needs fewer requests than revalidation allows —
+`max-age` returns as one per-site number, its zero meaning `yes`.
+*(2026-08-27, re-ruled 2026-08-30)*
+
 ## A paused site is invisible to TLS too; reactivation re-earns the certificate
 
 **Ruled (Human):** `_build_site_ssl_contexts` skips inactive sites — no
@@ -655,6 +719,12 @@ permanent/temporary column — is replaced by the Human's per-rule ruling
 *(2026-08-24)*
 
 ## A preview is content over the tunnel, not a deployment
+
+*Amended 2026-08-27 (Human): the draft opens full size in its own tab
+through a `rel="noopener"` link — the 420px sandboxed frame was not an
+honest representation. The isolation moved from opaque-origin to
+noopener plus passcode-gated endpoints; the token-in-the-path and
+same-pipeline clauses stand.*
 
 **Ruled (Human):** Preview stages the chosen folder where only the admin
 page can see it and shows it in a frame — did the CSS land, is the image

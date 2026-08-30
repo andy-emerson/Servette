@@ -142,6 +142,40 @@ def _free_port():
         return sock.getsockname()[1]
 
 
+def gen_named_cert(dirpath, domain, days):
+    """A self-issued certificate whose SAN names `domain`, valid for `days` —
+    what an issued Let's Encrypt pair looks like to the inspection helpers,
+    for tests that need a standing certificate without an authority."""
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key  = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)])
+    now  = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=days))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(domain)]),
+                       critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = os.path.join(dirpath, f"{domain}-{days}d-cert.pem")
+    key_path  = os.path.join(dirpath, f"{domain}-{days}d-key.pem")
+    with open(cert_path, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    with open(key_path, "wb") as f:
+        f.write(key.private_bytes(serialization.Encoding.PEM,
+                                  serialization.PrivateFormat.TraditionalOpenSSL,
+                                  serialization.NoEncryption()))
+    return cert_path, key_path
+
+
 class Response:
     def __init__(self, status, headers, body):
         self.status  = status
@@ -723,25 +757,42 @@ serve_dir = "b"
     check("__version__ has 3 parts",         len(s.__version__.split(".")) == 3)
     check("__version__ major is 0",          s.__version__.split(".")[0] == "0")
 
-    section("Cache-Control header")
+    section("Cache-Control header — a concrete per-site toggle")
 
-    s.config.sites[0].username     = ""
-    s.config.cache_policy = "no-store"
-    check("no-store",                          s._cache_control_header(s.config.sites[0].username) == "no-store")
+    site0 = s.config.sites[0]
+    site0.username, site0.cache = "", "yes"
+    check("public, yes → copies re-checked",
+          s._cache_control_header(site0) == "public, no-cache")
 
-    s.config.cache_policy = "no-cache"
-    check("no-cache, no auth → public",        s._cache_control_header(s.config.sites[0].username) == "public, no-cache")
+    site0.username, site0.cache = "alice", "no"
+    check("private, no → no copies at all",
+          s._cache_control_header(site0) == "no-store")
 
-    s.config.sites[0].username = "alice"
-    check("no-cache, with auth → private",     s._cache_control_header(s.config.sites[0].username) == "private, no-cache")
+    site0.cache = "yes"
+    check("yes on a private site: the media site keeps re-checked copies",
+          s._cache_control_header(site0) == "private, no-cache")
 
-    s.config.cache_policy  = "max-age"
-    s.config.cache_max_age = 3600
-    check("max-age with auth → private, max-age=3600",
-          s._cache_control_header(s.config.sites[0].username) == "private, max-age=3600")
+    site0.username, site0.cache = "", "no"
+    check("no on a public site: the app with secrets leaves no copies",
+          s._cache_control_header(site0) == "no-store")
 
-    s.config.sites[0].username     = ""
-    s.config.cache_policy = "no-cache"
+    # Caching is independent of access (ruled): the default is enabled
+    # for every site, and no access flip on any surface moves the toggle.
+    check("a new site defaults to caching enabled",
+          s.Site().cache == "yes")
+    check("a private site's file without the key defaults the same",
+          s.Site({"username": "a"}).cache == "yes")
+    _flip = s.Site()
+    _flip.cache = "no"
+    s._set_site_value(_flip, "username", "bob")
+    check("going private leaves the caching toggle alone",
+          _flip.cache == "no")
+    _flip.cache = "yes"
+    s._set_site_value(_flip, "username", "")
+    check("going public leaves it alone too",
+          _flip.cache == "yes")
+
+    site0.cache = "yes"
 
     section("Rate limiter bounds memory per IP")
 
@@ -1139,6 +1190,57 @@ def run_dispatch_tests(s):
           "restore-site" in [c.split()[0] for c, _ in s._COMMANDS]
           and s._needs_root("restore-site"))
 
+    # The admin door clears its own stale predecessor (ruled): a dropped
+    # SSH session leaves 'servette admin' holding the port, and no user
+    # should need pkill to get back in.
+    if not s._IS_MACOS:
+        free = _free_port()
+        decoy = subprocess.Popen(
+            [sys.executable, "-c",
+             "import socket, time; s = socket.socket(); "
+             f"s.bind(('127.0.0.1', {free})); s.listen(1); time.sleep(60)",
+             "servette", "admin"])
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    socket.create_connection(("127.0.0.1", free), 0.2).close()
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            pids = s._stale_admin_pids()
+            check("A stale admin run is found by its command line, never ourselves",
+                  decoy.pid in pids and os.getpid() not in pids)
+            saved_uiport = s._UI_PORT
+            try:
+                s._UI_PORT = free
+                httpd, code = s._reclaim_admin_port(s.config.sites[0],
+                                                    s._UI_ADMIN_PAGE)
+                check("Re-running admin ends the stale run and takes its port",
+                      httpd is not None and bool(code)
+                      and decoy.poll() is not None)
+                if httpd is not None:
+                    s._stop_ui(httpd)
+                # A port held by something that is NOT an admin run is
+                # refused, never killed.
+                blocker = socket.socket()
+                blocker.bind(("127.0.0.1", free))
+                blocker.listen(1)
+                try:
+                    httpd2, _ = s._reclaim_admin_port(s.config.sites[0],
+                                                      s._UI_ADMIN_PAGE)
+                    check("A foreign holder of the port is refused, not killed",
+                          httpd2 is None
+                          and blocker.fileno() != -1)
+                finally:
+                    blocker.close()
+            finally:
+                s._UI_PORT = saved_uiport
+        finally:
+            if decoy.poll() is None:
+                decoy.kill()
+            decoy.wait()
+
     section("Admin command")
 
     # The door to the browser half: the page server brackets exactly this
@@ -1211,7 +1313,8 @@ def run_dispatch_tests(s):
     check("...keys card state by the site's folder, the identity that survives",
           "siteData.dir || siteData.domain" in s._UI_ADMIN_PAGE)
     check("...names redirected traffic and totals the unnamed remainder",
-          "'Redirected'" in s._UI_ADMIN_PAGE
+          "'Redirected (301/302/308)'" in s._UI_ADMIN_PAGE
+          and "'Not found (404)'" in s._UI_ADMIN_PAGE
           and "row('Other'" in s._UI_ADMIN_PAGE)
     # The passcode is attached in one place rather than at each call site,
     # so no request can be written that forgets it.
@@ -1267,16 +1370,17 @@ def run_dispatch_tests(s):
     # Redirects are a setting, so the page edits them through the settings
     # write both surfaces share — not through a door of their own.
     # Preview and download on the page. The frame withholds
-    # allow-same-origin deliberately: a draft runs on an opaque origin and
-    # cannot read the page that staged it.
-    # Read the attribute itself, not the page text: prose about the sandbox
-    # is not the sandbox, and an assertion that cannot tell them apart would
-    # pass on a comment while the frame ran wide open.
-    sandboxes = re.findall(r'sandbox="([^"]*)"', s._UI_ADMIN_PAGE)
-    check("...offers a preview in a frame that cannot reach back",
-          sandboxes == ["allow-scripts allow-forms"]
+    # The preview opens in its own tab (ruled: full size, not a 420px
+    # frame). rel=noopener is the isolation now — the draft's tab must hold
+    # no handle back to the page whose address carries the passcode. Read
+    # the attribute itself, not the page text: prose about noopener is not
+    # noopener, and an assertion that cannot tell them apart would pass on
+    # a comment while the link ran wide open.
+    check("...offers a preview in a tab that cannot reach back",
+          re.search(r'class="action preview-open"[^>]*rel="noopener"',
+                    s._UI_ADMIN_PAGE) is not None
           and "api('/preview'" in s._UI_ADMIN_PAGE)
-    check("...whose frame URL carries the preview token, never the passcode",
+    check("...whose link carries the preview token, never the passcode",
           "'/preview/' + encodeURIComponent(data.token)" in s._UI_ADMIN_PAGE)
     # Download is removed by ruling: a sys admin already knows how to copy
     # a folder off their own box, and the terminal's own tools do it better.
@@ -1343,9 +1447,11 @@ def run_dispatch_tests(s):
           and "(kind ? ',' + kind : '')" in s._UI_ADMIN_PAGE
           and "redirects_temporary" in s._UI_ADMIN_PAGE
           and "' (temporary)'" in s._UI_ADMIN_PAGE)
-    check("...and the outside check the tunnel vantage cannot compute itself",
+    check("...and the outside check, a Test button on the Serving row",
           "outside" in s._UI_ADMIN_PAGE
-          and "servette-check" in s._UI_ADMIN_PAGE)
+          and "servette-check" in s._UI_ADMIN_PAGE
+          and ">Test</button>" in s._UI_ADMIN_PAGE
+          and "Test connection" not in s._UI_ADMIN_PAGE)
     check("...and the Server panel wired to the set vocabulary",
           "panel-server" in s._UI_ADMIN_PAGE
           and "getJSON('/config')" in s._UI_ADMIN_PAGE
@@ -1358,11 +1464,13 @@ def run_dispatch_tests(s):
           and '<div class="cfg-group">Performance</div>' in s._UI_ADMIN_PAGE
           and "SECURITY_FIELDS" in s._UI_ADMIN_PAGE
           and "PERFORMANCE_FIELDS" in s._UI_ADMIN_PAGE)
-    check("...with the browser-cache pair among the performance fields",
-          "'cache_policy'" in s._UI_ADMIN_PAGE
-          and "'cache_max_age'" in s._UI_ADMIN_PAGE
-          and "choices: ['no-store', 'no-cache', 'max-age']"
-              in s._UI_ADMIN_PAGE)
+    check("...and the cross-tab banner skips quiet rows",
+          "!c.ok && !c.quiet" in s._UI_ADMIN_PAGE)
+    check("...with browser caching a per-site toggle on the card, not a host field",
+          "cache-switch" in s._UI_ADMIN_PAGE
+          and "cache-mode" not in s._UI_ADMIN_PAGE
+          and "'cache_policy'" not in s._UI_ADMIN_PAGE
+          and "'cache_max_age'" not in s._UI_ADMIN_PAGE)
     check("...with every site's facts on its own card and the server's on the server tab",
           "auth-switch" in s._UI_ADMIN_PAGE and "host-rows" in s._UI_ADMIN_PAGE
           and "cfg-site-select" not in s._UI_ADMIN_PAGE)
@@ -1624,6 +1732,16 @@ def run_dispatch_tests(s):
                 check("An inactive swapfile is reported as inactive, not absent",
                       "inactive" in srow["detail"]
                       and any("inactive" in i for i in s._production_issues()))
+                # Ruled: the shortfall warns amber on its own row (and in
+                # the terminal), but never as the cross-tab banner — the
+                # row carries `quiet`, and the page's band skips quiet
+                # rows.
+                s._swap_sizes = lambda: (999, 0)
+                srow = [r for r in s._health_checks()
+                        if r["key"] == "swap"][0]
+                check("An active swap below the recommendation warns on its row only",
+                      not srow["ok"] and srow.get("quiet") is True
+                      and "MB active" in srow["detail"])
             finally:
                 s._swap_sizes, s._swap_offer = saved_sizes, saved_offer
                 s._SWAP_PATH = saved_swp
@@ -2062,6 +2180,28 @@ def run_dispatch_tests(s):
             check("...and refusing to ask for a certificate with no name to put on it",
                   st == 422 and b"set a domain first" in body)
             s.config.sites[n0].domain = "card.example"
+
+            # The guard on the page's certificate button: a standing
+            # certificate makes the button a no-op with a sentence, and the
+            # issuance core is never reached — a double click or a retry
+            # cannot spend a duplicate order. The terminal keeps the
+            # override; the page deliberately has none.
+            guard_dir = tempfile.mkdtemp()
+            saved_cert_file = s.config.sites[n0].cert_file
+            guard_calls = []
+            try:
+                cert_g, _ = gen_named_cert(guard_dir, "card.example", 90)
+                s.config.sites[n0].cert_file = cert_g
+                s._obtain_trusted_cert = (lambda domain, site_obj:
+                                          guard_calls.append(domain))
+                st, body = ui_req("POST", f"/sites?t={ui_code}",
+                                  body=json.dumps({"op": "certificate",
+                                                   "site": n0}).encode())
+                check("op=certificate on a standing certificate no-ops, naming the days",
+                      st == 422 and b"more days" in body and guard_calls == [])
+            finally:
+                s.config.sites[n0].cert_file = saved_cert_file
+                shutil.rmtree(guard_dir, ignore_errors=True)
             s._obtain_trusted_cert = saved_obtain
 
             saved_sites_list = s.config.sites
@@ -2362,18 +2502,25 @@ def run_dispatch_tests(s):
               s.config.sites[0].active is True)
 
         saved_auth = (s.config.sites[0].username, s.config.sites[0].password_hash,
-                      s.config.sites[0].password_salt)
+                      s.config.sites[0].password_salt, s.config.sites[0].cache)
         s.config.sites[0].username = "probe"
         s.config.sites[0].password_hash = "stale-hash"
         s.config.sites[0].password_salt = "stale-salt"
-        with contextlib.redirect_stdout(io.StringIO()):
+        s.config.sites[0].cache = "no"
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
             s.cmd_set(["username="])
         check("set username= is the one auth switch — the stored password clears with it",
               s.config.sites[0].username == ""
               and s.config.sites[0].password_hash == ""
               and s.config.sites[0].password_salt == "")
+        # Caching is independent of access (ruled): the flip leaves the
+        # toggle alone and says nothing about it.
+        check("...and the access flip leaves the caching toggle alone, silently",
+              s.config.sites[0].cache == "no"
+              and "copies" not in buf.getvalue().lower()
+              and "caching" not in buf.getvalue().lower())
         (s.config.sites[0].username, s.config.sites[0].password_hash,
-         s.config.sites[0].password_salt) = saved_auth
+         s.config.sites[0].password_salt, s.config.sites[0].cache) = saved_auth
 
         # The folder left the vocabulary by ruling: Servette assigns it, so
         # there is no key to answer wrongly. 'set dir=' is now as unknown as
@@ -3646,16 +3793,27 @@ def run_dispatch_tests(s):
     _tls_src = inspect.getsource(s._build_site_ssl_contexts)
     check("The TLS builder skips inactive sites before loading anything",
           "if not site.active:" in _tls_src and "continue" in _tls_src)
-    check("cache_policy is a choice, stated and refused outside it",
-          "no-store" in s._set_host_value(_sc, "cache_policy", "weird")
-          and s._set_host_value(_sc, "cache_policy", "max-age") == ""
-          and _sc.cache_policy == "max-age")
-    # A negative max-age is not a shorter cache, it is a malformed
-    # Cache-Control header on every response.
-    check("cache_max_age refuses negatives and takes zero",
-          s._set_host_value(_sc, "cache_max_age", "-5") != ""
-          and s._set_host_value(_sc, "cache_max_age", "0") == ""
-          and _sc.cache_max_age == 0)
+    # The retired pair is refused as unknown, not silently accepted; the
+    # per-site `cache` key is the surviving door, a choice stated in its
+    # refusal.
+    check("the retired cache keys have left the vocabulary",
+          "cache_policy" not in s._SET_HOST_KEYS
+          and "cache_max_age" not in s._SET_HOST_KEYS)
+    _site_sc = s.Site()
+    check("cache is a choice, stated and refused outside it",
+          "yes" in s._set_site_value(_site_sc, "cache", "sometimes")
+          and s._set_site_value(_site_sc, "cache", "no") == ""
+          and _site_sc.cache == "no")
+    _bad_cache_raised = False
+    try:
+        s.Site({"cache": "max-age"})
+    except s._ConfigInvalid as e:
+        _bad_cache_raised = "yes" in str(e)
+    check("the load door refuses a cache value no door would save",
+          _bad_cache_raised)
+    check("a saved override survives the config round-trip",
+          s.Site({"cache": "no"}).cache == "no"
+          and s.Site({"username": "a", "cache": "yes"}).cache == "yes")
     check("tls_min_version is 1.2 or 1.3, nothing else",
           s._set_host_value(_sc, "tls_min_version", "1.1") != ""
           and s._set_host_value(_sc, "tls_min_version", "1.3") == "")
@@ -4985,17 +5143,13 @@ def run_server_tests(s, serve_dir):
     check("...answered by the same page, byte for byte",
           req("GET", path="/selftest/").body == resp.body)
 
-    # An error page must never sit in a shared cache with a positive lifetime:
-    # the operator publishes the file that was missing and cached clients would
-    # keep the 404.
-    saved_policy, saved_age = s.config.cache_policy, s.config.cache_max_age
-    s.config.cache_policy, s.config.cache_max_age = "max-age", 3600
-    try:
-        cc_404 = req("GET", path="/nonexistent.html").headers.get("Cache-Control", "")
-        check("Default 404 is not cached with a positive max-age",
-              "max-age" not in cc_404 and "no-cache" in cc_404)
-    finally:
-        s.config.cache_policy, s.config.cache_max_age = saved_policy, saved_age
+    # An error page must never sit in a cache with a positive lifetime:
+    # the operator publishes the file that was missing and cached clients
+    # would keep the 404. Revalidate-always is now true by construction —
+    # this pins that no mode reintroduces a lifetime.
+    cc_404 = req("GET", path="/nonexistent.html").headers.get("Cache-Control", "")
+    check("Default 404 carries no positive lifetime",
+          "max-age" not in cc_404 and "no-cache" in cc_404)
 
     custom_404      = b"<html><body>Custom 404</body></html>"
     custom_404_path = os.path.join(serve_dir, "404.html")
@@ -5215,22 +5369,17 @@ def run_server_tests(s, serve_dir):
         s.config.sites[0].password_salt = ""
         s._auth_fail_times.clear()
 
-    section("Cache-Control policies")
+    section("Cache-Control on the wire — derived, and overridable")
 
-    s.config.cache_policy = "no-cache"
-    check("no-cache in response",
+    s.config.sites[0].cache = "yes"
+    check("public site: no-cache in response",
           "no-cache" in req("GET").headers.get("Cache-Control", ""))
 
-    s.config.cache_policy  = "max-age"
-    s.config.cache_max_age = 7200
-    check("max-age=7200 in response",
-          "max-age=7200" in req("GET").headers.get("Cache-Control", ""))
-
-    s.config.cache_policy = "no-store"
-    check("no-store in response",
+    s.config.sites[0].cache = "no"
+    check("cache=no: no-store in response",
           "no-store" in req("GET").headers.get("Cache-Control", ""))
 
-    s.config.cache_policy = "no-cache"
+    s.config.sites[0].cache = "yes"
 
     section("Request rate limiting")
 
@@ -5420,6 +5569,69 @@ def run_cert_tests(s, tmpdir):
     test_cert = os.path.join(tmpdir, "cert.pem")
     days2     = s._cert_days_remaining(test_cert)
     check("reads test cert expiry correctly", days2 is not None and days2 > 0)
+
+    section("The issuance guard")
+
+    # _standing_cert_days answers the days a site already holds for a domain,
+    # or None where an order is warranted — the check both operator doors run
+    # so a re-run of setup or a double-clicked button cannot spend Let's
+    # Encrypt's duplicate-certificate budget on a certificate already in hand.
+    guard_dir = tempfile.mkdtemp()
+    try:
+        cert90, key90 = gen_named_cert(guard_dir, "guard.example", 90)
+        cert10, _     = gen_named_cert(guard_dir, "guard.example", 10)
+
+        site = s.Site({"domain": "guard.example", "cert_file": cert90,
+                       "key_file": key90, "serve_dir": guard_dir})
+        days = s._standing_cert_days(site, "guard.example")
+        check("A standing certificate with >30 days answers its days remaining",
+              days is not None and 85 <= days <= 90)
+        check("A domain other than the site's is an order, not a duplicate",
+              s._standing_cert_days(site, "other.example") is None)
+        site.cert_file = cert10
+        check("Inside the watchdog's 30-day renewal line the guard stands aside",
+              s._standing_cert_days(site, "guard.example") is None)
+        site.cert_file = cert_path   # the self-signed pair generated above
+        check("A self-signed certificate never reads as standing coverage",
+              s._standing_cert_days(site, "guard.example") is None)
+        site.cert_file = os.path.join(guard_dir, "missing.pem")
+        check("A missing certificate file is an order",
+              s._standing_cert_days(site, "guard.example") is None)
+
+        # The terminal door: re-typing the covered domain asks before
+        # ordering, and only a yes reaches the issuance core.
+        site.cert_file = cert90
+        calls = []
+        saved_obtain, saved_input = s._obtain_trusted_cert, s._input
+        try:
+            s._obtain_trusted_cert = lambda domain, site_obj: calls.append(domain)
+            answers = iter(["guard.example", "n"])
+            s._input = lambda *a, **k: next(answers, "")
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                s._config_cert(site)
+            check("Declining the terminal confirm places no order, unchanged",
+                  calls == [] and "unchanged" in buf.getvalue())
+            answers = iter(["guard.example", "y"])
+            s._input = lambda *a, **k: next(answers, "")
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._config_cert(site)
+            check("Confirming overrules the guard and orders",
+                  calls == ["guard.example"])
+            # No standing coverage: issuance runs with no question asked — a
+            # prompt would read the exhausted feed's "" as a decline and fail
+            # the order this check requires.
+            site.domain = ""
+            calls.clear()
+            answers = iter(["guard.example"])
+            s._input = lambda *a, **k: next(answers, "")
+            with contextlib.redirect_stdout(io.StringIO()):
+                s._config_cert(site)
+            check("With no standing coverage issuance runs without a question",
+                  calls == ["guard.example"])
+        finally:
+            s._obtain_trusted_cert, s._input = saved_obtain, saved_input
+    finally:
+        shutil.rmtree(guard_dir, ignore_errors=True)
 
 
 def run_install_tests(s, tmpdir):
@@ -7018,10 +7230,23 @@ def run_browser_tests(s, tmpdir):
                   and page.locator("#site-cards .site-card").count() == 1)
 
             # The bug a text pin cannot see: a card asking for site -1.
-            check("...the version list rendered, so its site index resolved",
-                  "file" in page.locator(".ver-state").first.inner_text())
-            check("...with a Restore for the version that is not live",
-                  page.locator("button.restore").count() == 1)
+            vs = page.locator(".ver-state").first.inner_text()
+            check("...the version state rendered, so its site index resolved",
+                  "·" in vs and vs.strip().endswith("B"))
+            # History is one dropdown with a single Restore that acts on
+            # the selection: dim while the live version is selected, armed
+            # the moment another one is.
+            check("...with history a dropdown whose Restore arms off the live pick",
+                  page.evaluate("""() => {
+                    const pick = document.querySelector('.ver-pick');
+                    const b = document.querySelector('.ver-restore');
+                    if (!pick || !b || pick.options.length !== 2) return false;
+                    if (!b.disabled) return false;
+                    const other = [...pick.options].find(o => !o.selected);
+                    pick.value = other.value;
+                    pick.dispatchEvent(new Event('change'));
+                    return !b.disabled;
+                  }"""))
 
             # The dot is markup either way; only CSS decides it is a dot.
             check("...and the running dot is a dot where the status row puts it",
@@ -7030,6 +7255,32 @@ def run_browser_tests(s, tmpdir):
                     el.innerHTML = '<span class=dot></span>running';
                     const c = getComputedStyle(el.querySelector('.dot'));
                     return c.width === '7px' && c.borderRadius === '50%';
+                  }"""))
+
+            # Every panel fills at login (ruled), not on its tab's first
+            # click: the load meter is sampling and the traffic summary is
+            # rendered while Sites is still the visible panel.
+            check("...the load meter is sampling before the stats tab is opened",
+                  page.evaluate(
+                      "() => document.getElementById('load-rows').innerHTML !== ''"))
+            check("...and the traffic summary is rendered before its tab is opened",
+                  page.evaluate(
+                      "() => document.getElementById('traffic-rows').innerHTML !== ''"))
+
+            # The Serving link left .rows for its own switch-row; an anchor
+            # no rule reaches falls back to the browser default — visited
+            # purple. The pin is computed colour, which a text pin cannot
+            # see.
+            check("...the serving link wears the page's colour, not the browser's",
+                  page.evaluate("""() => {
+                    const a = document.querySelector('.serving-state a');
+                    if (!a) return false;
+                    const probe = document.createElement('span');
+                    probe.style.color = 'var(--brand)';
+                    document.body.appendChild(probe);
+                    const want = getComputedStyle(probe).color;
+                    probe.remove();
+                    return getComputedStyle(a).color === want;
                   }"""))
 
             for tab in ("server", "stats", "sites"):
@@ -7065,22 +7316,26 @@ def run_browser_tests(s, tmpdir):
                   and 0 < box_p["y"] - (box_b["y"] + box_b["height"]) < 60)
             page.locator(".do-cancel").first.click()
 
-            # Folding: the body goes, the head stays — so a folded card
-            # still says which site it is and whether it needs attention.
-            page.locator("button.fold").first.click()
+            # The accordion (ruled): the header is the toggle — one click
+            # collapses, one click reopens — and a single-site box loads
+            # with its card open. The body goes, the head stays, so a
+            # collapsed card still says which site it is and whether it
+            # needs attention.
+            check("...a single-site box loads with its card open",
+                  page.locator(".site-card .card-body").first.is_visible())
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
-            check("...folding hides the body and keeps the head",
+            check("...a header click hides the body and keeps the head",
                   not page.locator(".site-card .card-body").first.is_visible()
                   and page.locator(".site-card .card-title").first.is_visible())
             # It has to survive a re-render, or every save would spring it
-            # open again.
-            page.click("#tab-server")
-            page.wait_for_timeout(600)
-            page.click("#tab-sites")
+            # open again. Driven by refresh() directly: tab clicks no
+            # longer rebuild anything (ruled — panels fill at login).
+            page.evaluate("() => refresh()")
             page.wait_for_timeout(900)
             check("...and survives the re-render that follows every op",
                   not page.locator(".site-card .card-body").first.is_visible())
-            page.locator("button.fold").first.click()
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
             check("...unfolding brings it back",
                   page.locator(".site-card .card-body").first.is_visible())
@@ -7094,9 +7349,7 @@ def run_browser_tests(s, tmpdir):
             saved_cert = s.config.sites[0].cert_file
             try:
                 s.config.sites[0].cert_file = ""      # nothing trusted to present
-                page.click("#tab-server")
-                page.wait_for_timeout(400)
-                page.click("#tab-sites")
+                page.evaluate("() => refresh()")
                 page.wait_for_timeout(900)
                 info = page.locator(".info").first.inner_text()
                 # Two indicators for one fault, and exactly two: the Status
@@ -7114,27 +7367,27 @@ def run_browser_tests(s, tmpdir):
                       and not page.locator(".badge.needs").first.is_visible())
                 # Folded, the pill takes over — the count does not vanish
                 # just because the body is hidden.
-                page.locator("button.fold").first.click()
+                page.locator(".site-card .card-head").first.click()
                 page.wait_for_timeout(300)
                 check("...and folding hands that count to the pill",
                       page.locator(".badge.needs").first.is_visible())
-                page.locator("button.fold").first.click()
+                page.locator(".site-card .card-head").first.click()
                 page.wait_for_timeout(300)
             finally:
                 s.config.sites[0].cert_file = saved_cert
-                page.click("#tab-sites")
-                page.wait_for_timeout(800)
+                page.evaluate("() => refresh()")
+                page.wait_for_timeout(900)
 
             # The pill mirrors the Status line both ways (the ruled shape):
             # a healthy folded card wears the green all-clear rather than
             # nothing, so an empty head never has to mean two things.
-            page.locator("button.fold").first.click()
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
             _pill = page.locator(".badge.needs").first
             check("A healthy folded card wears the green all-clear pill",
                   _pill.is_visible() and "healthy" in _pill.inner_text()
                   and "badge-green" in (_pill.get_attribute("class") or ""))
-            page.locator("button.fold").first.click()
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
 
             # An unfinished login is treated as exactly what every other
@@ -7203,13 +7456,13 @@ def run_browser_tests(s, tmpdir):
             # only because a hidden one is always emitted — a client-side
             # fault has no rebuild to emit one, and a folded card's Status
             # row is the pill or nothing.
-            page.locator("button.fold").first.click()
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
             pill_loc = page.locator(".site-card .badge.needs").first
             check("...and folding a card faulted client-side still shows the pill",
                   pill_loc.is_visible()
                   and "1 to review" in pill_loc.inner_text())
-            page.locator("button.fold").first.click()
+            page.locator(".site-card .card-head").first.click()
             page.wait_for_timeout(300)
             # Typing the login completes it, so the count follows.
             page.locator("#cfg-username-0").fill("someone")
@@ -7232,30 +7485,43 @@ def run_browser_tests(s, tmpdir):
             page.wait_for_timeout(600)
             page.locator("button.prev").first.click()
             page.wait_for_timeout(2000)
-            frame = page.frame_locator(".preview-frame")
-            # Two lines, and the row still centres its label and buttons
-            # against the pair: one line ran into the buttons and wrapped
-            # mid-date.
-            check("...the published line is two lines, centred against them",
+            # One line — date · size is short enough never to reach the
+            # button (ruled: no file counts) — and the row centres its
+            # label and button against it.
+            check("...the published line is one line, clear of its button",
                   page.evaluate("""() => {
                     const st = document.querySelector('.ver-state');
                     const rows = st.querySelectorAll('span');
-                    if (rows.length !== 2) return false;
+                    if (rows.length !== 1) return false;
                     const a = rows[0].getBoundingClientRect();
-                    const b = rows[1].getBoundingClientRect();
                     const btn = document.querySelector('.switch-act button.ver-refresh')
                                         .getBoundingClientRect();
-                    const mid = (a.top + b.bottom) / 2;
-                    return b.top >= a.bottom - 1 &&
-                           Math.abs((btn.top + btn.bottom) / 2 - mid) < 6;
+                    return a.right <= btn.left &&
+                           Math.abs((btn.top + btn.bottom) / 2 -
+                                    (a.top + a.bottom) / 2) < 6;
                   }"""))
-            check("...a preview renders the chosen draft",
-                  frame.locator("#d").inner_text() == "DRAFT")
-            check("...with its relative stylesheet resolving inside the frame",
-                  frame.locator("#d").evaluate(
+            # The staged draft opens in its own tab (ruled: a 420px frame
+            # was not an honest representation). The link's address carries
+            # the preview token in the path and never the run's passcode,
+            # and noopener leaves the draft's tab no handle back to the
+            # page that staged it.
+            open_link = page.locator("a.preview-open").first
+            href = open_link.get_attribute("href") or ""
+            check("...a staged preview offers its own tab, passcode-free",
+                  href.startswith("/preview/") and code not in href
+                  and (open_link.get_attribute("rel") or "") == "noopener")
+            with page.context.expect_page() as popped:
+                open_link.click()
+            draft_tab = popped.value
+            draft_tab.wait_for_load_state()
+            check("...the preview tab renders the chosen draft",
+                  draft_tab.locator("#d").inner_text() == "DRAFT")
+            check("...with its relative stylesheet resolving",
+                  draft_tab.locator("#d").evaluate(
                       "e => getComputedStyle(e).color") == "rgb(1, 2, 3)")
-            check("...and the frame's URL carrying no admin passcode",
-                  code not in (page.locator(".preview-frame").get_attribute("src") or ""))
+            check("...and the tab holds no handle back to the admin page",
+                  draft_tab.evaluate("() => window.opener === null"))
+            draft_tab.close()
 
             # A redirect, added and removed through the page's own form.
             page.locator("button.redir-add").first.click()
@@ -7296,27 +7562,87 @@ def run_browser_tests(s, tmpdir):
                   and page.evaluate(
                       "() => document.activeElement.id === 'cfg-email'"))
 
-            # The browser-cache pair on the Performance group: a select
-            # for the policy (what cannot be typed cannot need refusing),
-            # and the seconds field existing only while max-age makes the
-            # seconds mean anything.
-            check("...the browser-cache seconds appear only under max-age",
+            # The group headers are marked apart from the field labels they
+            # govern (ruled): apart by weight and the rule above, NOT by
+            # colour or size — green is the page's healthy colour, so a
+            # header in it read as a verdict, and a subsection must not
+            # outrank the card title.
+            check("...the settings groups read apart from their fields, not louder",
                   page.evaluate("""() => {
-                    const pol = document.getElementById('cfg-cache_policy');
-                    const age = document.getElementById('cfg-cache_max_age');
-                    if (!pol || !age || pol.tagName !== 'SELECT') return false;
-                    const row = age.closest('.cfg-field');
-                    const was = pol.value;
-                    pol.value = 'no-store';
-                    pol.dispatchEvent(new Event('change'));
-                    const hiddenOff = row.classList.contains('hidden');
-                    pol.value = 'max-age';
-                    pol.dispatchEvent(new Event('change'));
-                    const shownOn = !row.classList.contains('hidden');
-                    pol.value = was;
-                    pol.dispatchEvent(new Event('change'));
-                    return hiddenOff && shownOn;
+                    const gs = document.querySelectorAll('#cfg-host-fields .cfg-group');
+                    const label = document.querySelector('#cfg-host-fields .cfg-field label');
+                    if (gs.length < 2 || !label) return false;
+                    const g0 = getComputedStyle(gs[0]);
+                    const g1 = getComputedStyle(gs[1]);
+                    const l = getComputedStyle(label);
+                    return g0.color === l.color &&
+                           g0.fontSize === l.fontSize &&
+                           parseInt(g0.fontWeight) > parseInt(l.fontWeight) &&
+                           parseFloat(g1.borderTopWidth) > 0;
                   }"""))
+
+            # Caching is per-site: a literal toggle on the card (ruled:
+            # two states get a switch, not a menu), enabled for a public
+            # site, sitting ABOVE Access with the same action-label shape,
+            # and no cache field left on the Server tab.
+            page.click("#tab-sites")
+            page.wait_for_timeout(300)
+            check("...caching is a labelled toggle above Access, enabled for a public site",
+                  page.evaluate("""() => {
+                    const sw = document.querySelector('.cache-switch');
+                    if (!sw || sw.type !== 'checkbox' || !sw.checked ||
+                        !sw.classList.contains('switch')) return false;
+                    const row = (el) => el.closest('.switch-row')
+                                          .getBoundingClientRect().top;
+                    return document.querySelector('.cache-state').textContent === 'enabled' &&
+                           document.querySelector('.cache-action').textContent === 'Disable' &&
+                           row(sw) < row(document.querySelector('.auth-switch')) &&
+                           !document.querySelector('.cache-mode') &&
+                           !document.getElementById('cfg-cache_policy');
+                  }"""))
+
+            # Toggle cosmetics (ruled): the track is always the green tint
+            # — the same for on and off — and the knob carries the state,
+            # filled against empty. Compared between the checked caching
+            # switch and the unchecked access switch.
+            check("...toggle tracks match on/off; the knobs differ",
+                  page.evaluate("""() => {
+                    const a = document.querySelector('.cache-switch');
+                    const b = document.querySelector('.auth-switch');
+                    if (!a.checked || b.checked) return false;
+                    const track = (el) => getComputedStyle(el).backgroundColor;
+                    const knob = (el) => getComputedStyle(el, '::after').backgroundColor;
+                    return track(a) === track(b) && knob(a) !== knob(b);
+                  }"""))
+
+            # Access and caching are independent (ruled): arming the flip
+            # narrates the login change only — caching goes unmentioned
+            # and its knob does not move.
+            page.locator(".auth-switch").first.check()
+            page.wait_for_timeout(200)
+            check("...arming private narrates the sign-in, loudly, caching unmentioned",
+                  "visitors sign in"
+                  in (page.locator(".auth-hint").first.text_content() or "")
+                  and "caching" not in
+                      (page.locator(".auth-hint").first.text_content() or "")
+                  and page.evaluate("""() => {
+                    const h = document.querySelector('.auth-hint');
+                    return getComputedStyle(h).color === 'rgb(251, 191, 36)';
+                  }"""))
+            check("...and the caching knob does not move with the flip",
+                  page.evaluate(
+                      "() => document.querySelector('.cache-switch').checked"))
+            # An armed-but-unsaved flip survives the re-render every other
+            # control's save triggers — the snap-back to the stored state
+            # was what read as one setting changing another.
+            page.evaluate("() => refresh()")
+            page.wait_for_timeout(900)
+            check("...and an armed flip survives a re-render, still pending",
+                  page.evaluate(
+                      "() => document.querySelector('.auth-switch').checked")
+                  and page.locator(".auth-save").first.is_visible())
+            page.locator(".auth-switch").first.uncheck()
+            page.wait_for_timeout(200)
 
             browser.close()
 

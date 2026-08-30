@@ -263,6 +263,15 @@ class Site:
             raise _ConfigInvalid("servette.toml: username — a username "
                                  "cannot contain a colon (sign-in splits "
                                  "user:password at the first one)")
+        # A file without the key gets the default: enabled. Caching is its
+        # own per-site setting, independent of access (ruled) — flipping
+        # public/private never touches it.
+        cache = data.get("cache", "yes")
+        if cache not in ("yes", "no"):
+            # The same sentence the write doors refuse with (the load-door
+            # principle — see _ConfigInvalid).
+            raise _ConfigInvalid('servette.toml: cache is "yes" (copies, '
+                                 're-checked every visit) or "no" (no copies)')
         self.domain         = domain
         # Deactivated sites keep their config and files but are invisible to
         # routing and TLS alike — the pause between serving and deleting.
@@ -273,6 +282,12 @@ class Site:
         self.username       = username
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
+        # What visitors' browsers keep: "yes" = copies kept but re-checked
+        # every visit, "no" = no copies at all. Independent of access
+        # (ruled): its own toggle, default enabled, and access flips never
+        # move it. Only the HEADER FORM follows access — a private site's
+        # copies are marked `private` so shared caches never hold them.
+        self.cache          = cache
         # Two tables, one per answer: redirects → 301, redirects_temporary
         # → 302 (the ruled per-rule choice, default permanent). Validated
         # strictly and together — criteria in _clean_redirects, principle
@@ -448,7 +463,6 @@ class Config:
             pass
         scratch = _ScratchHost()
         scratch.port, scratch.rate_limit, scratch.auth_rate_limit = 443, 120, 6
-        scratch.cache_policy, scratch.cache_max_age = "no-cache", 3600
         scratch.cache_size_mb = 128
         scratch.email = scratch.trusted_proxy = scratch.health_path = ""
         scratch.tls_min_version, scratch.ciphers = "1.2", ""
@@ -566,6 +580,10 @@ username = {s(site.username)}
 # Machine-generated — do not edit by hand
 password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
+
+# What visitors' browsers keep: "yes" = copies kept but re-checked every
+# visit (the default), "no" = no copies at all. Independent of access.
+cache = {s(site.cache)}
 {_redirect_toml(site)}""" for site in self.sites)
 
         content = f"""\
@@ -581,9 +599,6 @@ port = {self.port}
 rate_limit = {self.rate_limit}
 auth_rate_limit = {self.auth_rate_limit}
 
-# Browser cache policy: no-store, no-cache, or max-age
-cache_policy = {s(self.cache_policy)}
-cache_max_age = {self.cache_max_age}
 # In-memory file cache limit in MB — reduce on constrained hardware
 cache_size_mb = {self.cache_size_mb}
 
@@ -1031,16 +1046,17 @@ Cache-Control scope follows the site's auth: a password-protected site's respons
 
 ```python
 # Cache-Control
-def _cache_control_header(username):
-    """Cache-Control for the matched site. A site behind Basic Auth gets
-    `private`, so a shared cache never holds a response only some visitors
-    are entitled to."""
-    scope = "private" if username else "public"
-    if config.cache_policy == "no-store":
+def _cache_control_header(site):
+    """Cache-Control for the matched site, read straight off its `cache`
+    toggle. "yes" (the default): visitors keep copies re-checked every
+    visit (`no-cache` — unchanged files answer 304 and stale content is
+    never shown). "no": visitors keep no copies at all (`no-store`).
+    The toggle is the operator's alone, independent of access (ruled) —
+    only the header FORM follows access: a private site's copies are
+    marked `private` so shared caches never hold them."""
+    if site.cache == "no":
         return "no-store"
-    if config.cache_policy == "no-cache":
-        return f"{scope}, no-cache"
-    return f"{scope}, max-age={config.cache_max_age}"
+    return ("private" if site.username else "public") + ", no-cache"
 
 
 ```
@@ -1314,7 +1330,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # revalidate-always caching contract as the 404 body, for the same
     # reason: the page's checks probe the URL it was served from.
     if url_path.split("?", 1)[0] == _CONNECTION_PATH:
-        cache = _cache_control_header(site.username)
+        cache = _cache_control_header(site)
         if "max-age" in cache:
             cache = ("private" if site.username else "public") + ", no-cache"
         if headers.get("If-None-Match", "") == _CONNECTION_ETAG:
@@ -1390,13 +1406,11 @@ def _handle_request(method, url_path, headers, raw_ip):
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
         if not os.path.isfile(custom_404):
-            # A positive lifetime is downgraded to revalidate-always. Under
-            # cache_policy = "max-age" an error page would otherwise sit in a
-            # shared cache for max_age seconds and keep answering 404 for a path
-            # *after* the operator publishes the very file that was missing.
-            cache = _cache_control_header(site.username)
-            if "max-age" in cache:
-                cache = ("private" if site.username else "public") + ", no-cache"
+            # Revalidate-always by construction: every mode the header can
+            # emit is no-cache or no-store, so an error page can never sit
+            # in a cache and keep answering 404 for a path *after* the
+            # operator publishes the very file that was missing.
+            cache = _cache_control_header(site)
             if headers.get("If-None-Match", "") == _NOT_FOUND_ETAG:
                 log.info("304 Not Modified %s to %s", log_path, ip)
                 return resp(304, [(b"etag", _NOT_FOUND_ETAG.encode()),
@@ -1430,7 +1444,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # 304 Not Modified
     if headers.get("If-None-Match", "") == etag:
         log.info("304 Not Modified %s to %s", log_path, ip)
-        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header(site.username).encode())])
+        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header(site).encode())])
 
     accept_encoding = headers.get("Accept-Encoding", "")
     use_gzip        = compressed is not None and "gzip" in accept_encoding
@@ -1438,7 +1452,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     common = [
         (b"content-type",  mime.encode()),
         (b"etag",          etag.encode()),
-        (b"cache-control", _cache_control_header(site.username).encode()),
+        (b"cache-control", _cache_control_header(site).encode()),
         (b"vary",          b"Accept-Encoding"),
     ]
 

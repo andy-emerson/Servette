@@ -42,6 +42,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -325,6 +326,15 @@ class Site:
             raise _ConfigInvalid("servette.toml: username — a username "
                                  "cannot contain a colon (sign-in splits "
                                  "user:password at the first one)")
+        # A file without the key gets the default: enabled. Caching is its
+        # own per-site setting, independent of access (ruled) — flipping
+        # public/private never touches it.
+        cache = data.get("cache", "yes")
+        if cache not in ("yes", "no"):
+            # The same sentence the write doors refuse with (the load-door
+            # principle — see _ConfigInvalid).
+            raise _ConfigInvalid('servette.toml: cache is "yes" (copies, '
+                                 're-checked every visit) or "no" (no copies)')
         self.domain         = domain
         # Deactivated sites keep their config and files but are invisible to
         # routing and TLS alike — the pause between serving and deleting.
@@ -335,6 +345,12 @@ class Site:
         self.username       = username
         self.password_hash  = data.get("password_hash",  "")
         self.password_salt  = data.get("password_salt",  "")
+        # What visitors' browsers keep: "yes" = copies kept but re-checked
+        # every visit, "no" = no copies at all. Independent of access
+        # (ruled): its own toggle, default enabled, and access flips never
+        # move it. Only the HEADER FORM follows access — a private site's
+        # copies are marked `private` so shared caches never hold them.
+        self.cache          = cache
         # Two tables, one per answer: redirects → 301, redirects_temporary
         # → 302 (the ruled per-rule choice, default permanent). Validated
         # strictly and together — criteria in _clean_redirects, principle
@@ -500,7 +516,6 @@ class Config:
             pass
         scratch = _ScratchHost()
         scratch.port, scratch.rate_limit, scratch.auth_rate_limit = 443, 120, 6
-        scratch.cache_policy, scratch.cache_max_age = "no-cache", 3600
         scratch.cache_size_mb = 128
         scratch.email = scratch.trusted_proxy = scratch.health_path = ""
         scratch.tls_min_version, scratch.ciphers = "1.2", ""
@@ -618,6 +633,10 @@ username = {s(site.username)}
 # Machine-generated — do not edit by hand
 password_hash = {s(site.password_hash)}
 password_salt = {s(site.password_salt)}
+
+# What visitors' browsers keep: "yes" = copies kept but re-checked every
+# visit (the default), "no" = no copies at all. Independent of access.
+cache = {s(site.cache)}
 {_redirect_toml(site)}""" for site in self.sites)
 
         content = f"""\
@@ -633,9 +652,6 @@ port = {self.port}
 rate_limit = {self.rate_limit}
 auth_rate_limit = {self.auth_rate_limit}
 
-# Browser cache policy: no-store, no-cache, or max-age
-cache_policy = {s(self.cache_policy)}
-cache_max_age = {self.cache_max_age}
 # In-memory file cache limit in MB — reduce on constrained hardware
 cache_size_mb = {self.cache_size_mb}
 
@@ -1004,16 +1020,17 @@ def _resolve_request_path(url_path, serve_dir):
 
 
 # Cache-Control
-def _cache_control_header(username):
-    """Cache-Control for the matched site. A site behind Basic Auth gets
-    `private`, so a shared cache never holds a response only some visitors
-    are entitled to."""
-    scope = "private" if username else "public"
-    if config.cache_policy == "no-store":
+def _cache_control_header(site):
+    """Cache-Control for the matched site, read straight off its `cache`
+    toggle. "yes" (the default): visitors keep copies re-checked every
+    visit (`no-cache` — unchanged files answer 304 and stale content is
+    never shown). "no": visitors keep no copies at all (`no-store`).
+    The toggle is the operator's alone, independent of access (ruled) —
+    only the header FORM follows access: a private site's copies are
+    marked `private` so shared caches never hold them."""
+    if site.cache == "no":
         return "no-store"
-    if config.cache_policy == "no-cache":
-        return f"{scope}, no-cache"
-    return f"{scope}, max-age={config.cache_max_age}"
+    return ("private" if site.username else "public") + ", no-cache"
 
 
 # Byte ranges
@@ -2062,7 +2079,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # revalidate-always caching contract as the 404 body, for the same
     # reason: the page's checks probe the URL it was served from.
     if url_path.split("?", 1)[0] == _CONNECTION_PATH:
-        cache = _cache_control_header(site.username)
+        cache = _cache_control_header(site)
         if "max-age" in cache:
             cache = ("private" if site.username else "public") + ", no-cache"
         if headers.get("If-None-Match", "") == _CONNECTION_ETAG:
@@ -2138,13 +2155,11 @@ def _handle_request(method, url_path, headers, raw_ip):
         site_root  = _resolve(site.serve_dir)
         custom_404 = os.path.join(site_root, "404.html")
         if not os.path.isfile(custom_404):
-            # A positive lifetime is downgraded to revalidate-always. Under
-            # cache_policy = "max-age" an error page would otherwise sit in a
-            # shared cache for max_age seconds and keep answering 404 for a path
-            # *after* the operator publishes the very file that was missing.
-            cache = _cache_control_header(site.username)
-            if "max-age" in cache:
-                cache = ("private" if site.username else "public") + ", no-cache"
+            # Revalidate-always by construction: every mode the header can
+            # emit is no-cache or no-store, so an error page can never sit
+            # in a cache and keep answering 404 for a path *after* the
+            # operator publishes the very file that was missing.
+            cache = _cache_control_header(site)
             if headers.get("If-None-Match", "") == _NOT_FOUND_ETAG:
                 log.info("304 Not Modified %s to %s", log_path, ip)
                 return resp(304, [(b"etag", _NOT_FOUND_ETAG.encode()),
@@ -2178,7 +2193,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     # 304 Not Modified
     if headers.get("If-None-Match", "") == etag:
         log.info("304 Not Modified %s to %s", log_path, ip)
-        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header(site.username).encode())])
+        return resp(304, [(b"etag", etag.encode()), (b"cache-control", _cache_control_header(site).encode())])
 
     accept_encoding = headers.get("Accept-Encoding", "")
     use_gzip        = compressed is not None and "gzip" in accept_encoding
@@ -2186,7 +2201,7 @@ def _handle_request(method, url_path, headers, raw_ip):
     common = [
         (b"content-type",  mime.encode()),
         (b"etag",          etag.encode()),
-        (b"cache-control", _cache_control_header(site.username).encode()),
+        (b"cache-control", _cache_control_header(site).encode()),
         (b"vary",          b"Accept-Encoding"),
     ]
 
@@ -3396,6 +3411,25 @@ def _cert_days(cert):
     except AttributeError:
         expiry = cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
     return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
+
+
+# The issuance guard
+def _standing_cert_days(site, domain):
+    """Days of coverage `site` already holds for `domain`, or None where an
+    order is warranted. Not None means the site is named `domain`, its
+    certificate on disk covers `domain`, and more than 30 days remain — the
+    watchdog's renewal line, so anything closer is due for an order anyway.
+    A self-signed pair never trips it: those certificates name no real
+    domain, so _domain_from_cert answers None for them."""
+    if not domain or site.domain != domain or not site.cert_file:
+        return None
+    cert_path = _resolve(site.cert_file)
+    if _domain_from_cert(cert_path) != domain:
+        return None
+    days = _cert_days_remaining(cert_path)
+    if days is None or days <= 30:
+        return None
+    return days
 
 
 # Service probes
@@ -4640,7 +4674,7 @@ _COMMANDS = [
     ("log [n]",          "show the last n log entries"),
     ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
-    ("publish [n] <folder>", "publish a folder on this box as a site's content"),
+    ("publish <folder>", "publish a folder on this box as a site's content (site index first on a multi-site box)"),
     ("restore-site [n]", "roll back a site's content to a kept version"),
     ("help",             "show this message"),
     ("quit",             "exit"),
@@ -5015,8 +5049,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       min-width: 8rem;
       padding-right: 0.75rem;
     }
-    .rows a { color: var(--brand); text-decoration: none; }
-    .rows a:hover { text-decoration: underline; }
+    /* .serving-state too: the Serving link left .rows for its switch-row,
+       and an anchor no rule reaches falls back to the browser's default —
+       visited-purple on a green page. */
+    .rows a, .serving-state a { color: var(--brand); text-decoration: none; }
+    .rows a:hover, .serving-state a:hover { text-decoration: underline; }
     /* A ledger's total sits under a rule, at the foot of what it sums. */
     .rows .ledger {
       margin-top: 0.35rem;
@@ -5045,6 +5082,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     /* ── Prose: hints under a control, errors, the attention band ─────── */
     .hint  { font-size: 0.72rem; color: var(--muted); line-height: 1.7; margin-top: 0.75rem; }
     .hint b { color: var(--text); font-weight: 500; }
+    /* The access flip's narration is a consequence about to happen, not a
+       footnote: it wears the attention colour (loud, by ruling). */
+    .auth-hint.warn { color: var(--amber); }
     .warn  { color: var(--amber); }
     .fault { color: var(--red); }
     /* Not a fault at all — a change typed and not yet saved. It must not
@@ -5094,15 +5134,21 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     }
     .cfg-field .cfg-hint { grid-column: 2; }
     /* The two families inside the Settings card — what defends the server,
-       and what tunes it — named so neither wears the other's label. */
+       and what tunes it. Ruled off above and set heavier than the field
+       labels, in the same muted grey and at the same size: green is this
+       page's "healthy" colour, so a section name in it read as a verdict —
+       and a subsection must not outrank the card title it sits under. */
     .cfg-group {
-      margin: 1.1rem 0 0.45rem;
-      font-size: 0.72rem;
+      margin: 1.35rem 0 0.5rem;
+      padding-top: 0.9rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.7rem;
+      font-weight: 600;
       letter-spacing: 0.09em;
       text-transform: uppercase;
       color: var(--muted);
     }
-    .cfg-group:first-child { margin-top: 0.2rem; }
+    .cfg-group:first-child { margin-top: 0.2rem; padding-top: 0; border-top: none; }
     .cfg-hint {
       font-size: 0.68rem;
       color: var(--muted);
@@ -5151,13 +5197,20 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       color: var(--text);
     }
     .switch-act { display: flex; align-items: center; gap: 0.5rem; }
-    /* A value that needs two lines gets them, and the row keeps centring
-       its label and buttons against the pair. */
-    .ver-state span { display: block; }
+    /* The history dropdown shares its row with Restore: the select yields
+       (its option text runs long) so the button never leaves the card.
+       min-width: 0 at every level, because grid and flex both default a
+       child's minimum to its content — the chain is only as shrinkable
+       as its least shrinkable link. */
+    .versions .switch-value { min-width: 0; }
+    .versions .switch-act { flex: 1; min-width: 0; }
+    .ver-pick { flex: 1 1 auto; min-width: 0; }
     .switch-act label { color: var(--muted); cursor: pointer; }
 
-    /* The public/private switch — a literal toggle: the knob's position
-       and a green tint say private (on). */
+    /* Toggles, everywhere on the page (ruled): the track is always the
+       green tint — it names the control, not the state — and the KNOB
+       carries the state: filled when on, empty (the page's ground) when
+       off, with its position saying the same thing twice. */
     input.switch {
       appearance: none;
       -webkit-appearance: none;
@@ -5167,10 +5220,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       width: 38px;
       height: 20px;
       border-radius: 99px;
-      background: var(--bg);
-      border: 1px solid var(--border);
+      background: rgba(90,132,102,0.15);
+      border: 1px solid rgba(90,132,102,0.6);
       cursor: pointer;
-      transition: background 0.15s, border-color 0.15s;
     }
     input.switch::after {
       content: '';
@@ -5180,15 +5232,18 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       width: 14px;
       height: 14px;
       border-radius: 50%;
-      background: var(--muted);
+      box-sizing: border-box;
+      background: var(--bg);
+      border: 1px solid rgba(90,132,102,0.6);
       transform: translateY(-50%);
       transition: left 0.15s, right 0.15s, background 0.15s;
     }
-    input.switch:checked {
-      background: rgba(90,132,102,0.15);
-      border-color: rgba(90,132,102,0.6);
+    input.switch:checked::after {
+      left: auto;
+      right: 2px;
+      background: var(--brand);
+      border-color: var(--brand);
     }
-    input.switch:checked::after { left: auto; right: 2px; background: var(--brand); }
     input.switch:focus-visible { outline: 1px solid rgba(90,132,102,0.8); outline-offset: 1px; }
 
     /* ── Site cards ──────────────────────────────────────────────────── */
@@ -5228,7 +5283,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     /* Reordering, the notebook's grammar: grab the header, a ghost follows
        the cursor, the source dims to a dashed placeholder, and neighbours
        swap in place as the ghost crosses them. */
-    .site-card .card-head { cursor: grab; user-select: none; }
+    /* The head is the expand/collapse toggle (pointer); the drag grip
+       keeps the grab cursor as the reorder affordance. */
+    .site-card .card-head { cursor: pointer; user-select: none; }
+    .site-card .handle { cursor: grab; }
     .site-card.drag-placeholder { opacity: 0.35; border-style: dashed; }
     .card-ghost { box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
     .head-left, .head-right { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
@@ -5270,18 +5328,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     /* The panel hangs below the head, so the card must not clip it. */
     .site-card { overflow: visible; }
 
-    /* The staged draft, in a frame that cannot reach back. The sandbox
-       attribute deliberately withholds allow-same-origin: the draft runs on
-       an opaque origin, so a script in someone's own content cannot read
-       this page or call its endpoints. */
-    .preview-frame {
-      width: 100%;
-      height: 420px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: #fff;
-      margin-top: 0.5rem;
-    }
+    /* The staged draft opens in its own tab — full size, the honest
+       representation a 420px frame was not. The link carries rel=noopener,
+       so the draft's tab holds no handle back to this page or the passcode
+       in its address; the admin endpoints themselves all demand the
+       passcode the draft never learns. */
+    .preview-open { display: inline-block; margin-top: 0.6rem; }
 
     /* ── Charts: inline SVG, no library — the page loads no third-party
        code. The y-axis is part of the chart: a line without a scale is a
@@ -5450,9 +5502,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       <div class="card-body">
         <div class="rows" id="load-rows"></div>
         <div id="load-chart"></div>
-        <p class="hint">Averages since the server started; the line is live
-        while this tab is open and is kept nowhere. High CPU on a static
-        server usually means a bot, not popularity.</p>
+        <p class="hint">Averages since the server started; the line samples
+        from the moment the admin page opens and is kept nowhere. High CPU
+        on a static server usually means a bot, not popularity.</p>
         <p class="error hidden" id="load-error"></p>
       </div>
     </div>
@@ -5669,8 +5721,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       $('tab-' + key).classList.toggle('active', key === name);
       $('tab-' + key).setAttribute('aria-selected', String(key === name));
     }
-    refresh();  // every tab renders from the same /status + /config truth
-    if (name === 'stats') { loadTraffic(); startMeter(); } else stopMeter();
+    // Every panel is populated at login and re-rendered after each op
+    // (ruled): a tab click only shows what is already drawn — no refresh,
+    // no rebuild underfoot. startMeter here is only the retry after a
+    // failed sample stopped the meter; the meter itself runs from login.
+    if (name === 'stats') startMeter();
     // The full path + search + hash, in that order: a bare '#…' relative
     // URL swallows the search into the fragment — the hash became the tab
     // name with the whole passcode query glued on, which parses back as no
@@ -5692,14 +5747,28 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // A card's index is its position in the DOM, read at the moment it is
   // needed: adding, removing, or dragging a card renumbers its neighbours,
   // and a stale index would act on the wrong site.
-  // Which cards are folded shut. Kept here rather than on the card,
-  // because every op re-renders the list and a card that sprang open on
-  // each save would be worse than no fold at all. Keyed by the site's
+  // Which card is open — ONE at a time (ruled: an accordion, so a box
+  // with many sites stays one screen tall; expanding a card collapses
+  // the rest, and collapse is display-only, so a picked folder or an
+  // unsaved form is still there when its card reopens).
+  // `undefined` means the first render decides: a single-site box opens
+  // with its card open (most installs, zero clicks); a multi-site box
+  // opens all collapsed and the first click opens the one you came for.
+  let expandedKey;
+  // A drop's mouseup still fires a click on the head it started from —
+  // that click must not also toggle the card the drag just moved.
+  let dragJustEnded = false;
+  const applyAccordion = () => {
+    for (const c of document.querySelectorAll('#site-cards .site-card'))
+      c.classList.toggle('folded', c.dataset.foldKey !== expandedKey);
+  };
+  // The open card is keyed here rather than on the card, because every
+  // op re-renders the list and a card that sprang open (or shut) on each
+  // save would be worse than no accordion at all. Keyed by the site's
   // Servette-assigned folder: the one identity that survives everything —
   // a rename changes the domain, a drag or removal renumbers indexes, and
   // a positional key would hand one site's state (or its picked folder,
   // below) to a different site's card.
-  const folded = new Set();
   // The folder, not the domain and not the position: naming a site changes
   // its domain (and must not orphan a folder picked for it), and every
   // structural op renumbers positions. The one shape this key cannot tell
@@ -5713,6 +5782,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // every op re-renders the cards, and a re-render must never cost a
   // folder that took a drag to pick.
   const pendingFolders = new Map();
+
+  // An armed-but-unsaved access flip, surviving re-renders under the same
+  // keys: touching any other control saves and rebuilds the cards, and a
+  // rebuild that snapped the armed switch back to the stored state read
+  // as one setting changing another. Entries whose desire matches the
+  // stored truth are dropped at build, so a flip completed on any surface
+  // clears itself.
+  const pendingAuth = new Map();
 
   const cardIndex = (el) =>
     [...document.querySelectorAll('#site-cards .site-card')].indexOf(el);
@@ -5745,6 +5822,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     // One site is a site; the plural is earned.
     $('tab-sites').textContent = sites.length === 1 ? 'Site' : 'Sites';
     sites.forEach((s, idx) => wrap.appendChild(buildSiteCard(s, idx)));
+    if (expandedKey === undefined)
+      expandedKey = sites.length === 1 ? foldKey(sites[0], 0) : null;
+    applyAccordion();
   }
 
   /* ── Reordering, in the notebook's grammar: grab the header, a ghost
@@ -5788,6 +5868,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         document.removeEventListener('mousemove', move);
         document.removeEventListener('mouseup', up);
         if (!started) return;
+        // The click that follows this mouseup is the drag's, not a
+        // toggle; cleared on the next tick, after that click has fired.
+        dragJustEnded = true;
+        setTimeout(() => { dragJustEnded = false; });
         ghost.remove();
         el.classList.remove('drag-placeholder');
         document.body.style.userSelect = '';
@@ -5952,6 +6036,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       // it — publish, preview, restore, redirect — follows underneath.
       : (`<div class="rows info"></div>` +
 
+         // The site itself, one click away — and Test beside it: the one
+         // view a page on the tunnel cannot compute for itself, opened
+         // from the outside on the site's own check page.
+         `<div class="switch-row"><span class="k">Serving</span>` +
+         `<span class="switch-value"><span class="serving-state"></span>` +
+         `<span class="switch-act"><button class="action tiny outside" ` +
+         `type="button" disabled>Test</button></span></span></div>` +
+
          `<div class="switch-row"><span class="k">Domain</span>` +
          `<span class="switch-value"><input class="dom-input" type="text" ` +
          `placeholder="example.com" value="${escapeHtml(siteData.domain)}">` +
@@ -5966,6 +6058,20 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
          `<p class="cfg-hint">A certificate is issued only for a name that ` +
          `already points here — check that the domain's DNS has an A record ` +
          `to this server's IP before requesting one.</p>` +
+
+         // ── Whether visitors' browsers cache — above Access (ruled). A
+         // literal toggle like Access, with the same action label beside
+         // the knob. Applied on change — both states are safe and
+         // reversible, so a Save button would be ceremony; a refused
+         // write flips the knob back. The access-flip reset is Access's
+         // story, told there — not repeated in this hint.
+         `<div class="switch-row"><label class="k">Caching</label>` +
+         `<span class="switch-value"><span class="cache-state"></span>` +
+         `<span class="switch-act"><label class="cache-action"></label>` +
+         `<input class="switch cache-switch" type="checkbox"></span></span></div>` +
+         `<p class="cfg-hint">Enabled: browsers keep copies and re-check ` +
+         `them every visit, so a visitor is never shown stale content. ` +
+         `Disabled: nothing is stored on visitors' machines.</p>` +
 
          `<div class="switch-row">` +
          `<label class="k auth-label">Access</label>` +
@@ -5996,12 +6102,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
            `publish, not the live site">Preview</button>` +
          `</div>` +
          `<div class="preview hidden">` +
-           `<p class="hint">This is the folder you chose, served over the ` +
-           `tunnel and not published. Links inside it work; the site's real ` +
-           `domain, certificate, and headers are not part of what you are ` +
-           `seeing.</p>` +
-           `<iframe class="preview-frame" sandbox="allow-scripts allow-forms" ` +
-           `title="Preview of the chosen folder"></iframe>` +
+           `<p class="hint">Staged: the folder you chose, served over the ` +
+           `tunnel and not published — it opens full size in its own tab. ` +
+           `Links inside it work; the site's real domain, certificate, and ` +
+           `headers are not part of what you are seeing.</p>` +
+           `<a class="action preview-open" target="_blank" rel="noopener" ` +
+           `href="#">Open the preview ↗</a>` +
          `</div>` +
          `<div class="done hidden">` +
            `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
@@ -6048,12 +6154,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
            `<button class="action redir-save" type="button">Add redirect</button>` +
            `<button class="action redir-cancel" type="button">Cancel</button>` +
            `</div>` +
-         `</div>` +
-
-         // ── The one view a page on the tunnel cannot compute for itself.
-         `<div class="split"></div>` +
-         `<div class="btn-row">` +
-         `<button class="action outside" type="button" disabled>Test connection</button>` +
          `</div>`)
 
     const q = (sel) => card.querySelector(sel);
@@ -6080,13 +6180,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
                : '✓ healthy'}</span>` +
           `<span class="badge state badge-dim${inactive ? '' : ' hidden'}">${
              inactive ? 'deactivated' : ''}</span>` +
-          // Collapse, for a box serving more sites than fit on a screen.
-          // Chevrons toward each other close; away, open.
-          `<button class="action tiny fold" type="button" ` +
-            `title="Collapse this card"><svg viewBox="0 0 16 16" width="12" ` +
-            `height="12" fill="none" stroke="currentColor" stroke-width="1.6" ` +
-            `stroke-linecap="round"><path class="fold-a" d="M4 2.5l4 3.5 4-3.5"></path>` +
-            `<path class="fold-b" d="M4 13.5l4-3.5 4 3.5"></path></svg></button>` +
           // Removing a site is destructive, so it wears the destructive
           // colour all the time rather than only under the pointer — the
           // same rule the stop button follows.
@@ -6151,28 +6244,21 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const react = q('.do-reactivate');
     if (react) react.addEventListener('click', () => setActive(true));
 
-    // ── Fold. The head keeps its title, its badges, and its controls, so
-    // a folded card still says which site it is and whether it needs
-    // attention — the reason to fold is length, not secrecy.
+    // ── Accordion (ruled): one card open at a time, and the header
+    // itself is the toggle — a single click, the gesture every accordion
+    // answers to; the old fold button is gone. The head keeps its title,
+    // badges, and controls, so a collapsed card still says which site it
+    // is and whether it needs attention — collapse is length management,
+    // not secrecy, and it is display-only. Controls in the head keep
+    // their own jobs; a drag's trailing click is swallowed above.
     const key = foldKey(siteData, idx);
-    const applyFold = () => {
-      const shut = folded.has(key);
-      card.classList.toggle('folded', shut);
-      q('.fold').title = shut ? 'Expand this card' : 'Collapse this card';
-      // Shallow chevrons at the edges, with a clear gap between them.
-      // Drawn tall and meeting in the middle they read as an X, which sits
-      // beside a delete button and means the wrong thing entirely.
-      // A caret needs its angle: rise about equal to half its width. The
-      // gap between the two is what stops them reading as an X, so the
-      // pair sit at the edges — apexes 4px apart in a 16px box.
-      q('.fold-a').setAttribute('d', shut ? 'M4 6l4-3.5 4 3.5' : 'M4 2.5l4 3.5 4-3.5');
-      q('.fold-b').setAttribute('d', shut ? 'M4 10l4 3.5 4-3.5' : 'M4 13.5l4-3.5 4 3.5');
-    };
-    q('.fold').addEventListener('click', () => {
-      if (folded.has(key)) folded.delete(key); else folded.add(key);
-      applyFold();
+    card.dataset.foldKey = key;
+    q('.card-head').addEventListener('click', (e) => {
+      if (e.target.closest('button') || e.target.closest('a')
+          || e.target.closest('.confirm') || dragJustEnded) return;
+      expandedKey = (expandedKey === key) ? null : key;
+      applyAccordion();
     });
-    applyFold();
 
     attachCardDrag(q('.card-head'), card);
 
@@ -6376,7 +6462,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         // it asks for. And it is the PREVIEW token, never the run's
         // passcode — a draft can read its own address, and must not learn
         // the credential that publishes.
-        q('.preview-frame').src = '/preview/' + encodeURIComponent(data.token) +
+        q('.preview-open').href = '/preview/' + encodeURIComponent(data.token) +
           '/' + encodeURIComponent(siteIndex()) + '/';
         q('.preview').classList.remove('hidden');
         mark('badge-green', '✓ staged');
@@ -6407,12 +6493,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           const v = await getJSON('/versions', { site: siteIndex() });
           const rows = v.versions || [];
           const live = rows.find((r) => r.live);
-          // The live version's own size is the answer to "did the right
-          // folder land" — a file count off by an order of magnitude is
-          // the wrong folder, however right the site looks.
-          // Two lines: what is there, then when it landed. One line ran to
-          // the buttons and wrapped mid-date; the switch-row still centres
-          // the label and the buttons against the pair.
+          // The live version's size is the answer to "did the right
+          // folder land" — off by an order of magnitude is the wrong
+          // folder, however right the site looks (ruled: size carries
+          // that job alone; file counts left the row).
           // A missing folder is marked here, because publishing is what
           // fixes it — and judged from THIS fetch, not from a status
           // snapshot taken when the card was built: the terminal can
@@ -6422,29 +6506,51 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
           // live row IS the folder missing.
           state.innerHTML = !live
             ? `<span class="warn">missing — publish to recreate it</span>`
-            : `<span>${live.files} file${live.files === 1 ? '' : 's'}, ` +
-              `${fmtSize(live.bytes)}</span>` +
-              `<span>${escapeHtml(when(live.published))}</span>`;
+            : `<span>${escapeHtml(when(live.published))} · ` +
+              `${fmtSize(live.bytes)}</span>`;
+          // The kept versions are one dropdown, not a list: every other
+          // row on this card is label-left value-right, and five dated
+          // lines with floating buttons were the block that broke the
+          // grid. Each option is date and size, nothing more — which one
+          // is live, the Published row above already says, echoed by the
+          // dropdown opening on it with Restore dim.
           list.innerHTML = rows.length < 2 ? '' :
-            rows.map((r) => row(escapeHtml(when(r.published)),
-              `${r.files} file${r.files === 1 ? '' : 's'}, ${fmtSize(r.bytes)}` +
-              (r.live ? ' <span class="ok">· live</span>'
-                      : ` <button class="action tiny restore" type="button" ` +
-                        `data-v="${escapeHtml(r.name)}">Restore</button>`))).join('') +
-            `<p class="hint">The ${v.keep} most recent are kept. Restoring does ` +
-            `not consume one — you can restore back.</p>`;
-          for (const b of list.querySelectorAll('.restore'))
-            b.addEventListener('click', async () => {
-              b.disabled = true;
-              b.textContent = 'restoring…';
+            `<div class="switch-row"><span class="k">History</span>` +
+            `<span class="switch-value"><span class="switch-act">` +
+            `<select class="ver-pick">` +
+            rows.map((r) =>
+              `<option value="${escapeHtml(r.name)}"${r.live ? ' selected' : ''}>` +
+              escapeHtml(`${when(r.published)} · ${fmtSize(r.bytes)}`) +
+              `</option>`).join('') +
+            `</select>` +
+            `<button class="action tiny ver-restore" type="button">` +
+            `Restore</button></span></span></div>` +
+            `<p class="cfg-hint">The live version and the ${v.keep - 1} ` +
+            `before it are kept; restoring does not use one up — you can ` +
+            `restore back.</p>`;
+          const pick = list.querySelector('.ver-pick');
+          if (pick) {
+            const doRestore = list.querySelector('.ver-restore');
+            const liveName = live && live.name;
+            const arm = () => {
+              doRestore.disabled = pick.value === liveName;
+              doRestore.title = doRestore.disabled
+                ? 'This version is live already' : '';
+            };
+            arm();
+            pick.addEventListener('change', arm);
+            doRestore.addEventListener('click', async () => {
+              doRestore.disabled = true;
+              doRestore.textContent = 'restoring…';
               // What goes live now is not the operator's last upload; the
               // sent-note must not outlive the content it described.
               const pfr = pendingFolders.get(foldKey(siteData, idx));
               if (pfr) delete pfr.doneNote;
               const ok = await siteOp({ op: 'restore', site: siteIndex(),
-                                        version: b.dataset.v }, errEl);
-              if (!ok) { b.disabled = false; b.textContent = 'Restore'; }
+                                        version: pick.value }, errEl);
+              if (!ok) { doRestore.textContent = 'Restore'; arm(); }
             });
+          }
         } catch (e) {
           state.textContent = '';
           showError(errEl, reason(e, 'Could not read the kept versions'));
@@ -6514,8 +6620,13 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const authRow = checksFor.find((c) => c.key === 'password');
 
     // What the operator has asked for but not yet saved. null means the
-    // switch is still showing what the server says.
-    let authDesired = null;
+    // switch is still showing what the server says. Restored from
+    // pendingAuth so a rebuild (any other control's save) cannot snap an
+    // armed flip back; a desire the stored truth already matches is done.
+    if (pendingAuth.get(foldKey(siteData, idx)) === !!siteData.username)
+      pendingAuth.delete(foldKey(siteData, idx));
+    let authDesired = pendingAuth.has(foldKey(siteData, idx))
+      ? pendingAuth.get(foldKey(siteData, idx)) : null;
     const authOn = () => (authDesired === null) ? !!siteData.username : authDesired;
 
     /* ── What this card wants dealt with ───────────────────────────────
@@ -6595,13 +6706,14 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         row('Status', needs.length
           ? `<span class="${blocking ? 'fault' : 'warn'}">` +
             `${needs.length} to review</span>`
-          : '<span class="ok">✓</span> healthy') +
-        // The site itself, one click away and in its own tab: the fastest
-        // answer to "did that publish land" is looking at it.
-        row('Serving', siteData.domain
-          ? `<a href="${escapeHtml('https://' + siteData.domain)}" target="_blank" ` +
-            `rel="noopener">${escapeHtml('https://' + siteData.domain)}</a>`
-          : "this server's IP address (no domain set)");
+          : '<span class="ok">✓</span> healthy');
+      // The fastest answer to "did that publish land" is looking at the
+      // site. Its row is static markup (the Test button keeps its one
+      // listener); only this value re-renders.
+      q('.serving-state').innerHTML = siteData.domain
+        ? `<a href="${escapeHtml('https://' + siteData.domain)}" target="_blank" ` +
+          `rel="noopener">${escapeHtml('https://' + siteData.domain)}</a>`
+        : "this server's IP address (no domain set)";
 
       // One marker per row, taken from the same list the count read, so a
       // row and the count can never disagree about what is wrong.
@@ -6628,6 +6740,23 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         : 'Save the access settings for this site';
     };
 
+    // The cache switch reflects the stored value, nothing else — access
+    // and caching are independent (ruled). A write the server refuses
+    // must not leave the knob lying about what is stored.
+    const cacheSw = q('.cache-switch');
+    const showCache = () => {
+      q('.cache-state').textContent = cacheSw.checked ? 'enabled' : 'disabled';
+      q('.cache-action').textContent = cacheSw.checked ? 'Disable' : 'Enable';
+    };
+    cacheSw.checked = (siteData.cache || 'yes') === 'yes';
+    showCache();
+    cacheSw.addEventListener('change', async () => {
+      showCache();
+      const ok = await saveSettings({ cache: cacheSw.checked ? 'yes' : 'no' },
+                                    cardIndex(card), badge, errEl);
+      if (!ok) { cacheSw.checked = !cacheSw.checked; showCache(); }
+    });
+
     const renderInfo = () => {
       const on = authOn();
       const pending = authDesired !== null && authDesired !== !!siteData.username;
@@ -6653,10 +6782,19 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
               '', { type: 'password',
                     hint: 'Case-sensitive. Any characters, spaces included. No length limit.' });
       q('.auth-save').classList.toggle('hidden', !(on || pending));
-      q('.auth-hint').textContent = on ? ''
+      // The access flip's consequences are said BEFORE Save, not
+      // discovered after (loudly, by ruling). Access and caching are
+      // independent (ruled): the flip narrates the login change only.
+      const ah = q('.auth-hint');
+      ah.textContent = on
+        ? (siteData.username ? ''
+           : 'Saving makes the site private: visitors sign in with this ' +
+             'username and password.')
         : (siteData.username
-           ? 'Saving makes the site public: the login is removed and the stored password deleted.'
+           ? 'Saving makes the site public: the login is removed and the ' +
+             'stored password deleted.'
            : '');
+      ah.classList.toggle('warn', ah.textContent !== '');
 
       // Typing changes whether the login is complete, so the count follows
       // the keystroke — but only the attention half re-renders, or the
@@ -6681,6 +6819,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       // it goes with the state that produced it.
       clearError(errEl);
       authDesired = e.target.checked;
+      pendingAuth.set(foldKey(siteData, idx), authDesired);
       renderInfo();
     });
 
@@ -6771,16 +6910,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
      'Wrong-password attempts one visitor may make per minute, counted the same rolling way.'],
   ];
   const PERFORMANCE_FIELDS = [
+    // Browser caching is a per-site setting on each site's card, derived
+    // from its access unless overridden — not a host knob here.
     ['cache_size_mb', 'File cache size (MB)',
      'Memory set aside to serve frequently requested files without re-reading the disk.'],
-    ['cache_policy', 'Browser cache',
-     'What a visitor keeps: no-store always downloads fresh, no-cache ' +
-     'keeps a copy but re-checks it every time (a quick ETag check), ' +
-     'max-age trusts the copy for the seconds below.',
-     { choices: ['no-store', 'no-cache', 'max-age'] }],
-    ['cache_max_age', 'Cache seconds',
-     'How long a browser trusts its copy without checking back. Applies ' +
-     'to max-age only, which is why this field appears with it.'],
   ];
   const HOST_FIELDS = SECURITY_FIELDS.concat(PERFORMANCE_FIELDS);
 
@@ -6789,8 +6922,10 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     const hostChecks = ((d.checks) || []).filter((c) => c.site === null);
 
     // What has no card of its own says its piece here; a site's trouble is
-    // worn by that site's card on the Sites tab.
-    const needs = hostChecks.filter((c) => !c.ok);
+    // worn by that site's card on the Sites tab. A `quiet` row (the swap
+    // shortfall) warns amber on its own Server-tab row but is never worth
+    // this cross-tab band (ruled).
+    const needs = hostChecks.filter((c) => !c.ok && !c.quiet);
     $('attention').classList.toggle('hidden', !needs.length);
     $('attention').innerHTML = needs.map((c) =>
       `<b>This server</b> · ${escapeHtml(c.label)} — ${escapeHtml(c.detail)} ` +
@@ -6859,18 +6994,6 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       SECURITY_FIELDS.map(one).join('') +
       '<div class="cfg-group">Performance</div>' +
       PERFORMANCE_FIELDS.map(one).join('') + swapField;
-    // The seconds only mean anything under max-age, so the field exists
-    // only while the select says so — the same only-while-relevant rule
-    // the login fields follow.
-    const pol = $('cfg-cache_policy');
-    const ageEl = $('cfg-cache_max_age');
-    if (pol && ageEl) {
-      const ageRow = ageEl.closest('.cfg-field');
-      const showAge = () =>
-        ageRow.classList.toggle('hidden', pol.value !== 'max-age');
-      pol.addEventListener('change', showAge);
-      showAge();
-    }
   }
 
   /* ── The service's lifecycle: start, restart, stop. The page runs the
@@ -6971,15 +7094,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     try {
       const t = await getJSON('/traffic', { days: $('traffic-window').value });
       const total = t.total || 0;
-      // Status codes are the server's vocabulary, not the reader's: each
-      // count is named for what actually happened.
-      const NAMED = [['Files sent', ['200', '206']],
-                     ['Already cached', ['304']],
-                     ['Redirected', ['301', '302', '308']],
-                     ['Nothing there', ['404']],
-                     ['Refused', ['403', '405']],
-                     ['Sign-in needed', ['401']],
-                     ['Rate limited', ['429']]];
+      // Each count is named for what happened, with the status code
+      // beside it (ruled): the reader who does not know the codes gets
+      // the word, and the one who does is not made to translate.
+      const NAMED = [['Sent (200/206)', ['200', '206']],
+                     ['Cached (304)', ['304']],
+                     ['Redirected (301/302/308)', ['301', '302', '308']],
+                     ['Not found (404)', ['404']],
+                     ['Refused (403/405)', ['403', '405']],
+                     ['Sign-in needed (401)', ['401']],
+                     ['Rate limited (429)', ['429']]];
       const named = NAMED
         .map(([name, codes]) => [name, codes.reduce(
           (n, c) => n + ((t.statuses || {})[c] || 0), 0)])
@@ -7052,7 +7176,9 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
 
   /* ── The live meter: successive readings of the server's own cumulative
      CPU counter, differenced here. Nothing is sampled or stored on the
-     server — the line exists only while this tab is open. ── */
+     server — the line exists only while this page is open. It samples
+     from login, not from the first opening of the Statistics tab, so the
+     tab shows history rather than a line starting under your click. ── */
 
   const METER_SECONDS = 3;
   let meterTimer = null, lastSample = null, cpuSeries = [];
@@ -7098,7 +7224,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // a tunnel whose command has ended.
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) stopMeter();
-    else if (!$('panel-stats').classList.contains('hidden')) startMeter();
+    else startMeter();
   });
   window.addEventListener('pagehide', stopMeter);
 
@@ -7108,7 +7234,12 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   $(supported ? 'app' : 'unsupported').classList.remove('hidden');
   if (supported) {
     showTab((location.hash || '').replace('#', ''));
+    // Every panel fills NOW (ruled): tab clicks only reveal, so the data
+    // must not wait for the first click on its tab.
+    refresh();
+    loadTraffic();
     checkUpgrade();
+    startMeter();  // sampling begins at login, so the load line has history
   }
 </script>
 
@@ -7251,6 +7382,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
                            "active": s.active,
+                           "cache": s.cache,
                            "username": s.username,
                            "redirects": s.redirects,
                            "redirects_temporary": s.redirects_temp,
@@ -7431,6 +7563,13 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                         target = config.sites[idx]
                         if not target.domain:
                             err = "set a domain first — a certificate is issued for a name"
+                        elif (standing := _standing_cert_days(target, target.domain)) is not None:
+                            # The issuance guard, with no override here: a
+                            # button invites the double click and the retry,
+                            # and the operator who truly wants a duplicate
+                            # order has the terminal's confirm.
+                            err = (f"already covered — this certificate is good for "
+                                   f"{standing} more days and renews on its own")
                         else:
                             outcome = _obtain_trusted_cert(target.domain, target)
                             err = ("" if outcome is None else
@@ -7575,13 +7714,70 @@ def _stop_ui(httpd):
 
 
 # admin
+def _stale_admin_pids():
+    """PIDs of OTHER 'servette admin' runs owned by this same user, read
+    from /proc. The service (no 'admin' argument) never matches, and
+    neither does the calling process. Empty on hosts without /proc
+    (macOS) — the caller then has nothing it can safely clear."""
+    pids = []
+    me, uid = os.getpid(), os.getuid()
+    for name in os.listdir("/proc") if os.path.isdir("/proc") else []:
+        if not name.isdigit() or int(name) == me:
+            continue
+        entry = os.path.join("/proc", name)
+        try:
+            if os.stat(entry).st_uid != uid:
+                continue
+            with open(os.path.join(entry, "cmdline"), "rb") as f:
+                argv = [a.decode("utf-8", "replace")
+                        for a in f.read().split(b"\0") if a]
+        except OSError:
+            continue                     # raced away, or unreadable
+        if "admin" in argv[1:] and any(
+                os.path.basename(a).startswith("servette") for a in argv):
+            pids.append(int(name))
+    return pids
+
+
+def _reclaim_admin_port(site, page):
+    """After a refused bind: end this user's stale admin runs and retry.
+    A dropped SSH session does not always end the admin command it was
+    running, and the leftover holds the port. Running 'admin' again IS
+    the statement that the old session is over (ruled: clear it, never
+    ask) — and its passcode dying with it is what this page wants anyway.
+    Returns (httpd, code), or (None, None) when the port's holder is not
+    ours to clear."""
+    stale = _stale_admin_pids()
+    for pid in stale:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass                         # already gone
+    if stale:
+        for _ in range(20):              # up to ~2 s for the socket to free
+            time.sleep(0.1)
+            try:
+                return _start_ui(site, page)
+            except OSError:
+                continue
+    return None, None
+
+
 def cmd_admin():
     site = config.sites[0]  # the fallback when an upload names no site
     try:
         httpd, code = _start_ui(site, _UI_ADMIN_PAGE)
-    except OSError as e:
-        print(f"  Could not open the page (port {_UI_PORT}: {e.strerror or e}).")
-        return
+    except OSError:
+        httpd, code = _reclaim_admin_port(site, _UI_ADMIN_PAGE)
+        if httpd is None:
+            # Not ours to kill, so the refusal names the finder and the fix.
+            print(f"  Could not open the page: port {_UI_PORT} is taken by "
+                  "another program.")
+            print(f"  Find it with 'sudo ss -ltnp | grep {_UI_PORT}', stop "
+                  "it, then run 'admin' again.")
+            return
+        print("  An earlier admin session was still running — closed it and "
+              "took its place (its passcode no longer works).")
     httpd.on_publish = lambda s: print(
         f"\n  Published from browser to {s.domain or s.serve_dir}: "
         "content swapped in — restore-site undoes it.")
@@ -7933,7 +8129,8 @@ def cmd_publish(args):
     """Publish a folder on this box as a site's content — the terminal half
     of the pair whose browser half is the page's Publish button."""
     if not args:
-        print("  Usage: publish [n] <folder>")
+        print("  Usage: publish <folder>")
+        print("  (On a multi-site box, the site index comes first: publish 1 <folder>)")
         return
     if len(args) >= 2:
         site, folder = _config_site_arg([args[0]]), args[1]
@@ -8201,17 +8398,6 @@ def _set_host_value(target, key, value):
                 return ("/.well-known/ is reserved — the connection test and "
                         "ACME challenges live there")
         target.health_path = value
-    elif key == "cache_policy":
-        v = value.strip().lower()
-        if v not in ("no-store", "no-cache", "max-age"):
-            return "cache_policy is no-store, no-cache, or max-age"
-        target.cache_policy = v
-    elif key == "cache_max_age":
-        # Non-negative: a negative max-age is not a shorter cache, it is a
-        # malformed Cache-Control header sent on every response.
-        if not value.isdigit():
-            return "cache_max_age is seconds — a whole number, 0 or more"
-        target.cache_max_age = int(value)
     elif key == "tls_min_version":
         if value not in ("1.2", "1.3"):
             return "tls_min_version is 1.2 or 1.3"
@@ -8261,6 +8447,8 @@ def _set_site_value(target, key, value):
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
         # (`set`, the page, and the prompt alike, since all land here).
+        # Access and caching are independent settings (ruled): flipping
+        # public/private never touches the cache toggle.
         target.username = value
         if not value:
             target.password_hash = ""
@@ -8342,15 +8530,23 @@ def _set_site_value(target, key, value):
                         f"({target.cert_file or 'none configured'}) — "
                         "run 'config cert' first")
         target.active = (v == "yes")
+    elif key == "cache":
+        # What visitors' browsers keep — the operator's own toggle,
+        # independent of access (ruled). "yes": copies re-checked every
+        # visit. "no": no copies.
+        v = value.strip().lower()
+        if v not in ("yes", "no"):
+            return 'cache is "yes" (copies, re-checked every visit) or "no" (no copies)'
+        target.cache = v
     return ""
 
 
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
-                  "cache_size_mb", "cache_policy", "cache_max_age",
+                  "cache_size_mb",
                   "trusted_proxy", "health_path", "tls_min_version",
                   "ciphers", "csp", "permissions_policy")
-_SET_SITE_KEYS = ("username", "active", "redirect")
+_SET_SITE_KEYS = ("username", "active", "cache", "redirect")
 
 
 def _set_usage():
@@ -8445,16 +8641,11 @@ def _config_show():
     def val(v):
         return v if v else "(not set)"
 
-    cache_display = config.cache_policy
-    if config.cache_policy == "max-age":
-        cache_display += f" ({config.cache_max_age}s)"
-
     host_rows = [
         ("HTTPS port",         config.port),
         ("Email",              val(config.email)),
         ("Rate limit",         f"{config.rate_limit} req/min"),
         ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
-        ("Cache policy",       cache_display),
         ("Cache size",         f"{config.cache_size_mb} MB"),
         ("Trusted proxy",      val(config.trusted_proxy)),
         ("Health check path",  config.health_path or "(off)"),
@@ -8476,6 +8667,9 @@ def _config_show():
             ("Key",         val(site.key_file)),
             ("Username",    val(site.username)),
             ("Password",    "(set)" if site.password_hash else "(not set)"),
+            ("Caching",
+             "enabled (copies re-checked each visit)" if site.cache == "yes"
+             else "disabled (nothing stored)"),
         ]
         for label, value in site_rows:
             print(f"    {label:<{_PAD - 2}} {value}")
@@ -8760,6 +8954,18 @@ def _config_cert(site):
         return
 
     if domain:
+        # The issuance guard, with the terminal's override: re-typing the
+        # domain here is the natural re-run of setup, not a request to spend
+        # a duplicate order — but the operator holding a certificate they
+        # have reason to distrust can still say yes.
+        days = _standing_cert_days(site, domain)
+        if days is not None:
+            print(f"  This site's certificate already covers {domain} with {days} days")
+            print("  left, and renewal is automatic. A fresh order spends Let's Encrypt's")
+            print("  duplicate-certificate budget (5 a week) without changing anything.")
+            if not _prompt("Order a new certificate anyway?"):
+                print("  → unchanged")
+                return
         _obtain_trusted_cert(domain, site)
     else:
         cert_path = _resolve(site.cert_file or "cert.pem")
@@ -9296,7 +9502,12 @@ def _health_checks(service_active=None):
             detail = "swapfile present but inactive — 'enable' re-activates it"
         else:
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
+        # `quiet` (this row only): warn amber where it lives — the Server
+        # tab row and the terminal — but never as the cross-tab banner
+        # (ruled: an undersized swap is worth its row's colour, not a
+        # "This server" band over the site cards).
         rows.append({"key": "swap", "site": None, "ok": offer is None,
+                     "quiet": True,
                      "blocking": False, "label": "Swap file", "detail": detail})
     # Disk is host-wide and platform-independent: a full disk is the outage
     # every other row assumes is not happening. A publish that cannot write

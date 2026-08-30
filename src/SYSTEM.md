@@ -917,6 +917,30 @@ def _cert_days(cert):
 
 ```
 
+The issuance guard: ordering a certificate a site already holds is not free — Let's Encrypt allows five duplicates a week, and the renewal that must succeed later draws on the same budget — so the operator doors ask this question before they order. The watchdog never needs to: it only acts under the same 30-day line this answers by.
+
+```python
+# The issuance guard
+def _standing_cert_days(site, domain):
+    """Days of coverage `site` already holds for `domain`, or None where an
+    order is warranted. Not None means the site is named `domain`, its
+    certificate on disk covers `domain`, and more than 30 days remain — the
+    watchdog's renewal line, so anything closer is due for an order anyway.
+    A self-signed pair never trips it: those certificates name no real
+    domain, so _domain_from_cert answers None for them."""
+    if not domain or site.domain != domain or not site.cert_file:
+        return None
+    cert_path = _resolve(site.cert_file)
+    if _domain_from_cert(cert_path) != domain:
+        return None
+    days = _cert_days_remaining(cert_path)
+    if days is None or days <= 30:
+        return None
+    return days
+
+
+```
+
 Everything above runs while the server serves. Everything from here down belongs to the operator's commands and never to a request: read-only probes that answer `status`, and provisioning whose writers — units, the service user, the runtime copy, swap, the netwatch — run once, as root, at `setup`/`enable`/`disable`. A reader tracing live serving behavior can stop here.
 
 ## Service management

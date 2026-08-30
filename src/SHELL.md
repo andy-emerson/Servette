@@ -68,7 +68,7 @@ _COMMANDS = [
     ("log [n]",          "show the last n log entries"),
     ("traffic",          "requests, statuses, and top paths from the last 7 days"),
     ("admin",            "open the browser admin page over your SSH tunnel"),
-    ("publish [n] <folder>", "publish a folder on this box as a site's content"),
+    ("publish <folder>", "publish a folder on this box as a site's content (site index first on a multi-site box)"),
     ("restore-site [n]", "roll back a site's content to a kept version"),
     ("help",             "show this message"),
     ("quit",             "exit"),
@@ -342,6 +342,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 "host":  {k: getattr(config, k) for k in _SET_HOST_KEYS},
                 "sites": [{"index": i, "domain": s.domain, "dir": s.serve_dir,
                            "active": s.active,
+                           "cache": s.cache,
                            "username": s.username,
                            "redirects": s.redirects,
                            "redirects_temporary": s.redirects_temp,
@@ -522,6 +523,13 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                         target = config.sites[idx]
                         if not target.domain:
                             err = "set a domain first — a certificate is issued for a name"
+                        elif (standing := _standing_cert_days(target, target.domain)) is not None:
+                            # The issuance guard, with no override here: a
+                            # button invites the double click and the retry,
+                            # and the operator who truly wants a duplicate
+                            # order has the terminal's confirm.
+                            err = (f"already covered — this certificate is good for "
+                                   f"{standing} more days and renews on its own")
                         else:
                             outcome = _obtain_trusted_cert(target.domain, target)
                             err = ("" if outcome is None else
@@ -676,13 +684,70 @@ def _stop_ui(httpd):
 
 ```python
 # admin
+def _stale_admin_pids():
+    """PIDs of OTHER 'servette admin' runs owned by this same user, read
+    from /proc. The service (no 'admin' argument) never matches, and
+    neither does the calling process. Empty on hosts without /proc
+    (macOS) — the caller then has nothing it can safely clear."""
+    pids = []
+    me, uid = os.getpid(), os.getuid()
+    for name in os.listdir("/proc") if os.path.isdir("/proc") else []:
+        if not name.isdigit() or int(name) == me:
+            continue
+        entry = os.path.join("/proc", name)
+        try:
+            if os.stat(entry).st_uid != uid:
+                continue
+            with open(os.path.join(entry, "cmdline"), "rb") as f:
+                argv = [a.decode("utf-8", "replace")
+                        for a in f.read().split(b"\0") if a]
+        except OSError:
+            continue                     # raced away, or unreadable
+        if "admin" in argv[1:] and any(
+                os.path.basename(a).startswith("servette") for a in argv):
+            pids.append(int(name))
+    return pids
+
+
+def _reclaim_admin_port(site, page):
+    """After a refused bind: end this user's stale admin runs and retry.
+    A dropped SSH session does not always end the admin command it was
+    running, and the leftover holds the port. Running 'admin' again IS
+    the statement that the old session is over (ruled: clear it, never
+    ask) — and its passcode dying with it is what this page wants anyway.
+    Returns (httpd, code), or (None, None) when the port's holder is not
+    ours to clear."""
+    stale = _stale_admin_pids()
+    for pid in stale:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass                         # already gone
+    if stale:
+        for _ in range(20):              # up to ~2 s for the socket to free
+            time.sleep(0.1)
+            try:
+                return _start_ui(site, page)
+            except OSError:
+                continue
+    return None, None
+
+
 def cmd_admin():
     site = config.sites[0]  # the fallback when an upload names no site
     try:
         httpd, code = _start_ui(site, _UI_ADMIN_PAGE)
-    except OSError as e:
-        print(f"  Could not open the page (port {_UI_PORT}: {e.strerror or e}).")
-        return
+    except OSError:
+        httpd, code = _reclaim_admin_port(site, _UI_ADMIN_PAGE)
+        if httpd is None:
+            # Not ours to kill, so the refusal names the finder and the fix.
+            print(f"  Could not open the page: port {_UI_PORT} is taken by "
+                  "another program.")
+            print(f"  Find it with 'sudo ss -ltnp | grep {_UI_PORT}', stop "
+                  "it, then run 'admin' again.")
+            return
+        print("  An earlier admin session was still running — closed it and "
+              "took its place (its passcode no longer works).")
     httpd.on_publish = lambda s: print(
         f"\n  Published from browser to {s.domain or s.serve_dir}: "
         "content swapped in — restore-site undoes it.")
@@ -1070,7 +1135,8 @@ def cmd_publish(args):
     """Publish a folder on this box as a site's content — the terminal half
     of the pair whose browser half is the page's Publish button."""
     if not args:
-        print("  Usage: publish [n] <folder>")
+        print("  Usage: publish <folder>")
+        print("  (On a multi-site box, the site index comes first: publish 1 <folder>)")
         return
     if len(args) >= 2:
         site, folder = _config_site_arg([args[0]]), args[1]
@@ -1351,17 +1417,6 @@ def _set_host_value(target, key, value):
                 return ("/.well-known/ is reserved — the connection test and "
                         "ACME challenges live there")
         target.health_path = value
-    elif key == "cache_policy":
-        v = value.strip().lower()
-        if v not in ("no-store", "no-cache", "max-age"):
-            return "cache_policy is no-store, no-cache, or max-age"
-        target.cache_policy = v
-    elif key == "cache_max_age":
-        # Non-negative: a negative max-age is not a shorter cache, it is a
-        # malformed Cache-Control header sent on every response.
-        if not value.isdigit():
-            return "cache_max_age is seconds — a whole number, 0 or more"
-        target.cache_max_age = int(value)
     elif key == "tls_min_version":
         if value not in ("1.2", "1.3"):
             return "tls_min_version is 1.2 or 1.3"
@@ -1414,6 +1469,8 @@ def _set_site_value(target, key, value):
         # Auth is one switch, not two half-states: a cleared username takes
         # the stored password with it, on every surface that writes settings
         # (`set`, the page, and the prompt alike, since all land here).
+        # Access and caching are independent settings (ruled): flipping
+        # public/private never touches the cache toggle.
         target.username = value
         if not value:
             target.password_hash = ""
@@ -1495,6 +1552,14 @@ def _set_site_value(target, key, value):
                         f"({target.cert_file or 'none configured'}) — "
                         "run 'config cert' first")
         target.active = (v == "yes")
+    elif key == "cache":
+        # What visitors' browsers keep — the operator's own toggle,
+        # independent of access (ruled). "yes": copies re-checked every
+        # visit. "no": no copies.
+        v = value.strip().lower()
+        if v not in ("yes", "no"):
+            return 'cache is "yes" (copies, re-checked every visit) or "no" (no copies)'
+        target.cache = v
     return ""
 
 
@@ -1505,10 +1570,10 @@ The vocabulary `set` accepts, and its usage line.
 ```python
 # The set vocabulary
 _SET_HOST_KEYS = ("port", "email", "rate_limit", "auth_rate_limit",
-                  "cache_size_mb", "cache_policy", "cache_max_age",
+                  "cache_size_mb",
                   "trusted_proxy", "health_path", "tls_min_version",
                   "ciphers", "csp", "permissions_policy")
-_SET_SITE_KEYS = ("username", "active", "redirect")
+_SET_SITE_KEYS = ("username", "active", "cache", "redirect")
 
 
 def _set_usage():
@@ -1615,16 +1680,11 @@ def _config_show():
     def val(v):
         return v if v else "(not set)"
 
-    cache_display = config.cache_policy
-    if config.cache_policy == "max-age":
-        cache_display += f" ({config.cache_max_age}s)"
-
     host_rows = [
         ("HTTPS port",         config.port),
         ("Email",              val(config.email)),
         ("Rate limit",         f"{config.rate_limit} req/min"),
         ("Auth rate limit",    f"{config.auth_rate_limit} fails/min"),
-        ("Cache policy",       cache_display),
         ("Cache size",         f"{config.cache_size_mb} MB"),
         ("Trusted proxy",      val(config.trusted_proxy)),
         ("Health check path",  config.health_path or "(off)"),
@@ -1646,6 +1706,9 @@ def _config_show():
             ("Key",         val(site.key_file)),
             ("Username",    val(site.username)),
             ("Password",    "(set)" if site.password_hash else "(not set)"),
+            ("Caching",
+             "enabled (copies re-checked each visit)" if site.cache == "yes"
+             else "disabled (nothing stored)"),
         ]
         for label, value in site_rows:
             print(f"    {label:<{_PAD - 2}} {value}")
@@ -1955,6 +2018,18 @@ def _config_cert(site):
         return
 
     if domain:
+        # The issuance guard, with the terminal's override: re-typing the
+        # domain here is the natural re-run of setup, not a request to spend
+        # a duplicate order — but the operator holding a certificate they
+        # have reason to distrust can still say yes.
+        days = _standing_cert_days(site, domain)
+        if days is not None:
+            print(f"  This site's certificate already covers {domain} with {days} days")
+            print("  left, and renewal is automatic. A fresh order spends Let's Encrypt's")
+            print("  duplicate-certificate budget (5 a week) without changing anything.")
+            if not _prompt("Order a new certificate anyway?"):
+                print("  → unchanged")
+                return
         _obtain_trusted_cert(domain, site)
     else:
         cert_path = _resolve(site.cert_file or "cert.pem")
@@ -2555,7 +2630,12 @@ def _health_checks(service_active=None):
             detail = "swapfile present but inactive — 'enable' re-activates it"
         else:
             detail = f"none — {rec_mb} MB recommended" if rec_mb else "none"
+        # `quiet` (this row only): warn amber where it lives — the Server
+        # tab row and the terminal — but never as the cross-tab banner
+        # (ruled: an undersized swap is worth its row's colour, not a
+        # "This server" band over the site cards).
         rows.append({"key": "swap", "site": None, "ok": offer is None,
+                     "quiet": True,
                      "blocking": False, "label": "Swap file", "detail": detail})
     # Disk is host-wide and platform-independent: a full disk is the outage
     # every other row assumes is not happening. A publish that cannot write

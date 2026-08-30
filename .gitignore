@@ -19,15 +19,8 @@ servette.toml
 # SSL certificates and keys
 *.pem
 
-# Throwaway certs and keys named for a .test domain (RFC 2606), which a
-# probe script once left in the repository root and a blind stage committed
-*.test
-
 # Site folders the suite creates through the page's add-site door
 site-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*/
-
-# Log files
-*.log
 
 # macOS
 .DS_Store

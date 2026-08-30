@@ -6,6 +6,35 @@ hold the deliberation, and [`DESIGN.md`](DESIGN.md) describes what is
 built as a result. Entries are compact and present-tense; newest first.
 Only the Human closes a decision ([`AGENTS.md`](AGENTS.md)).
 
+## servette.org has no mirror; the box is the only origin
+
+**Ruled (Human):** the GitHub Pages mirror that once shadowed servette.org
+does not return with the site's move to its own repository. The site is the
+program demonstrating itself — the security headers, the diagnosing 404,
+and the connection test all come from Servette serving — and a mirror
+serves none of them: it answers the closest inspection, the visitor probing
+whether Servette does what it claims, with someone else's server wearing
+the site's name. A dark site is also the operator's alarm — the netwatch
+and the reboot machinery exist because an outage was loud — and a mirror
+mutes that signal. Continuity of the content is already provided honestly
+by the repository itself, browsable on GitHub at its own address.
+**Rejected:** conditional failover (health-checked DNS, or a proxy always
+in front) — a redirect cannot be served by the origin that is down; DNS
+failover hands the apex to a host that cannot hold a valid certificate for
+it, and HSTS, pinned in every visitor's browser for a year, turns that
+wrong certificate into a hard block with no click-through — strictly worse
+than a dead site; a permanent fronting proxy would mean servette.org is
+never Servette serving, even healthy. Also rejected: a labeled mirror at
+its own name (mirror.servette.org on Pages) — honest and workable, but
+redundant beside the repository view while the box's own recovery
+machinery answers the outage class a mirror would insure against.
+**Reopen if:** an outage the box cannot self-recover — host-level failure
+needing manual intervention, lasting long enough to matter — or
+servette.org grows content whose reachability matters more than its
+fidelity. The labeled-mirror variant is the one to revisit, never the
+impersonating one.
+*(2026-08-30)*
+
 ## A standing certificate is not re-ordered; the terminal may overrule, the page may not
 
 **Ruled (Human):** both operator doors to issuance run `_standing_cert_days`

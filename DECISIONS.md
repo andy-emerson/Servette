@@ -31,6 +31,7 @@ cannot express — a key-compromise revocation flow, or coverage changes
 (www) that leave the standing certificate covering the name but not the
 need.
 *(2026-08-30)*
+
 ## Caching is one independent per-site toggle, default enabled
 
 **Ruled (Human):** the browser-cache enum is gone. One per-site toggle,

@@ -7755,8 +7755,9 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/preview":
             # The same bundle, staged where only this page can see it. A
-            # fresh token per staging, so a preview's reach ends when the
-            # next one is staged or the command exits.
+            # fresh token per staging — a link shared under the old token
+            # stops working — and every staged tree is dropped when the
+            # command exits.
             result = _stage_preview(site, self.rfile.read(length))
             if result != "staged":
                 return self._respond(422, json.dumps({"result": result}),

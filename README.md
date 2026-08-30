@@ -36,7 +36,7 @@ Then put your site on it from your own computer: run `servette admin` over SSH a
 | Rate limiting | Stops bots from hammering the server; makes password guessing impractical |
 | Instant content updates | New content is served the moment it lands — every request re-checks the file on disk, so publishing needs no restart and drops no connections |
 | Auto cert renewal | Let's Encrypt certificates renew automatically before they expire |
-| Security headers | HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent by default on every response |
+| Security headers | X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Content-Security-Policy, and Permissions-Policy sent by default on every response — plus HSTS on every site with a domain |
 | Automatic startup | Keeps running after you close your terminal; restarts automatically if the server reboots |
 | Automatic recovery | A dead server process is restarted by systemd within seconds; a watchdog timer recovers a dropped network route |
 | A browser admin page | `servette admin` serves an admin page to your browser over your own SSH tunnel — one card per site (publish, preview, domain, certificate, access, redirects, history), the server's own status and settings, and traffic statistics read from its log. It never exists on the public internet: the tunnel is the road in, and a one-time code per session is the login |
@@ -50,7 +50,7 @@ Then put your site on it from your own computer: run `servette admin` over SSH a
 
 ## Who is Servette for?
 
-**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~6,900 lines of Python, no hidden machinery), sized and structured so that one person can fully understand all of it. Reading the entire source, which was written to be read, is a weekend's honest work.
+**People who want to understand what their server is running.** General-purpose servers do the job, but they are large systems you configure and take on trust. Servette is one readable module (~7,100 lines of Python, no hidden machinery), sized and structured so that one person can fully understand all of it. Reading the entire source, which was written to be read, is a weekend's honest work.
 
 **People with a site to share that needs a simple secure server.** Development servers are perfect while you build, but they are not meant to face the internet. Servette is built to stay up: a trusted certificate that renews itself, and a hardened service that survives reboots.
 

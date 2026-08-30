@@ -1041,13 +1041,46 @@ def _swap_site_content(new_dir, serve_dir):
 
 ```
 
-The lock that serializes every content mutation.
+The lock that serializes every content mutation. Two layers because the contenders come in two kinds: threads of one process (the page server handles each request on its own thread) and separate processes entirely — a browser publish and a terminal `restore-site` each run in their own elevated process, and a `threading.Lock` alone let their staging trees and flips interleave. The flock rides a dedicated file because locking a tree that is itself renamed and replaced would lock a name, not the content.
 
 ```python
-_publish_lock = threading.Lock()  # serializes site-content mutation across every
-                                   # site: a page publish and 'restore-site' can
-                                   # run from two sessions at once, and the swap
-                                   # is several unguarded filesystem ops, not one.
+# The publish lock
+class _PublishLock:
+    """Serializes site-content mutation across every site, every thread, AND
+    every process: an in-process threading.Lock (fcntl locks do not exclude
+    threads sharing the process) around an fcntl.flock on one file in the
+    data directory (threading locks do not exclude other processes — a page
+    publish and 'restore-site' can run from two sessions at once, and the
+    swap is several unguarded filesystem ops, not one). Closing the fd
+    releases the flock, including on the way out of a raise; the kernel
+    releases it if the process dies, so a killed publish cannot wedge the
+    next one."""
+    def __init__(self):
+        self._threads = threading.Lock()
+        self._fd = None
+
+    def __enter__(self):
+        self._threads.acquire()
+        try:
+            self._fd = os.open(os.path.join(BASE_DIR, ".publish.lock"),
+                               os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
+        except BaseException:
+            if self._fd is not None:
+                os.close(self._fd)
+                self._fd = None
+            self._threads.release()
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self._fd)
+        self._fd = None
+        self._threads.release()
+        return False
+
+
+_publish_lock = _PublishLock()
 
 
 ```
@@ -1188,15 +1221,19 @@ def _stage_preview(site, bundle):
     The same _extract_bundle every content channel runs, so a bundle the
     publish door would refuse the preview refuses identically — a preview
     that accepted more than a publish would be a preview of something that
-    can never ship."""
+    can never ship. Under the publish lock like every other content
+    mutation: the preview tree is no publish's, but two stagings of the
+    same site's preview from two runs would interleave rmtree and
+    extraction just as two publishes would."""
     dest = _preview_dir(site)
-    shutil.rmtree(dest, ignore_errors=True)
-    try:
-        _extract_bundle(bundle, dest)
-    except Exception as e:
-        log.error("Preview bundle rejected: %s", e)
+    with _publish_lock:
         shutil.rmtree(dest, ignore_errors=True)
-        return "rejected"
+        try:
+            _extract_bundle(bundle, dest)
+        except Exception as e:
+            log.error("Preview bundle rejected: %s", e)
+            shutil.rmtree(dest, ignore_errors=True)
+            return "rejected"
     log.info("Staged a preview for %s", site.domain or site.serve_dir)
     return "staged"
 
@@ -1205,8 +1242,9 @@ def _clear_previews():
     """Drop every staged preview. A preview belongs to one `admin` run: it is
     a draft nobody published, and leaving it on disk would keep an
     unpublished tree beside a live site indefinitely."""
-    for site in config.sites:
-        shutil.rmtree(_preview_dir(site), ignore_errors=True)
+    with _publish_lock:
+        for site in config.sites:
+            shutil.rmtree(_preview_dir(site), ignore_errors=True)
 
 
 def _tree_size(path):

@@ -4305,6 +4305,41 @@ def run_dispatch_tests(s):
         finally:
             s._swap_site_content = saved_swap
 
+        # And across PROCESSES: a browser publish and a terminal
+        # restore-site each run in their own elevated process, where a
+        # threading.Lock excludes nothing. A child process holds the flock;
+        # this process must block on it until the child lets go.
+        lock_path = os.path.join(s.BASE_DIR, ".publish.lock")
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import fcntl, os, sys\n"
+             "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+             "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+             "print('held', flush=True)\n"
+             "sys.stdin.readline()\n",
+             lock_path],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            child.stdout.readline()          # the child really holds it
+            acquired = threading.Event()
+            def _try_lock():
+                with s._publish_lock:
+                    acquired.set()
+            waiter = threading.Thread(target=_try_lock, daemon=True)
+            waiter.start()
+            waiter.join(0.3)
+            check("A lock held by another process blocks this one",
+                  not acquired.is_set())
+            child.stdin.close()              # the child exits and releases
+            child.wait(10)
+            waiter.join(10)
+            check("...and is acquired the moment that process releases it",
+                  acquired.is_set())
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+
         section("publish — the terminal half of the pair")
 
         # `publish [n] <folder>` tars a folder under the same cap, hidden

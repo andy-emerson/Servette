@@ -13,6 +13,9 @@ dist/
 # Runtime config — contains password hashes and cert paths
 servette.toml
 
+# The publish lock's file — held via flock, content-free, created at first use
+.publish.lock
+
 # SSL certificates and keys
 *.pem
 

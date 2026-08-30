@@ -301,16 +301,28 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         # carries. A second door for the run credential is a second thing
         # to audit, so there is none.
         code = (qs.get("t") or [""])[0]
-        if self.server.bad_codes >= _UI_MAX_BAD_CODES:
-            return "locked"
-        if not code:
-            return "none"
-        if hmac.compare_digest(code.encode(), self.server.code.encode()):
-            return "ok"
-        self.server.bad_codes += 1
-        return "bad"
+        # One lock around check-and-count: each request runs on its own
+        # thread, and an unsynchronized += raced the ceiling check —
+        # parallel wrong guesses could land past _UI_MAX_BAD_CODES. The
+        # comparison inside the lock also serializes guessing, which only
+        # helps the ceiling do its job.
+        with self.server.bad_lock:
+            if self.server.bad_codes >= _UI_MAX_BAD_CODES:
+                return "locked"
+            if not code:
+                return "none"
+            if hmac.compare_digest(code.encode(), self.server.code.encode()):
+                return "ok"
+            self.server.bad_codes += 1
+            return "bad"
 
     def do_GET(self):
+        # The freshness rule the dispatcher applies before every command,
+        # applied before every page request for the same reason: this
+        # process lives for the whole admin run, and answering (or worse,
+        # saving) from its load-time snapshot would silently revert
+        # anything the terminal or the service wrote in between.
+        config.reload_if_changed()
         path = urlsplit(self.path).path
 
         # Preview content, on its own per-staging token — why it is not the
@@ -390,6 +402,10 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         return self._respond(200, _UI_LOGIN_PAGE)
 
     def do_POST(self):
+        # Freshness before every write, as in do_GET — a save built on a
+        # stale snapshot is the clobber the dispatcher's re-read exists
+        # to prevent.
+        config.reload_if_changed()
         path = urlsplit(self.path).path
         if path not in ("/upload", "/preview", "/config", "/sites", "/service",
                         "/swap"):
@@ -418,8 +434,11 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             # garbled or unknown op is refused, never defaulted — a
             # truncated stop must not become a start.
             try:
+                # AttributeError included everywhere a body is read: '"start"'
+                # parses as JSON but is not an object, and .get on it must be
+                # the same malformed-body refusal, not a dropped connection.
                 body_op = str(json.loads(self.rfile.read(length)).get("op") or "")
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed body.")
             if body_op not in ("start", "restart", "stop"):
                 return self._respond(422, json.dumps(
@@ -447,7 +466,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 return self._respond(413, "Body too large.")
             try:
                 mb = int(json.loads(self.rfile.read(length)).get("mb"))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(422, json.dumps(
                     {"error": "a size in MB is needed"}), "application/json")
             if not (64 <= mb <= 65536):
@@ -470,7 +489,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             try:
                 body = json.loads(self.rfile.read(length))
                 op   = str(body.get("op") or "")
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed body.")
             try:
                 if op == "add":
@@ -578,7 +597,7 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 idx  = int(body.get("site") or 0)
                 values = {str(k).strip().lower(): str(v)
                           for k, v in dict(body.get("values") or {}).items()}
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed settings body.")
             password = values.pop("password", "")
             pairs = list(values.items())
@@ -664,6 +683,7 @@ def _start_ui(site, page, port=_UI_PORT):
     _clear_previews()
     httpd.site, httpd.page = site, page
     httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
+    httpd.bad_lock = threading.Lock()   # guards the guess ceiling across request threads
     httpd.preview_code = ""      # minted by the first staging, not before
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, httpd.code
@@ -2557,7 +2577,7 @@ def _runtime_stats(service_active):
             return rows
         elapsed = None
         mono = props.get("ActiveEnterTimestampMonotonic", "")
-        if mono and mono != "0":
+        if mono.isdigit() and mono != "0":
             try:
                 with open("/proc/uptime") as f:
                     boot_elapsed = float(f.read().split()[0])

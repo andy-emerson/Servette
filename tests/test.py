@@ -1779,6 +1779,35 @@ def run_dispatch_tests(s):
               st == 200 and b'"version"' in body and b'"sites"' in body
               and b'"checks"' in body)
 
+        # The freshness rule the dispatcher applies before every command: the
+        # admin process lives for the whole run, and a page answering (or
+        # saving) from its load-time snapshot would silently revert whatever
+        # the terminal or the service wrote in between.
+        saved_ui_reload = s.Config.reload_if_changed
+        ui_reloads = []
+        try:
+            s.Config.reload_if_changed = lambda self: ui_reloads.append(1)
+            ui_req("GET", f"/status?t={ui_code}")
+            check("Every page request re-reads the config first",
+                  len(ui_reloads) == 1)
+            ui_req("POST", f"/service?t={ui_code}", body=b'{"op":"nonsense"}')
+            check("...writes too", len(ui_reloads) == 2)
+        finally:
+            s.Config.reload_if_changed = saved_ui_reload
+
+        # A body that parses as JSON but is not an object ('"start"', '[1]')
+        # must be the same malformed-body refusal as unparseable bytes — not
+        # an AttributeError that drops the connection and prints a traceback.
+        st, body = ui_req("POST", f"/service?t={ui_code}", body=b'"start"')
+        check("Non-object JSON to /service is refused as malformed",
+              st == 400 and b"Malformed" in body)
+        st, body = ui_req("POST", f"/sites?t={ui_code}", body=b"[1]")
+        check("Non-object JSON to /sites is refused as malformed",
+              st == 400 and b"Malformed" in body)
+        st, body = ui_req("POST", f"/swap?t={ui_code}", body=b'"512"')
+        check("Non-object JSON to /swap is refused with the size sentence",
+              st == 422 and b"size in MB" in body)
+
         health_keys = {r["key"] for r in s._health_checks()}
         check("The health rows cover the roster, green included",
               {"service", "cert", "password", "disk"} <= health_keys

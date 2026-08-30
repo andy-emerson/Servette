@@ -2639,12 +2639,20 @@ def _server_running():
 
 # The watchdog pass
 def _cert_watchdog_tick():
-    """One renewal/reload pass over every configured site's certificate. Each
+    """One renewal/reload pass over every ACTIVE site's certificate. Each
     site's pass is wrapped in its own try/except: one site's failure can't skip
     the rest, and nothing here can kill the watchdog thread — a dead watchdog
     would silently end renewals for every site, for the life of the process;
-    the next pass simply retries."""
+    the next pass simply retries.
+
+    A paused site is skipped whole: it is invisible to routing and TLS, so
+    renewing its certificate would order (or reload the server for) material
+    nothing serves — hourly ACME attempts forever on a site paused because
+    its DNS moved away. Reactivation re-earns the certificate at the door,
+    and a renewal missed while paused is caught on the first pass after."""
     for site in config.sites:
+        if not site.active:
+            continue
         try:
             cert_path = _resolve(site.cert_file)
 
@@ -2707,6 +2715,14 @@ def start_server():
         return
 
     for site in config.sites:
+        # A paused site is not served, so nothing of it is checked here —
+        # the same exemption the TLS context build applies, and for the
+        # same reason: a deactivated site whose certificate or folder was
+        # deleted since must not refuse the whole start (under --serve,
+        # a restart loop). Its files are re-earned at the reactivation
+        # door instead.
+        if not site.active:
+            continue
         for fname in [site.serve_dir, site.cert_file, site.key_file]:
             if not fname:
                 print("  Not fully configured. Run 'config' to set up the server.")

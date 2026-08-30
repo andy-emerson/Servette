@@ -751,6 +751,75 @@ serve_dir = "b"
         if not default_cert_existed and os.path.exists(s._DEFAULT_CERT_FILE):
             shutil.rmtree(s._DEFAULT_CERT_DIR, ignore_errors=True)
 
+    section("A paused site is exempt from the start pre-flight too")
+
+    # The context build above skips a paused site; the existence pre-flight
+    # in start_server() must apply the same exemption, or a paused site
+    # whose folder or certificate was deleted since refuses the whole start
+    # — under --serve, a systemd restart loop. The fake TLS server proves
+    # the pre-flight was passed, then stops before any socket binds.
+    class _ReachedBuild(Exception):
+        pass
+    saved_running_pf = s._server_running
+    saved_tls_pf     = s._TLSThreadingHTTPServer
+    saved_sites_pf   = s.config.sites
+    reached_pf       = []
+    try:
+        s._server_running = lambda: False
+        def _fake_tls_mark(*a, **k):
+            reached_pf.append(1)
+            raise _ReachedBuild()
+        s._TLSThreadingHTTPServer = _fake_tls_mark
+        paused_pf = s.Site({"domain": "paused.example.com",
+                            "serve_dir": "no-such-dir-anymore",
+                            "cert_file": "deleted-since.pem",
+                            "key_file":  "deleted-since.key",
+                            "active":    False})
+        s.config.sites = [s.config.sites[0], paused_pf]
+        with contextlib.redirect_stdout(io.StringIO()):
+            s.start_server()
+        check("A paused site's missing files do not refuse the start",
+              bool(reached_pf))
+    finally:
+        s._server_running         = saved_running_pf
+        s._TLSThreadingHTTPServer = saved_tls_pf
+        s.config.sites            = saved_sites_pf
+
+    section("The cert watchdog sweeps active sites only")
+
+    # A paused site is invisible to routing and TLS; renewing its
+    # certificate would order material nothing serves — hourly ACME
+    # attempts forever on a site paused precisely because its DNS moved
+    # away. Reactivation re-earns the certificate at the door.
+    saved_days_wd   = s._cert_days_remaining
+    saved_obtain_wd = s._obtain_trusted_cert
+    saved_sites_wd  = s.config.sites
+    saved_attempts  = dict(s._last_renewal_attempt)
+    renewed_wd      = []
+    try:
+        s._last_renewal_attempt.clear()
+        s._cert_days_remaining = lambda p: 5
+        s._obtain_trusted_cert = (lambda domain, site:
+                                  renewed_wd.append(domain))
+        active_wd = s.Site({"domain": "active.example.com",
+                            "serve_dir": "x", "cert_file": "a.pem",
+                            "key_file": "a.key"})
+        paused_wd = s.Site({"domain": "paused.example.com",
+                            "serve_dir": "y", "cert_file": "b.pem",
+                            "key_file": "b.key", "active": False})
+        s.config.sites = [active_wd, paused_wd]
+        s._cert_watchdog_tick()
+        check("An active site's expiring certificate is renewed",
+              renewed_wd == ["active.example.com"])
+        check("A paused site is skipped whole (nothing ordered, no reload)",
+              "paused.example.com" not in renewed_wd)
+    finally:
+        s._cert_days_remaining  = saved_days_wd
+        s._obtain_trusted_cert  = saved_obtain_wd
+        s.config.sites          = saved_sites_wd
+        s._last_renewal_attempt.clear()
+        s._last_renewal_attempt.update(saved_attempts)
+
     section("Versioning")
 
     check("__version__ is set",              bool(s.__version__))

@@ -863,6 +863,8 @@
   let statusData = null;      // GET /status  — what the box is doing
   let cfgData = null;         // GET /config  — what it is set to
   let latestVersion = null;   // GET /update  — asked once, by the operator
+  let installSource = '';     // same call — the install's PEP 610 origin URL,
+                              // '' for a PyPI install; switches the row's advice
 
   /* ══ 2. The loopback server ═════════════════════════════════════════
      Every request goes through these. The passcode is attached in one
@@ -916,7 +918,9 @@
   // phone home on its own schedule, and this is the operator asking.
   async function checkUpgrade() {
     try {
-      latestVersion = (await getJSON('/update')).latest || null;
+      const u = await getJSON('/update');
+      latestVersion = u.latest || null;
+      installSource = u.direct_url || '';
       if (latestVersion) renderServer();
     } catch (e) { /* offline, or PyPI unreachable — the row simply omits it */ }
   }
@@ -2177,11 +2181,19 @@
 
     // The upgrade row tells; it never installs. Upgrading is a terminal
     // act, so the row names the two commands and stops there.
+    // The advice must be the command that actually works for THIS install:
+    // on a URL install (PEP 610), 'pipx upgrade' re-resolves the recorded
+    // URL forever and releases never arrive — the reinstall re-points it.
+    const upgradeHint = installSource
+      ? ` — this install came from <b>${escapeHtml(installSource)}</b>, not` +
+        ` PyPI: <b>pipx install --force servette</b> in the terminal` +
+        ` re-points it, then <b>enable</b>`
+      : ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`;
     $('host-rows').innerHTML =
       row('Version', 'v' + escapeHtml(d.version || '?') +
         (latestVersion
           ? ` <span class="warn">v${escapeHtml(latestVersion)} available</span>` +
-            ` — <b>pipx upgrade servette</b> in the terminal, then <b>enable</b>`
+            upgradeHint
           : '')) +
       hostChecks.map(factRow).join('');
 

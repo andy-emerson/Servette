@@ -2055,7 +2055,70 @@ def run_dispatch_tests(s):
               st == 200 and b'"latest"' in body)
         st, _ = ui_req("GET", "/update")
         check("...and is code-gated like every other route", st == 403)
+
+        # The install's provenance rides the same answer (PEP 610): on a URL
+        # install, 'pipx upgrade' re-resolves the recorded URL forever and
+        # releases never arrive — the row's advice must switch to the
+        # reinstall that re-points it, and the page carries both variants.
+        saved_source = s._install_source_url
+        try:
+            s._install_source_url = lambda: "https://example.com/x.tar.gz"
+            st, body = ui_req("GET", f"/update?t={ui_code}")
+            check("/update names a URL install's origin",
+                  st == 200
+                  and b'"direct_url": "https://example.com/x.tar.gz"' in body)
+            s._install_source_url = lambda: ""
+            st, body = ui_req("GET", f"/update?t={ui_code}")
+            check("...and a PyPI install reads as no origin at all",
+                  st == 200 and b'"direct_url": ""' in body)
+        finally:
+            s._install_source_url = saved_source
+        check("The page switches its advice on that origin",
+              "pipx install --force servette" in s._UI_ADMIN_PAGE
+              and "pipx upgrade servette" in s._UI_ADMIN_PAGE
+              and "installSource" in s._UI_ADMIN_PAGE)
         s._latest_release = saved_latest
+
+        # The detection itself, both ways: a dist-info carrying
+        # direct_url.json is a URL install; one without it is PyPI's.
+        class _FakeDist:
+            def __init__(self, raw):
+                self._raw = raw
+            def read_text(self, name):
+                return self._raw if name == "direct_url.json" else None
+        saved_dist = s.importlib.metadata.distribution
+        try:
+            s.importlib.metadata.distribution = (lambda name:
+                _FakeDist('{"url": "https://github.com/x/y/archive/b.tar.gz"}'))
+            check("direct_url.json names the install's origin",
+                  s._install_source_url()
+                  == "https://github.com/x/y/archive/b.tar.gz")
+            s.importlib.metadata.distribution = lambda name: _FakeDist(None)
+            check("...its absence reads as an index install",
+                  s._install_source_url() == "")
+            s.importlib.metadata.distribution = (lambda name:
+                (_ for _ in ()).throw(s.importlib.metadata.PackageNotFoundError(name)))
+            check("...and no dist-info at all (a checkout) reads the same",
+                  s._install_source_url() == "")
+        finally:
+            s.importlib.metadata.distribution = saved_dist
+
+        # The launch line, both ways: one actionable sentence on a URL
+        # install, and silence — not noise — on the documented path.
+        saved_source_n = s._install_source_url
+        try:
+            s._install_source_url = lambda: "https://example.com/x.tar.gz"
+            with contextlib.redirect_stdout(io.StringIO()) as nbuf:
+                s._install_source_notice()
+            check("The launch notice names the origin and the re-point command",
+                  "https://example.com/x.tar.gz" in nbuf.getvalue()
+                  and "pipx install --force servette" in nbuf.getvalue())
+            s._install_source_url = lambda: ""
+            with contextlib.redirect_stdout(io.StringIO()) as nbuf:
+                s._install_source_notice()
+            check("...and says nothing on a PyPI install", nbuf.getvalue() == "")
+        finally:
+            s._install_source_url = saved_source_n
 
         # Download is removed by ruling — the route must be gone, not
         # merely unlinked from the page.

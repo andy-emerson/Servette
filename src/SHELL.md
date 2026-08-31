@@ -366,8 +366,12 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             # operator opens it, and the answer is cached for six hours.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
-            return self._respond(200, json.dumps({"latest": _upgrade_available()}),
-                                 "application/json")
+            return self._respond(200, json.dumps(
+                {"latest": _upgrade_available(),
+                 # The install's provenance rides along (PEP 610): the row's
+                 # advice must not name a command that fails on a URL install.
+                 "direct_url": _install_source_url()}),
+                "application/json")
 
         if path == "/versions":
             # One site's kept trees — its own endpoint for the cost reason
@@ -2880,6 +2884,41 @@ def _upgrade_available():
     return None
 
 
+def _install_source_url():
+    """The URL this install came from, or "" for an index (PyPI) install.
+    pip records direct_url.json in the dist-info of a URL, VCS, or
+    local-path install (PEP 610) and omits it for an index one — and its
+    presence is exactly what makes 'pipx upgrade' advice wrong: pip
+    re-resolves that recorded URL forever instead of asking PyPI, so
+    releases never arrive, and a deleted branch answers 404 in pip's
+    vocabulary, nowhere near the cause. Both advice surfaces (the page's
+    version row and the launch notice) switch on this. A checkout run has
+    no dist-info of its own and reads as "" — unless a pipx install also
+    exists on the box, whose metadata then answers; acceptable, because
+    the advice being switched is about upgrading that install."""
+    try:
+        raw = importlib.metadata.distribution("servette").read_text("direct_url.json")
+        if not raw:
+            return ""
+        return str(json.loads(raw).get("url") or "") or "a non-index source"
+    except Exception:
+        return ""
+
+
+def _install_source_notice():
+    """One launch line when the running install came from a URL rather than
+    an index: said here, where the operator is, with the command that
+    re-points the install — rather than discovered later from pip, after
+    'pipx upgrade' has answered "already at latest" from a URL it will
+    re-resolve forever. Printed before the unit refresh so the unit
+    notice, when both appear, stays the last actionable line."""
+    src = _install_source_url()
+    if src:
+        print(f"  This install came from {src} — not PyPI, so 'pipx upgrade' "
+              "will not deliver releases.\n  'pipx install --force servette' "
+              "re-points it at PyPI.")
+
+
 def _swap_snapshot(running=None):
     """Servette's own swapfile as numbers — what is allocated, what the
     kernel reports active, and what the sizing recommends. None on a host
@@ -3318,6 +3357,7 @@ The interactive loop: banner, help, then the startup refresh — in that order d
 def shell():
     _banner("Servette — The Simple Secure Server")
     print(HELP)
+    _install_source_notice()
     _startup_refresh()
 
     while True:

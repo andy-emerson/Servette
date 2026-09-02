@@ -1822,6 +1822,68 @@ def run_dispatch_tests(s):
               {"service", "cert", "password", "disk"} <= health_keys
               and (s._IS_MACOS or {"netwatch", "swap"} <= health_keys))
 
+        # The certificate row, all three shapes (#138 was the first one,
+        # live: a site named tallydb.com holding its ten-year add-site
+        # placeholder read "3649 days remaining (auto-renew enabled)" and
+        # healthy while every visitor got the browser interstitial). A
+        # certificate covering NOTHING a named site advertises is the same
+        # fault as one covering the wrong name.
+        from cryptography import x509 as _hx509
+        from cryptography.x509.oid import NameOID as _hNameOID
+        from cryptography.hazmat.primitives import (hashes as _hhashes,
+                                                    serialization as _hser)
+        from cryptography.hazmat.primitives.asymmetric import rsa as _hrsa
+        hc_dir = tempfile.mkdtemp()
+        saved_sites_hc = s.config.sites
+        try:
+            placeholder = os.path.join(hc_dir, "ph.pem")
+            s._generate_self_signed_cert(placeholder,
+                                         os.path.join(hc_dir, "ph.key"))
+            hkey  = _hrsa.generate_private_key(public_exponent=65537,
+                                               key_size=2048)
+            hname = _hx509.Name([_hx509.NameAttribute(_hNameOID.COMMON_NAME,
+                                                      "h.example.com")])
+            hnow  = datetime.datetime.now(datetime.timezone.utc)
+            hcert = (_hx509.CertificateBuilder()
+                     .subject_name(hname).issuer_name(hname)
+                     .public_key(hkey.public_key())
+                     .serial_number(_hx509.random_serial_number())
+                     .not_valid_before(hnow - datetime.timedelta(days=1))
+                     .not_valid_after(hnow + datetime.timedelta(days=90))
+                     .add_extension(_hx509.SubjectAlternativeName(
+                         [_hx509.DNSName("h.example.com"),
+                          _hx509.DNSName("www.h.example.com")]),
+                         critical=False)
+                     .sign(hkey, _hhashes.SHA256()))
+            real = os.path.join(hc_dir, "real.pem")
+            with open(real, "wb") as f:
+                f.write(hcert.public_bytes(_hser.Encoding.PEM))
+            sdir = s.config.sites[0].serve_dir
+            s.config.sites = [
+                s.Site({"domain": "h.example.com", "serve_dir": sdir,
+                        "cert_file": placeholder, "key_file": placeholder}),
+                s.Site({"domain": "h.example.com", "serve_dir": sdir,
+                        "cert_file": real, "key_file": real}),
+                s.Site({"serve_dir": sdir,
+                        "cert_file": placeholder, "key_file": placeholder}),
+            ]
+            hrows = {(r["site"], r["key"]): r
+                     for r in s._health_checks() if "site" in r}
+            check("A named site's placeholder cert is the blocking fault it is",
+                  hrows[(0, "cert")]["blocking"]
+                  and not hrows[(0, "cert")]["ok"]
+                  and "self-signed" in hrows[(0, "cert")]["detail"]
+                  and "auto-renew" not in hrows[(0, "cert")]["detail"])
+            check("...a cert covering the name still reads as renewing coverage",
+                  hrows[(1, "cert")]["ok"]
+                  and "auto-renew enabled" in hrows[(1, "cert")]["detail"])
+            check("...and a domainless self-signed stays the amber normal case",
+                  not hrows[(2, "cert")]["ok"]
+                  and not hrows[(2, "cert")]["blocking"])
+        finally:
+            s.config.sites = saved_sites_hc
+            shutil.rmtree(hc_dir, ignore_errors=True)
+
         # Disk: the outage every other row assumes is not happening. Two
         # thresholds, because one does not fit a Pi card and a VPS both.
         disk = s._status_data()["disk"]
@@ -7608,12 +7670,38 @@ def run_browser_tests(s, tmpdir):
     # version list, the restore buttons, and the sizes all have something
     # to render rather than an empty state that proves little.
     site = s.config.sites[0]
-    saved = (site.serve_dir, site.domain, dict(site.redirects))
+    saved = (site.serve_dir, site.domain, dict(site.redirects), site.cert_file)
     root = tempfile.mkdtemp(dir=tmpdir)
     httpd = None
     try:
         site.domain = "browser-check.test"
         site.serve_dir = os.path.join(root, "site")
+        # A named healthy card needs a certificate that actually covers its
+        # name: since #138, a cert covering nothing the site advertises is
+        # the blocking fault it always was in a browser, so the fixture
+        # mints a covering one — "healthy" below is earned, not the bug's
+        # leftovers (the suite's own cert names only 127.0.0.1).
+        from cryptography import x509 as _bx509
+        from cryptography.x509.oid import NameOID as _bNameOID
+        from cryptography.hazmat.primitives import (hashes as _bhashes,
+                                                    serialization as _bser)
+        from cryptography.hazmat.primitives.asymmetric import rsa as _brsa
+        bkey  = _brsa.generate_private_key(public_exponent=65537, key_size=2048)
+        bname = _bx509.Name([_bx509.NameAttribute(_bNameOID.COMMON_NAME,
+                                                  "browser-check.test")])
+        bnow  = datetime.datetime.now(datetime.timezone.utc)
+        bcert = (_bx509.CertificateBuilder()
+                 .subject_name(bname).issuer_name(bname)
+                 .public_key(bkey.public_key())
+                 .serial_number(_bx509.random_serial_number())
+                 .not_valid_before(bnow - datetime.timedelta(days=1))
+                 .not_valid_after(bnow + datetime.timedelta(days=90))
+                 .add_extension(_bx509.SubjectAlternativeName(
+                     [_bx509.DNSName("browser-check.test")]), critical=False)
+                 .sign(bkey, _bhashes.SHA256()))
+        site.cert_file = os.path.join(root, "browser-check.pem")
+        with open(site.cert_file, "wb") as f:
+            f.write(bcert.public_bytes(_bser.Encoding.PEM))
         for n, text in enumerate(["one", "two"], 1):
             d = os.path.join(root, f"v{n}")
             os.makedirs(d)
@@ -8094,7 +8182,7 @@ def run_browser_tests(s, tmpdir):
     finally:
         if httpd is not None:
             s._stop_ui(httpd)
-        site.serve_dir, site.domain, site.redirects = saved
+        site.serve_dir, site.domain, site.redirects, site.cert_file = saved
         shutil.rmtree(root, ignore_errors=True)
 
 

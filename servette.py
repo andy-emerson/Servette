@@ -9729,7 +9729,15 @@ def _health_checks(service_active=None):
         days   = _cert_days(cert)
         covers = _cert_covered_domain(cert)
         mismatched = bool(site.domain) and bool(covers) and covers != site.domain
-        cert_ok = days is not None and days > 0 and bool(site.domain) and not mismatched
+        # bool(covers) is load-bearing on a named site: the add-site
+        # placeholder names only localhost and IPs, which read as no covered
+        # domain at all — and a certificate covering NOTHING the site
+        # advertises is the same browser interstitial as one covering the
+        # wrong name. Without it, a named site holding its ten-year
+        # placeholder read "3649 days remaining (auto-renew enabled)" and
+        # healthy while every visitor was warned off (#138).
+        cert_ok = (days is not None and days > 0 and bool(site.domain)
+                   and bool(covers) and not mismatched)
         # Severity turns on whether the site claims a public name. With a
         # domain set, an untrusted certificate is a full-page browser
         # interstitial for everyone who visits it — the site is unusable at
@@ -9743,7 +9751,9 @@ def _health_checks(service_active=None):
                      "detail": (f"{days} days remaining (auto-renew enabled)" if cert_ok
                                 else f"issued for {covers} — get one for this name" if mismatched
                                 else "expired" if (days is not None and days <= 0)
-                                else "self-signed" if days is not None
+                                else ("self-signed — get one for this name"
+                                      if site.domain else "self-signed")
+                                     if days is not None
                                 else "not configured")})
         # A public site is a choice, not a defect: no password is healthy.
         # What IS broken is the half-state — a username with nothing stored

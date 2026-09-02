@@ -1523,6 +1523,15 @@ def run_dispatch_tests(s):
           and "api('/preview'" in s._UI_ADMIN_PAGE)
     check("...whose link carries the preview token, never the passcode",
           "'/preview/' + encodeURIComponent(data.token)" in s._UI_ADMIN_PAGE)
+    # The view control is the row's third button — an anchor in button
+    # dress, born without an href and dim (aria-disabled) until a preview
+    # exists, because the open must be the operator's own click and the
+    # address does not exist until the staging answers.
+    check("...View preview is a button-dressed link, dim until built",
+          'aria-disabled="true" title="Build the preview first"'
+          in s._UI_ADMIN_PAGE
+          and 'a.action[aria-disabled="true"]' in s._UI_ADMIN_PAGE
+          and "removeAttribute('aria-disabled')" in s._UI_ADMIN_PAGE)
     # Download is removed by ruling: a sys admin already knows how to copy
     # a folder off their own box, and the terminal's own tools do it better.
     check("...and offers no download — the terminal already knows how",
@@ -7900,8 +7909,19 @@ def run_browser_tests(s, tmpdir):
                 f.write("h1{color:rgb(1,2,3)}")
             page.set_input_files('input[type="file"]', draft)
             page.wait_for_timeout(600)
+            # Before anything is built, View preview is the row's dim third
+            # button: present, button-dressed, and going nowhere — like Save
+            # until a form can be saved.
+            check("...View preview sits dim until a preview is built",
+                  page.locator("a.preview-open").first
+                      .get_attribute("aria-disabled") == "true"
+                  and page.locator("a.preview-open").first
+                          .get_attribute("href") is None)
             page.locator("button.prev").first.click()
             page.wait_for_timeout(2000)
+            check("...and wakes once the staging answers",
+                  page.locator("a.preview-open").first
+                      .get_attribute("aria-disabled") is None)
             # One line — date · size is short enough never to reach the
             # button (ruled: no file counts) — and the row centres its
             # label and button against it.

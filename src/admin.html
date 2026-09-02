@@ -193,7 +193,12 @@
        brightens it, unavailable is dim and says so by being unclickable —
        never by vanishing. The variants below change only what a button
        means, never that rule. */
-    button.action {
+    /* a.action is a link in button dress: the View-preview control must be
+       an anchor (the open happens on the operator's own click, with
+       rel=noopener as the ruled isolation) but reads as the third button
+       of its row. aria-disabled is its disabled attribute — an anchor
+       without an href goes nowhere, and the style says so. */
+    button.action, a.action {
       font-family: inherit;
       font-size: 0.75rem;
       color: var(--text);
@@ -203,9 +208,12 @@
       padding: 0.5rem 0.9rem;
       cursor: pointer;
       letter-spacing: 0.03em;
+      text-decoration: none;
+      display: inline-block;
     }
-    button.action:hover:not(:disabled) { background: rgba(90,132,102,0.28); }
-    button.action:disabled {
+    button.action:hover:not(:disabled),
+    a.action:hover:not([aria-disabled="true"]) { background: rgba(90,132,102,0.28); }
+    button.action:disabled, a.action[aria-disabled="true"] {
       color: var(--muted);
       border-color: rgba(90,132,102,0.25);
       background: rgba(90,132,102,0.05);
@@ -554,7 +562,6 @@
        so the draft's tab holds no handle back to this page or the passcode
        in its address; the admin endpoints themselves all demand the
        passcode the draft never learns. */
-    .preview-open { display: inline-block; margin-top: 0.6rem; }
 
     /* ── Charts: inline SVG, no library — the page loads no third-party
        code. The y-axis is part of the chart: a line without a scale is a
@@ -1320,15 +1327,24 @@
            // certificate, and its headers are not in scope here.
            `<button class="action prev" type="button" disabled ` +
            `title="Choose a folder first — this shows what you are about to ` +
-           `publish, not the live site">Preview</button>` +
+           `publish, not the live site">Build preview</button>` +
+           // The row's third button, dim until a preview exists to view —
+           // like Save until a form can be saved. An anchor in button
+           // dress, deliberately: the open must be the operator's own
+           // click (a tab opened when the async staging finishes would be
+           // popup-blocked), and rel=noopener is the ruled isolation — the
+           // draft's tab holds no handle back to the page whose address
+           // carries the passcode. Its href exists only once built.
+           `<a class="action preview-open" target="_blank" rel="noopener" ` +
+           `aria-disabled="true" title="Build the preview first">` +
+           `View preview ↗</a>` +
          `</div>` +
          `<div class="preview hidden">` +
            `<p class="hint">Staged: the folder you chose, served over the ` +
-           `tunnel and not published — it opens full size in its own tab. ` +
-           `Links inside it work; the site's real domain, certificate, and ` +
-           `headers are not part of what you are seeing.</p>` +
-           `<a class="action preview-open" target="_blank" rel="noopener" ` +
-           `href="#">Open the preview ↗</a>` +
+           `tunnel and not published — View preview opens it full size in ` +
+           `its own tab. Links inside it work; the site's real domain, ` +
+           `certificate, and headers are not part of what you are ` +
+           `seeing.</p>` +
          `</div>` +
          `<div class="done hidden">` +
            `<p class="hint note-done" style="margin-top:0.75rem"></p>` +
@@ -1683,8 +1699,11 @@
         // it asks for. And it is the PREVIEW token, never the run's
         // passcode — a draft can read its own address, and must not learn
         // the credential that publishes.
-        q('.preview-open').href = '/preview/' + encodeURIComponent(data.token) +
+        const viewBtn = q('.preview-open');
+        viewBtn.href = '/preview/' + encodeURIComponent(data.token) +
           '/' + encodeURIComponent(siteIndex()) + '/';
+        viewBtn.removeAttribute('aria-disabled');
+        viewBtn.title = 'The staged draft, full size in its own tab';
         q('.preview').classList.remove('hidden');
         mark('badge-green', '✓ staged');
       } catch (e) {

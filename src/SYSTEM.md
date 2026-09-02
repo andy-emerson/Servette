@@ -1183,12 +1183,15 @@ def _systemd_unit(python_path, module_path):
     The remaining restrictions cost the service nothing it uses: no devices
     beyond the private stubs, no clock/hostname changes, no kernel log reads,
     no other processes' /proc entries, no realtime scheduling, no namespaces,
-    one syscall architecture. PYTHONDONTWRITEBYTECODE stops the interpreter
-    attempting __pycache__ writes into the read-only pin. Deliberately absent,
-    pending validation on real hardware: MemoryDenyWriteExecute and
-    SystemCallFilter (cffi loads a compiled extension), ProtectHome (breaks an
-    install that IS reachable under /home), and UMask=0077 (a renewed
-    certificate would become unreadable to the unelevated status command).
+    one syscall architecture, the @system-service syscall set, and no
+    memory both writable and executable. The last two were the ones cffi's
+    compiled extension put in doubt; a drill on the production host proved
+    them harmless (2026-09-02, #141: service up, TLS answering, no seccomp
+    or MDWE faults in the journal). PYTHONDONTWRITEBYTECODE stops the
+    interpreter attempting __pycache__ writes into the read-only pin.
+    Deliberately absent: ProtectHome (breaks an install that IS reachable
+    under /home) and UMask=0077 (a renewed certificate would become
+    unreadable to the unelevated status command).
 
     The leading version stamp is load-bearing, not decoration: a pip upgrade
     changes no directive, so without the stamp an upgraded host's units would
@@ -1233,6 +1236,8 @@ ProtectProc=invisible
 RestrictRealtime=yes
 RestrictNamespaces=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=yes
 ExecStart={python_path} -m servette --serve
 Restart=always
 RestartSec=3

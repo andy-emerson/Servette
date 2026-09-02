@@ -6194,6 +6194,8 @@ def run_install_tests(s, tmpdir):
                       "ProtectKernelLogs=yes", "ProtectProc=invisible",
                       "RestrictRealtime=yes", "RestrictNamespaces=yes",
                       "SystemCallArchitectures=native",
+                      "SystemCallFilter=@system-service",
+                      "MemoryDenyWriteExecute=yes",
                       "Environment=PYTHONDONTWRITEBYTECODE=1"):
         check(f"Unit carries {directive.split('=')[0]}", directive in service)
     check("The service starts the package with the enabling shell's interpreter",

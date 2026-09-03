@@ -6947,6 +6947,57 @@ def run_install_tests(s, tmpdir):
         os.chdir(saved_cwd)
         os.remove(rel_path)
 
+    section("Status keeps the server's rows out of the site blocks")
+
+    # The process facts (Uptime/Memory/CPU/PID) once printed after the site
+    # loop, so on a multi-site host they ran straight out of the last site's
+    # rows and read as that site's — "Uptime 3s" under Site 1 looked like the
+    # site's uptime, not the server's. They belong in the block under the
+    # status line that names the process, and every site block opens on a
+    # blank line so the single-site case cannot merge either way.
+    st_saved = (s.config.sites, s._service_is_active, s._server_running,
+                s._runtime_stats, s._production_issues, s._cache_warnings)
+    try:
+        s._service_is_active = lambda: True
+        s._server_running    = lambda: True
+        s._runtime_stats     = lambda active: [("Uptime", "3s"), ("PID", "25079")]
+        s._production_issues = lambda: []
+        s._cache_warnings    = lambda: []
+
+        def status_lines():
+            b = io.StringIO()
+            with contextlib.redirect_stdout(b):
+                s.cmd_status()
+            return b.getvalue().splitlines()
+
+        pair = []
+        for dom, folder in (("a.example", "site-a"), ("b.example", "site-b")):
+            st = s.Site()
+            st.domain, st.serve_dir = dom, folder
+            pair.append(st)
+        s.config.sites = pair
+        lines  = status_lines()
+        first  = next(i for i, l in enumerate(lines) if l.strip().startswith("Site 0"))
+        procs  = [i for i, l in enumerate(lines)
+                  if l.strip().startswith("Uptime") or l.strip().startswith("PID")]
+        check("Every process row sits above the first site block",
+              len(procs) == 2 and max(procs) < first)
+        heads = [i for i, l in enumerate(lines) if l.strip().startswith("Site ")]
+        check("Each site block opens on a blank line",
+              len(heads) == 2 and all(lines[i - 1].strip() == "" for i in heads))
+
+        s.config.sites = pair[:1]
+        lines = status_lines()
+        # No "Site 0" heading for a lone site, so the blank line is the only
+        # thing separating its URL row from the server block above it.
+        url = next(i for i, l in enumerate(lines) if l.strip().startswith("URL"))
+        check("A lone site's rows do not merge into the server block",
+              lines[url - 1].strip() == ""
+              and not any(l.strip().startswith("Site ") for l in lines))
+    finally:
+        (s.config.sites, s._service_is_active, s._server_running,
+         s._runtime_stats, s._production_issues, s._cache_warnings) = st_saved
+
     section("Connection cap survives thread-start failure")
 
     # If Thread.start() raises after a slot is acquired (memory/thread exhaustion),

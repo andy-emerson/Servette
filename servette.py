@@ -19,7 +19,7 @@ Architecture:
                           publishing, the settings doors, and the terminal shell
 """
 
-__version__ = "0.26.242"
+__version__ = "0.26.246"
 
 # Imports — standard library only
 import base64

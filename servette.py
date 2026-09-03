@@ -9995,9 +9995,15 @@ def cmd_status(json_mode=False):
     status_dot = _c("● Running", "green") if running else _c("○ Stopped", "red")
     print(f"{status_dot}  (v{__version__})")
 
+    # Every process fact belongs to this block, under the status line that
+    # names the process — not trailing the site list, where the last site's
+    # rows run straight into them and "Uptime 3s" reads as that site's uptime
+    # rather than the server's.
     if running:
         mode = "System service" if service_active else "Session only"
         print(f"  {'Mode':<{W}} {mode}")
+        for label, value in _runtime_stats(service_active):
+            print(f"  {label:<{W}} {value}")
 
     for i, site in enumerate(config.sites):
         cert_path = _resolve(site.cert_file)
@@ -10005,8 +10011,12 @@ def cmd_status(json_mode=False):
         # HSTS all key off the configured domain, so reporting anything else can
         # print a URL that does not actually reach this site.
         url       = f"https://{site.domain}" if site.domain else f"https://localhost:{config.port}"
+        # The blank line is unconditional: with one site it is what keeps the
+        # site's rows from merging into the server block above, and the number
+        # is still only worth printing when there is more than one to tell apart.
+        print()
         if len(config.sites) > 1:
-            print(f"\n  Site {i}")
+            print(f"  Site {i}")
         print(f"  {'URL':<{W}} {url}")
         print(f"  {'Directory':<{W}} {site.serve_dir or '(not configured)'}")
         auth_str = _c("enabled", "green") if site.username else _c("disabled", "yellow")
@@ -10025,10 +10035,6 @@ def cmd_status(json_mode=False):
         print()
         for issue in issues:
             print(_c(f"  {issue}", "yellow"))
-
-    if running:
-        for label, value in _runtime_stats(service_active):
-            print(f"  {label:<{W}} {value}")
 
     print()
 

@@ -1,116 +1,106 @@
 # DESIGN-V2.md
 
-The plan for Servette 2.0 — what it ships, how it is administered, and why. [`DESIGN.md`](DESIGN.md) describes 1.x, which is what runs today; this document describes the version after it. Where the two disagree, `DESIGN.md` is the truth about the code and this is the truth about the destination. Rulings that 2.0 needs and that are not yet closed are listed under [Open decisions](#open-decisions); open work lives in the repository's GitHub issues.
+The plan for Servette 2.0 — what it ships, how it is administered, and why. [`DESIGN.md`](DESIGN.md) describes 1.x, which is what runs today; this document describes the version after it. Where the two disagree, `DESIGN.md` is the truth about the code and this is the truth about the destination. Rulings that 2.0 needs and that are not yet closed are listed under [Open decisions](#open-decisions). They are listed here, not in issues, because 2.0 is not yet scheduled work: this document is a destination under consideration, and its forks stay with it until the Human confirms the move toward 2.0 — expected after 1.x's release, not before. At that point each becomes an issue and this section points to them.
 
 ## Why a 2.0
 
 Servette exists to answer Python's own warning that `http.server` is not for production. 1.x answers it, and then keeps going: the same module carries a setup wizard, content publishing with version history, swap and network-watchdog management, traffic statistics, a live CPU meter, preview staging, and a root-run loopback web server with a 2,500-line admin page. Each addition was defensible under the principles — "Production-grade" and "Zero-friction" license almost any operations feature — and together they made a second product, wrapped around the first.
 
-Measured at 0.26.246, of roughly 7,100 lines of Python plus 3,300 of embedded HTML and JavaScript:
+Measured at 0.26.246 with `python3 src/build.py --counts`, plus the generated lines of the Shell section's *Loopback page server* alone:
 
-| Part | Lines | What it is |
+| Part | Lines in the module | What it is |
 | - | - | - |
-| `src/SERVER.md` | 1,709 | config, rate limiting, file cache, request handler, TLS |
-| `src/SYSTEM.md` | 2,077 | certificates and ACME, lifecycle, systemd units and sandbox, network watchdog, swap |
-| `src/SHELL.md` | 3,132 | shell, setup, status, publishing, and the admin page's server (674) |
-| `src/admin.html`, `src/connection.html`, `src/404.html` | 3,328 | the browser pages |
+| Server | 1,731 | config, rate limiting, file cache, request handler, TLS |
+| System | 2,084 | certificates and ACME, lifecycle, systemd units and sandbox, network watchdog, swap |
+| Shell | 3,134 | shell, setup, status, publishing — and the admin page's loopback server, 664 of them |
+| Init and Main | 171 | version, imports, the entry point |
+| Embedded pages | 3,306 | `src/admin.html` (2,504), `src/connection.html` (472), `src/404.html` (330) — HTML and JavaScript, not Python |
 
-The secure server is about a third of it. Two costs follow. **Auditability:** "understood by one person" now means reading a CPU meter's JavaScript to audit TLS. **Attack surface:** the admin server runs as root and accepts uploads; it is reachable only through the operator's SSH tunnel, but it ships with — and must be audited as part of — the security product.
+The secure server is about a third of the module. Two costs follow. **Auditability:** "understood by one person" now means reading a CPU meter's JavaScript to audit TLS. **Attack surface:** the admin server runs as root and accepts uploads; it is reachable only through the operator's SSH tunnel, but it ships with — and must be audited as part of — the security product.
 
-2.0 separates the two products and keeps each one honest about what it is.
+2.0 separates the two products and gives each one its own audience: the server for the person who installs software with a package manager and operates it from a terminal, and an application for the person who wants a familiar install and a window.
 
 ## The shape of 2.0
 
-Three parts, each with one job:
+Two products, in two repositories, beside the website that already has its own ([ruling](DECISIONS.md#the-website-lives-in-its-own-repository)):
 
-| Part | Job | Delivered by | Runs on |
+| Product | Job | Delivered by | Runs on |
 | - | - | - | - |
-| **The core** — `servette.py` | serve static sites securely: TLS, ACME, headers, auth, rate limits, the service unit, and a command line | PyPI, through pipx | the server |
-| **The admin extension** | the browser admin tool: its loopback server and its page | a GitHub release, fetched and verified by the core | the server, only where the operator installs it |
-| **servette.org** | the front door: a launcher that opens the tunnel and frames the box's own admin page | static hosting | the operator's browser |
+| **The server** — `servette.py` | serve static sites securely: TLS, ACME, headers, auth, rate limits, the service unit, and a command line that is the whole administrative interface | PyPI, through pipx — one file, as today | the box |
+| **The app** | administer boxes from the operator's own computer: hold the list of boxes, open the SSH connection, drive the server's command line, and show a browser interface served on the computer's own loopback | an installer built in CI and published as a release, linked from servette.org | the operator's computer |
+| **servette.org** | the project site, as now — a Servette box serving itself; it links to both and holds neither | its own repository | a Servette box |
 
-From the operator's side it is one website with an unusual login: open servette.org, pick a box, click Connect; a terminal window opens the tunnel, and the box's admin tool appears in the same tab.
+From the operator's side: install the server once with pipx and run `setup`; install the app once; add the box to the app by address, user, and key; click it. The terminal remains a complete second way in — every operation the app performs is a command the operator could type — and a box that never meets the app loses nothing.
 
-## The core
+## The server
 
-The core is `servette.py` without the admin server and pages. It keeps every 1.x principle in [`DESIGN.md`](DESIGN.md#scope--non-goals) unchanged — and gains one scope rule that 1.x lacked: **a feature for administering the box belongs to the extension; the core grows only for serving.** The core's command line is the extension's interface: `status --json`, `sites --json`, `set`, `publish`, and the rest, stable within a major version.
+`servette.py` is 1.x without the loopback admin server and its page. Every 1.x principle in [`DESIGN.md`](DESIGN.md#scope--non-goals) holds unchanged, and one scope rule is added that 1.x lacked: **the server grows only for serving and for its command line; a graphical way to administer the box belongs to the app.**
 
-What else leaves the core is not yet decided — see [what is core](#what-is-core).
+- **The command line is the API**, as the [standing ruling](DECISIONS.md#the-cli-is-the-api) says and as nothing yet depends on. In 2.0 the app depends on it: `status --json`, `sites --json`, `set`, `publish`, `restore-site`, and the rest are a contract, stable within a major version, with their JSON shapes stated in `DESIGN.md` and pinned by the suite. Commands the app needs that answer only in prose today gain a `--json` form — `traffic` first.
+- **Publishing from elsewhere.** `publish` takes a folder on the box. The app's content arrives over SSH, so the command gains a way to take a bundle from standard input, through the same `_land_bundle` every publish runs; the extraction guards, the ring, and the lock are unchanged.
+- **`admin` leaves the command list.** Until the app exists, `servette admin` keeps working exactly as 1.x documents it; the day the app is proven, the loopback server and `src/admin.html` leave the module and `help` names the app instead. The connection test and the error page stay: they are served to visitors by every box.
+- **The service is untouched.** Nothing the service user can reach changes; the sandbox, the runtime copy, and the request-time invariant are as 1.x states them.
 
-## The admin extension
+What else leaves the server is not yet decided — see [what is core](#what-is-core).
 
-The admin server and its pages, shipped separately and installed on demand.
+## The app
 
-- **Installing.** `servette admin` on a box without the extension says so and offers to fetch it. On yes, the core downloads the extension's release archive from GitHub.
-- **Trust comes from the core, not from GitHub.** Every core release embeds the SHA-256 of the one extension release it was built with — they are versioned in lockstep. The core refuses an archive that does not match. The checksum arrives inside the core, through PyPI, so the extension inherits the core's trust; GitHub only serves bytes, and a tampered release or download fails the check. No signing key, no new trust root, and the core never replaces its own code.
-- **Where it lives.** A root-owned directory the sandboxed service can read but not write — the runtime-copy directory is already that. Never under `/var/lib/servette`: the service can write there, so code placed there could be altered by a compromised service and then run as root at the next `servette admin`.
-- **Checked on every load,** not only at install: the checksum is recomputed before the extension is imported.
-- **Unpacked by the core's existing hardened extraction** — the same path publishing uses for uploaded archives, which refuses escaping paths and links — not by a second extractor.
-- **Lockstep versions remove compatibility negotiation.** A core only ever runs the extension release it names.
-- **Uninstalling** is deleting the directory.
-- **Offline boxes** install from a local archive under the same checksum check.
+A desktop application, designed and documented in its own repository. This document records only what the server owes it and the shape the two agreed on:
 
-This is not the self-update machinery that [the distribution ruling](DECISIONS.md#distribution-is-pippypi--servette-is-not-its-own-package-manager) deleted: that ruling governs how Servette itself is delivered, and Servette is still delivered only by pipx. The extension is code the installed core fetches and verifies; its own ruling, scoped beside that one, is an [open decision](#open-decisions).
-
-## servette.org: the launcher
-
-servette.org stops being a brochure and becomes the way in — without becoming the infrastructure.
-
-- **Connect.** Setup prints a complete `Host` entry for the operator's `~/.ssh/config`: the box's address, user, a `LocalForward` on a port unique to that box, `RequestTTY yes`, and `RemoteCommand servette admin`. servette.org's Connect button is an `ssh://<host-alias>` link; on macOS it opens Terminal, which opens the tunnel and starts the admin server in one step. Where the platform has no `ssh://` handler (Windows, most Linux desktops), Connect copies `ssh <host-alias>` to paste into a terminal.
-- **A port per box.** Every box tunnelled to the same local port would share one browser origin and one key store; setup assigns each its own.
-- **Detecting the tunnel.** The page polls an unauthenticated `/hello` on the box's local port until it answers. `/hello` reveals only that an admin server is listening and its version.
-- **The admin tool appears in the tab.** servette.org embeds the box's page — served by the box, through the tunnel, from `http://localhost:<port>` — in a frame. The browser's same-origin policy forbids servette.org's own code from reading or scripting that frame: servette.org draws the frame around the tool but cannot see into it or act on the box. A compromised servette.org can break the launcher; it cannot administer anyone's server.
-- **Framing is the box's to permit.** The box's admin page sends `Content-Security-Policy: frame-ancestors https://servette.org` and accepts no other framer.
-- **The box list.** The launcher keeps the operator's boxes (alias, address, user, port) encrypted at rest in the browser — a non-extractable AES-GCM key in IndexedDB, the pattern Neodide's secrets manager uses. Nothing there is a credential; it is convenience.
-- **What servette.org never holds:** SSH keys (the system's ssh and agent keep them), pairing keys (they live with the box's page, below), or any route to a box that does not run through the operator's own tunnel.
-
-Unverified, to settle before building: Chrome and Firefox allow an https page to frame `http://localhost` (Chrome behind its one-time local-network-access prompt); Safari's behavior is untested.
-
-## Pairing: logging in without a passcode
-
-1.x logs in with a six-character passcode printed per run. 2.0 replaces it with a key that cannot leave the browser.
-
-- **The first login on a browser** uses a one-time code the admin server prints in the terminal as a clickable link, `https://servette.org/#c=<code>`. The code rides in the URL fragment, which browsers never send to a server: servette.org's host never sees it, only the page in the operator's browser, which hands it to the framed admin page.
-- **Pairing.** On that first login, the box's admin page — on the box's origin, not servette.org's — generates a non-extractable ECDSA key with WebCrypto, stores it in IndexedDB, and sends the box its public half. The box keeps a list of trusted browsers, in the manner of `authorized_keys`.
-- **Every later login** is a challenge the browser signs: click Connect, the tunnel opens, the page signs the box's challenge, and the tool opens. Nothing to read or type.
-- **Two locks:** the SSH key opens the tunnel; a browser key that cannot be exported passes the admin server. A copied link or leaked code is worthless after first use.
-- **Revoking** a browser is deleting one line from the trusted list, from the terminal.
-- **Per browser, per device:** a new laptop or cleared storage pairs once more from the terminal link — by design.
-
-This removes the passcode, its guess ceiling, and the login page from the admin server. The box verifies signatures with `cryptography`, already the core's one dependency.
+- **It holds the operator's boxes** — alias, address, user, key path — in its own configuration on the operator's computer. Nothing is stored on any box, and no key material is copied: the system's `ssh` and its agent open every connection, as they do for the terminal today.
+- **It drives the server's command line over SSH.** Every read is a `--json` command; every write is the command the terminal would run. There is no admin protocol, no loopback server on the box, and no network-reachable door: the SSH connection is the authentication, as it always was.
+- **Its interface is a browser page served on the computer's own loopback.** `src/admin.html` moves to the app largely as it is; its three functions that talk to a server talk to the app's local process instead of the box.
+- **Publish and preview become local.** The folder being published is on the operator's computer, so the app builds the bundle there and sends it over SSH; a preview is that folder served locally, so nothing is staged on the box.
+- **Login disappears.** There is no browser talking to a box, so there is no passcode, no guess ceiling, no login page, and no pairing. The app's own loopback page carries a per-launch token in the address the app opens, against other local processes and sites.
+- **How it is delivered is where its trust lives.** The installer is built in CI from a release tag, published as a release asset with its checksum and provenance, and signed and notarized for the platforms that check. servette.org links to the release; it does not serve the binary, because a single box's content tree is not where a download's integrity should rest, however well the server guarding it is built.
 
 ## Trust, summarized
 
 | Who could act on a box | 1.x | 2.0 |
 | - | - | - |
-| Someone with the operator's SSH key | yes | yes, and only from a paired browser or the terminal link |
-| servette.org's host or its scripts | n/a | no — same-origin forbids reading or scripting the framed tool |
-| Someone with a copied admin link or code | yes, for that run | no — single use, then pairing |
-| A compromised service user | no | no — the extension lives where the service cannot write, and is checksummed on load |
+| Someone with the operator's SSH key | yes | yes — unchanged; the key is the credential in both |
+| Someone with a copied admin link or passcode | yes, for that run | no such thing: no browser logs in to a box |
+| servette.org's host or its scripts | n/a | no — it links to the app's release and serves nothing that runs anywhere |
+| Whoever can alter the app's release | n/a | yes, on the operator's computer and so on every box — the trade 2.0 accepts, and why the release is built in public CI, attested, and signed |
+| A compromised service user | no | no — unchanged |
+
+The new row is the honest cost of the second audience. It is bounded by the same means every installed application relies on, and it touches nobody who administers from the terminal.
 
 ## What 2.0 costs
 
-For operators: a one-time pairing per browser; one-click Connect on macOS and copy-a-command elsewhere; browser prompts for local-network access that vary by browser; and the launcher is unavailable while servette.org is down — the terminal and every command line keep working.
+For operators who use the app: one installer, and the platform warnings an unsigned or unfamiliar application draws until signing is in place. For operators who do not: nothing — the terminal is complete.
 
-For maintainers: two artifacts released in lockstep, with CI enforcing that each core release names a published extension checksum; servette.org's publishing becomes part of the product (static files, built by CI from this repository, no third-party scripts, integrity hashes), even though it holds no keys; ~60–100 lines of fetch-verify-install code in the core that decide what runs as root, under the [verification bar](DESIGN.md#verification-bar)'s human read; and a migration in which 1.x operators keep `servette admin` working until the 2.0 path is proven.
+For maintainers: a second product in a second repository, with a build matrix, installers for each platform, signing certificates that expire, and a release cadence of its own; the command line's JSON becomes a compatibility promise the suite pins and the app's tests exercise against the server versions it supports; the admin page's browser checks move with the page; and a migration in which 1.x operators keep `servette admin` until the app is proven.
+
+## Rejected on the way here
+
+Each of these was considered for how the admin tool should be delivered; the reason each lost is the reason the shape above holds.
+
+- **An extension fetched from GitHub by the server and verified against an embedded checksum.** Fetch-verify-run-as-root is the path the [distribution ruling](DECISIONS.md#distribution-is-pippypi--servette-is-not-its-own-package-manager) deleted, and its reopen conditions have not fired; every upgraded box would also need GitHub before `admin` worked again.
+- **The admin page hosted on servette.org, talking to the box over the tunnel.** The browser trusts the origin that served the document; a page from servette.org makes servette.org's host a party who can act on every box while the tool is open, whatever data the box withholds.
+- **A loader on the box that fetches the page from servette.org and verifies its hash before running it.** Sound, but it keeps the admin server in the module, ties the tool to servette.org's uptime against the [no-mirror ruling](DECISIONS.md#servetteorg-has-no-mirror-the-box-is-the-only-origin), and makes every release a two-repository event.
+- **A second module shipped in the same wheel.** Breaks the expectation that `pipx install servette` delivers `servette.py` and nothing else.
+- **A `servette-admin` package injected into the server's environment.** Keeps the box's single file and PyPI's trust root, but keeps a root-run loopback server on the box and the tunnel, the passcode or a pairing scheme, and an `ssh` configuration in front of every operator.
+- **servette.org as a launcher** — framing the box's page from an https site, with browser pairing in place of the passcode. The most machinery of any option, with open browser questions, for a flow the app gives without a launcher.
+- **A zero-click `ssh` configuration entry** that starts `admin` and opens the browser. Workable, but it asks the operator to maintain an unusual `Host` entry and still leaves the admin server on the box.
 
 ## Open decisions
 
-Each is the Human's to close; what it gates follows it. They are listed here, not in issues, because 2.0 is not yet scheduled work: this document is a destination under consideration, and its forks stay with it until the Human confirms the move toward 2.0 — expected after 1.x's release, not before. At that point each becomes an issue and this section points to them.
+Each is the Human's to close; what it gates follows it.
 
-- <a id="what-is-core"></a>**What is core.** Moving the admin server and pages takes the core from ~10,400 lines to ~6,700. Getting toward 3,000–4,000 means deciding whether these are serving or administering: publishing and version history (558), the config sub-shell (468), status and traffic reporting (592), the setup wizard, and swap and the network watchdog in `src/SYSTEM.md`. *Gates:* the size of the core and the extension's interface.
-- **The extension ruling.** "The installed core may fetch one extension from GitHub, verified against a checksum the core carries" — scoped beside [the distribution ruling](DECISIONS.md#distribution-is-pippypi--servette-is-not-its-own-package-manager), which it leaves standing for Servette itself. *Gates:* the install path.
-- **Superseded rulings.** Pairing replaces [the front door is a login: link and passcode, printed apart](DECISIONS.md#the-front-door-is-a-login-link-and-passcode-printed-apart); the extension amends [one admin page with tabs is the browser surface](DECISIONS.md#one-admin-page-with-tabs-is-the-browser-surface) and [the build emits one servette.py](DECISIONS.md#the-build-emits-one-servettepy-the-package-build-runs-the-literate-transform); "Understood by one person — one literate module" becomes one literate module per product. *Gates:* the rewrite of `DESIGN.md` at merge.
-- **Safari.** Whether it frames `http://localhost` from an https page. *Gates:* whether the launcher frames or navigates the tab on Safari.
+- <a id="what-is-core"></a>**What is core.** Removing the loopback server and its page takes the module from about 10,400 lines to about 7,300, of which about 6,500 are Python. Getting toward 3,000–4,000 means deciding whether these are serving or administering: publishing and version history, the config sub-shell, status and traffic reporting, the setup wizard, and swap and the network watchdog in `src/SYSTEM.md`. The app drives whatever stays through the command line, so moving a feature out means the app reimplements it on its side. *Gates:* the size of the server and the breadth of the command-line contract.
+- **Privileged commands from the app.** `servette admin` elevates with `sudo` and asks for the password in the terminal. The app runs commands over SSH without a terminal of its own; it must either request one and relay the prompt, rely on the box's `sudo` asking no password, or something else. *Gates:* the app's connection design and what setup must say about the operator account.
+- **The command-line contract.** Which commands gain `--json`, how a bundle reaches `publish` over SSH, and how the contract's version is stated. *Gates:* the first step of the build.
+- **The app's technology and first packaging.** A Python application shipped through PyPI first, wrapped in an installer later, or a binary installer from the start. *Gates:* the app repository's own design document.
+- **The repositories.** Two products in two repositories beside the website's; whether they move under one organization. *Gates:* where the app's repository is created.
+- **Superseded rulings.** The app amends [multi-step features pair a shell flow with a loopback browser page](DECISIONS.md#multi-step-features-pair-a-shell-flow-with-a-loopback-browser-page) and [one admin page with tabs is the browser surface](DECISIONS.md#one-admin-page-with-tabs-is-the-browser-surface) — the browser surface leaves the box — and retires [the front door is a login](DECISIONS.md#the-front-door-is-a-login-link-and-passcode-printed-apart) with the door itself; [the build emits one `servette.py`](DECISIONS.md#the-build-emits-one-servettepy-the-package-build-runs-the-literate-transform) becomes true in the strict sense. *Gates:* the rewrite of `DESIGN.md` and `DECISIONS.md` at merge.
 - **The transport stays out.** Replacing threaded `http.server` with asyncio is not part of 2.0; it is a core question to reopen only on evidence — the connection cap hit under real traffic, or per-connection memory measurably hurting a small box.
 
 ## Building it
 
 Each step is its own branch and merges on its own; 1.x operators keep working after every one.
 
-1. **Split the build** into the core and the extension, behaviour unchanged: two outputs from `src/`, the extension still bundled.
-2. **Fetch and verify:** the extension leaves the core's package; `servette admin` installs it from a GitHub release against the embedded checksum.
-3. **Pairing** replaces the passcode.
-4. **`/hello` and framing:** the box answers the launcher and permits servette.org to frame it.
-5. **The launcher** on servette.org: box list, Connect, frame.
-6. **Setup** prints the `Host` entry with a port per box; `DESIGN.md` is rewritten for two products and this document retires into it.
+1. **The contract**, in this repository: `--json` where the app needs it, `publish` from a bundle, the shapes stated in `DESIGN.md` and pinned by the suite. Nothing is removed.
+2. **The app**, in its own repository: the page and a local process that drives `ssh`, working against 1.x boxes, with its own design document and suite.
+3. **The admin server leaves** once the app is proven: the loopback server and `src/admin.html` leave the module, `admin` leaves the command list, `help` names the app.
+4. **`DESIGN.md` is rewritten** for the server alone, the superseded rulings are recorded, and this document retires into it.

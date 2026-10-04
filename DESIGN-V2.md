@@ -96,7 +96,7 @@ For maintainers: two artifacts released in lockstep, with CI enforcing that each
 
 ## Open decisions
 
-Each is the Human's to close; what it gates follows it.
+Each is the Human's to close; what it gates follows it. They are listed here, not in issues, because 2.0 is not yet scheduled work: this document is a destination under consideration, and its forks stay with it until the Human confirms the move toward 2.0 — expected after 1.x's release, not before. At that point each becomes an issue and this section points to them.
 
 - <a id="what-is-core"></a>**What is core.** Moving the admin server and pages takes the core from ~10,400 lines to ~6,700. Getting toward 3,000–4,000 means deciding whether these are serving or administering: publishing and version history (558), the config sub-shell (468), status and traffic reporting (592), the setup wizard, and swap and the network watchdog in `src/SYSTEM.md`. *Gates:* the size of the core and the extension's interface.
 - **The extension ruling.** "The installed core may fetch one extension from GitHub, verified against a checksum the core carries" — scoped beside [the distribution ruling](DECISIONS.md#distribution-is-pippypi--servette-is-not-its-own-package-manager), which it leaves standing for Servette itself. *Gates:* the install path.

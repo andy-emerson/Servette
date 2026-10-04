@@ -765,7 +765,8 @@
        7. Feature gate and startup
 
      Every render reads `statusData` and `cfgData` and nothing else, so the
-     three tabs cannot disagree about what the server is doing.
+     three tabs cannot disagree about what the server is doing — except
+     the live meter, which draws its own `loadData` and nothing beyond it.
      ═══════════════════════════════════════════════════════════════════════ */
 
   /* ══ 1. Shared vocabulary ═══════════════════════════════════════════ */
@@ -2486,7 +2487,10 @@
 
   // A start while a reading is still out (a tab hidden and shown again)
   // leaves the next one to that reading's finally: two chains would be
-  // the stacking this exists to prevent.
+  // the stacking this exists to prevent. A restart more than two beats
+  // after the last reading landed starts the line over: the x-axis is
+  // spaced by index, so one point averaging a hidden hour would be drawn
+  // one beat wide. What was hidden was not measured.
   function startMeter() {
     if (meterOn) return;
     meterOn = true;

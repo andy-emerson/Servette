@@ -2400,7 +2400,9 @@
     $('load-chart').innerHTML = cpuSeries.length < 2
       ? '<p class="hint">Live CPU — the line starts when you open this tab.</p>'
       : chart(lineSVG(cpuSeries),
-              (cpuSeries.length - 1) * METER_SECONDS + 's ago',
+              // From the readings' own clocks: the beat is 3 s plus each
+              // round trip, so counting points times the beat ran short.
+              Math.round(cpuTimes[cpuTimes.length - 1] - cpuTimes[0]) + 's ago',
               cpuSeries[cpuSeries.length - 1].toFixed(1) + '% now',
               Math.max(1, ...cpuSeries).toFixed(0), '%');
   }
@@ -2444,7 +2446,7 @@
   // ever-growing line — and each refresh's own /status queued at the back
   // of it, so an added site's card never drew until a reload.
   let meterOn = false, meterTimer = null, sampling = false;
-  let lastSample = null, cpuSeries = [];
+  let lastSample = null, cpuSeries = [], cpuTimes = [];
   // The meter's own reading, from /load: just the figures it draws, so a
   // tick costs a few hundred bytes instead of the whole status snapshot.
   // The rest of statusData stays as the last refresh left it.
@@ -2460,7 +2462,8 @@
         if (dt > 0) {
           cpuSeries.push(Math.max(0,
             (l.cpu_ns - lastSample.ns) / 1_000_000_000 / dt * 100));
-          if (cpuSeries.length > 60) cpuSeries.shift();
+          cpuTimes.push(l.sampled_at);
+          if (cpuSeries.length > 60) { cpuSeries.shift(); cpuTimes.shift(); }
         }
       }
       if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };

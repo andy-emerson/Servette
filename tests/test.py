@@ -8221,6 +8221,17 @@ def run_browser_tests(s, tmpdir):
                   waiting["peak"] == 1)
             check("...and the idle meter never asks for the full /status",
                   waiting["status"] == 0)
+            # The slow readings above landed ~7 s apart (4 s served + the
+            # 3 s beat): the chart's span must come from their clocks, so it
+            # exceeds points x 3 s — what the label used to print — by at
+            # least the 4 s each slow reading added.
+            span = page.evaluate("""() => {
+              const el = document.querySelector('#load-chart .chart-labels span');
+              return [el ? parseInt(el.textContent) : -1,
+                      cpuSeries.length];
+            }""")
+            check("...and the CPU chart's span is read from the readings' clocks",
+                  span[1] >= 3 and span[0] >= (span[1] - 1) * 3 + 4)
 
             browser.close()
 

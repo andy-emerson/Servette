@@ -2438,9 +2438,17 @@
      tab shows history rather than a line starting under your click. ── */
 
   const METER_SECONDS = 3;
-  let meterTimer = null, lastSample = null, cpuSeries = [];
+  // The beat is the gap AFTER an answer, never a fixed timer: every reading
+  // is the same URL, which the browser sends one at a time, so a timer
+  // that outpaced a slow round trip (an SSH tunnel is enough) stacked an
+  // ever-growing line — and each refresh's own /status queued at the back
+  // of it, so an added site's card never drew until a reload.
+  let meterOn = false, meterTimer = null, sampling = false;
+  let lastSample = null, cpuSeries = [];
 
   async function sampleLoad() {
+    meterTimer = null;
+    sampling = true;
     try {
       const d = await getJSON('/status');
       const l = d.load || {};
@@ -2462,17 +2470,25 @@
       // 'channel N: open failed' in the operator's terminal.
       stopMeter();
       showError($('load-error'), reason(e));
+    } finally {
+      sampling = false;
+      if (meterOn && !meterTimer)
+        meterTimer = setTimeout(sampleLoad, METER_SECONDS * 1000);
     }
   }
 
+  // A start while a reading is still out (a tab hidden and shown again)
+  // leaves the next one to that reading's finally: two chains would be
+  // the stacking this exists to prevent.
   function startMeter() {
-    if (meterTimer) return;
-    meterTimer = setInterval(sampleLoad, METER_SECONDS * 1000);
-    sampleLoad();
+    if (meterOn) return;
+    meterOn = true;
+    if (!sampling) sampleLoad();
   }
 
   function stopMeter() {
-    clearInterval(meterTimer);
+    meterOn = false;
+    clearTimeout(meterTimer);
     meterTimer = null;
   }
 

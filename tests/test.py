@@ -8171,6 +8171,44 @@ def run_browser_tests(s, tmpdir):
             page.locator(".auth-switch").first.uncheck()
             page.wait_for_timeout(200)
 
+            # The live meter asks for the next reading only after the last
+            # one answered. On a fixed timer, a /status round trip slower
+            # than the beat stacked requests the browser sends one at a
+            # time (every reading is the same URL), the line only grew, and
+            # each refresh's own /status joined the back of it: an added
+            # site's card never drew, and only a reload showed it. Counted
+            # in the page, where the line forms — the server never sees it.
+            saved_status = s._status_data
+
+            def _slow_status():
+                time.sleep(4)       # longer than the meter's 3 s beat
+                return saved_status()
+
+            waiting = {"now": 0, "peak": 0}
+
+            def _status_req(r, step):
+                if urllib.parse.urlsplit(r.url).path == "/status":
+                    waiting["now"] += step
+                    waiting["peak"] = max(waiting["peak"], waiting["now"])
+
+            on_req  = lambda r: _status_req(r, 1)
+            on_done = lambda r: _status_req(r, -1)
+            page.wait_for_timeout(3500)   # let any fast reading land first
+            s._status_data = _slow_status
+            page.on("request", on_req)
+            page.on("requestfinished", on_done)
+            page.on("requestfailed", on_done)
+            try:
+                page.wait_for_timeout(13000)
+            finally:
+                s._status_data = saved_status
+            page.wait_for_timeout(4500)   # let the last slow reading land
+            for event, fn in (("request", on_req), ("requestfinished", on_done),
+                              ("requestfailed", on_done)):
+                page.remove_listener(event, fn)
+            check("...a slow /status never stacks meter requests in the page",
+                  waiting["peak"] == 1)
+
             browser.close()
 
         # The console is a check in itself: every failure above is silent

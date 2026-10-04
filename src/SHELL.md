@@ -211,8 +211,8 @@ One page, one passcode, and every endpoint behind it: requests without the run's
 # The loopback handler
 class _UIHandler(http.server.BaseHTTPRequestHandler):
     """The loopback server's one handler. GET is the page and its read half
-    (/status /config /traffic /update /versions, and /preview on its own
-    per-staging token); POST is the write half (/upload /preview /config
+    (/status /load /config /traffic /update /versions, and /preview on its
+    own per-staging token); POST is the write half (/upload /preview /config
     /sites /service /swap). Everything but the login page and /preview
     requires this run's passcode; after _UI_MAX_BAD_CODES wrong guesses
     the run stops authenticating anyone, including the right code —
@@ -1308,7 +1308,7 @@ def _site_versions(site):
     restore by, when it was published, how many files and bytes it holds, and
     which one is live. Answering walks every tree on disk — which is why the
     page fetches it as its own /versions call instead of a field on the
-    /status it polls every few seconds.
+    /status every refresh reads.
 
     The live tree is ALWAYS reported, ring member or not. A site published
     before the ring existed serves a tree the ring does not hold — it joins
@@ -2994,9 +2994,10 @@ def _status_data():
     `checks` is the health-row form of the same facts, `load` the
     utilization figures, and `disk` the space left where content lands.
 
-    The page's live meter polls this every few seconds, so the snapshot
-    asks systemd exactly once and hands the answer to everything below —
-    each subprocess spawn saved here is saved on every meter tick."""
+    The admin page reads this on every refresh (the live meter reads only
+    _load_snapshot, through /load), so the snapshot asks systemd exactly
+    once and hands the answer to everything below — each subprocess spawn
+    saved here is saved on every refresh."""
     service_active = _service_is_active()
     running        = service_active or _server_running()
     return {

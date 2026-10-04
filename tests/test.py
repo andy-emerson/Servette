@@ -8233,6 +8233,30 @@ def run_browser_tests(s, tmpdir):
             check("...and the CPU chart's span is read from the readings' clocks",
                   span[1] >= 3 and span[0] >= (span[1] - 1) * 3 + 4)
 
+            # A hidden tab stops the meter. Resumed after a gap, the first
+            # reading used to be differenced against the last one before
+            # the gap: one point averaging the whole hidden period, drawn
+            # one beat wide on an index-spaced line. Now a gap longer than
+            # two beats starts the line over — what was hidden was not
+            # measured. The hide is simulated by the one fact the handler
+            # reads, document.hidden, so the page's own code does the rest.
+            before = page.evaluate("() => cpuSeries.length")
+            page.evaluate("""() => {
+              Object.defineProperty(document, 'hidden',
+                                    { configurable: true, get: () => true });
+              document.dispatchEvent(new Event('visibilitychange'));
+            }""")
+            page.wait_for_timeout(7000)   # past the two-beat threshold
+            page.evaluate("""() => {
+              Object.defineProperty(document, 'hidden',
+                                    { configurable: true, get: () => false });
+              document.dispatchEvent(new Event('visibilitychange'));
+            }""")
+            page.wait_for_timeout(1500)   # the first reading after the gap
+            after = page.evaluate("() => cpuSeries.length")
+            check("...and the line starts over after a hidden gap",
+                  before >= 3 and after <= 1)
+
             browser.close()
 
         # The console is a check in itself: every failure above is silent

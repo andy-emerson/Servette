@@ -7294,7 +7294,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // ever-growing line — and each refresh's own /status queued at the back
   // of it, so an added site's card never drew until a reload.
   let meterOn = false, meterTimer = null, sampling = false;
-  let lastSample = null, cpuSeries = [], cpuTimes = [];
+  let lastSample = null, lastReadMs = 0, cpuSeries = [], cpuTimes = [];
   // The meter's own reading, from /load: just the figures it draws, so a
   // tick costs a few hundred bytes instead of the whole status snapshot.
   // The rest of statusData stays as the last refresh left it.
@@ -7315,6 +7315,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         }
       }
       if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
+      lastReadMs = performance.now();
       loadData = l;
       renderLoad();
       clearError($('load-error'));
@@ -7337,6 +7338,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   function startMeter() {
     if (meterOn) return;
     meterOn = true;
+    if (lastSample && performance.now() - lastReadMs > 2 * METER_SECONDS * 1000) {
+      lastSample = null;
+      cpuSeries = [];
+      cpuTimes = [];
+    }
     if (!sampling) sampleLoad();
   }
 

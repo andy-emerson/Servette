@@ -1787,6 +1787,13 @@ def run_dispatch_tests(s):
         check("GET /status with the code answers the inside view",
               st == 200 and b'"version"' in body and b'"sites"' in body
               and b'"checks"' in body)
+        st, body = ui_req("GET", f"/load?t={ui_code}")
+        load_reply = json.loads(body) if st == 200 else {}
+        check("GET /load answers the meter's figures and nothing more",
+              st == 200 and "cpu_ns" in load_reply and "sampled_at" in load_reply
+              and "checks" not in load_reply and "sites" not in load_reply)
+        check("GET /load without the code is refused",
+              ui_req("GET", "/load")[0] == 403)
 
         # The freshness rule the dispatcher applies before every command: the
         # admin process lives for the whole run, and a page answering (or
@@ -8178,36 +8185,42 @@ def run_browser_tests(s, tmpdir):
             # each refresh's own /status joined the back of it: an added
             # site's card never drew, and only a reload showed it. Counted
             # in the page, where the line forms — the server never sees it.
-            saved_status = s._status_data
+            # The meter reads /load, never the full /status snapshot.
+            saved_load = s._load_snapshot
 
-            def _slow_status():
+            def _slow_load(*a, **kw):
                 time.sleep(4)       # longer than the meter's 3 s beat
-                return saved_status()
+                return saved_load(*a, **kw)
 
-            waiting = {"now": 0, "peak": 0}
+            waiting = {"now": 0, "peak": 0, "status": 0}
 
-            def _status_req(r, step):
-                if urllib.parse.urlsplit(r.url).path == "/status":
+            def _meter_req(r, step):
+                path = urllib.parse.urlsplit(r.url).path
+                if path == "/status" and step > 0:
+                    waiting["status"] += 1
+                if path == "/load":
                     waiting["now"] += step
                     waiting["peak"] = max(waiting["peak"], waiting["now"])
 
-            on_req  = lambda r: _status_req(r, 1)
-            on_done = lambda r: _status_req(r, -1)
+            on_req  = lambda r: _meter_req(r, 1)
+            on_done = lambda r: _meter_req(r, -1)
             page.wait_for_timeout(3500)   # let any fast reading land first
-            s._status_data = _slow_status
+            s._load_snapshot = _slow_load
             page.on("request", on_req)
             page.on("requestfinished", on_done)
             page.on("requestfailed", on_done)
             try:
                 page.wait_for_timeout(13000)
             finally:
-                s._status_data = saved_status
+                s._load_snapshot = saved_load
             page.wait_for_timeout(4500)   # let the last slow reading land
             for event, fn in (("request", on_req), ("requestfinished", on_done),
                               ("requestfailed", on_done)):
                 page.remove_listener(event, fn)
-            check("...a slow /status never stacks meter requests in the page",
+            check("...a slow reading never stacks meter requests in the page",
                   waiting["peak"] == 1)
+            check("...and the idle meter never asks for the full /status",
+                  waiting["status"] == 0)
 
             browser.close()
 

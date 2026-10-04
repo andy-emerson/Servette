@@ -2390,7 +2390,7 @@
   $('traffic-window').addEventListener('change', loadTraffic);
 
   function renderLoad() {
-    const l = ((statusData || {}).load) || {};
+    const l = loadData || ((statusData || {}).load) || {};
     $('load-rows').innerHTML =
       row('CPU', l.cpu_percent == null ? '(not available on this host)'
                  : l.cpu_percent.toFixed(1) + '% average' +
@@ -2445,13 +2445,16 @@
   // of it, so an added site's card never drew until a reload.
   let meterOn = false, meterTimer = null, sampling = false;
   let lastSample = null, cpuSeries = [];
+  // The meter's own reading, from /load: just the figures it draws, so a
+  // tick costs a few hundred bytes instead of the whole status snapshot.
+  // The rest of statusData stays as the last refresh left it.
+  let loadData = null;
 
   async function sampleLoad() {
     meterTimer = null;
     sampling = true;
     try {
-      const d = await getJSON('/status');
-      const l = d.load || {};
+      const l = await getJSON('/load');
       if (l.cpu_ns != null && lastSample) {
         const dt = l.sampled_at - lastSample.at;
         if (dt > 0) {
@@ -2461,7 +2464,7 @@
         }
       }
       if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
-      statusData = d;
+      loadData = l;
       renderLoad();
       clearError($('load-error'));
     } catch (e) {

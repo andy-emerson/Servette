@@ -7238,7 +7238,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   $('traffic-window').addEventListener('change', loadTraffic);
 
   function renderLoad() {
-    const l = ((statusData || {}).load) || {};
+    const l = loadData || ((statusData || {}).load) || {};
     $('load-rows').innerHTML =
       row('CPU', l.cpu_percent == null ? '(not available on this host)'
                  : l.cpu_percent.toFixed(1) + '% average' +
@@ -7293,13 +7293,16 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // of it, so an added site's card never drew until a reload.
   let meterOn = false, meterTimer = null, sampling = false;
   let lastSample = null, cpuSeries = [];
+  // The meter's own reading, from /load: just the figures it draws, so a
+  // tick costs a few hundred bytes instead of the whole status snapshot.
+  // The rest of statusData stays as the last refresh left it.
+  let loadData = null;
 
   async function sampleLoad() {
     meterTimer = null;
     sampling = true;
     try {
-      const d = await getJSON('/status');
-      const l = d.load || {};
+      const l = await getJSON('/load');
       if (l.cpu_ns != null && lastSample) {
         const dt = l.sampled_at - lastSample.at;
         if (dt > 0) {
@@ -7309,7 +7312,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
         }
       }
       if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
-      statusData = d;
+      loadData = l;
       renderLoad();
       clearError($('load-error'));
     } catch (e) {
@@ -7491,8 +7494,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         if path == "/preview" or path.startswith("/preview/"):
             return self._serve_preview(path)
 
-        if path not in ("/", "/status", "/config", "/traffic", "/update",
-                        "/versions"):
+        if path not in ("/", "/status", "/load", "/config", "/traffic",
+                        "/update", "/versions"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -7503,6 +7506,14 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps(_status_data()), "application/json")
+        if path == "/load":
+            # The live meter's reading and nothing else: the CPU counter and
+            # memory it draws, from the same function /status takes its
+            # `load` from. Asked every few seconds, so the health walk,
+            # certificate loads, and disk probes are not paid on every tick.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            return self._respond(200, json.dumps(_load_snapshot()), "application/json")
         if path == "/config":
             # The settings read half, for the Server tab and the site cards:
             # exactly the vocabulary `set`

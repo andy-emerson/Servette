@@ -330,8 +330,8 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
         if path == "/preview" or path.startswith("/preview/"):
             return self._serve_preview(path)
 
-        if path not in ("/", "/status", "/config", "/traffic", "/update",
-                        "/versions"):
+        if path not in ("/", "/status", "/load", "/config", "/traffic",
+                        "/update", "/versions"):
             return self._respond(404, "Not found.")
         auth = self._auth()
         if auth == "locked":
@@ -342,6 +342,14 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
             return self._respond(200, json.dumps(_status_data()), "application/json")
+        if path == "/load":
+            # The live meter's reading and nothing else: the CPU counter and
+            # memory it draws, from the same function /status takes its
+            # `load` from. Asked every few seconds, so the health walk,
+            # certificate loads, and disk probes are not paid on every tick.
+            if auth != "ok":
+                return self._respond(403, "Not logged in.")
+            return self._respond(200, json.dumps(_load_snapshot()), "application/json")
         if path == "/config":
             # The settings read half, for the Server tab and the site cards:
             # exactly the vocabulary `set`

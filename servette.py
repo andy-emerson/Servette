@@ -2962,11 +2962,19 @@ def _wait_for_port_free(port, timeout=15):
 
 # Reloading
 _reload_requested = False  # lets --serve's exit log a restart as a restart
+# Per thread: `active` means _reload_server must record the wish in `wanted`
+# instead of restarting — set by the page server around a request's work,
+# which runs the restart on a thread of its own afterwards.
+_reload_deferral = threading.local()
 
 
 def _reload_server():
-    """Reload the server to pick up a new certificate."""
+    """Reload the server to pick up a new certificate, or a changed site
+    list — the TLS contexts are built from it at start."""
     global _reload_requested
+    if getattr(_reload_deferral, "active", False):
+        _reload_deferral.wanted = True
+        return
     if "--serve" in sys.argv:
         # Inside the service, the sandboxed unit user can't systemctl restart
         # (NoNewPrivileges, least privilege). Stop serving instead: _watch_server
@@ -5183,6 +5191,21 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
     .attention b { color: var(--text); font-weight: 500; }
     .attention a { color: var(--amber); text-decoration: underline; }
 
+    /* What the page is waiting on, in words — a change being written, or
+       the service restart it asked for. Neutral, not amber: waiting is
+       not a fault. */
+    .busy {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 8px;
+      padding: 0.7rem 1rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.72rem;
+      line-height: 1.8;
+      color: var(--muted);
+    }
+    .busy.failed { color: var(--red); border-color: rgba(248,113,113,0.35); }
+
     .note {
       font-size: 0.7rem;
       color: var(--muted);
@@ -5474,6 +5497,11 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
        that only signals something is wrong, without saying what or where,
        is a puzzle rather than a notice. -->
   <div class="attention hidden" id="attention"></div>
+  <!-- What the page is waiting on. A request that changes the server
+       answers only when its work is done, and the restart it asks for
+       runs after that; both were silent before, and silence read as a
+       hang. -->
+  <div class="busy hidden" id="busy" role="status"></div>
 
   <!-- role="tab" without aria-selected announces a tab strip and then
        never says which tab is current; showTab keeps both in step. -->
@@ -5713,6 +5741,36 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
   function clearError(el) { el.classList.add('hidden'); }
 
+  /* ── The busy band: what the page is waiting on, said while it waits.
+     Two things take time here. A write (add, remove, move, a setting)
+     answers only when the config is saved and the trees are handled; a
+     restart the write asks for runs on the server after that, and
+     /status says `restarting` until it is done. Each is one line in the
+     band; the band is empty — hidden — when neither is pending. ── */
+
+  let busyWrites = 0;          // POSTs in flight
+  let restartSeen = false;     // a restart was reported and not yet finished
+
+  function renderBusy() {
+    const el = $('busy');
+    const d = statusData || {};
+    // A restart is over once a status read after it says so.
+    if (restartSeen && statusData && !d.restarting) restartSeen = false;
+    const pending = busyWrites > 0 || restartSeen || !!d.restarting;
+    // A restart that failed stays said until the next one clears it on
+    // the server: a line that showed for one poll would be missed.
+    const failed = !pending && !!d.restart_error;
+    const text = busyWrites > 0
+      ? 'Saving… this can take a moment on a small server.'
+      : pending
+        ? 'Restarting the server to apply the change — the sites are back ' +
+          'in a few seconds.'
+        : failed ? d.restart_error : '';
+    el.textContent = text;
+    el.classList.toggle('failed', failed);
+    el.classList.toggle('hidden', !text);
+  }
+
   /* ── The page's state: one read of the server, rendered into every tab. ── */
 
   let statusData = null;      // GET /status  — what the box is doing
@@ -5739,9 +5797,25 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
   // `want` is the value of `result` that means this op succeeded: 'ok' from
   // the site, service, and swap doors, 'saved' from a settings write.
   async function post(path, body, want) {
-    const r = await fetch(api(path), { method: 'POST', body: JSON.stringify(body) });
+    busyWrites += 1;
+    renderBusy();
+    let r;
+    try {
+      r = await fetch(api(path), { method: 'POST', body: JSON.stringify(body) });
+    } finally {
+      busyWrites -= 1;
+    }
     let data = {};
     try { data = await r.json(); } catch (e) { data = {}; }
+    // The server says when the change needs a restart it has started
+    // rather than waited on; the band watches /status until it is over.
+    // The last status read predates that restart, so it is marked as
+    // restarting here — the next read says whether it still is.
+    if (data.restarting) {
+      restartSeen = true;
+      statusData = Object.assign({}, statusData || {}, { restarting: true });
+    }
+    renderBusy();
     if (!r.ok || data.result !== want)
       throw new Error(data.error || 'HTTP ' + r.status);
     return data;
@@ -5758,6 +5832,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       cfgData = cfg;
       renderServer();
       renderSiteCards();
+      renderBusy();
       clearError($('sites-error'));
     } catch (e) {
       setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
@@ -7303,6 +7378,7 @@ _UI_ADMIN_PAGE = """<!DOCTYPE html>
       if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
       statusData = d;
       renderLoad();
+      renderBusy();
       clearError($('load-error'));
     } catch (e) {
       // Nothing is listening any more — the admin command ended, or the
@@ -7461,6 +7537,44 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             self.server.bad_codes += 1
             return "bad"
 
+    def _deferring_restart(self, work):
+        """Run `work` with any service restart it asks for taken off this
+        request. Returns (work's result, whether a restart was started).
+        The restart runs on its own thread — _restart_later — and /status
+        reports `restarting` until it is done: a request that waited on
+        the restart gave the page nothing to show for as long as it took,
+        and a slow one read as a frozen page."""
+        _reload_deferral.active, _reload_deferral.wanted = True, False
+        try:
+            result = work()
+        finally:
+            _reload_deferral.active = False
+        wanted = bool(_reload_deferral.wanted)
+        if wanted:
+            self._restart_later()
+        return result, wanted
+
+    def _restart_later(self):
+        """The deferred restart, counted so /status can say it is running.
+        Its failure is kept for the page: the terminal line _reload_server
+        prints lands in the middle of the admin command's prompt, where
+        nobody watching the browser sees it."""
+        srv = self.server
+        with srv.restart_lock:
+            srv.restarts_pending += 1
+            srv.restart_error = ""
+
+        def run():
+            try:
+                _reload_server()
+                if not (_server_running() or _service_is_active()):
+                    srv.restart_error = ("the server did not come back after the "
+                                         "restart — run 'status' in the terminal")
+            finally:
+                with srv.restart_lock:
+                    srv.restarts_pending -= 1
+        threading.Thread(target=run, daemon=True).start()
+
     def do_GET(self):
         # The freshness rule the dispatcher applies before every command,
         # applied before every page request for the same reason: this
@@ -7483,10 +7597,16 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._respond(403, "Too many wrong passcodes. Close this page and re-run the command.")
         if path == "/status":
             # The inside view, for the Server tab's Status card: exactly what
-            # `status --json` prints, because it is the same function.
+            # `status --json` prints, because it is the same function — plus
+            # the one fact only this process knows: whether a restart a page
+            # operation asked for is still running, and how the last one
+            # ended.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
-            return self._respond(200, json.dumps(_status_data()), "application/json")
+            data = _status_data()
+            data["restarting"]    = getattr(self.server, "restarts_pending", 0) > 0
+            data["restart_error"] = getattr(self.server, "restart_error", "")
+            return self._respond(200, json.dumps(data), "application/json")
         if path == "/config":
             # The settings read half, for the Server tab and the site cards:
             # exactly the vocabulary `set`
@@ -7640,7 +7760,13 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 op   = str(body.get("op") or "")
             except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed body.")
-            try:
+
+            # The op's work, as one function, so the restart it asks for
+            # can be taken off this request (_deferring_restart): the
+            # answer goes back as soon as the config is written and the
+            # trees are handled, and the page learns from `restarting`
+            # that the service is still coming back.
+            def work():
                 if op == "add":
                     _append_site(_invent_site_dir())
                     err = ""
@@ -7723,13 +7849,17 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                             str(want) if want else None)
                 else:
                     err = "unknown op"
+                return err
+
+            try:
+                err, restarting = self._deferring_restart(work)
             except PermissionError:
                 return self._respond(500, json.dumps(
                     {"error": "writing the config needs root — re-run 'admin' elevated"}),
                     "application/json")
             return self._respond(200 if not err else 422,
-                                 json.dumps({"result": "ok"} if not err
-                                            else {"error": err}),
+                                 json.dumps({"result": "ok", "restarting": restarting}
+                                            if not err else {"error": err}),
                                  "application/json")
 
         if path == "/config":
@@ -7830,6 +7960,8 @@ def _start_ui(site, page, port=_UI_PORT):
     httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
     httpd.bad_lock = threading.Lock()   # guards the guess ceiling across request threads
     httpd.preview_code = ""      # minted by the first staging, not before
+    httpd.restart_lock = threading.Lock()   # guards the two fields below
+    httpd.restarts_pending, httpd.restart_error = 0, ""   # _restart_later's
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, httpd.code
 

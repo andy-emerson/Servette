@@ -316,6 +316,44 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             self.server.bad_codes += 1
             return "bad"
 
+    def _deferring_restart(self, work):
+        """Run `work` with any service restart it asks for taken off this
+        request. Returns (work's result, whether a restart was started).
+        The restart runs on its own thread — _restart_later — and /status
+        reports `restarting` until it is done: a request that waited on
+        the restart gave the page nothing to show for as long as it took,
+        and a slow one read as a frozen page."""
+        _reload_deferral.active, _reload_deferral.wanted = True, False
+        try:
+            result = work()
+        finally:
+            _reload_deferral.active = False
+        wanted = bool(_reload_deferral.wanted)
+        if wanted:
+            self._restart_later()
+        return result, wanted
+
+    def _restart_later(self):
+        """The deferred restart, counted so /status can say it is running.
+        Its failure is kept for the page: the terminal line _reload_server
+        prints lands in the middle of the admin command's prompt, where
+        nobody watching the browser sees it."""
+        srv = self.server
+        with srv.restart_lock:
+            srv.restarts_pending += 1
+            srv.restart_error = ""
+
+        def run():
+            try:
+                _reload_server()
+                if not (_server_running() or _service_is_active()):
+                    srv.restart_error = ("the server did not come back after the "
+                                         "restart — run 'status' in the terminal")
+            finally:
+                with srv.restart_lock:
+                    srv.restarts_pending -= 1
+        threading.Thread(target=run, daemon=True).start()
+
     def do_GET(self):
         # The freshness rule the dispatcher applies before every command,
         # applied before every page request for the same reason: this
@@ -338,10 +376,16 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
             return self._respond(403, "Too many wrong passcodes. Close this page and re-run the command.")
         if path == "/status":
             # The inside view, for the Server tab's Status card: exactly what
-            # `status --json` prints, because it is the same function.
+            # `status --json` prints, because it is the same function — plus
+            # the one fact only this process knows: whether a restart a page
+            # operation asked for is still running, and how the last one
+            # ended.
             if auth != "ok":
                 return self._respond(403, "Not logged in.")
-            return self._respond(200, json.dumps(_status_data()), "application/json")
+            data = _status_data()
+            data["restarting"]    = getattr(self.server, "restarts_pending", 0) > 0
+            data["restart_error"] = getattr(self.server, "restart_error", "")
+            return self._respond(200, json.dumps(data), "application/json")
         if path == "/config":
             # The settings read half, for the Server tab and the site cards:
             # exactly the vocabulary `set`
@@ -495,7 +539,13 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                 op   = str(body.get("op") or "")
             except (ValueError, TypeError, AttributeError):
                 return self._respond(400, "Malformed body.")
-            try:
+
+            # The op's work, as one function, so the restart it asks for
+            # can be taken off this request (_deferring_restart): the
+            # answer goes back as soon as the config is written and the
+            # trees are handled, and the page learns from `restarting`
+            # that the service is still coming back.
+            def work():
                 if op == "add":
                     _append_site(_invent_site_dir())
                     err = ""
@@ -578,13 +628,17 @@ class _UIHandler(http.server.BaseHTTPRequestHandler):
                                             str(want) if want else None)
                 else:
                     err = "unknown op"
+                return err
+
+            try:
+                err, restarting = self._deferring_restart(work)
             except PermissionError:
                 return self._respond(500, json.dumps(
                     {"error": "writing the config needs root — re-run 'admin' elevated"}),
                     "application/json")
             return self._respond(200 if not err else 422,
-                                 json.dumps({"result": "ok"} if not err
-                                            else {"error": err}),
+                                 json.dumps({"result": "ok", "restarting": restarting}
+                                            if not err else {"error": err}),
                                  "application/json")
 
         if path == "/config":
@@ -690,6 +744,8 @@ def _start_ui(site, page, port=_UI_PORT):
     httpd.code, httpd.bad_codes = os.urandom(3).hex(), 0
     httpd.bad_lock = threading.Lock()   # guards the guess ceiling across request threads
     httpd.preview_code = ""      # minted by the first staging, not before
+    httpd.restart_lock = threading.Lock()   # guards the two fields below
+    httpd.restarts_pending, httpd.restart_error = 0, ""   # _restart_later's
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, httpd.code
 

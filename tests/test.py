@@ -2656,6 +2656,49 @@ def run_dispatch_tests(s):
                     except OSError:
                         pass
 
+        # A change that needs a service restart answers before the restart
+        # runs. The page showed nothing for as long as the restart took,
+        # and a slow one read as a frozen page (the delete that "froze the
+        # admin tool"). The systemctl call is a sleep here; the request
+        # must not wait on it, and /status must say the restart is running
+        # until it has run.
+        saved_run_sp, saved_act_d = s.subprocess.run, s._service_is_active
+        saved_domain0 = s.config.sites[0].domain
+        restart_log = []
+        def slow_restart(argv, *a, **kw):
+            if argv[:2] == ["systemctl", "restart"]:
+                restart_log.append(time.monotonic())
+                time.sleep(1.0)
+                restart_log.append(time.monotonic())
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            return saved_run_sp(argv, *a, **kw)
+        s.subprocess.run = slow_restart
+        s._service_is_active = lambda: True
+        try:
+            t0 = time.monotonic()
+            st, body = ui_req("POST", f"/sites?t={ui_code}",
+                              body=json.dumps({"op": "name", "site": 0,
+                                               "domain": "defer.example"}).encode())
+            answered = time.monotonic() - t0
+            st_s, body_s = ui_req("GET", f"/status?t={ui_code}")
+            during = json.loads(body_s)
+            check("A change that needs a restart answers at once, saying the restart is running",
+                  st == 200 and json.loads(body).get("restarting") is True
+                  and answered < 0.8 and during.get("restarting") is True)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and len(restart_log) < 2:
+                time.sleep(0.05)
+            time.sleep(0.2)
+            st_a, body_a = ui_req("GET", f"/status?t={ui_code}")
+            after = json.loads(body_a)
+            check("...and /status says so only until the restart has run",
+                  len(restart_log) == 2 and after.get("restarting") is False
+                  and after.get("restart_error") == "")
+        finally:
+            s.subprocess.run, s._service_is_active = saved_run_sp, saved_act_d
+            s.config.sites[0].domain = saved_domain0
+            s.config.save()
+
         # An oversize claim must be refused before the body is read — sent
         # raw, because http.client would insist on sending a real body.
         sk = socket.create_connection(("127.0.0.1", ui_port), timeout=10)

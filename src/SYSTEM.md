@@ -408,16 +408,24 @@ def _wait_for_port_free(port, timeout=15):
 
 ```
 
-Reloading picks the mechanism the environment allows: inside the sandboxed service the process can only stop itself and let systemd restart it; outside, `systemctl restart` or a stop/start of the session server.
+Reloading picks the mechanism the environment allows: inside the sandboxed service the process can only stop itself and let systemd restart it; outside, `systemctl restart` or a stop/start of the session server. The admin page's request threads ask for a reload without waiting on it: a restart has been seen to take long enough that a page showing nothing until it returned read as a hang, so the page server records the wish and runs the restart after the request has answered.
 
 ```python
 # Reloading
 _reload_requested = False  # lets --serve's exit log a restart as a restart
+# Per thread: `active` means _reload_server must record the wish in `wanted`
+# instead of restarting — set by the page server around a request's work,
+# which runs the restart on a thread of its own afterwards.
+_reload_deferral = threading.local()
 
 
 def _reload_server():
-    """Reload the server to pick up a new certificate."""
+    """Reload the server to pick up a new certificate, or a changed site
+    list — the TLS contexts are built from it at start."""
     global _reload_requested
+    if getattr(_reload_deferral, "active", False):
+        _reload_deferral.wanted = True
+        return
     if "--serve" in sys.argv:
         # Inside the service, the sandboxed unit user can't systemctl restart
         # (NoNewPrivileges, least privilege). Stop serving instead: _watch_server

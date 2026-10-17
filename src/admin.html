@@ -335,6 +335,21 @@
     .attention b { color: var(--text); font-weight: 500; }
     .attention a { color: var(--amber); text-decoration: underline; }
 
+    /* What the page is waiting on, in words — a change being written, or
+       the service restart it asked for. Neutral, not amber: waiting is
+       not a fault. */
+    .busy {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 8px;
+      padding: 0.7rem 1rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.72rem;
+      line-height: 1.8;
+      color: var(--muted);
+    }
+    .busy.failed { color: var(--red); border-color: rgba(248,113,113,0.35); }
+
     .note {
       font-size: 0.7rem;
       color: var(--muted);
@@ -626,6 +641,11 @@
        that only signals something is wrong, without saying what or where,
        is a puzzle rather than a notice. -->
   <div class="attention hidden" id="attention"></div>
+  <!-- What the page is waiting on. A request that changes the server
+       answers only when its work is done, and the restart it asks for
+       runs after that; both were silent before, and silence read as a
+       hang. -->
+  <div class="busy hidden" id="busy" role="status"></div>
 
   <!-- role="tab" without aria-selected announces a tab strip and then
        never says which tab is current; showTab keeps both in step. -->
@@ -865,6 +885,36 @@
   function showError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
   function clearError(el) { el.classList.add('hidden'); }
 
+  /* ── The busy band: what the page is waiting on, said while it waits.
+     Two things take time here. A write (add, remove, move, a setting)
+     answers only when the config is saved and the trees are handled; a
+     restart the write asks for runs on the server after that, and
+     /status says `restarting` until it is done. Each is one line in the
+     band; the band is empty — hidden — when neither is pending. ── */
+
+  let busyWrites = 0;          // POSTs in flight
+  let restartSeen = false;     // a restart was reported and not yet finished
+
+  function renderBusy() {
+    const el = $('busy');
+    const d = statusData || {};
+    // A restart is over once a status read after it says so.
+    if (restartSeen && statusData && !d.restarting) restartSeen = false;
+    const pending = busyWrites > 0 || restartSeen || !!d.restarting;
+    // A restart that failed stays said until the next one clears it on
+    // the server: a line that showed for one poll would be missed.
+    const failed = !pending && !!d.restart_error;
+    const text = busyWrites > 0
+      ? 'Saving… this can take a moment on a small server.'
+      : pending
+        ? 'Restarting the server to apply the change — the sites are back ' +
+          'in a few seconds.'
+        : failed ? d.restart_error : '';
+    el.textContent = text;
+    el.classList.toggle('failed', failed);
+    el.classList.toggle('hidden', !text);
+  }
+
   /* ── The page's state: one read of the server, rendered into every tab. ── */
 
   let statusData = null;      // GET /status  — what the box is doing
@@ -891,9 +941,25 @@
   // `want` is the value of `result` that means this op succeeded: 'ok' from
   // the site, service, and swap doors, 'saved' from a settings write.
   async function post(path, body, want) {
-    const r = await fetch(api(path), { method: 'POST', body: JSON.stringify(body) });
+    busyWrites += 1;
+    renderBusy();
+    let r;
+    try {
+      r = await fetch(api(path), { method: 'POST', body: JSON.stringify(body) });
+    } finally {
+      busyWrites -= 1;
+    }
     let data = {};
     try { data = await r.json(); } catch (e) { data = {}; }
+    // The server says when the change needs a restart it has started
+    // rather than waited on; the band watches /status until it is over.
+    // The last status read predates that restart, so it is marked as
+    // restarting here — the next read says whether it still is.
+    if (data.restarting) {
+      restartSeen = true;
+      statusData = Object.assign({}, statusData || {}, { restarting: true });
+    }
+    renderBusy();
     if (!r.ok || data.result !== want)
       throw new Error(data.error || 'HTTP ' + r.status);
     return data;
@@ -910,6 +976,7 @@
       cfgData = cfg;
       renderServer();
       renderSiteCards();
+      renderBusy();
       clearError($('sites-error'));
     } catch (e) {
       setBadge($('cfg-host-badge'), 'badge-red', '✕ unreachable');
@@ -2455,6 +2522,7 @@
       if (l.cpu_ns != null) lastSample = { ns: l.cpu_ns, at: l.sampled_at };
       statusData = d;
       renderLoad();
+      renderBusy();
       clearError($('load-error'));
     } catch (e) {
       // Nothing is listening any more — the admin command ended, or the
